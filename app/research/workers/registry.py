@@ -54,7 +54,7 @@ def worker_tools_for_step(step_type: str) -> list[str]:
     profile = resolve_worker_profile(step_type)
     tools = tools_for_profile(profile)
     extras = {
-        "network_search": ["internet_search", *CONTEXT_TOOLS],
+        "network_search": ["internet_search", "fetch_url", *CONTEXT_TOOLS],
         "file_read": ["read_file_content", *CONTEXT_TOOLS],
         "research": tools,
         "generate_markdown": ["generate_markdown", "read_file_content", *CONTEXT_TOOLS],
@@ -115,6 +115,7 @@ def build_worker_registry(
     )
     from app.tools.artifact_tools import read_artifact, read_evidence
     from app.tools.tavily_tool import internet_search
+    from app.tools.fetch_url import fetch_url
 
     kind_map = dict(STEP_KINDS)
     if kinds:
@@ -161,7 +162,7 @@ def build_worker_registry(
             checkpointer=checkpointer,
         )
 
-    net_tools = [internet_search]
+    net_tools = [internet_search, fetch_url]
     context_tools = [read_artifact, read_evidence]
 
     def _contract(tools: list[Any], step_type: str) -> list[Any]:
@@ -170,7 +171,7 @@ def build_worker_registry(
             if tool is None:
                 continue
             name = getattr(tool, "name", "")
-            if name in {"read_artifact", "read_evidence"}:
+            if name in {"read_artifact", "read_evidence", "fetch_url"}:
                 wrapped.append(tool)
             else:
                 wrapped.append(wrap_tool_with_contract(tool, tool_name=name, step_type=step_type))

@@ -23,7 +23,7 @@ def internet_search(
     """
     根据用户问题检索互联网公开信息
 
-    注意：本工具只用于外部公开网页、新闻、政策等信息，不用于查询业务数据库或 RAGFlow 私有知识库
+    注意：默认只返回标题、URL、摘要卡片。需要网页正文时再调用 fetch_url。
     :param query: 搜索关键词或自然语言问题
     :param topic: 搜索主题，可选 news、finance、general
     :param max_results: 返回的最大结果数

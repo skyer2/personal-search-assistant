@@ -27,6 +27,13 @@ class ResearchState(TypedDict):
     tenant_id: str
     project_id: str
 
+    search_mode: str
+    search_mode_requested: str
+    route_signals: list[str]
+    conversation_summary: str
+    resolved_query: str
+    search_cards: list[dict[str, Any]]
+
     intent: dict[str, Any] | None
     plan: dict[str, Any] | None
     plan_version: int
@@ -79,6 +86,7 @@ def empty_research_state(
     project_id: str = "",
     max_tool_calls: int = 80,
     max_replan_count: int = 3,
+    search_mode: str = "auto",
 ) -> ResearchState:
     return {
         "run_id": run_id,
@@ -87,6 +95,12 @@ def empty_research_state(
         "user_id": user_id,
         "tenant_id": tenant_id,
         "project_id": project_id,
+        "search_mode": "",
+        "search_mode_requested": search_mode or "auto",
+        "route_signals": [],
+        "conversation_summary": "",
+        "resolved_query": task_query,
+        "search_cards": [],
         "intent": None,
         "plan": None,
         "plan_version": 1,

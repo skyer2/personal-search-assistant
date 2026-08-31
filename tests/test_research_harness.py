@@ -147,17 +147,72 @@ def test_compile_research_graph():
     state = initial_graph_state(
         run_id="r1",
         session_id="s1",
-        task_query="搜索AI趋势并查数据库库存，生成Markdown",
+        task_query="比较 Tesla 和 Figure 的差异并生成 Markdown 报告",
+        search_mode="deep",
     )
     result = graph.invoke(
         state,
         config={"configurable": {"thread_id": "s1"}, "recursion_limit": 50},
     )
+    assert result["search_mode"] == "deep"
     assert result["plan"]
     assert result["task_status"]
     assert any(v == "done" for v in result["task_status"].values())
     assert result.get("progress_assessment") is not None
     print(f"[OK] graph invoke status={result.get('status')} tasks={result['task_status']} progress={result.get('progress_assessment')}")
+
+
+def test_compile_auto_routes_to_quick():
+    try:
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from app.research.runtime.graph import compile_research_graph, initial_graph_state
+    except ModuleNotFoundError:
+        print("[SKIP] compile_auto_routes_to_quick (langgraph not installed)")
+        return
+
+    graph = compile_research_graph(checkpointer=InMemorySaver())
+    state = initial_graph_state(
+        run_id="r-auto",
+        session_id="s-auto",
+        task_query="今天纳斯达克休市了吗",
+        search_mode="auto",
+    )
+    result = graph.invoke(
+        state,
+        config={"configurable": {"thread_id": "s-auto"}, "recursion_limit": 20},
+    )
+    assert result["search_mode"] == "quick"
+    assert "fact_or_short" in (result.get("route_signals") or [])
+    assert result.get("plan") in (None, {})
+    print(f"[OK] auto→quick signals={result.get('route_signals')}")
+
+
+def test_compile_quick_graph():
+    try:
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from app.research.runtime.graph import compile_research_graph, initial_graph_state
+    except ModuleNotFoundError:
+        print("[SKIP] compile_quick_graph (langgraph not installed)")
+        return
+
+    graph = compile_research_graph(checkpointer=InMemorySaver())
+    state = initial_graph_state(
+        run_id="r-quick",
+        session_id="s-quick",
+        task_query="今天纳斯达克休市了吗",
+        search_mode="quick",
+    )
+    result = graph.invoke(
+        state,
+        config={"configurable": {"thread_id": "s-quick"}, "recursion_limit": 20},
+    )
+    assert result["search_mode"] == "quick"
+    assert result.get("plan") in (None, {})
+    assert result.get("final_content")
+    assert "Sources" in result["final_content"] or "来源" in result["final_content"]
+    print(f"[OK] quick graph status={result.get('status')} mode={result.get('search_mode')}")
 
 
 def test_plan_step_roundtrip_includes_dag_fields():
@@ -184,5 +239,7 @@ if __name__ == "__main__":
     test_synthesis_prompt_is_not_supervisor()
     test_all_step_types_direct_when_registered()
     test_compile_research_graph()
+    test_compile_auto_routes_to_quick()
+    test_compile_quick_graph()
     test_plan_step_roundtrip_includes_dag_fields()
     print("\n=== Phase 21 research harness tests passed ===")

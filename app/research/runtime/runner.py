@@ -90,6 +90,7 @@ class ResearchGraphRunner:
             project_id=ctx.project_id,
             max_tool_calls=self.harness.harness_config.max_tool_calls,
             max_replan_count=self.harness.harness_config.max_replan_count,
+            search_mode=getattr(ctx, "search_mode", "auto") or "auto",
         )
         if ctx.restored_full and session.state.intent is not None:
             payload["intent"] = session.state.intent.to_dict()
@@ -212,6 +213,126 @@ class ResearchGraphRunner:
         return result
 
     # --- nodes ---
+
+    async def node_conversation(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.conversation.store import ConversationStore, rewrite_query
+
+        session = _require_session(gstate)
+        ctx = session.ctx
+        store = ConversationStore.default(user_id=ctx.user_id or "me", project_id=ctx.project_id or "Inbox")
+        thread = store.get(ctx.session_id)
+        original = ctx.original_query or ctx.task_query
+        resolved = rewrite_query(original, thread)
+        ctx.original_query = original
+        if resolved != ctx.task_query:
+            ctx.task_query = resolved
+        session.state.metadata["conversation_summary"] = thread.rolling_summary
+        session.state.metadata["resolved_query"] = resolved
+        return {
+            "conversation_summary": thread.rolling_summary,
+            "resolved_query": resolved,
+            "progress": "conversation",
+        }
+
+    async def node_mode_router(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.routing.mode_router import budget_for_mode, route
+
+        session = _require_session(gstate)
+        ctx = session.ctx
+        personal = getattr(self.harness.harness_config, "personal_search", None) or {}
+        decision = route(
+            str(gstate.get("resolved_query") or ctx.task_query),
+            user_mode=getattr(ctx, "search_mode", "auto") or "auto",
+            conversation_summary=str(gstate.get("conversation_summary") or ""),
+        )
+        budget_cfg = budget_for_mode(decision.mode, personal)
+        session.state.metadata["search_mode"] = decision.mode
+        session.state.metadata["route_signals"] = decision.signals
+        current = dict(gstate.get("budget") or {})
+        current["max_tool_calls"] = int(budget_cfg["max_tool_calls"])
+        current["max_replan_count"] = int(budget_cfg["max_replan_count"])
+        try:
+            from app.api.monitor import monitor
+
+            monitor.report_phase(
+                "mode_router",
+                "done",
+                session_id=session.session_id,
+                search_mode=decision.mode,
+                signals=decision.signals,
+                user_override=decision.user_override,
+            )
+        except Exception:
+            pass
+        return {
+            "search_mode": decision.mode,
+            "route_signals": decision.signals,
+            "budget": current,
+            "progress": "routed",
+        }
+
+    async def node_quick_search(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.quick import run_quick_search
+
+        session = _require_session(gstate)
+        query = str(gstate.get("resolved_query") or session.ctx.task_query)
+        try:
+            cards = run_quick_search(query, max_queries=2, max_results=4)
+        except Exception as exc:
+            cards = []
+            session.state.metadata["quick_search_error"] = str(exc)[:200]
+        session.state.metadata["search_cards"] = cards
+        return {"search_cards": cards, "progress": "quick_search"}
+
+    async def node_quick_fetch(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.quick import run_quick_fetch
+
+        session = _require_session(gstate)
+        cards = list(gstate.get("search_cards") or [])
+        try:
+            fetched = run_quick_fetch(cards, limit=2)
+        except Exception as exc:
+            fetched = []
+            session.state.metadata["quick_fetch_error"] = str(exc)[:200]
+        session.state.metadata["fetched_pages"] = fetched
+        refs = [str(item.get("artifact_id") or item.get("url") or "") for item in fetched if item]
+        citation_manager = session.ctx.citation_manager
+        if citation_manager is not None:
+            from app.agent.harness.citations import EvidenceSource
+
+            for i, item in enumerate(fetched or cards[:2]):
+                url = str(item.get("url") or "")
+                if not url:
+                    continue
+                citation_manager.sources.append(
+                    EvidenceSource(
+                        source_id=f"Q{i+1}",
+                        step_index=0,
+                        step_type="network_search",
+                        source_kind="url",
+                        locator=url,
+                        excerpt=str(item.get("snippet") or "")[:400],
+                        artifact_id=str(item.get("artifact_id") or ""),
+                    )
+                )
+        return {"search_cards": cards, "evidence_refs": [r for r in refs if r], "progress": "quick_fetch"}
+
+    async def node_quick_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.quick import compose_quick_answer
+
+        session = _require_session(gstate)
+        query = str(gstate.get("resolved_query") or session.ctx.original_query or session.ctx.task_query)
+        cards = list(gstate.get("search_cards") or [])
+        fetched = list((session.state.metadata or {}).get("fetched_pages") or [])
+        answer = compose_quick_answer(query, cards, fetched or None)
+        session.state.final_content = answer
+        session.state.phase = Phase.FINALIZE
+        return {
+            "final_content": answer,
+            "status": "completed",
+            "quality_passed": True,
+            "progress": "quick_synth",
+        }
 
     async def node_intent(self, gstate: dict[str, Any]) -> dict[str, Any]:
         session = _require_session(gstate)
@@ -687,6 +808,7 @@ class ResearchGraphRunner:
             started_at=session.ctx.run_started,
         )
         session.result = result
+        _persist_conversation(session, result)
         return {
             "status": "completed" if result.status != "failed" else "aborted",
             "final_content": session.state.final_content,
@@ -717,6 +839,7 @@ class ResearchGraphRunner:
             started_at=session.ctx.run_started,
         )
         session.result = result
+        _persist_conversation(session, result)
         return {
             "status": "aborted",
             "abort_reason": session.state.abort_reason or "aborted",
@@ -730,6 +853,34 @@ def _require_session(gstate: dict[str, Any]) -> RunSession:
     if session is None:
         raise RuntimeError("research graph session missing")
     return session
+
+
+def _persist_conversation(session: RunSession, result: Any) -> None:
+    try:
+        from app.conversation.store import ConversationStore, ConversationTurn
+
+        ctx = session.ctx
+        store = ConversationStore.default(user_id=ctx.user_id or "me", project_id=ctx.project_id or "Inbox")
+        user_text = ctx.original_query or ctx.task_query
+        store.append_turn(ctx.session_id, ConversationTurn(role="user", content=user_text, run_id=session.run_id))
+        assistant = str(getattr(result, "content", None) or session.state.final_content or "")
+        sources: list[str] = []
+        for card in list((session.state.metadata or {}).get("search_cards") or []):
+            url = str((card or {}).get("url") or "")
+            if url and url not in sources:
+                sources.append(url)
+        if assistant:
+            store.append_turn(
+                ctx.session_id,
+                ConversationTurn(
+                    role="assistant",
+                    content=assistant[:4000],
+                    run_id=session.run_id,
+                    sources=sources[:12],
+                ),
+            )
+    except Exception as exc:
+        logger.warning("conversation persist skipped: %s", exc)
 
 
 def _failed_worker(task_id: str, step_type: str, reason: str) -> dict[str, Any]:

@@ -11,7 +11,8 @@ from app.config.loader import get_harness_config
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 
 LOCAL_TOOLS = [
-    {"name": "internet_search", "source": "web", "description": "检索互联网公开信息"},
+    {"name": "internet_search", "source": "web", "description": "检索互联网公开信息（卡片）"},
+    {"name": "fetch_url", "source": "web", "description": "按 URL 拉取网页正文进 Artifact"},
     {"name": "read_file_content", "source": "file", "description": "读取会话上传附件"},
     {"name": "read_artifact", "source": "context", "description": "读取外置原文 Artifact"},
     {"name": "read_evidence", "source": "context", "description": "读取证据摘录"},

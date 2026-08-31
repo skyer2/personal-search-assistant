@@ -21,7 +21,7 @@ COMPARE_MARKERS = ("比较", "对比", " vs ", " VS ", "versus", "横向比较")
 LANDSCAPE_MARKERS = ("竞争格局", "多维度", "综合对比")
 
 SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
-    "web": ("internet_search",),
+    "web": ("internet_search", "fetch_url"),
     "file": ("read_file_content",),
 }
 

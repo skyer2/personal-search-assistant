@@ -22,6 +22,13 @@
 - API `mode` / `project_id` / `tenant_id=local`
 - 删除 MySQL、RAGFlow、MCP 全栈代码
 
+## P1 已实现
+
+- **Mode Router**：`auto/quick/deep`；用户显式选择优先；Auto 按比较/报告/多 PDF 升 Deep
+- **Quick 子图**：`conversation → mode_router → quick_search → quick_fetch → quick_synthesize → finalize`，不进 Progress/Replan
+- **Conversation Store**：按 `user/project/thread` 存最近 4～8 turn + rolling summary；短追问改写
+- **`fetch_url`**：搜索只出卡片，按需拉正文进 Artifact/Evidence
+
 ## 快速启动
 
 ```bash
@@ -39,21 +46,23 @@ cd frontend && pnpm install && pnpm dev
 ## 架构（个人版）
 
 ```text
-用户 → Mode (auto/quick/deep) → Harness Intent/Plan
-  → StateGraph → Web/File Worker → Evidence → Answer + Sources
-  （显式 Markdown/PDF 请求才走 synthesis 工具）
+用户 → Conversation → Mode Router (auto/quick/deep)
+  ├─ Quick：search 卡片 → fetch_url → Answer + Sources（无 Progress/Replan）
+  └─ Deep：Intent → Plan → DAG Workers → Progress → Replan → Synthesis
 ```
 
 ## 测试
 
 ```bash
+python3 tests/test_personal_search_p1.py
+python3 tests/test_research_harness.py
 python3 tests/test_harness_phase1.py
 python3 tests/test_hybrid_planning.py
 python3 tests/test_harness_hitl.py
 ```
 
-## 下一步（P1）
+## 下一步（P2）
 
-- `mode_router.py` Quick/Deep 分流子图
-- `conversation/store.py` 多轮会话
-- `fetch_url.py` 搜索卡片后按需拉正文
+- History / Projects / Saved Sources UI
+- Developer Mode 折叠 Eval/Trace
+- 中文 2-gram hybrid context selector

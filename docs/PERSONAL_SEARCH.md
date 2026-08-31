@@ -2,7 +2,7 @@
 
 > **定位**：本仓库产品目标从「企业多数据源研搜 Demo」转向「个人 Search Assistant；复杂问题按需升级 Deep Research」。  
 > **原则**：底层 Harness / StateGraph **保留**；真正要动的是入口分流、默认能力面、身份/对话、Progress 通用化与 UI。  
-> **状态**：架构设计文档（2026-08-31）。**P0 已落地**（见 README）；P1 Quick 子图 / Conversation / fetch_url 待实现。
+> **状态**：架构设计文档（2026-08-31）。**P0 已落地**（见 README）；**P1 已落地**：Mode Router + Quick 子图、Conversation Store、`fetch_url`。
 
 ---
 
@@ -539,16 +539,16 @@ Episodic 次要；网页 Fact 尽量不进长期。Consolidation 默认关。
 
 ### P1 — 路由与 Quick 路径
 
-| 任务 | 文件 |
-|------|------|
-| Mode Router | `research/routing/mode_router.py` |
-| Quick 子图 | `runtime/graph.py`, `runtime/state.py` |
-| Conversation Store | `conversation/store.py` |
-| fetch_url 工具 | `tools/fetch_url.py` |
-| Brief depth/freshness/primary | `research_brief.py` |
-| Brief-driven Progress | `planning/progress.py` |
-| search_web 卡片化 | `tools/tavily`, `internet_search` |
-| API 增加 mode/thread/project | `api/server.py` |
+| 任务 | 文件 | 状态 |
+|------|------|------|
+| Mode Router | `research/routing/mode_router.py` | **已落地** |
+| Quick 子图 | `runtime/graph.py`, `runtime/state.py`, `runtime/quick.py` | **已落地** |
+| Conversation Store | `conversation/store.py` | **已落地** |
+| fetch_url 工具 | `tools/fetch_url.py` | **已落地** |
+| search_web 卡片化 | `tools/tavily_tool.py` | **已落地** |
+| API mode/thread/project | `api/server.py`（P0 已接 mode；thread=session_id） | **已落地** |
+| Brief depth/freshness/primary | `research_brief.py` | 未做（可并入后续） |
+| Brief-driven Progress | `planning/progress.py` | 未做（可并入后续） |
 
 ### P2 — 体验 polish
 

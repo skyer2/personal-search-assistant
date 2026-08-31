@@ -33,7 +33,7 @@ def test_sqlite_checkpointer_roundtrip_plan_and_progress():
         state = initial_graph_state(
             run_id="ckpt-1",
             session_id="ckpt-1",
-            task_query="搜索AI趋势并查数据库库存，生成Markdown",
+            task_query="比较 Tesla 和 Figure 的差异并生成 Markdown 报告",
         )
         config = {"configurable": {"thread_id": "ckpt-1"}, "recursion_limit": 50}
         result = graph.invoke(state, config=config)

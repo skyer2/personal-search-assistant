@@ -129,6 +129,8 @@ class HarnessRunContext:
     policy_token: Any = None
     restored_full: bool = False
     step_index: int = 0
+    original_query: str = ""
+    search_mode: str = "auto"
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     context_built: bool = False
 
@@ -298,6 +300,7 @@ class AgentHarness:
         user_id: str = "",
         tenant_id: str = "",
         project_id: str = "",
+        mode: str = "auto",
     ) -> HarnessRunContext:
         state = LoopState(session_id=session_id, max_retries=self.max_retries)
         state.metadata["strict_validation"] = self.harness_config.validation_strict_mode
@@ -374,6 +377,8 @@ class AgentHarness:
             policy_token=policy_token,
             restored_full=restored_full,
             step_index=step_index,
+            search_mode=mode or "auto",
+            original_query=task_query,
         )
 
     def _teardown_run(self, ctx: HarnessRunContext) -> None:
@@ -401,6 +406,7 @@ class AgentHarness:
             user_id=user_id,
             tenant_id=tenant_id,
             project_id=project_id,
+            mode=mode,
         )
         state = ctx.state
         try:
@@ -2432,6 +2438,7 @@ class AgentHarness:
             metadata={
                 "assistants_called": state.assistants_called,
                 "plan_steps": len(state.plan.steps) if state.plan else 0,
+                "search_mode": str((state.metadata or {}).get("search_mode") or ""),
                 "tool_calls_count": state.tool_calls_count,
                 "latency_ms": total_latency_ms,
                 "step_success_rate": round(step_success_rate, 3),

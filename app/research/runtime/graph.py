@@ -26,7 +26,8 @@ def _plan_from_state(state: ResearchState) -> ExecutionPlan | None:
 
 
 def intent_node(state: ResearchState) -> dict[str, Any]:
-    intent = understand_task(state["task_query"])
+    query = str(state.get("resolved_query") or state.get("task_query") or "")
+    intent = understand_task(query)
     return {
         "intent": intent.to_dict(),
         "needs_clarification": bool(intent.needs_clarification),
@@ -51,6 +52,79 @@ def plan_node(state: ResearchState) -> dict[str, Any]:
         "task_status": status,
         "needs_plan_review": False,
         "progress": "planned",
+    }
+
+
+def conversation_node(state: ResearchState) -> dict[str, Any]:
+    from app.conversation.store import ConversationStore, rewrite_query
+
+    store = ConversationStore.default(
+        user_id=str(state.get("user_id") or "me"),
+        project_id=str(state.get("project_id") or "Inbox"),
+    )
+    thread = store.get(str(state.get("session_id") or ""))
+    original = str(state.get("task_query") or "")
+    resolved = rewrite_query(original, thread)
+    return {
+        "conversation_summary": thread.rolling_summary,
+        "resolved_query": resolved,
+        "progress": "conversation",
+    }
+
+
+def mode_router_node(state: ResearchState) -> dict[str, Any]:
+    from app.research.routing.mode_router import budget_for_mode, route
+
+    decision = route(
+        str(state.get("resolved_query") or state.get("task_query") or ""),
+        user_mode=str(state.get("search_mode_requested") or "auto"),
+        conversation_summary=str(state.get("conversation_summary") or ""),
+    )
+    budget_cfg = budget_for_mode(decision.mode)
+    current = dict(state.get("budget") or {})
+    current["max_tool_calls"] = int(budget_cfg["max_tool_calls"])
+    current["max_replan_count"] = int(budget_cfg["max_replan_count"])
+    return {
+        "search_mode": decision.mode,
+        "route_signals": decision.signals,
+        "budget": current,
+        "progress": "routed",
+    }
+
+
+def route_after_mode(state: ResearchState) -> Literal["quick_search", "intent"]:
+    return "quick_search" if str(state.get("search_mode") or "") == "quick" else "intent"
+
+
+def quick_search_node(state: ResearchState) -> dict[str, Any]:
+    query = str(state.get("resolved_query") or state.get("task_query") or "")
+    cards = [
+        {
+            "title": "placeholder",
+            "url": "https://example.com",
+            "snippet": query[:120],
+        }
+    ]
+    return {"search_cards": cards, "progress": "quick_search"}
+
+
+def quick_fetch_node(state: ResearchState) -> dict[str, Any]:
+    cards = list(state.get("search_cards") or [])
+    refs = [str(c.get("url") or "") for c in cards if c.get("url")]
+    return {"evidence_refs": refs[:2], "progress": "quick_fetch"}
+
+
+def quick_synthesize_node(state: ResearchState) -> dict[str, Any]:
+    from app.research.runtime.quick import compose_quick_answer
+
+    query = str(state.get("resolved_query") or state.get("task_query") or "")
+    cards = list(state.get("search_cards") or [])
+    answer = compose_quick_answer(query, cards)
+    return {
+        "final_content": answer,
+        "status": "completed",
+        "quality_passed": True,
+        "progress": "quick_synth",
     }
 
 
@@ -241,6 +315,11 @@ def compile_research_graph(
 
     builder = StateGraph(ResearchState)
     if runtime is not None:
+        builder.add_node("conversation", runtime.node_conversation)
+        builder.add_node("mode_router", runtime.node_mode_router)
+        builder.add_node("quick_search", runtime.node_quick_search)
+        builder.add_node("quick_fetch", runtime.node_quick_fetch)
+        builder.add_node("quick_synthesize", runtime.node_quick_synthesize)
         builder.add_node("intent", runtime.node_intent)
         builder.add_node("clarify", runtime.node_clarify)
         builder.add_node("plan", runtime.node_plan)
@@ -254,6 +333,11 @@ def compile_research_graph(
         builder.add_node("finalize", runtime.node_finalize)
         builder.add_node("abort", runtime.node_abort)
     else:
+        builder.add_node("conversation", conversation_node)
+        builder.add_node("mode_router", mode_router_node)
+        builder.add_node("quick_search", quick_search_node)
+        builder.add_node("quick_fetch", quick_fetch_node)
+        builder.add_node("quick_synthesize", quick_synthesize_node)
         builder.add_node("intent", intent_node)
         builder.add_node("clarify", clarify_node)
         builder.add_node("plan", plan_node)
@@ -267,7 +351,16 @@ def compile_research_graph(
         builder.add_node("finalize", finalize_node)
         builder.add_node("abort", abort_node)
 
-    builder.add_edge(START, "intent")
+    builder.add_edge(START, "conversation")
+    builder.add_edge("conversation", "mode_router")
+    builder.add_conditional_edges(
+        "mode_router",
+        route_after_mode,
+        {"quick_search": "quick_search", "intent": "intent"},
+    )
+    builder.add_edge("quick_search", "quick_fetch")
+    builder.add_edge("quick_fetch", "quick_synthesize")
+    builder.add_edge("quick_synthesize", "finalize")
     builder.add_conditional_edges(
         "intent",
         route_after_intent,
@@ -320,9 +413,12 @@ __all__ = [
     "compile_research_graph",
     "dispatch_sends",
     "initial_graph_state",
+    "conversation_node",
+    "mode_router_node",
     "intent_node",
     "plan_node",
     "progress_node",
+    "route_after_mode",
     "route_dispatch",
     "route_progress",
 ]

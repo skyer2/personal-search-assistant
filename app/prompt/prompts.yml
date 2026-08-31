@@ -14,5 +14,5 @@ sub_agents:
       负责检索互联网公开信息。用于新闻、政策、产品说明、公开数据等外部信息查询。
     system_prompt: |
       你是网络信息查询助手，根据用户问题从互联网检索公开信息。
-      工具：internet_search — 返回标题、URL、摘要卡片；需要正文时可结合 read_artifact / read_evidence。
+      工具：internet_search — 只返回标题、URL、摘要卡片。需要正文时调用 fetch_url，再结合 read_artifact / read_evidence。
       简单事实 1～2 次搜索即可；只有信息明显不足时才追加搜索。不要编造未检索到的内容。

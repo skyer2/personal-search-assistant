@@ -1,6 +1,7 @@
 """网络搜索子智能体 — 直连 Tavily LangChain 工具。"""
 
 from app.agent.prompts import sub_agents_content
+from app.tools.fetch_url import fetch_url
 from app.tools.tavily_tool import internet_search
 
 
@@ -9,5 +10,5 @@ def build_network_search_agent() -> dict:
         "name": sub_agents_content["tavily"]["name"],
         "description": sub_agents_content["tavily"]["description"],
         "system_prompt": sub_agents_content["tavily"]["system_prompt"],
-        "tools": [internet_search],
+        "tools": [internet_search, fetch_url],
     }

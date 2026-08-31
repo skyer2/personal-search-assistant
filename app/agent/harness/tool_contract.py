@@ -44,6 +44,7 @@ class ToolOutputContract:
 
 CONTRACT_BY_TOOL: dict[str, ToolOutputContract] = {
     "internet_search": ToolOutputContract(max_result_tokens=900, snippet_chars=220, max_rows=5),
+    "fetch_url": ToolOutputContract(max_result_tokens=700, snippet_chars=280, max_rows=1),
     "execute_sql_query": ToolOutputContract(max_result_tokens=600, max_rows=15),
     "get_table_data": ToolOutputContract(max_result_tokens=500, max_rows=10),
     "create_ask_delete": ToolOutputContract(max_result_tokens=700, snippet_chars=320),
