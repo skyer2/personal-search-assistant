@@ -35,6 +35,7 @@ PLANNER_LLM_PROMPT = """你是个人搜索助手的意图理解助手。根据�
 4. 「列出 N 条 + 来源」仍用 text，在对话中附来源
 5. slots 含 topic、item_count、require_citations、output_preference、time_range
 6. confidence 0~1；reason 一句话
+7. 可选 brief：entities、dimensions、depth(shallow|standard|thorough)、freshness、prefer_primary
 
 输出格式：
 {{
@@ -43,7 +44,8 @@ PLANNER_LLM_PROMPT = """你是个人搜索助手的意图理解助手。根据�
   "deliverable": "text",
   "confidence": 0.88,
   "reason": "…",
-  "slots": {{ "topic": "…", "require_citations": true, "output_preference": "chat" }}
+  "slots": {{ "topic": "…", "require_citations": true, "output_preference": "chat" }},
+  "brief": {{ "entities": [], "dimensions": [], "depth": "standard", "freshness": "any", "prefer_primary": false }}
 }}
 """
 
@@ -119,8 +121,28 @@ def merge_intent_from_llm(
         f"搜索任务，交付物={merged.deliverable}，置信度={merged.intent_confidence}（rules+llm）"
     )
     from app.research.planning.policy import apply_source_policy
+    from app.agent.harness.research_brief import ResearchBrief, attach_brief
 
-    return apply_source_policy(merged)
+    merged = apply_source_policy(merged)
+    merged = attach_brief(merged)
+    llm_brief = llm_patch.get("brief") if isinstance(llm_patch.get("brief"), dict) else {}
+    if llm_brief and merged.brief is not None:
+        base = merged.brief.to_dict()
+        for key in (
+            "objective",
+            "entities",
+            "dimensions",
+            "time_range",
+            "depth",
+            "freshness",
+            "prefer_primary",
+            "preferred_domains",
+        ):
+            value = llm_brief.get(key)
+            if value not in (None, "", []):
+                base[key] = value
+        merged.brief = ResearchBrief.from_dict(base)
+    return merged
 
 
 async def understand_with_llm(

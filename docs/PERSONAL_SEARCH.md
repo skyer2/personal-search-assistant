@@ -2,7 +2,7 @@
 
 > **定位**：本仓库产品目标从「企业多数据源研搜 Demo」转向「个人 Search Assistant；复杂问题按需升级 Deep Research」。  
 > **原则**：底层 Harness / StateGraph **保留**；真正要动的是入口分流、默认能力面、身份/对话、Progress 通用化与 UI。  
-> **状态**：架构设计文档（2026-08-31）。**P0 已落地**（见 README）；**P1 已落地**：Mode Router + Quick 子图、Conversation Store、`fetch_url`。
+> **状态**：架构设计文档（2026-08-31）。**P0 / P1 已落地**；Intent/Plan 方案见 [INTENT_AND_PLAN.md](INTENT_AND_PLAN.md)。
 
 ---
 
@@ -547,8 +547,8 @@ Episodic 次要；网页 Fact 尽量不进长期。Consolidation 默认关。
 | fetch_url 工具 | `tools/fetch_url.py` | **已落地** |
 | search_web 卡片化 | `tools/tavily_tool.py` | **已落地** |
 | API mode/thread/project | `api/server.py`（P0 已接 mode；thread=session_id） | **已落地** |
-| Brief depth/freshness/primary | `research_brief.py` | 未做（可并入后续） |
-| Brief-driven Progress | `planning/progress.py` | 未做（可并入后续） |
+| Brief depth/freshness/primary | `research_brief.py` | **已落地**（见 [INTENT_AND_PLAN.md](INTENT_AND_PLAN.md)） |
+| Brief-driven Progress | `planning/progress.py` | **已落地** |
 
 ### P2 — 体验 polish
 

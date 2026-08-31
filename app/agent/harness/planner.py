@@ -95,8 +95,10 @@ def understand_task(task_query: str, has_uploaded_files: bool = False) -> TaskIn
         clarification_question=clarification_question,
     )
     from app.research.planning.policy import apply_source_policy
+    from app.agent.harness.research_brief import attach_brief
 
-    return apply_source_policy(intent)
+    intent = apply_source_policy(intent)
+    return attach_brief(intent)
 
 
 def build_plan(intent: TaskIntent) -> ExecutionPlan:

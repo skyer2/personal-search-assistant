@@ -231,7 +231,11 @@ class AgentHarness:
     ) -> None:
         sources = citation_manager.sources if citation_manager is not None else []
         query = task_query or (state.intent.raw_query if state.intent else "")
-        if state.intent and (state.plan or query):
+        if state.intent and getattr(state.intent, "brief", None) and not state.intent.brief.is_empty():
+            state.research_brief_obj = state.intent.brief
+            if state.plan and not state.plan.research_brief:
+                state.plan.research_brief = state.research_brief_obj.objective
+        elif state.intent and (state.plan or query):
             state.research_brief_obj = compile_research_brief(
                 task_query=query,
                 intent=state.intent,

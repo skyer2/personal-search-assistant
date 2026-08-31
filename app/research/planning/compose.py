@@ -35,7 +35,11 @@ class PlanningLimits:
 
 def _stamp(plan: ExecutionPlan, intent: TaskIntent, mode: str, brief: str = "") -> ExecutionPlan:
     plan.planning_mode = mode
-    plan.research_brief = brief or plan.research_brief or intent.summary
+    objective = brief or plan.research_brief
+    attached = getattr(intent, "brief", None)
+    if attached is not None and getattr(attached, "objective", ""):
+        objective = objective or attached.objective
+    plan.research_brief = objective or intent.summary
     intent.planning_mode = mode
     return plan
 

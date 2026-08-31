@@ -642,6 +642,7 @@ class ResearchGraphRunner:
                 or gstate.get("abort_reason")
             ),
             enabled=enabled,
+            intent=session.state.intent if session is not None else gstate.get("intent"),
         )
         if session is not None:
             session.state.metadata["progress_assessment"] = assessment.to_dict()

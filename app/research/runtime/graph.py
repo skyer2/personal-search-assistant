@@ -198,8 +198,9 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
         plan,
         task_status=dict(state.get("task_status") or {}),
         worker_results=list(state.get("worker_results") or []),
-        query=str(state.get("task_query") or ""),
+        query=str(state.get("resolved_query") or state.get("task_query") or ""),
         aborted=bool(state.get("status") == "aborted" or state.get("abort_reason")),
+        intent=state.get("intent"),
     )
     return {
         "progress_assessment": assessment.to_dict(),

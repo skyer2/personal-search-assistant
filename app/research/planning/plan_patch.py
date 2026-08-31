@@ -45,7 +45,7 @@ def apply_plan_patch(
             s
             for s in (raw.get("allowed_sources") or [])
             if str(s) in policy.allowed_sources
-        ] or [s for s in ("web", "kb", "db") if s in policy.allowed_sources]
+        ] or [s for s in ("web", "file") if s in policy.allowed_sources]
         depends = [str(x) for x in (raw.get("depends_on") or []) if str(x) in existing]
         step = research_step_from_task(
             task_id=tid,
@@ -96,7 +96,7 @@ def build_progress_patch(
 
     parsed = ProgressAssessment.from_dict(assessment or {})
     policy = parse_source_policy(intent.raw_query)
-    default_sources = [s for s in ("web", "kb", "db") if s in policy.allowed_sources]
+    default_sources = [s for s in ("web", "file") if s in policy.allowed_sources]
     if not default_sources:
         return {"add_tasks": [], "reason": "no_allowed_source"}
 
@@ -183,7 +183,7 @@ def build_gap_patch(
         s
         for s in (target.metadata or {}).get("allowed_sources") or []
         if s in policy.allowed_sources
-    ] or [s for s in ("web", "kb", "db") if s in policy.allowed_sources]
+    ] or [s for s in ("web", "file") if s in policy.allowed_sources]
     if not sources:
         return {"add_tasks": [], "reason": "no_allowed_source"}
     return {

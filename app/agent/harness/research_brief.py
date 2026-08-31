@@ -1,7 +1,8 @@
 """
-Research Brief — 把多轮对话压成后续 Worker / Supervisor 共用的稳定锚点。
+Research Brief — Deep 路径的稳定研究说明书（Intent 合同）。
 
-后续步骤主要消费 Brief，而不是整段原始对话。
+后续 Plan / Progress / Worker 主要消费 Brief，而不是整段原始对话。
+Quick 路径不编译 Brief。
 """
 
 from __future__ import annotations
@@ -13,7 +14,43 @@ from typing import Any, Optional
 _ENTITY_SPLIT = re.compile(r"[,，、/]|以及|和")
 _YEAR_RANGE = re.compile(r"(20\d{2})\s*[-~到至]\s*(20\d{2}|今|现在|最新)")
 _YEAR = re.compile(r"(20\d{2})")
-_COMPARE = re.compile(r"(比较|对比|vs\.?|VS)", re.IGNORECASE)
+_COMPARE = re.compile(r"(比较|对比|vs\.?|VS|versus)", re.IGNORECASE)
+_DOMAIN = re.compile(r"\b(?:[a-z0-9-]+\.)+(?:com|org|net|gov|edu|io|cn)\b", re.I)
+_ENTITY_STOP = {
+    "进度",
+    "动态",
+    "报告",
+    "资料",
+    "差异",
+    "比较",
+    "对比",
+    "趋势",
+    "搜索",
+    "检索",
+    "查询",
+    "生成",
+    "输出",
+    "markdown",
+    "pdf",
+}
+
+PRIMARY_MARKERS = ("官方", "一手", "白皮书", "官网", "原论文", "primary", "first-party")
+RECENT_MARKERS = ("最新", "今天", "现在", "刚刚", "实时")
+THOROUGH_MARKERS = ("多维度", "综合", "全面", "深入", "官方", "白皮书", "对照")
+PRIMARY_SOURCE_HINTS = (
+    ".gov",
+    "gov.",
+    "官方",
+    "白皮书",
+    "arxiv.org",
+    "ieee.org",
+    "nature.com",
+    "sec.gov",
+    "investor",
+    "/ir/",
+    "白皮",
+    "官网",
+)
 
 
 @dataclass
@@ -28,6 +65,10 @@ class ResearchBrief:
     constraints: list[str] = field(default_factory=list)
     success_criteria: list[str] = field(default_factory=list)
     raw_query: str = ""
+    depth: str = "standard"  # shallow | standard | thorough
+    freshness: str = "any"  # any | recent | 约束原文
+    prefer_primary: bool = False
+    preferred_domains: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         return not (self.objective or self.raw_query)
@@ -43,8 +84,14 @@ class ResearchBrief:
             lines.append(f"    维度: {', '.join(self.dimensions[:12])}")
         if self.time_range:
             lines.append(f"    时间范围: {self.time_range}")
+        lines.append(f"    深度: {self.depth}")
+        lines.append(f"    新鲜度: {self.freshness}")
         if self.source_policy:
             lines.append(f"    来源策略: {self.source_policy}")
+        if self.prefer_primary:
+            lines.append("    来源偏好: 优先官方/一手")
+        if self.preferred_domains:
+            lines.append(f"    提示域名: {', '.join(self.preferred_domains[:8])}")
         lines.append(f"    交付物: {self.deliverable}")
         lines.append(f"    引用策略: {self.citation_policy}")
         if self.constraints:
@@ -67,6 +114,10 @@ class ResearchBrief:
             return cls()
         if isinstance(data, str):
             return cls(objective=data, raw_query=data)
+        depth = str(data.get("depth") or "standard")
+        if depth not in {"shallow", "standard", "thorough"}:
+            depth = "standard"
+        freshness = str(data.get("freshness") or "any") or "any"
         return cls(
             objective=str(data.get("objective") or ""),
             entities=[str(x) for x in (data.get("entities") or []) if x],
@@ -78,18 +129,52 @@ class ResearchBrief:
             constraints=[str(x) for x in (data.get("constraints") or []) if x],
             success_criteria=[str(x) for x in (data.get("success_criteria") or []) if x],
             raw_query=str(data.get("raw_query") or ""),
+            depth=depth,
+            freshness=freshness,
+            prefer_primary=bool(data.get("prefer_primary", False)),
+            preferred_domains=[str(x) for x in (data.get("preferred_domains") or []) if x],
         )
 
 
 def _split_entities(text: str) -> list[str]:
-    parts = [p.strip(" 的") for p in _ENTITY_SPLIT.split(text or "") if p.strip()]
+    parts = [p.strip(" 的了呢吗？? ") for p in _ENTITY_SPLIT.split(text or "") if p.strip()]
     out: list[str] = []
     seen: set[str] = set()
     for part in parts:
-        if 1 < len(part) <= 40 and part.lower() not in seen:
-            seen.add(part.lower())
+        key = part.lower()
+        if key in _ENTITY_STOP or part in _ENTITY_STOP:
+            continue
+        if 1 < len(part) <= 40 and key not in seen:
+            seen.add(key)
             out.append(part)
     return out[:12]
+
+
+def _infer_depth(query: str, *, deliverable: str, entity_count: int, dimensions: list[str]) -> str:
+    q = query or ""
+    if deliverable in {"md", "pdf"} or entity_count >= 2 or _COMPARE.search(q):
+        return "thorough"
+    if any(m in q for m in THOROUGH_MARKERS) or len(dimensions) >= 2:
+        return "thorough"
+    if len(q.strip()) <= 24:
+        return "shallow"
+    return "standard"
+
+
+def _infer_freshness(query: str, time_range: str) -> str:
+    q = query or ""
+    if any(m in q for m in RECENT_MARKERS):
+        return "recent"
+    if "以前" in q or "之前" in q or "不得使用" in q or "不要使用" in q:
+        return (time_range or q)[:80] or "constrained"
+    if time_range:
+        return time_range
+    return "any"
+
+
+def _infer_prefer_primary(query: str) -> bool:
+    q = (query or "").lower()
+    return any(m.lower() in q or m in (query or "") for m in PRIMARY_MARKERS)
 
 
 def compile_research_brief(
@@ -108,8 +193,13 @@ def compile_research_brief(
     dimensions: list[str] = []
     source_bits: list[str] = []
     citation_policy = "claim-evidence"
+    preferred_domains = [m.group(0).lower() for m in _DOMAIN.finditer(query)]
 
     slots = getattr(intent, "slots", None) if intent is not None else None
+    existing = getattr(intent, "brief", None) if intent is not None else None
+    if isinstance(existing, ResearchBrief) and not existing.is_empty() and existing.entities:
+        entities = list(existing.entities)
+        dimensions = list(existing.dimensions)
     if intent is not None:
         summary = str(getattr(intent, "summary", "") or "")
         deliverable = str(getattr(intent, "deliverable", "text") or "text")
@@ -126,7 +216,7 @@ def compile_research_brief(
     if slots is not None:
         time_range = str(getattr(slots, "time_range", "") or time_range)
         topic = str(getattr(slots, "topic", "") or "")
-        if topic:
+        if topic and not entities:
             entities.extend(_split_entities(topic))
         if getattr(slots, "require_citations", False):
             citation_policy = "inline-[n]+references"
@@ -143,14 +233,25 @@ def compile_research_brief(
 
     if "不要使用" in query or "不得使用" in query:
         constraints.append("遵守用户对资料年份/来源的排除要求")
-    if _COMPARE.search(query):
+
+    try:
+        from app.research.planning.policy import extract_compare_entities
+
+        compared = extract_compare_entities(query)
+    except Exception:
+        compared = []
+    if compared:
+        entities = compared
+
+    if _COMPARE.search(query) and "横向比较" not in dimensions:
         dimensions.append("横向比较")
     for dim, keys in [
         ("市场规模", ("市场规模", "市场空间", "CAGR")),
-        ("商业化", ("商业化", "量产", "交付", "营收")),
+        ("商业化", ("商业化", "量产", "交付", "营收", "订单")),
         ("技术路线", ("技术", "方案", "架构")),
         ("竞争格局", ("竞争", "对手", "格局")),
         ("风险", ("风险", "监管", "合规")),
+        ("监管", ("监管", "合规", "牌照")),
     ]:
         if any(k in query or k in summary for k in keys) and dim not in dimensions:
             dimensions.append(dim)
@@ -158,23 +259,85 @@ def compile_research_brief(
     if not entities:
         entities = _split_entities(summary or query)[:8]
 
-    objective = (plan_brief or summary or query).strip()
+    prefer_primary = _infer_prefer_primary(query)
+    if prefer_primary:
+        constraints.append("优先官方/一手来源")
+
+    depth = _infer_depth(
+        query,
+        deliverable=deliverable,
+        entity_count=len(entities),
+        dimensions=dimensions,
+    )
+    freshness = _infer_freshness(query, time_range)
+
+    if plan_brief:
+        objective = plan_brief.strip()
+    elif summary and not summary.startswith("搜索任务"):
+        objective = summary.strip()
+    else:
+        objective = query
     success = [
         "结论可追溯到 evidence_id / artifact_id",
         "冲突数字并列保留，不自行消解",
     ]
     if deliverable in {"md", "pdf"}:
         success.append("交付物写入当前 session 工作目录")
+    if prefer_primary:
+        success.append("关键结论尽量落到官方或一手来源")
+    if freshness == "recent" or (time_range and time_range[:4].isdigit()):
+        success.append("证据年份覆盖用户关心的时间范围")
+
+    if source_bits:
+        source_policy = "+".join(source_bits)
+    else:
+        forbidden = (
+            set(str(x) for x in (getattr(intent, "forbidden_sources", None) or []))
+            if intent is not None
+            else set()
+        )
+        if "web" in forbidden and "file" not in forbidden:
+            source_policy = "file"
+        else:
+            source_policy = "web"
 
     return ResearchBrief(
         objective=objective[:500],
         entities=entities,
         dimensions=dimensions or ["关键事实"],
         time_range=time_range,
-        source_policy="+".join(source_bits) if source_bits else "web",
+        source_policy=source_policy,
         deliverable=deliverable,
         citation_policy=citation_policy,
         constraints=constraints,
         success_criteria=success,
         raw_query=query[:500],
+        depth=depth,
+        freshness=freshness,
+        prefer_primary=prefer_primary,
+        preferred_domains=preferred_domains[:8],
+    )
+
+
+def attach_brief(intent: Any, *, plan_brief: str = "") -> Any:
+    """把编译后的 Brief 写回 Intent；供 planner / compose 调用。"""
+    if intent is None:
+        return intent
+    query = str(getattr(intent, "raw_query", "") or "")
+    intent.brief = compile_research_brief(
+        task_query=query,
+        intent=intent,
+        plan_brief=plan_brief,
+    )
+    return intent
+
+
+def brief_of(intent: Any | None, *, query: str = "", plan_brief: str = "") -> ResearchBrief:
+    existing = getattr(intent, "brief", None) if intent is not None else None
+    if isinstance(existing, ResearchBrief) and not existing.is_empty():
+        return existing
+    return compile_research_brief(
+        task_query=query or str(getattr(intent, "raw_query", "") or ""),
+        intent=intent,
+        plan_brief=plan_brief,
     )

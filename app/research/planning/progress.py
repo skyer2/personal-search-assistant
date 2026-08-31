@@ -33,6 +33,15 @@ _METRIC = re.compile(
 )
 _YEAR = re.compile(r"\b(20\d{2})\b")
 _COMMERCIAL_DIM = ("收入", "营收", "订单", "量产", "商业化", "客户", "revenue", "order", "production")
+_DIM_ALIASES = {
+    "商业化": ("商业化", "量产", "交付", "营收", "订单", "收入", "客户", "revenue", "order", "production"),
+    "横向比较": ("比较", "对比", "vs", "差异", "横向"),
+    "技术路线": ("技术", "方案", "架构"),
+    "竞争格局": ("竞争", "对手", "格局"),
+    "风险": ("风险", "监管", "合规"),
+    "监管": ("监管", "合规", "牌照"),
+    "市场规模": ("市场规模", "市场空间", "cagr"),
+}
 
 
 @dataclass
@@ -88,6 +97,7 @@ def assess_progress(
     aborted: bool = False,
     current_year: int | None = None,
     enabled: bool = True,
+    intent: Any = None,
 ) -> ProgressAssessment:
     if aborted or (state is not None and state.abort_reason):
         return ProgressAssessment(verdict="abort", reason="aborted")
@@ -142,10 +152,25 @@ def assess_progress(
 
     _fill_worker_signals(assessment, plan, rows, query=query or getattr(plan, "research_brief", "") or "")
 
+    resolved_intent = intent
+    if resolved_intent is None and state is not None:
+        resolved_intent = getattr(state, "intent", None)
+    elif isinstance(resolved_intent, dict):
+        from app.agent.harness.state import TaskIntent
+
+        resolved_intent = TaskIntent.from_dict(resolved_intent)
+
     mode = str(plan.planning_mode or "")
     year = int(current_year or datetime.now().year)
     if enabled:
-        _fill_stale_and_dimensions(assessment, plan, rows, query=query, current_year=year)
+        _fill_stale_and_dimensions(
+            assessment,
+            plan,
+            rows,
+            query=query,
+            current_year=year,
+            intent=resolved_intent,
+        )
         if mode != "dynamic":
             # DIRECT/TEMPLATE：没有显式失败/gaps/冲突时不因启发式维度再搜。
             if not assessment.coverage_gaps and not assessment.conflicts:
@@ -189,6 +214,7 @@ def evaluate_progress(
     query: str = "",
     aborted: bool = False,
     enabled: bool = True,
+    intent: Any = None,
 ) -> Progress:
     return assess_progress(
         plan,
@@ -198,6 +224,7 @@ def evaluate_progress(
         query=query,
         aborted=aborted,
         enabled=enabled,
+        intent=intent,
     ).verdict
 
 
@@ -323,31 +350,63 @@ def _fill_stale_and_dimensions(
     *,
     query: str,
     current_year: int,
+    intent: Any = None,
 ) -> None:
-    blob_query = f"{query} {plan.research_brief or ''}"
+    from app.agent.harness.research_brief import PRIMARY_SOURCE_HINTS, brief_of
+
+    brief = brief_of(
+        intent,
+        query=query or "",
+        plan_brief=str(getattr(plan, "research_brief", "") or ""),
+    )
+    blob_query = f"{query} {plan.research_brief or ''} {brief.time_range}"
     query_years = [int(y) for y in _YEAR.findall(blob_query)]
     target_year = max(query_years) if query_years else current_year
     combined = " ".join(_text_of(row) for row in rows)
     mentioned = [int(y) for y in _YEAR.findall(combined)]
-    if mentioned and max(mentioned) <= target_year - 2:
+    freshness = str(brief.freshness or "any")
+    needs_fresh = freshness == "recent" or bool(brief.time_range) or bool(query_years)
+    if needs_fresh and mentioned and max(mentioned) <= target_year - 2:
         assessment.stale_evidence.append(
             f"latest_year={max(mentioned)}; required>={target_year}"
         )
 
-    compare = any(token in blob_query for token in ("比较", "对比", " vs ", "VS"))
-    commercial = any(token in blob_query for token in ("商业化", "营收", "收入", "量产"))
-    if not (compare and commercial):
-        return
+    dims = [d for d in (brief.dimensions or []) if d and d != "关键事实"]
+    if not dims:
+        compare = any(token in blob_query for token in ("比较", "对比", " vs ", "VS"))
+        commercial = any(token in blob_query for token in ("商业化", "营收", "收入", "量产"))
+        if compare and commercial:
+            dims = list(_COMMERCIAL_DIM)
+        else:
+            dims = []
     by_id = {str(row.get("task_id") or ""): row for row in rows}
-    for index, step in enumerate(plan.steps):
-        if step.step_type not in RESEARCH_TYPES:
-            continue
-        if step.depends_on:
-            continue
-        tid = step.resolved_task_id(index)
-        row = by_id.get(tid)
-        text = _text_of(row) if row else ""
-        if not any(dim.lower() in text.lower() for dim in _COMMERCIAL_DIM):
-            assessment.missing_dimensions.append(
-                f"{tid}:{(step.objective or step.description)[:80]}"
-            )
+    if dims:
+        for index, step in enumerate(plan.steps):
+            if step.step_type not in RESEARCH_TYPES:
+                continue
+            if step.depends_on:
+                continue
+            tid = step.resolved_task_id(index)
+            row = by_id.get(tid)
+            text = _text_of(row) if row else ""
+            hay = text.lower()
+            covered = False
+            for dim in dims:
+                aliases = _DIM_ALIASES.get(dim, (dim,))
+                if any(alias.lower() in hay for alias in aliases):
+                    covered = True
+                    break
+            if not covered:
+                assessment.missing_dimensions.append(
+                    f"{tid}:{(step.objective or step.description)[:80]}"
+                )
+
+    if brief.prefer_primary:
+        urls: list[str] = []
+        for row in rows:
+            payload = _payload(row)
+            urls.extend(str(x) for x in (payload.get("sources") or []) if x)
+            urls.extend(str(x) for x in (row.get("sources") or []) if x)
+        blob = " ".join(urls).lower() + " " + combined.lower()
+        if urls and not any(hint.lower() in blob for hint in PRIMARY_SOURCE_HINTS):
+            assessment.coverage_gaps.append("missing_primary_source")

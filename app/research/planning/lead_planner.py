@@ -33,7 +33,8 @@ Intent / Research Brief：
 4. 比较类问题按实体或评价维度拆；横向比较任务 depends_on 各实体任务。
 5. 不要生成写报告 / PDF / summarize 任务，系统会追加。
 6. task 数量 2~{max_tasks}。
-7. 只输出一个 JSON 对象。
+7. allowed_sources 只能是 web 和/或 file。
+8. 只输出一个 JSON 对象。
 
 格式：
 {{
@@ -43,7 +44,7 @@ Intent / Research Brief：
       "task_id": "t_tesla",
       "objective": "Tesla 2026 商业化进度：产能、客户、收入线索",
       "depends_on": [],
-      "allowed_sources": ["web", "kb"]
+      "allowed_sources": ["web"]
     }}
   ]
 }}
@@ -80,7 +81,7 @@ def _sanitize_sources(requested: list[Any], policy: SourcePolicy) -> list[str]:
 
 
 def intent_like_default(policy: SourcePolicy) -> list[str]:
-    preferred = [s for s in ("web", "kb", "db", "file") if s in policy.allowed_sources]
+    preferred = [s for s in ("web", "file") if s in policy.allowed_sources]
     return preferred[:3] or list(policy.allowed_sources)
 
 
@@ -144,10 +145,18 @@ def append_synthesis(intent: TaskIntent, steps: list[PlanStep]) -> list[PlanStep
 
 
 def heuristic_dynamic_plan(intent: TaskIntent, policy: SourcePolicy) -> ExecutionPlan:
-    """无 LLM 时的确定性拆解：按比较实体或整问作为研究目标。"""
+    """无 LLM 时的确定性拆解：按 Brief 实体/维度或比较实体作为研究目标。"""
+    from app.agent.harness.research_brief import brief_of
+
     sources = intent_allowed_sources(intent)
     sources = [s for s in sources if policy.allows(s)] or list(policy.allowed_sources)
-    entities = extract_compare_entities(intent.raw_query)
+    brief = brief_of(intent, query=intent.raw_query)
+    entities = [e for e in (brief.entities or []) if e][:5]
+    if len(entities) < 2:
+        entities = extract_compare_entities(intent.raw_query)
+    dimensions = [d for d in (brief.dimensions or []) if d and d != "关键事实"]
+    dim_hint = "、".join(dimensions[:4]) if dimensions else "与用户问题相关的事实、进展与证据"
+    primary_hint = "；优先官方/一手来源" if brief.prefer_primary else ""
     steps: list[PlanStep] = []
     if len(entities) >= 2:
         entity_ids: list[str] = []
@@ -157,7 +166,7 @@ def heuristic_dynamic_plan(intent: TaskIntent, policy: SourcePolicy) -> Executio
             steps.append(
                 research_step_from_task(
                     task_id=tid,
-                    objective=f"{name}：与用户问题相关的事实、进展与证据",
+                    objective=f"{name}：{dim_hint}{primary_hint}",
                     depends_on=[],
                     sources=sources,
                 )
@@ -165,28 +174,28 @@ def heuristic_dynamic_plan(intent: TaskIntent, policy: SourcePolicy) -> Executio
         steps.append(
             research_step_from_task(
                 task_id="t_compare",
-                objective="基于各实体证据做横向比较，不引入新的未授权来源",
+                objective=f"基于各实体证据做横向比较（{dim_hint}），不引入新的未授权来源",
                 depends_on=list(entity_ids),
                 sources=sources,
             )
         )
-        brief = f"比较 { ' / '.join(entities[:5]) }"
+        brief_text = brief.objective or f"比较 {' / '.join(entities[:5])}"
     else:
         steps.append(
             research_step_from_task(
                 task_id="t_core",
-                objective=intent.raw_query,
+                objective=(brief.objective or intent.raw_query) + primary_hint,
                 depends_on=[],
                 sources=sources,
             )
         )
-        brief = intent.summary or intent.raw_query
+        brief_text = brief.objective or intent.summary or intent.raw_query
     append_synthesis(intent, steps)
     return ExecutionPlan(
         steps=steps,
         summary=" → ".join(s.description for s in steps),
         planning_mode="dynamic",
-        research_brief=brief,
+        research_brief=brief_text,
     )
 
 

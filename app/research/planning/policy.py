@@ -143,9 +143,15 @@ def select_planning_mode(intent: TaskIntent, *, hybrid_enabled: bool = True) -> 
         return "direct" if sources <= 1 else "template"
 
     query = intent.raw_query or ""
+    brief = getattr(intent, "brief", None)
+    entities = [str(x) for x in (getattr(brief, "entities", None) or []) if x]
+    dimensions = [str(x) for x in (getattr(brief, "dimensions", None) or []) if x]
+    depth = str(getattr(brief, "depth", "") or "")
     if any(m in query for m in COMPARE_MARKERS + LANDSCAPE_MARKERS):
         return "dynamic"
-    if len(extract_compare_entities(query)) >= 2:
+    if len(entities) >= 2 or len(extract_compare_entities(query)) >= 2:
+        return "dynamic"
+    if depth == "thorough" and len(dimensions) >= 2:
         return "dynamic"
 
     sources = sum([intent.needs_network, intent.needs_file_read])

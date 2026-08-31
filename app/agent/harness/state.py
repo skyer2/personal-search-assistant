@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Any, Literal, Optional
 
 from app.agent.harness.intent_slots import IntentSlots
+from app.agent.harness.research_brief import ResearchBrief
 
 
 class Phase(str, Enum):
@@ -61,6 +62,7 @@ class TaskIntent:
     forbidden_sources: list[str] = field(default_factory=list)
     required_sources: list[str] = field(default_factory=list)
     planning_mode: str = ""
+    brief: ResearchBrief = field(default_factory=ResearchBrief)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +84,7 @@ class TaskIntent:
             "forbidden_sources": list(self.forbidden_sources),
             "required_sources": list(self.required_sources),
             "planning_mode": self.planning_mode,
+            "brief": self.brief.to_dict() if self.brief else {},
         }
 
     @classmethod
@@ -89,7 +92,7 @@ class TaskIntent:
         deliverable = str(data.get("deliverable", "text"))
         if deliverable not in {"text", "md", "pdf"}:
             deliverable = "text"
-        return cls(
+        obj = cls(
             raw_query=str(data.get("raw_query", "")),
             summary=str(data.get("summary", "")),
             needs_network=bool(data.get("needs_network", False)),
@@ -108,7 +111,13 @@ class TaskIntent:
             forbidden_sources=[str(x) for x in (data.get("forbidden_sources") or [])],
             required_sources=[str(x) for x in (data.get("required_sources") or [])],
             planning_mode=str(data.get("planning_mode") or ""),
+            brief=ResearchBrief.from_dict(data.get("brief")),
         )
+        if obj.brief.is_empty() and obj.raw_query:
+            from app.agent.harness.research_brief import compile_research_brief
+
+            obj.brief = compile_research_brief(task_query=obj.raw_query, intent=obj)
+        return obj
 
 
 @dataclass

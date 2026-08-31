@@ -6,7 +6,8 @@
 
 | 文档 | 内容 |
 |------|------|
-| [Personal Search 产品架构](docs/PERSONAL_SEARCH.md) | Mode Router、Quick/Deep、模块拆分、P0 实施 |
+| [Personal Search 产品架构](docs/PERSONAL_SEARCH.md) | Mode Router、Quick/Deep、模块拆分 |
+| [Intent 与 Plan 方案](docs/INTENT_AND_PLAN.md) | Deep 路径 Brief / 混合规划 / Brief-driven Progress |
 | [Harness 运行时架构](docs/HARNESS_ARCHITECTURE.md) | StateGraph + Worker Profile |
 | [Research Intelligence](docs/RESEARCH_INTELLIGENCE.md) | Progress / Replan（Deep 路径） |
 | [上下文工程](docs/CONTEXT_SYSTEM.md) | Artifact / Evidence / JIT |
@@ -28,6 +29,12 @@
 - **Quick 子图**：`conversation → mode_router → quick_search → quick_fetch → quick_synthesize → finalize`，不进 Progress/Replan
 - **Conversation Store**：按 `user/project/thread` 存最近 4～8 turn + rolling summary；短追问改写
 - **`fetch_url`**：搜索只出卡片，按需拉正文进 Artifact/Evidence
+
+## Intent / Plan（Deep）
+
+- Intent = **Research Brief**（目标、实体、维度、depth/freshness、官方优先、成功标准）
+- Plan 按 Brief 选 DIRECT / TEMPLATE / DYNAMIC；比较题按实体拆 DAG
+- Progress 对照 Brief 判缺口，不再写死营收/量产词
 
 ## 快速启动
 
@@ -54,6 +61,7 @@ cd frontend && pnpm install && pnpm dev
 ## 测试
 
 ```bash
+python3 tests/test_intent_and_plan.py
 python3 tests/test_personal_search_p1.py
 python3 tests/test_research_harness.py
 python3 tests/test_harness_phase1.py

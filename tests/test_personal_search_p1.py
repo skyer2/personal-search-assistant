@@ -41,9 +41,11 @@ def test_budget_for_mode():
 
 
 def test_conversation_follow_up(tmp_path: Path | None = None):
+    import uuid
+
     root = tmp_path or (ROOT / "output" / "test_conversations")
     store = ConversationStore(root, user_id="me", project_id="Inbox")
-    tid = "thr-follow"
+    tid = "thr-follow-" + uuid.uuid4().hex[:8]
     store.append_turn(tid, ConversationTurn(role="user", content="创业板今天为什么跌？"))
     store.append_turn(tid, ConversationTurn(role="assistant", content="主要受大盘拖累。"))
     thread = store.get(tid)
