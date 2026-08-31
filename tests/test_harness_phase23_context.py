@@ -166,8 +166,9 @@ def test_worker_profiles_minimize_surface():
     assert resolve_worker_profile("network_search") == PROFILE_WEB
     assert resolve_worker_profile("file_read") == PROFILE_FILE
     assert resolve_worker_profile("research", ["internet_search"]) == PROFILE_WEB
-    assert resolve_worker_profile("research", ["internet_search", "execute_sql_query"]) == PROFILE_MIXED
+    assert resolve_worker_profile("research", ["internet_search", "read_file_content"]) == PROFILE_MIXED
     assert "internet_search" in worker_tools_for_step("network_search")
+    assert "fetch_url" in worker_tools_for_step("network_search")
     assert "read_artifact" in worker_tools_for_step("network_search")
     assert "execute_sql_query" not in worker_tools_for_step("network_search")
     worker = object()
