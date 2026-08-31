@@ -90,9 +90,10 @@ class TaskRequest(BaseModel):
 
     query: str
     thread_id: str = None
-    user_id: str = ""
-    tenant_id: str = ""
-    project_id: str = ""
+    mode: str = "auto"
+    user_id: str = "me"
+    tenant_id: str = "local"
+    project_id: str = "Inbox"
 
 
 class HitlDecision(BaseModel):
@@ -117,7 +118,7 @@ def _forget_task(thread_id: str, task: asyncio.Task) -> None:
 
 @app.get("/health")
 async def health_check():
-    """Harness 健康检查：LLM / MySQL / Tavily / RAGFlow / Langfuse / Mem0。"""
+    """Harness 健康检查：LLM / Tavily / Langfuse。"""
     return await collect_health()
 
 
@@ -141,9 +142,10 @@ async def run_task(request: TaskRequest):
         run_deep_agent(
             request.query,
             thread_id,
-            user_id=request.user_id or "",
-            tenant_id=request.tenant_id or "",
-            project_id=request.project_id or "",
+            user_id=request.user_id or "me",
+            tenant_id=request.tenant_id or "local",
+            project_id=request.project_id or "Inbox",
+            mode=request.mode or "auto",
         )
     )
     active_tasks[thread_id] = task

@@ -13,9 +13,9 @@ from app.config.loader import reload_harness_config
 
 def test_hitl_config_loaded():
     config = reload_harness_config()
-    assert config.hitl_enabled is True
+    assert config.hitl_enabled is False
     assert config.hitl_interrupt_on.get("generate_markdown") is True
-    assert "database_query" in config.hitl_step_gate_types
+    assert config.hitl_step_gate_types == []
     print("[OK] hitl config")
 
 

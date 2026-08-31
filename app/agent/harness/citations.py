@@ -85,20 +85,6 @@ class CitationManager:
             self.sources.append(src)
             registered.append(src)
 
-        if step_type == "database_query":
-            sql_hint = meta.get("sql_query") or self._extract_sql_hint(content)
-            src = EvidenceSource(
-                source_id=self._next_id(),
-                step_index=step_index,
-                step_type=step_type,
-                source_kind="sql",
-                locator=sql_hint or "mysql://structured_query",
-                excerpt=content[:800].replace("\n", " "),
-                artifact_id=str(meta.get("artifact_id") or ""),
-            )
-            self.sources.append(src)
-            registered.append(src)
-
         if step_type == "file_read":
             src = EvidenceSource(
                 source_id=self._next_id(),
@@ -106,19 +92,6 @@ class CitationManager:
                 step_type=step_type,
                 source_kind="file",
                 locator=meta.get("filename", "uploaded_file"),
-                excerpt=content[:800].replace("\n", " "),
-                artifact_id=str(meta.get("artifact_id") or ""),
-            )
-            self.sources.append(src)
-            registered.append(src)
-
-        if step_type == "knowledge_base":
-            src = EvidenceSource(
-                source_id=self._next_id(),
-                step_index=step_index,
-                step_type=step_type,
-                source_kind="kb",
-                locator="ragflow://internal_kb",
                 excerpt=content[:800].replace("\n", " "),
                 artifact_id=str(meta.get("artifact_id") or ""),
             )
@@ -151,11 +124,7 @@ class CitationManager:
         registered: list[EvidenceSource] = []
         locators = [str(s).strip() for s in (sources or []) if str(s).strip()][:10]
         kind = "url" if step_type == "network_search" else (
-            "sql" if step_type == "database_query" else (
-                "kb" if step_type == "knowledge_base" else (
-                    "file" if step_type == "file_read" else "text"
-                )
-            )
+            "file" if step_type == "file_read" else "text"
         )
         for i, fact in enumerate((facts or [])[:10]):
             text = str(fact).strip()

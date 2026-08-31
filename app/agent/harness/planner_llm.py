@@ -18,7 +18,7 @@ from app.agent.harness.planner import (
 )
 from app.agent.harness.state import ExecutionPlan, TaskIntent
 
-PLANNER_LLM_PROMPT = """你是深度研搜系统的意图理解与规划助手。根据用户问题和规则引擎候选，输出结构化 JSON。
+PLANNER_LLM_PROMPT = """你是个人搜索助手的意图理解助手。根据用户问题和规则引擎候选，输出结构化 JSON。
 
 用户问题：
 {query}
@@ -30,28 +30,20 @@ PLANNER_LLM_PROMPT = """你是深度研搜系统的意图理解与规划助手�
 
 要求：
 1. 只输出一个 JSON 对象，不要 markdown 代码块
-2. deliverable 只能是 text、md、pdf
-3. 用户要「列出 N 条 + 来源/链接」且未明确「不要文件」时，deliverable 优先 md
-4. 仅对话问答、明确说不要文件 → text
-5. slots 字段包含 topic、item_count、require_citations、output_preference（auto/chat/file_md/file_pdf）、time_range
+2. deliverable 只能是 text、md、pdf；默认 text（对话回答）
+3. 只有用户明确要求生成报告/Markdown/PDF 时才用 md 或 pdf
+4. 「列出 N 条 + 来源」仍用 text，在对话中附来源
+5. slots 含 topic、item_count、require_citations、output_preference、time_range
 6. confidence 0~1；reason 一句话
 
 输出格式：
 {{
   "needs_network": true,
-  "needs_database": false,
-  "needs_knowledge_base": false,
   "needs_file_read": false,
-  "deliverable": "md",
+  "deliverable": "text",
   "confidence": 0.88,
   "reason": "…",
-  "slots": {{
-    "topic": "…",
-    "item_count": 5,
-    "require_citations": true,
-    "output_preference": "file_md",
-    "time_range": "2026"
-  }}
+  "slots": {{ "topic": "…", "require_citations": true, "output_preference": "chat" }}
 }}
 """
 
@@ -96,12 +88,8 @@ def merge_intent_from_llm(
 
     merged = TaskIntent(
         raw_query=rule_intent.raw_query,
-        summary=f"研搜任务，交付物={deliverable}（planner={rule_intent.planner_source}+llm）",
+        summary=f"搜索任务，交付物={deliverable}（planner={rule_intent.planner_source}+llm）",
         needs_network=bool(llm_patch.get("needs_network", rule_intent.needs_network)),
-        needs_database=bool(llm_patch.get("needs_database", rule_intent.needs_database)),
-        needs_knowledge_base=bool(
-            llm_patch.get("needs_knowledge_base", rule_intent.needs_knowledge_base)
-        ),
         needs_file_read=bool(llm_patch.get("needs_file_read", rule_intent.needs_file_read)),
         deliverable=deliverable,  # type: ignore[arg-type]
         keywords=rule_intent.keywords,
@@ -111,14 +99,7 @@ def merge_intent_from_llm(
         planner_reason=str(llm_patch.get("reason", "")),
         slots=merged_slots,
     )
-    if not any(
-        [
-            merged.needs_network,
-            merged.needs_database,
-            merged.needs_knowledge_base,
-            merged.needs_file_read,
-        ]
-    ):
+    if not merged.needs_network and not merged.needs_file_read:
         merged.needs_network = True
 
     merged.ambiguity_flags = detect_ambiguity_flags(
@@ -126,8 +107,7 @@ def merge_intent_from_llm(
         deliverable=merged.deliverable,
         slots=merged.slots,
         needs_network=merged.needs_network,
-        needs_database=merged.needs_database,
-        needs_knowledge_base=merged.needs_knowledge_base,
+        needs_file_read=merged.needs_file_read,
     )
     merged.needs_clarification = bool(merged.ambiguity_flags) or merged.intent_confidence < 0.72
     merged.clarification_question = (
@@ -136,7 +116,7 @@ def merge_intent_from_llm(
         else ""
     )
     merged.summary = (
-        f"研搜任务，交付物={merged.deliverable}，置信度={merged.intent_confidence}（rules+llm）"
+        f"搜索任务，交付物={merged.deliverable}，置信度={merged.intent_confidence}（rules+llm）"
     )
     from app.research.planning.policy import apply_source_policy
 

@@ -479,8 +479,8 @@ class EvidenceStore:
 def _kind_from_step(step_type: str) -> str:
     return {
         "network_search": "url",
-        "database_query": "sql",
-        "knowledge_base": "kb",
+        "network_search": "url",
+        "file_read": "file",
         "file_read": "file",
         "research": "url",
     }.get(step_type, "text")

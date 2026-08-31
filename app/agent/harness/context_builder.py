@@ -29,11 +29,7 @@ from app.agent.harness.research_brief import ResearchBrief, compile_research_bri
 from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep, StepStatus, TaskIntent
 from app.agent.harness.token_counter import stage_from_step_type
 from app.agent.memory.models import MemoryRecord
-from app.mcp.registry import mcp_registry
-
-RETRIEVAL_STEP_TYPES = frozenset(
-    {"network_search", "database_query", "knowledge_base", "file_read", "research"}
-)
+RETRIEVAL_STEP_TYPES = frozenset({"network_search", "file_read", "research"})
 
 
 class ContextBuilder:
@@ -129,32 +125,18 @@ class ContextBuilder:
     """
 
     def build_tool_context(self, step_type: str) -> str:
-        tool_text = mcp_registry.build_tool_context(step_type)
-        if not tool_text:
+        from app.research.workers.registry import worker_tools_for_step
+
+        tools = worker_tools_for_step(step_type)
+        if not tools:
             return ""
         return f"""
-    【当前步骤可用 MCP 工具】
-{tool_text}
+    【当前步骤可用工具】
+    {", ".join(tools)}
     """
 
     def _build_resources_layer(self, relative_session_dir: str) -> str:
-        from app.api.context import get_session_context
-        from app.config.loader import get_harness_config
-
-        cfg = get_harness_config()
-        if not (cfg.mcp_enabled or cfg.mcp_files_enabled):
-            return ""
-        session_dir = get_session_context() or relative_session_dir
-        session_id = relative_session_dir.strip("/\\").split("/")[-1] or "default"
-        try:
-            from app.mcp.resources_client import build_resources_context
-
-            text = build_resources_context(session_id, session_dir)
-            if not text:
-                return ""
-            return f"\n    {text}\n"
-        except Exception:
-            return ""
+        return ""
 
     def build_path_instruction(
         self,
@@ -192,10 +174,6 @@ class ContextBuilder:
         sources = []
         if intent.needs_network:
             sources.append("网络搜索")
-        if intent.needs_database:
-            sources.append("数据库")
-        if intent.needs_knowledge_base:
-            sources.append("知识库")
         if intent.needs_file_read:
             sources.append("上传文件")
         deliverable_map = {"text": "文本回答", "md": "Markdown 文件", "pdf": "PDF 文件"}

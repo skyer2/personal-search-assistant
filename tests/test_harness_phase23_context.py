@@ -18,7 +18,7 @@ from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep, StepResu
 from app.agent.harness.token_counter import TokenCounter, stage_from_step_type
 from app.agent.harness.tool_contract import apply_tool_output_contract
 from app.agent.harness.worker_profiles import (
-    PROFILE_DB,
+    PROFILE_FILE,
     PROFILE_MIXED,
     PROFILE_WEB,
     resolve_worker_profile,
@@ -164,7 +164,7 @@ def test_tool_output_contract_search():
 
 def test_worker_profiles_minimize_surface():
     assert resolve_worker_profile("network_search") == PROFILE_WEB
-    assert resolve_worker_profile("database_query") == PROFILE_DB
+    assert resolve_worker_profile("file_read") == PROFILE_FILE
     assert resolve_worker_profile("research", ["internet_search"]) == PROFILE_WEB
     assert resolve_worker_profile("research", ["internet_search", "execute_sql_query"]) == PROFILE_MIXED
     assert "internet_search" in worker_tools_for_step("network_search")

@@ -60,19 +60,6 @@ class ResultValidator:
             if step.subagent and step.subagent not in assistants_seen:
                 return ValidationOutcome(False, "wrong_subagent", "error")
 
-        if step.step_type == "database_query":
-            if any(kw in content for kw in SQL_EMPTY_KEYWORDS):
-                return ValidationOutcome(False, "sql_empty", "error")
-            assistants_seen = list(
-                result.metadata.get("step_assistants_called") or state.assistants_called
-            )
-            if step.subagent and step.subagent not in assistants_seen:
-                return ValidationOutcome(False, "wrong_subagent", "error")
-
-        if step.step_type == "knowledge_base":
-            if len(content) < 80:
-                return ValidationOutcome(False, "search_too_short", "error")
-
         if step.step_type in ("generate_markdown", "summarize"):
             if not content.strip():
                 return ValidationOutcome(False, "no_content", "error")

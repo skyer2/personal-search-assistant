@@ -26,19 +26,15 @@ jobs:
 
       - name: Harness unit tests
         run: |
-          uv run python tests/test_harness_phase1.py
-          uv run python tests/test_harness_phase4.py
-          uv run python tests/test_mcp_tavily_server.py
-          uv run python tests/test_harness_hitl.py
+      uv run python tests/test_harness_phase1.py
+      uv run python tests/test_harness_phase4.py
+      uv run python tests/test_harness_hitl.py
 
       - name: Eval dry-run smoke
         run: uv run python tests/eval/test_eval_dry_run.py
 
       - name: Phase 9 observability tests
         run: uv run python tests/test_harness_phase9.py
-
-      - name: Phase 10 tools/MCP tests
-        run: uv run python tests/test_harness_phase10_tools.py
 
       - name: Phase 11 context tests
         run: uv run python tests/test_harness_phase11_context.py

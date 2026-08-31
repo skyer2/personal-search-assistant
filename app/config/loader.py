@@ -113,37 +113,12 @@ class HarnessConfig:
     max_replan_count: int = 3
     max_plan_steps: int = 12
 
-    mcp_enabled: bool = False
-    mcp_tavily_enabled: bool = False
-    mcp_mysql_enabled: bool = False
-    mcp_ragflow_enabled: bool = False
-    mcp_transport: str = "stdio"
-    mcp_call_timeout_sec: int = 30
-    mcp_max_retries: int = 1
-    mcp_pool_enabled: bool = True
-    mcp_sync_on_startup: bool = True
-    mcp_files_enabled: bool = False
-    mcp_tasks_enabled: bool = True
-    mcp_gateway_rate_limit_per_minute: int = 120
-    mcp_gateway_oauth_token: str = ""
-    mcp_require_auth: bool = False
-    mcp_pool_size: int = 3
-    mcp_queue_limit: int = 32
-    mcp_oauth_audience: str = "https://mcp.local/gateway"
-    mcp_oauth_issuer: str = "deepsearch-harness"
-    mcp_breaker_failure_threshold: int = 5
-    mcp_breaker_reset_sec: float = 30.0
-    mcp_trusted_servers: dict[str, Any] = field(default_factory=dict)
+    personal_search: dict[str, Any] = field(default_factory=dict)
 
     tools_fail_closed: bool = True
-    tools_sql_select_only: bool = True
     tools_enforce_step_policy: bool = True
-    tools_sql_max_rows: int = 200
-    tools_sql_max_bytes: int = 262144
-    tools_sql_timeout_ms: int = 5000
-    tools_sql_table_allowlist: list[str] = field(default_factory=list)
 
-    hitl_enabled: bool = True
+    hitl_enabled: bool = False
     hitl_timeout_sec: int = 600
     hitl_interrupt_on: dict[str, bool] = field(default_factory=dict)
     hitl_step_gate_types: list[str] = field(default_factory=list)
@@ -218,6 +193,8 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
     observability = raw.get("observability", {})
     budget = raw.get("budget", {})
     mcp = raw.get("mcp", {})
+    personal = raw.get("personal_search", {})
+    _ = mcp  # legacy yaml key ignored
     hitl = raw.get("hitl", {})
     citations = raw.get("citations", {})
     eval_cfg = raw.get("eval", {})
@@ -481,95 +458,21 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         ),
         max_replan_count=int(budget.get("max_replan_count", 3)),
         max_plan_steps=int(budget.get("max_plan_steps", 12)),
-        mcp_enabled=_env_bool(
-            "HARNESS_MCP_ENABLED",
-            bool(mcp.get("enabled", False)),
-        ),
-        mcp_tavily_enabled=_env_bool(
-            "HARNESS_MCP_TAVILY",
-            bool(mcp.get("tavily_enabled", mcp.get("enabled", False))),
-        ),
-        mcp_mysql_enabled=_env_bool(
-            "HARNESS_MCP_MYSQL",
-            bool(mcp.get("mysql_enabled", mcp.get("enabled", False))),
-        ),
-        mcp_ragflow_enabled=_env_bool(
-            "HARNESS_MCP_RAGFLOW",
-            bool(mcp.get("ragflow_enabled", mcp.get("enabled", False))),
-        ),
-        mcp_transport=str(mcp.get("transport", "stdio")),
-        mcp_call_timeout_sec=int(
-            os.getenv("HARNESS_MCP_CALL_TIMEOUT_SEC", mcp.get("call_timeout_sec", 30))
-        ),
-        mcp_max_retries=int(
-            os.getenv("HARNESS_MCP_MAX_RETRIES", mcp.get("max_retries", 1))
-        ),
-        mcp_pool_enabled=_env_bool(
-            "HARNESS_MCP_POOL_ENABLED",
-            bool(mcp.get("pool_enabled", True)),
-        ),
-        mcp_sync_on_startup=_env_bool(
-            "HARNESS_MCP_SYNC_ON_STARTUP",
-            bool(mcp.get("sync_on_startup", True)),
-        ),
-        mcp_files_enabled=_env_bool(
-            "HARNESS_MCP_FILES",
-            bool(mcp.get("files_enabled", mcp.get("enabled", False))),
-        ),
-        mcp_tasks_enabled=_env_bool(
-            "HARNESS_MCP_TASKS_ENABLED",
-            bool(mcp.get("tasks_enabled", True)),
-        ),
-        mcp_gateway_rate_limit_per_minute=int(
-            os.getenv(
-                "HARNESS_MCP_GATEWAY_RATE_LIMIT",
-                mcp.get("gateway_rate_limit_per_minute", 120),
-            )
-        ),
-        mcp_gateway_oauth_token=str(
-            os.getenv("HARNESS_MCP_GATEWAY_OAUTH_TOKEN", mcp.get("gateway_oauth_token", ""))
-        ),
-        mcp_require_auth=_env_bool(
-            "HARNESS_MCP_REQUIRE_AUTH",
-            bool(mcp.get("require_auth", False)),
-        ),
-        mcp_pool_size=int(os.getenv("HARNESS_MCP_POOL_SIZE", mcp.get("pool_size", 3))),
-        mcp_queue_limit=int(os.getenv("HARNESS_MCP_QUEUE_LIMIT", mcp.get("queue_limit", 32))),
-        mcp_oauth_audience=str(mcp.get("oauth_audience", "https://mcp.local/gateway")),
-        mcp_oauth_issuer=str(mcp.get("oauth_issuer", "deepsearch-harness")),
-        mcp_breaker_failure_threshold=int(mcp.get("breaker_failure_threshold", 5)),
-        mcp_breaker_reset_sec=float(mcp.get("breaker_reset_sec", 30)),
-        mcp_trusted_servers=dict(mcp.get("trusted_servers") or {}),
+        personal_search=dict(personal),
         tools_fail_closed=_env_bool(
             "HARNESS_TOOLS_FAIL_CLOSED",
             bool(raw.get("tools", {}).get("fail_closed", True)),
-        ),
-        tools_sql_select_only=_env_bool(
-            "HARNESS_SQL_SELECT_ONLY",
-            bool(raw.get("tools", {}).get("sql_select_only", True)),
         ),
         tools_enforce_step_policy=_env_bool(
             "HARNESS_TOOLS_ENFORCE_STEP_POLICY",
             bool(raw.get("tools", {}).get("enforce_step_policy", True)),
         ),
-        tools_sql_max_rows=int(
-            os.getenv("HARNESS_SQL_MAX_ROWS", raw.get("tools", {}).get("sql_max_rows", 200))
-        ),
-        tools_sql_max_bytes=int(
-            os.getenv("HARNESS_SQL_MAX_BYTES", raw.get("tools", {}).get("sql_max_bytes", 262144))
-        ),
-        tools_sql_timeout_ms=int(
-            os.getenv("HARNESS_SQL_TIMEOUT_MS", raw.get("tools", {}).get("sql_timeout_ms", 5000))
-        ),
-        tools_sql_table_allowlist=[
-            str(x) for x in (raw.get("tools", {}).get("sql_table_allowlist") or [])
-        ],
-        hitl_enabled=_env_bool("HARNESS_HITL_ENABLED", bool(hitl.get("enabled", True))),
+        hitl_enabled=_env_bool("HARNESS_HITL_ENABLED", bool(hitl.get("enabled", False))),
         hitl_timeout_sec=int(hitl.get("timeout_sec", 600)),
         hitl_interrupt_on={
             str(k): bool(v) for k, v in (interrupt_raw or default_interrupt).items()
         },
-        hitl_step_gate_types=list(hitl.get("step_gate_types", ["database_query"])),
+        hitl_step_gate_types=list(hitl.get("step_gate_types", [])),
         hitl_plan_review_enabled=_env_bool(
             "HARNESS_HITL_PLAN_REVIEW",
             bool(hitl.get("plan_review_enabled", True)),

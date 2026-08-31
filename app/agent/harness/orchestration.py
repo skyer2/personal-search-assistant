@@ -21,21 +21,14 @@ from typing import Any, Optional
 from app.agent.harness.state import ExecutionPlan, PlanStep, StepResult, StepStatus
 
 # 可并行 fan-out 的检索类步骤（写文件 / 汇总不在此列）
-RETRIEVAL_STEP_TYPES = frozenset(
-    {"network_search", "database_query", "knowledge_base", "file_read", "research"}
-)
+RETRIEVAL_STEP_TYPES = frozenset({"network_search", "file_read", "research"})
 
-# 子 Agent 步骤必须走 task，禁止主 Agent 直接调文件工具
-SUBAGENT_STEP_TYPES = frozenset(
-    {"network_search", "database_query", "knowledge_base", "research"}
-)
+SUBAGENT_STEP_TYPES = frozenset({"network_search", "research"})
 
 FORBIDDEN_TOOLS_BY_STEP: dict[str, frozenset[str]] = {
     "network_search": frozenset({"generate_markdown", "convert_md_to_pdf"}),
-    "database_query": frozenset({"generate_markdown", "convert_md_to_pdf", "internet_search"}),
-    "knowledge_base": frozenset({"generate_markdown", "convert_md_to_pdf"}),
     "research": frozenset({"generate_markdown", "convert_md_to_pdf"}),
-    "generate_markdown": frozenset({"internet_search", "execute_sql_query", "list_sql_tables"}),
+    "generate_markdown": frozenset({"internet_search"}),
 }
 
 

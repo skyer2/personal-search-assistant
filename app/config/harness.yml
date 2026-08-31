@@ -1,35 +1,33 @@
 harness:
-  version: "1.0.0-harness"
+  version: "1.0.0-personal-search"
   max_retries: 2
 
   compression:
     enabled: true
     max_tokens: 500
-    threshold_chars: 2000        # 【Phase 11】超过此字符数触发压缩
+    threshold_chars: 2000
     model: "qwen-turbo"
-    retention_check: true        # 【Phase 19】压缩后检查 URL/数字是否还在
+    retention_check: true
     retention_min_url: 0.8
     retention_min_number: 0.5
 
-  # 【Phase 11/19/23】上下文工程 — 分层预算 + JIT + 可恢复压缩
   context:
-    max_step_message_tokens: 16000   # researcher 回退上限；实际按 token_budget.stages
-    prior_results_max_steps: 5       # 回灌最近 N 步摘要
+    max_step_message_tokens: 16000
+    prior_results_max_steps: 5
     prior_snippet_max_chars: 400
-    wrap_untrusted_external: true    # 检索结果用 <untrusted> 包裹
-    layer_budget_log_enabled: true   # 记录各层 token 估算
-    fresh_thread_per_step: true      # 【Phase 19】每步独立 LangGraph thread，避免旧 tool 原文叠窗口
-    layer_priority_eviction: true    # 【Phase 19】超预算按层淘汰，当前步骤指令优先保留
-    working_notes_enabled: true      # 【Phase 19】抗压缩工作笔记
-    evidence_lookup_enabled: true    # 【Phase 19】写报告可回读 evidence 摘录
-    clear_bulky_tool_results: true   # 【Phase 19】HITL resume 前清除过长 tool_result
-    jit_retrieval_enabled: true      # 【Phase 23】Memory/Evidence 按当前任务检索，不再 eager 全塞
-    research_brief_as_anchor: true   # 【Phase 23】后续步骤以 Brief 为准
-    evidence_max_items: 12           # 合成步 JIT 证据上限
-    reversible_compression: true     # 摘要必带 artifact_id
-    tool_output_contract: true       # 工具返回短卡 + ref
+    wrap_untrusted_external: true
+    layer_budget_log_enabled: true
+    fresh_thread_per_step: true
+    layer_priority_eviction: true
+    working_notes_enabled: true
+    evidence_lookup_enabled: true
+    clear_bulky_tool_results: true
+    jit_retrieval_enabled: true
+    research_brief_as_anchor: true
+    evidence_max_items: 12
+    reversible_compression: true
+    tool_output_contract: true
 
-  # GLM-5.2 model-aware token 预算：窗口 - tools - output - safety = 动态上下文
   token_budget:
     model: "glm-5.2"
     context_window: 128000
@@ -44,13 +42,13 @@ harness:
       compress: 8000
 
   memory:
-    provider: "sqlite"         # sqlite | local | postgres | mem0；生产多实例用 postgres
-    dsn: ""                    # postgres DSN，或环境变量 HARNESS_MEMORY_DSN
+    provider: "sqlite"
+    dsn: ""
     enabled: true
     recall_top_k: 5
-    ttl_days: 90               # semantic 回退 TTL；0=不过期
+    ttl_days: 90
     ttl_by_type:
-      preference: 0            # 直到用户改/删
+      preference: 0
       procedural: 0
       semantic: 90
       episodic: 14
@@ -58,143 +56,132 @@ harness:
     volatile_semantic_ttl_days: 7
     max_facts_per_remember: 5
     min_fact_chars: 12
-    wrap_untrusted: true       # recall 注入时 <untrusted> 包裹，防注入
-    embedding_enabled: true    # 【Phase 15】Hybrid Recall 语义向量
+    wrap_untrusted: true
+    embedding_enabled: true
     recall_keyword_weight: 0.4
     recall_embedding_weight: 0.6
     merge_jaccard_threshold: 0.55
     merge_embedding_threshold: 0.88
     pii_redact_enabled: true
-    step_incremental_enabled: true   # 检索步成功后写 Source Ledger
-    step_incremental_write_longterm: false  # 步内结果默认不进长期 Memory
-    remember_on_partial: false       # 仅 success 时 finalize 写入
-    utility_gate_enabled: true       # Future Utility Gate
-    # 【Phase 18/24】企业级分层记忆
-    project_scope_enabled: true      # 同项目记忆加权，避免重复检索
-    require_explicit_identity: true  # 拒绝 session 退化身份写入
-    min_recall_trust: "derived"      # 常规召回最低信任；untrusted 不注入
-    synthesis_min_trust: "derived"   # 写报告二次召回最低信任
-    require_provenance_for_step_write: true  # 网页步无 URL 不写长期记忆
-    source_ledger_enabled: true      # 项目已查来源台账
+    step_incremental_enabled: true
+    step_incremental_write_longterm: false
+    remember_on_partial: false
+    utility_gate_enabled: true
+    project_scope_enabled: true
+    require_explicit_identity: true
+    min_recall_trust: "derived"
+    synthesis_min_trust: "derived"
+    require_provenance_for_step_write: true
+    source_ledger_enabled: true
     source_ledger_max_inject: 8
-    source_freshness_days: 7         # 超过则应 revisit，而不是永不再查
-    step_recall_enabled: true        # 合成步二次召回
+    source_freshness_days: 7
+    step_recall_enabled: true
     step_recall_top_k: 3
-    consolidation_enabled: true      # finalize 后衰减/确认晋升/硬清理
-    consolidation_async: true
-    consolidation_durable: true      # 先入 durable job，再 drain
+    consolidation_enabled: false
+    consolidation_async: false
+    consolidation_durable: false
     consolidation_half_life_days: 30
     consolidation_min_confidence: 0.25
-    consolidation_promote_min_sessions: 2   # 仅保留兼容字段，晋升不再用 recall
+    consolidation_promote_min_sessions: 2
     consolidation_promote_min_confirmations: 2
     purge_after_days: 180
 
   validation:
-    strict_mode: false         # true = step warning 也算失败
+    strict_mode: false
 
   observability:
     langfuse_enabled: true
     jsonl_log_enabled: true
     jsonl_log_dir: "logs/traces"
-    metrics_enabled: true              # 【Phase 9】在线指标聚合
-    metrics_window_hours: 168          # 默认 7 天滚动窗口
-    prometheus_enabled: true           # GET /api/metrics/prometheus
-    usage_tracking_enabled: true       # 【Phase 17】LLM token/成本追踪
+    metrics_enabled: true
+    metrics_window_hours: 168
+    prometheus_enabled: true
+    usage_tracking_enabled: true
 
   budget:
     max_total_tokens: 100000
-    max_tool_calls: 20
-    max_run_sec: 600             # 【Phase 13】整任务墙钟时限（秒）
-    max_replan_count: 3          # 【Phase 13】动态重规划上限
-    max_plan_steps: 12           # 【Phase 13】计划步数上限，防 replan 膨胀
+    max_tool_calls: 15
+    max_run_sec: 600
+    max_replan_count: 2
+    max_plan_steps: 8
 
-  mcp:
-    enabled: false               # true = Tavily/MySQL/RAGFlow/Files 均走 MCP Gateway
-    tavily_enabled: false        # 可单独覆盖 enabled
-    mysql_enabled: false
-    ragflow_enabled: false
-    files_enabled: false         # 会话文件 Resources + 异步 PDF
-    transport: "stdio"            # local/dev=stdio；生产=streamable-http（2026-07-28 stateless）
-    pool_enabled: true            # 【Phase 16】常驻连接池，避免每次起子进程
-    pool_size: 3                  # 同 server 并发 worker 数，避免 fan-out 被串行化
-    queue_limit: 32               # 单 worker 队列上限，超限 backpressure
-    sync_on_startup: true         # 【Phase 16】list_tools 同步 Registry schema
-    tasks_enabled: true           # durable MCP Tasks + tasks/get 轮询
-    call_timeout_sec: 30
-    max_retries: 1
-    require_auth: false           # 生产打开：OIDC principal → MCP access token
-    oauth_audience: "https://mcp.local/gateway"
-    oauth_issuer: "deepsearch-harness"
-    breaker_failure_threshold: 5
-    breaker_reset_sec: 30
-    gateway_rate_limit_per_minute: 120
-    gateway_oauth_token: ""       # 仅作 HMAC secret 回退，不再自校验 caller identity
+  personal_search:
+    default_mode: auto
+    default_deliverable: chat
+    enabled_sources:
+      web: true
+      file: true
+    quick:
+      max_tool_calls: 3
+      max_search_queries: 2
+      max_replan: 0
+      parallel: false
+      progress_eval: false
+      compression: false
+    deep:
+      max_tool_calls: 15
+      max_research_tasks: 5
+      max_replan: 2
+      parallel: true
+      progress_eval: true
+      compression: true
 
-  # 【Phase 10/25】工具网关 — fail-closed + SQL 数据访问护栏（LangChain/MCP 共用 db_core）
   tools:
     fail_closed: true
-    sql_select_only: true
-    enforce_step_policy: true    # Registry 步级工具白名单（文档+Gateway 校验）
-    sql_max_rows: 200
-    sql_max_bytes: 262144
-    sql_timeout_ms: 5000
-    sql_table_allowlist: []      # 空=开发态全表；生产必须显式表白名单
+    enforce_step_policy: true
 
   hitl:
-    enabled: true
+    enabled: false
     timeout_sec: 600
-    plan_review_enabled: true       # 【Phase 6】多意图任务计划审批
-    allow_edit: true                # 【Phase 6】HITL Edit-in-the-Loop
-    allow_replan: true              # 【Phase 6】动态重规划
+    plan_review_enabled: false
+    allow_edit: true
+    allow_replan: true
     interrupt_on:
       generate_markdown: true
       convert_md_to_pdf: true
       read_file_content: false
-    step_gate_types:
-      - database_query
+    step_gate_types: []
 
-  citations:                          # 【Phase 6】Citation-First Research
+  citations:
     enabled: true
     min_coverage_rate: 0.2
 
   eval:
     trajectory_min_similarity: 0.6
-    intent_deliverable_min_accuracy: 0.9     # 【Phase 14】交付物识别最低准确率
-    plan_validation_min_rate: 1.0            # 【Phase 14】Plan 校验通过率
-    heuristic_judge_enabled: true      # 【Phase 9】live eval 启发式报告 Judge
+    intent_deliverable_min_accuracy: 0.9
+    plan_validation_min_rate: 1.0
+    heuristic_judge_enabled: true
     heuristic_judge_min_score: 0.6
-    llm_judge_enabled: false           # 可选 LLM Judge（默认关）
-    structured_output_min_rate: 0.8    # JCR 回归告警阈值参考
+    llm_judge_enabled: false
+    structured_output_min_rate: 0.8
 
-  # 【Phase 7】多 Agent 编排 — 监督者 + 工人协作增强
   orchestration:
-    parallel_retrieval_enabled: true    # 无依赖检索步 fan-out
-    max_parallel_workers: 3             # 并行工人上限
-    step_timeout_sec: 120                 # 单步执行超时（含子 Agent）
-    enforce_subagent_binding: true        # 计划绑定 + 禁止越权工具
-    step_checkpoint_enabled: true         # 步级 checkpoint 持久化
-    resume_checkpoint: true               # 同 session 同任务指纹时从 checkpoint 续跑
-    supervisor_temperature: 0.1           # 监督者低温，降低路由波动
-    structured_output_retry: true          # 【Phase 8】工人非 JSON 时自动重试一次
-    require_structured_worker_output: true # 【Phase 8】重试后仍非 JSON 则 step 失败
-    synthesis_use_evidence_digest: true     # 【Phase 8】写报告用 facts 证据_digest
-    direct_worker_invoke: true              # 按步直调 Leaf Worker，禁止 Main Agent 二次路由
-    persist_loop_state: true                # checkpoint.json 落整份 LoopState（副作用幂等仍要 IdempotencyRegistry）
-    graph_runtime_enabled: true             # 生产调度权威：Research StateGraph（legacy while 仅作回退）
-    progress_eval_enabled: true             # Evidence → Progress Evaluator → GAP/ENOUGH
-    graph_checkpoint_backend: sqlite        # sqlite | memory；多实例再换 postgres
+    parallel_retrieval_enabled: true
+    max_parallel_workers: 3
+    step_timeout_sec: 120
+    enforce_subagent_binding: true
+    step_checkpoint_enabled: true
+    resume_checkpoint: true
+    supervisor_temperature: 0.1
+    structured_output_retry: true
+    require_structured_worker_output: true
+    synthesis_use_evidence_digest: true
+    direct_worker_invoke: true
+    persist_loop_state: true
+    graph_runtime_enabled: true
+    progress_eval_enabled: true
+    graph_checkpoint_backend: sqlite
     graph_checkpoint_path: output/.harness/graph_checkpoints.sqlite
 
-  # 【Phase 14】工业级 Planner：结构化槽位 + 默认 LLM + 澄清 + Plan 审批
   planner:
-    llm_enabled: true                    # 默认 LLM Planner（失败回退规则）
+    llm_enabled: true
     llm_min_confidence: 0.5
-    llm_confirm_enabled: true             # 向后兼容别名
+    llm_confirm_enabled: true
     llm_confirm_min_confidence: 0.5
-    clarification_enabled: true            # 低置信/歧义 → HITL 澄清
-    clarification_auto_resolve: true       # 无 HITL 响应/单测时自动保守解析
-    plan_review_min_confidence: 0.75       # 低于此阈值触发计划审批
-    hybrid_enabled: true                   # DIRECT / TEMPLATE / DYNAMIC 分流
-    dynamic_lead_planner: true             # DYNAMIC 时用受约束 Lead Planner（失败回退启发式）
-    max_research_tasks: 6                  # 研究任务上限（不含合成步）
-    max_plan_patch_tasks: 2                # 单次 PlanPatch 最多新增任务
+    clarification_enabled: false
+    clarification_auto_resolve: true
+    plan_review_min_confidence: 0.75
+    hybrid_enabled: true
+    dynamic_lead_planner: true
+    max_research_tasks: 5
+    max_plan_patch_tasks: 2

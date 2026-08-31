@@ -13,6 +13,7 @@ import type {
   JsonlTraceResponse,
   LangfuseConfigResponse,
   LangfuseTraceResponse,
+  SearchMode,
   TaskResponse,
   UploadResponse
 } from "../types";
@@ -35,7 +36,11 @@ async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Pro
   return payload as T;
 }
 
-export async function startTask(query: string, threadId: string): Promise<TaskResponse> {
+export async function startTask(
+  query: string,
+  threadId: string,
+  options?: { mode?: SearchMode; projectId?: string; userId?: string }
+): Promise<TaskResponse> {
   return requestJson<TaskResponse>(apiUrl("/api/task"), {
     method: "POST",
     headers: {
@@ -43,7 +48,11 @@ export async function startTask(query: string, threadId: string): Promise<TaskRe
     },
     body: JSON.stringify({
       query,
-      thread_id: threadId
+      thread_id: threadId,
+      mode: options?.mode ?? "auto",
+      user_id: options?.userId ?? "me",
+      tenant_id: "local",
+      project_id: options?.projectId ?? "Inbox"
     })
   });
 }

@@ -40,7 +40,7 @@ TRUST_RECALL_WEIGHT: dict[TrustTier, float] = {
 }
 
 # 内部可控数据源：结论可视为 derived，而非外部 untrusted
-INTERNAL_STEP_TYPES = frozenset({"database_query", "knowledge_base", "file_read"})
+INTERNAL_STEP_TYPES = frozenset({"file_read"})
 EXTERNAL_STEP_TYPES = frozenset({"network_search"})
 
 _URL_PATTERN = re.compile(r"https?://[^\s\]\)\"'<>]+", re.IGNORECASE)
@@ -250,8 +250,6 @@ def provenance_from_step(
 
     if not source_kind:
         source_kind = {
-            "database_query": "sql",
-            "knowledge_base": "kb",
             "file_read": "file",
             "network_search": "url",
             "finalize": "agent",

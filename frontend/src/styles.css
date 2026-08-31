@@ -1746,6 +1746,12 @@ textarea {
   background: linear-gradient(180deg, rgba(5, 7, 11, 0), rgba(5, 7, 11, 0.86) 42%, rgba(5, 7, 11, 0.98));
 }
 
+.composer-mode-row {
+  display: flex;
+  justify-content: flex-start;
+  padding: 0 0.25rem 0.35rem;
+}
+
 .composer-shell {
   border: 1px solid rgba(113, 247, 255, 0.2);
   border-radius: 8px;

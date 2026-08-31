@@ -5,8 +5,7 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   CloudServerOutlined,
-  DatabaseOutlined,
-  FileSearchOutlined,
+  FileTextOutlined,
   LineChartOutlined,
   MessageOutlined,
   PauseCircleOutlined,
@@ -24,7 +23,7 @@ import { TraceViewer } from "./components/TraceViewer";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
 import { isLiveRun, runStatusLabel } from "./lib/runStatus";
-import type { ConnectionState, UploadedItem, WorkspaceTab } from "./types";
+import type { ConnectionState, SearchMode, UploadedItem, WorkspaceTab } from "./types";
 
 function connectionLabel(state: ConnectionState): string {
   const labels: Record<ConnectionState, string> = {
@@ -51,6 +50,7 @@ function createTurn(content: string): ChatTurn {
 export default function App() {
   const { message } = AntApp.useApp();
   const [query, setQuery] = useState("");
+  const [searchMode, setSearchMode] = useState<SearchMode>("auto");
   const [stagedItems, setStagedItems] = useState<UploadedItem[]>([]);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [workspace, setWorkspace] = useState<WorkspaceTab>("chat");
@@ -128,7 +128,7 @@ export default function App() {
     setWorkspace("chat");
 
     try {
-      await session.submitTask(cleanQuery);
+      await session.submitTask(cleanQuery, searchMode);
       message.success("任务已启动，执行过程会显示在对话中");
     } catch (error) {
       setTurns((previous) => previous.slice(0, -1));
@@ -182,13 +182,13 @@ export default function App() {
     <div className="chat-app-shell min-h-dvh">
       <aside className="chat-sidebar" aria-label="会话信息">
         <div className="sidebar-brand">
-          <span className="panel-kicker">DEEPSEARCH</span>
-          <h1>深度研搜</h1>
-          <p>Harness 生产特性演示台</p>
+          <span className="panel-kicker">SEARCH</span>
+          <h1>Personal Search</h1>
+          <p>个人搜索助手 · Web + File</p>
         </div>
 
         <Button className="new-chat-button" block onClick={handleNewSession}>
-          新建研搜
+          新建搜索
         </Button>
 
         <div className="workspace-nav">
@@ -263,19 +263,15 @@ export default function App() {
         </div>
 
         <div className="sidebar-section">
-          <span className="sidebar-label">AGENTS</span>
+          <span className="sidebar-label">SOURCES</span>
           <ul className="agent-mini-list">
             <li>
               <CloudServerOutlined aria-hidden />
-              网络搜索助手
+              公开网页搜索
             </li>
             <li>
-              <DatabaseOutlined aria-hidden />
-              数据库查询助手
-            </li>
-            <li>
-              <FileSearchOutlined aria-hidden />
-              RAGFlow 助手
+              <FileTextOutlined aria-hidden />
+              上传文件 / URL
             </li>
           </ul>
         </div>
@@ -295,10 +291,10 @@ export default function App() {
             </span>
             <h2>
               {workspace === "chat"
-                ? "深度研搜对话"
+                ? "个人搜索对话"
                 : workspace === "eval"
-                  ? "Harness Eval 评测"
-                  : "Harness Trace 观测"}
+                  ? "Developer · Eval"
+                  : "Developer · Trace"}
             </h2>
           </div>
           <div
@@ -363,6 +359,8 @@ export default function App() {
             isCancelling={session.isCancelling}
             isRunning={session.isRunning}
             isUploading={session.isUploading}
+            mode={searchMode}
+            onModeChange={setSearchMode}
             onCancel={handleCancel}
             onNewSession={handleNewSession}
             onQueryChange={setQuery}

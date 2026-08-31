@@ -2,7 +2,7 @@
 
 > **定位**：本仓库产品目标从「企业多数据源研搜 Demo」转向「个人 Search Assistant；复杂问题按需升级 Deep Research」。  
 > **原则**：底层 Harness / StateGraph **保留**；真正要动的是入口分流、默认能力面、身份/对话、Progress 通用化与 UI。  
-> **状态**：架构设计文档（2026-08-31）。本文是产品语义与模块边界的权威说明；Harness 运行时细节仍以 [RESEARCH_HARNESS.md](./RESEARCH_HARNESS.md) 为准，Deep 闭环以 [RESEARCH_INTELLIGENCE.md](./RESEARCH_INTELLIGENCE.md) 为准。
+> **状态**：架构设计文档（2026-08-31）。**P0 已落地**（见 README）；P1 Quick 子图 / Conversation / fetch_url 待实现。
 
 ---
 

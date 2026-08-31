@@ -1,4 +1,4 @@
-export type ConnectionState = "connecting" | "connected" | "reconnecting" | "closed";
+export type SearchMode = "auto" | "quick" | "deep";
 
 export type MonitorEventName =
   | "session_created"

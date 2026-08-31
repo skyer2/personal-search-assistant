@@ -177,15 +177,6 @@ class AgentHarness:
 
     def _agent_for_step(self, step: PlanStep) -> tuple[Any, str]:
         profile = resolve_worker_profile(step.step_type, step.allowed_tools)
-        try:
-            from app.mcp.policy_context import get_tool_call_context
-
-            ctx = get_tool_call_context()
-            if ctx is not None:
-                ctx.step_type = step.step_type or ctx.step_type
-                ctx.allowed_tools = list(step.allowed_tools or tools_for_profile(profile))
-        except Exception:
-            pass
         return resolve_execute_target(
             step.step_type,
             workers=self.workers,
@@ -332,32 +323,7 @@ class AgentHarness:
             project_id=project_id,
         )
         identity_token = set_memory_identity(identity)
-        try:
-            from app.mcp.auth import MCPPrincipal, issue_access_token
-            from app.mcp.policy_context import ToolCallContext, set_tool_call_context
-
-            principal = MCPPrincipal(
-                tenant_id=identity.tenant_id,
-                user_id=identity.user_id,
-                scopes=["read", "search", "write"],
-                ephemeral=identity.ephemeral,
-            )
-            access_token = issue_access_token(principal)
-            policy_token = set_tool_call_context(
-                ToolCallContext(
-                    tenant_id=identity.tenant_id,
-                    user_id=identity.user_id,
-                    project_id=identity.project_id,
-                    session_id=session_id,
-                    run_id=self._current_trace_id,
-                    trace_id=self._current_trace_id,
-                    granted_scopes=["read", "search", "write"],
-                    access_token=access_token,
-                    ephemeral=identity.ephemeral,
-                )
-            )
-        except Exception:
-            policy_token = None
+        policy_token = None
         artifact_store = ArtifactStore(session_dir)
         artifact_store.load(session_dir)
         evidence_store = EvidenceStore(session_dir)
@@ -418,22 +384,16 @@ class AgentHarness:
         reset_evidence_store()
         reset_session_context(ctx.tokens[0], ctx.tokens[1])
         reset_memory_identity(ctx.identity_token)
-        try:
-            from app.mcp.policy_context import reset_tool_call_context
-
-            if ctx.policy_token is not None:
-                reset_tool_call_context(ctx.policy_token)
-        except Exception:
-            pass
 
     async def run(
         self,
         task_query: str,
         session_id: str,
         *,
-        user_id: str = "",
-        tenant_id: str = "",
-        project_id: str = "",
+        user_id: str = "me",
+        tenant_id: str = "local",
+        project_id: str = "Inbox",
+        mode: str = "auto",
     ) -> HarnessResult:
         ctx = self._bootstrap_run(
             task_query,
@@ -695,7 +655,7 @@ class AgentHarness:
             2
             if (
                 self.harness_config.structured_output_retry
-                and step.step_type in {"network_search", "database_query", "knowledge_base", "research"}
+                and step.step_type in {"network_search", "research"}
             )
             else 1
         )
@@ -730,7 +690,7 @@ class AgentHarness:
             assert result is not None
             result = self._enrich_worker_result(step, result, state)
             structured_ok, struct_reason = self._check_structured_output(step, result)
-            if step.step_type in {"network_search", "database_query", "knowledge_base", "research"}:
+            if step.step_type in {"network_search", "research"}:
                 state.obs_structured_checks += 1
                 if structured_ok:
                     state.obs_structured_passes += 1
@@ -1744,7 +1704,7 @@ class AgentHarness:
         policy = get_memory_policy()
         if not policy.enabled or not policy.step_incremental_enabled:
             return
-        if step.step_type not in {"network_search", "database_query", "knowledge_base", "file_read"}:
+        if step.step_type not in {"network_search", "file_read"}:
             return
         identity = self._memory_identity(state)
         provenance = provenance_from_step(

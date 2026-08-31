@@ -60,33 +60,33 @@ def test_resolve_direct_worker_not_main():
 def test_worker_tool_isolation_table():
     assert "internet_search" in worker_tools_for_step("network_search")
     assert "generate_markdown" not in worker_tools_for_step("network_search")
-    assert "execute_sql_query" in worker_tools_for_step("database_query")
-    assert "internet_search" not in worker_tools_for_step("database_query")
+    assert "read_file_content" in worker_tools_for_step("file_read")
+    assert "internet_search" not in worker_tools_for_step("file_read")
     print("[OK] worker tool isolation table")
 
 
 def test_loop_state_roundtrip():
     state = LoopState(session_id="s1", phase=Phase.EXECUTE)
     state.task_fingerprint = "fp"
-    state.intent = TaskIntent(raw_query="查库存并写报告", summary="查库存")
-    state.intent.needs_database = True
+    state.intent = TaskIntent(raw_query="搜索并写报告", summary="搜索")
+    state.intent.needs_network = True
     state.intent.deliverable = "md"
     state.plan = ExecutionPlan(
         summary="两步",
         steps=[
-            PlanStep(step_type="database_query", description="查库", subagent="数据库查询助手"),
+            PlanStep(step_type="network_search", description="搜索", subagent="网络搜索助手"),
             PlanStep(step_type="generate_markdown", description="写报告"),
         ],
     )
     state.step_index = 1
     state.step_results = [
         StepResult(
-            step_type="database_query",
-            content="库存 12",
+            step_type="network_search",
+            content="搜索结果",
             metadata={"worker_dispatch": "direct"},
         )
     ]
-    state.assistants_called = ["数据库查询助手"]
+    state.assistants_called = ["网络搜索助手"]
     state.working_notes = "已确认库存 12"
     state.metadata["hitl_waiting"] = {"gate_type": "step", "step_index": 1}
 
@@ -94,7 +94,7 @@ def test_loop_state_roundtrip():
     restored = deserialize_loop_state(payload)
     assert restored.session_id == "s1"
     assert restored.plan is not None
-    assert restored.plan.steps[0].subagent == "数据库查询助手"
+    assert restored.plan.steps[0].subagent == "网络搜索助手"
     assert restored.working_notes.startswith("已确认")
     assert restored.metadata["hitl_waiting"]["gate_type"] == "step"
     assert restored.step_results[0].metadata["worker_dispatch"] == "direct"

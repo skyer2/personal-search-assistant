@@ -115,10 +115,6 @@ def compile_research_brief(
         deliverable = str(getattr(intent, "deliverable", "text") or "text")
         if getattr(intent, "needs_network", False):
             source_bits.append("web")
-        if getattr(intent, "needs_database", False):
-            source_bits.append("db")
-        if getattr(intent, "needs_knowledge_base", False):
-            source_bits.append("kb")
         if getattr(intent, "needs_file_read", False):
             source_bits.append("file")
         forbidden = list(getattr(intent, "forbidden_sources", None) or [])

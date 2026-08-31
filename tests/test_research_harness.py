@@ -40,11 +40,11 @@ def test_action_idempotency_stable_across_index_shift():
 
 
 def test_annotate_plan_dag_dependencies():
-    intent = understand_task("搜索公开资料，查数据库库存，生成Markdown")
+    intent = understand_task("搜索公开资料，生成Markdown报告")
     plan = annotate_plan_tasks(finalize_plan(build_plan(intent)))
     ids = [s.task_id for s in plan.steps]
     assert all(ids)
-    retrieval = [s for s in plan.steps if s.step_type in {"network_search", "database_query"}]
+    retrieval = [s for s in plan.steps if s.step_type == "network_search"]
     assert all(s.depends_on == [] for s in retrieval)
     md = next(s for s in plan.steps if s.step_type == "generate_markdown")
     assert set(md.depends_on) == {s.task_id for s in retrieval}
@@ -52,12 +52,13 @@ def test_annotate_plan_dag_dependencies():
 
 
 def test_ready_retrieval_can_fan_out():
-    intent = understand_task("搜索公开资料，查数据库库存，生成Markdown")
+    intent = understand_task("搜索公开资料并读取附件，生成Markdown")
+    intent.needs_file_read = True
     plan = annotate_plan_tasks(finalize_plan(build_plan(intent)))
     ready = ready_retrieval_steps(plan)
-    assert len(ready) >= 2
+    assert len(ready) >= 1
     sends = dispatch_sends(plan)
-    assert {row["step_type"] for row in sends} >= {"network_search", "database_query"}
+    assert "network_search" in {row["step_type"] for row in sends}
     assert next_synthesis_step(plan) is None
     status = {s.resolved_task_id(i): "done" for i, s in enumerate(plan.steps) if s.depends_on == []}
     for i, s in enumerate(plan.steps):

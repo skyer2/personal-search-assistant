@@ -44,8 +44,6 @@ class TaskIntent:
     raw_query: str
     summary: str
     needs_network: bool = False
-    needs_database: bool = False
-    needs_knowledge_base: bool = False
     needs_file_read: bool = False
     deliverable: Literal["text", "md", "pdf"] = "text"
     keywords: list[str] = field(default_factory=list)
@@ -69,8 +67,6 @@ class TaskIntent:
             "raw_query": self.raw_query,
             "summary": self.summary,
             "needs_network": self.needs_network,
-            "needs_database": self.needs_database,
-            "needs_knowledge_base": self.needs_knowledge_base,
             "needs_file_read": self.needs_file_read,
             "deliverable": self.deliverable,
             "keywords": list(self.keywords),
@@ -97,8 +93,6 @@ class TaskIntent:
             raw_query=str(data.get("raw_query", "")),
             summary=str(data.get("summary", "")),
             needs_network=bool(data.get("needs_network", False)),
-            needs_database=bool(data.get("needs_database", False)),
-            needs_knowledge_base=bool(data.get("needs_knowledge_base", False)),
             needs_file_read=bool(data.get("needs_file_read", False)),
             deliverable=deliverable,  # type: ignore[arg-type]
             keywords=[str(k) for k in (data.get("keywords") or [])],

@@ -1,7 +1,5 @@
 """
-【Phase 13】Harness 能力清单 API
-
-GET /api/harness/capabilities  面试/运维：当前运行时能力与护栏
+【Phase 13】Harness 能力清单 API — 个人搜索助手 defaults
 """
 
 from __future__ import annotations
@@ -17,10 +15,17 @@ router = APIRouter(prefix="/api/harness", tags=["harness"])
 
 @router.get("/capabilities")
 def harness_capabilities() -> dict[str, Any]:
-    """描述当前 Harness 作为运行时的能力面。"""
     config = get_harness_config()
+    personal = getattr(config, "personal_search", {}) or {}
     return {
         "version": config.version,
+        "product": "personal-search-assistant",
+        "search_modes": ["auto", "quick", "deep"],
+        "default_mode": personal.get("default_mode", "auto"),
+        "default_deliverable": personal.get("default_deliverable", "chat"),
+        "enabled_sources": personal.get("enabled_sources", {"web": True, "file": True}),
+        "projects": ["Inbox", "C++", "Agent", "KRX"],
+        "identity": {"tenant_id": "local", "user_id": "me"},
         "loop": [
             "understand",
             "plan",
@@ -30,13 +35,11 @@ def harness_capabilities() -> dict[str, Any]:
             "validate",
             "recover / replan",
             "finalize",
-            "abort",
         ],
         "control_plane": {
             "domain_harness": "app.research",
             "runtime": "langgraph",
             "leaf": "langchain.create_agent",
-            "main_deep_agent": False,
         },
         "guardrails": {
             "max_tool_calls": config.max_tool_calls,
@@ -44,42 +47,11 @@ def harness_capabilities() -> dict[str, Any]:
             "max_run_sec": config.max_run_sec,
             "max_replan_count": config.max_replan_count,
             "max_plan_steps": config.max_plan_steps,
-            "step_timeout_sec": config.step_timeout_sec,
-            "max_retries": config.max_retries,
         },
-        "orchestration": {
-            "parallel_retrieval": config.parallel_retrieval_enabled,
-            "subagent_binding": config.enforce_subagent_binding,
-            "step_checkpoint": config.step_checkpoint_enabled,
-            "structured_worker_output": config.require_structured_worker_output,
-            "direct_worker_invoke": getattr(config, "direct_worker_invoke", True),
-            "persist_loop_state": getattr(config, "persist_loop_state", True),
-            "graph_runtime_enabled": getattr(config, "graph_runtime_enabled", False),
-            "progress_eval_enabled": getattr(config, "progress_eval_enabled", True),
-            "graph_checkpoint_backend": getattr(
-                config, "graph_checkpoint_backend", "sqlite"
-            ),
+        "personal_search": personal,
+        "developer_mode": {
+            "eval": True,
+            "trace": True,
+            "metrics": config.metrics_enabled,
         },
-        "planner": {
-            "llm_enabled": config.planner_llm_enabled,
-            "structured_slots": True,
-            "clarification_hitl": config.planner_clarification_enabled,
-            "plan_review": config.hitl_plan_review_enabled,
-            "plan_validation": True,
-            "hybrid_enabled": getattr(config, "planner_hybrid_enabled", True),
-            "dynamic_lead_planner": getattr(config, "planner_dynamic_lead_enabled", True),
-            "progress_evaluator": getattr(config, "progress_eval_enabled", True),
-        },
-        "safety": {
-            "tools_fail_closed": config.tools_fail_closed,
-            "sql_select_only": config.tools_sql_select_only,
-            "citations": config.citations_enabled,
-            "hitl": config.hitl_enabled,
-            "untrusted_context": config.context_wrap_untrusted_external,
-        },
-        "note": (
-            "Domain Harness 定义计划、护栏、证据与评测；LangGraph StateGraph 是唯一 workflow authority。"
-            "Leaf 为 create_agent，按 ResearchPlan 直调。HITL 图内 interrupt()，HTTP coordinator 只做前端桥。"
-            "Lead 为 Supervisor Brain 而非 Supervisor Runtime。"
-        ),
     }

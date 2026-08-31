@@ -17,11 +17,9 @@ from app.agent.llm import compression_model, model
 from app.agent.memory.extractor import MemoryExtractor
 from app.agent.memory.store import MemoryStore
 from app.config.loader import get_harness_config
-from app.mcp.client import bootstrap_mcp_registry
 from app.research.workers.registry import build_worker_registry
 
 harness_config = get_harness_config()
-bootstrap_mcp_registry()
 
 agent_checkpointer = InMemorySaver()
 
@@ -67,15 +65,24 @@ harness = AgentHarness(
 )
 
 
-async def run_deep_agent(task_query, session_id, *, user_id="", tenant_id="", project_id=""):
+async def run_deep_agent(
+    task_query,
+    session_id,
+    *,
+    user_id="me",
+    tenant_id="local",
+    project_id="Inbox",
+    mode="auto",
+):
     """异步执行入口 — StateGraph 为 workflow 权威，领域服务仍由 harness 提供。"""
-    print(f"[MainAgent] Harness 开始执行，session_id={session_id}")
+    print(f"[MainAgent] Harness 开始执行，session_id={session_id}, mode={mode}")
     result = await harness.run(
         task_query,
         session_id,
-        user_id=user_id,
-        tenant_id=tenant_id,
-        project_id=project_id,
+        user_id=user_id or "me",
+        tenant_id=tenant_id or "local",
+        project_id=project_id or "Inbox",
+        mode=mode,
     )
     print(
         f"[MainAgent] Harness 完成，status={result.status}, "
@@ -87,5 +94,5 @@ async def run_deep_agent(task_query, session_id, *, user_id="", tenant_id="", pr
 
 if __name__ == "__main__":
     asyncio.run(
-        run_deep_agent("从网络查询机器人信息，并生成Markdown文件", "test_session_001")
+        run_deep_agent("今天 A 股创业板为什么跌？", "test_session_001")
     )

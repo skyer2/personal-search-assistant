@@ -28,8 +28,6 @@ EXTRACT_PROMPT = """从以下 Agent 任务结果中提取少量可长期复用�
 
 STEP_EXTRACT_HINTS = {
     "network_search": MemoryType.EPISODIC,
-    "database_query": MemoryType.SEMANTIC,
-    "knowledge_base": MemoryType.SEMANTIC,
     "file_read": MemoryType.EPISODIC,
 }
 

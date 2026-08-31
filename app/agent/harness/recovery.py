@@ -14,11 +14,7 @@ class RecoveryManager:
             "再使用 generate_markdown 生成 Markdown，如需 PDF 再调用 convert_md_to_pdf。"
         ),
         "file_min_size": "上次生成的文件内容过短，请补充更多检索信息后再生成完整报告。",
-        "sql_empty": (
-            "上次数据库查询返回空结果。请先调用数据库查询助手执行 list_sql_tables "
-            "确认表名，再编写 SQL 查询。"
-        ),
-        "search_too_short": "上次网络搜索结果不足，请换关键词重新搜索，至少检索 3 个角度。",
+        "search_too_short": "上次网络搜索结果不足，请换关键词重新搜索。",
         "wrong_subagent": (
             "上次未命中计划指定的工人。检索步应由 Harness 直调对应工人；"
             "请确认本步工人图可用，并只使用已绑定工具。"
@@ -58,7 +54,6 @@ class RecoveryManager:
 
     def get_retry_step(self, reason: str, plan_steps: list[PlanStep]) -> PlanStep | None:
         mapping = {
-            "sql_empty": "database_query",
             "no_file_generated": "generate_markdown",
             "search_too_short": "network_search",
             "citation_coverage_low": "generate_markdown",

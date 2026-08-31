@@ -1,9 +1,5 @@
 """
-WorkerRegistry：按 step_type 直调 Leaf，不再经 Main DeepAgent 二次路由。
-
-kind:
-  create_agent     — 默认
-  create_deep_agent — 仅 document_research / coding 等需要 filesystem 的工人
+WorkerRegistry：按 step_type 直调 Leaf（个人版：Web + File + Synthesis）。
 """
 
 from __future__ import annotations
@@ -13,14 +9,13 @@ from typing import Any, Mapping
 
 STEP_KINDS: dict[str, str] = {
     "network_search": "create_agent",
-    "database_query": "create_agent",
-    "knowledge_base": "create_agent",
     "file_read": "create_agent",
     "research": "create_agent",
     "generate_markdown": "create_agent",
     "convert_pdf": "create_agent",
     "summarize": "create_agent",
 }
+
 
 class UnsupportedTaskType(KeyError):
     """Planner 产出了 WorkerRegistry 未注册的 step_type。"""
@@ -60,8 +55,6 @@ def worker_tools_for_step(step_type: str) -> list[str]:
     tools = tools_for_profile(profile)
     extras = {
         "network_search": ["internet_search", *CONTEXT_TOOLS],
-        "database_query": ["list_sql_tables", "get_table_data", "execute_sql_query", *CONTEXT_TOOLS],
-        "knowledge_base": ["get_assistant_list", "create_ask_delete", *CONTEXT_TOOLS],
         "file_read": ["read_file_content", *CONTEXT_TOOLS],
         "research": tools,
         "generate_markdown": ["generate_markdown", "read_file_content", *CONTEXT_TOOLS],
@@ -79,7 +72,6 @@ def resolve_execute_target(
     direct_invoke: bool = True,
     profile: str = "",
 ) -> tuple[Any, str]:
-    """计划指定谁干就调谁。未注册 step 默认 fail-closed，禁止落到合成工人。"""
     if not direct_invoke:
         if main_agent is not None:
             return main_agent, "main"
@@ -92,14 +84,16 @@ def resolve_execute_target(
     raise UnsupportedTaskType(step_type)
 
 
-def _file_tool_map() -> dict[str, Any]:
-    from app.mcp.client import get_file_tools
+def _local_file_tools() -> dict[str, Any]:
+    from app.tools.markdown_tools import generate_markdown
+    from app.tools.pdf_tools import convert_md_to_pdf
+    from app.tools.upload_file_read_tool import read_file_content
 
-    mapping: dict[str, Any] = {}
-    for tool in get_file_tools():
-        if tool is not None:
-            mapping[getattr(tool, "name", "")] = tool
-    return mapping
+    return {
+        "read_file_content": read_file_content,
+        "generate_markdown": generate_markdown,
+        "convert_md_to_pdf": convert_md_to_pdf,
+    }
 
 
 def build_worker_registry(
@@ -109,37 +103,37 @@ def build_worker_registry(
     interrupt_on: Mapping[str, bool] | None = None,
     kinds: Mapping[str, str] | None = None,
 ) -> WorkerRegistry:
-    from app.agent.subagents.database_query_agent import build_database_query_agent
-    from app.agent.subagents.knowledge_base_agent import build_knowledge_base_agent
     from app.agent.subagents.network_search_agent import build_network_search_agent
-    from app.mcp.client import get_db_tools, get_internet_search_tool, get_ragflow_tools
     from app.research.workers.factory import create_research_worker, create_synthesis_worker
     from app.research.workers.prompts import RESEARCH_TASK_SYSTEM_PROMPT, SYNTHESIS_SYSTEM_PROMPT
     from app.agent.harness.tool_contract import wrap_tool_with_contract
     from app.agent.harness.worker_profiles import (
-        PROFILE_DB,
         PROFILE_FILE,
-        PROFILE_KB,
         PROFILE_MIXED,
         PROFILE_WEB,
         filter_tools_for_profile,
     )
     from app.tools.artifact_tools import read_artifact, read_evidence
+    from app.tools.tavily_tool import internet_search
 
     kind_map = dict(STEP_KINDS)
     if kinds:
         kind_map.update(kinds)
 
     net = build_network_search_agent()
-    db = build_database_query_agent()
-    kb = build_knowledge_base_agent()
-    files = _file_tool_map()
+    files = _local_file_tools()
     synthesis_prompt = SYNTHESIS_SYSTEM_PROMPT
     hitl = dict(interrupt_on or {})
 
     registry = WorkerRegistry()
 
-    def _maybe_deep(step_type: str, tools: list[Any], prompt: str, *, hitl_flags: Mapping[str, bool] | None = None) -> Any:
+    def _maybe_deep(
+        step_type: str,
+        tools: list[Any],
+        prompt: str,
+        *,
+        hitl_flags: Mapping[str, bool] | None = None,
+    ) -> Any:
         kind = kind_map.get(step_type, "create_agent")
         if kind == "create_deep_agent":
             from deepagents import create_deep_agent
@@ -167,10 +161,7 @@ def build_worker_registry(
             checkpointer=checkpointer,
         )
 
-    net_tool = get_internet_search_tool()
-    net_tools = [net_tool] if net_tool is not None else [t for t in (net.get("tools") or []) if t]
-    db_tools = [t for t in (get_db_tools() or []) if t] or [t for t in (db.get("tools") or []) if t]
-    kb_tools = [t for t in (get_ragflow_tools() or []) if t] or [t for t in (kb.get("tools") or []) if t]
+    net_tools = [internet_search]
     context_tools = [read_artifact, read_evidence]
 
     def _contract(tools: list[Any], step_type: str) -> list[Any]:
@@ -186,45 +177,14 @@ def build_worker_registry(
         return wrapped
 
     net_tools = _contract(net_tools, "network_search") + context_tools
-    db_tools = _contract(db_tools, "database_query") + context_tools
-    kb_tools = _contract(kb_tools, "knowledge_base") + context_tools
 
     registry.register(
         "network_search",
         _maybe_deep("network_search", net_tools, str(net.get("system_prompt") or "")),
     )
     registry.register(
-        "database_query",
-        _maybe_deep("database_query", db_tools, str(db.get("system_prompt") or "")),
-    )
-    registry.register(
-        "knowledge_base",
-        _maybe_deep("knowledge_base", kb_tools, str(kb.get("system_prompt") or "")),
-    )
-    research_tools: list[Any] = []
-    for tool in [*net_tools, *db_tools, *kb_tools]:
-        if tool is not None and tool not in research_tools:
-            research_tools.append(tool)
-    mixed_tools = filter_tools_for_profile(research_tools, PROFILE_MIXED) or research_tools
-    registry.register(
-        "research",
-        _maybe_deep("research", mixed_tools, RESEARCH_TASK_SYSTEM_PROMPT),
-    )
-    registry.register(
         PROFILE_WEB,
         _maybe_deep("network_search", net_tools, str(net.get("system_prompt") or "")),
-    )
-    registry.register(
-        PROFILE_DB,
-        _maybe_deep("database_query", db_tools, str(db.get("system_prompt") or "")),
-    )
-    registry.register(
-        PROFILE_KB,
-        _maybe_deep("knowledge_base", kb_tools, str(kb.get("system_prompt") or "")),
-    )
-    registry.register(
-        PROFILE_MIXED,
-        _maybe_deep("research", mixed_tools, RESEARCH_TASK_SYSTEM_PROMPT),
     )
 
     read_tool = files.get("read_file_content")
@@ -233,6 +193,17 @@ def build_worker_registry(
     read_tools = ([read_tool] if read_tool else []) + context_tools
     md_tools = [t for t in (md_tool, read_tool) if t] + context_tools
     pdf_tools = [t for t in (pdf_tool, md_tool, read_tool) if t] + context_tools
+
+    mixed_tools = filter_tools_for_profile(net_tools + read_tools, PROFILE_MIXED) or net_tools
+    registry.register(
+        "research",
+        _maybe_deep("research", mixed_tools, RESEARCH_TASK_SYSTEM_PROMPT),
+    )
+    registry.register(
+        PROFILE_MIXED,
+        _maybe_deep("research", mixed_tools, RESEARCH_TASK_SYSTEM_PROMPT),
+    )
+
     registry.register(
         PROFILE_FILE,
         _maybe_deep(
@@ -242,10 +213,14 @@ def build_worker_registry(
             hitl_flags={"read_file_content": hitl.get("read_file_content", False)},
         ),
     )
-
     registry.register(
         "file_read",
-        _maybe_deep("file_read", read_tools, synthesis_prompt, hitl_flags={"read_file_content": hitl.get("read_file_content", False)}),
+        _maybe_deep(
+            "file_read",
+            read_tools,
+            synthesis_prompt,
+            hitl_flags={"read_file_content": hitl.get("read_file_content", False)},
+        ),
     )
     registry.register(
         "generate_markdown",

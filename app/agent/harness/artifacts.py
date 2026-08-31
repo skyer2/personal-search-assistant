@@ -39,10 +39,6 @@ def infer_kind(step_type: str | None = None, locator: str = "") -> str:
     loc = (locator or "").lower()
     if step in {"network_search", "web"} or loc.startswith("http"):
         return ARTIFACT_KIND_WEB
-    if step in {"database_query", "db"} or loc.startswith("mysql") or "select " in loc:
-        return ARTIFACT_KIND_SQL
-    if step in {"knowledge_base", "kb"} or loc.startswith("ragflow"):
-        return ARTIFACT_KIND_KB
     if step in {"file_read", "file"} or loc.endswith((".md", ".txt", ".csv")):
         return ARTIFACT_KIND_FILE
     if step in {"pdf"} or loc.endswith(".pdf"):

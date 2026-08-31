@@ -8,6 +8,7 @@ import type {
   HitlInterruptPayload,
   MonitorMessage,
   OutputFile,
+  SearchMode,
   SocketMessage,
   UploadedItem
 } from "../types";
@@ -245,10 +246,10 @@ export function useDeepAgentSession() {
   }, [hitlPending, isRunning, refreshFiles, sessionPath]);
 
   const submitTask = useCallback(
-    async (query: string) => {
+    async (query: string, mode: SearchMode = "auto") => {
       const cleanQuery = query.trim();
       if (!cleanQuery) {
-        throw new Error("请输入研搜任务");
+        throw new Error("请输入搜索问题");
       }
 
       setIsRunning(true);
@@ -259,7 +260,7 @@ export function useDeepAgentSession() {
       setHitlPending(null);
       setTaskFailure(null);
       try {
-        const response = await startTask(cleanQuery, threadId);
+        const response = await startTask(cleanQuery, threadId, { mode });
         if (response.thread_id && response.thread_id !== threadId) {
           storeThreadId(response.thread_id);
           setThreadId(response.thread_id);

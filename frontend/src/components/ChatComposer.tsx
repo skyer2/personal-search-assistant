@@ -4,15 +4,17 @@ import {
   SendOutlined,
   StopOutlined
 } from "@ant-design/icons";
-import { Button, Tooltip, Upload } from "antd";
+import { Button, Segmented, Tooltip, Upload } from "antd";
 import type { UploadFile } from "antd";
-import type { UploadedItem } from "../types";
+import type { SearchMode, UploadedItem } from "../types";
 
 interface ChatComposerProps {
   isAwaitingApproval?: boolean;
   isCancelling: boolean;
   isRunning: boolean;
   isUploading: boolean;
+  mode: SearchMode;
+  onModeChange: (mode: SearchMode) => void;
   onNewSession: () => void;
   onCancel: () => void;
   onQueryChange: (value: string) => void;
@@ -53,6 +55,8 @@ export function ChatComposer({
   isCancelling,
   isRunning,
   isUploading,
+  mode,
+  onModeChange,
   onCancel,
   onNewSession,
   onQueryChange,
@@ -84,7 +88,21 @@ export function ChatComposer({
   }
 
   return (
-    <section className="chat-composer" aria-label="发送研搜任务">
+    <section className="chat-composer" aria-label="发送搜索任务">
+      <div className="composer-mode-row">
+        <Segmented
+          aria-label="搜索模式"
+          disabled={isRunning}
+          onChange={(value) => onModeChange(value as SearchMode)}
+          options={[
+            { label: "Auto", value: "auto" },
+            { label: "Quick", value: "quick" },
+            { label: "Deep", value: "deep" }
+          ]}
+          value={mode}
+        />
+      </div>
+
       {uploadedItems.length > 0 ? (
         <div className="attachment-strip" aria-label="当前会话附件">
           {uploadedItems.map((item) => (
@@ -110,13 +128,13 @@ export function ChatComposer({
 
       {isAwaitingApproval ? (
         <div className="composer-pause-hint" role="status">
-          任务已暂停，等待人工审批。批准或拒绝后才会继续，期间不会刷新进度动画。
+          任务已暂停，等待人工审批。批准或拒绝后才会继续。
         </div>
       ) : null}
 
       <div className="composer-shell">
         <textarea
-          aria-label="研搜任务"
+          aria-label="搜索问题"
           disabled={isRunning}
           onChange={(event) => onQueryChange(event.target.value)}
           onKeyDown={(event) => {
@@ -125,7 +143,7 @@ export function ChatComposer({
               onSubmit();
             }
           }}
-          placeholder="向 DeepSearch Agents 发送任务..."
+          placeholder="向 Personal Search Assistant 提问..."
           value={query}
         />
 
@@ -161,7 +179,7 @@ export function ChatComposer({
             </Upload>
           </div>
 
-          <Tooltip title={isAwaitingApproval ? "取消已暂停的任务" : isRunning ? "取消当前任务" : "发送任务"}>
+          <Tooltip title={isAwaitingApproval ? "取消已暂停的任务" : isRunning ? "取消当前任务" : "发送"}>
             <Button
               aria-label={isRunning ? "取消当前任务" : "发送任务"}
               className={isRunning ? "send-button send-button--cancel" : "send-button"}
