@@ -3,9 +3,13 @@
 > **版本**: v1.0（设计草案 2026-07-15）  
 > **现行实现**：以代码和下列文档为准，本文保留升级动机与早期路线，**不要把第 8 节旧 MCP 方案、Mem0 默认、HITL「暂不实现」当成当前状态**。
 >
+> **产品演进（2026-08）**：产品目标从企业多数据源 Demo 转向个人 Search Assistant + 按需 Deep Research。Harness 层保留；Mode Router / Quick 路径 / Conversation / UI 见 [PERSONAL_SEARCH.md](./PERSONAL_SEARCH.md)。
+>
 > | 主题 | 现行文档 |
 > |------|----------|
+> | **产品架构 / Mode Router** | [PERSONAL_SEARCH.md](./PERSONAL_SEARCH.md) |
 > | 运行时 / StateGraph | [HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md) · [RESEARCH_HARNESS.md](./RESEARCH_HARNESS.md) |
+> | Deep 闭环 / Progress | [RESEARCH_INTELLIGENCE.md](./RESEARCH_INTELLIGENCE.md) |
 > | 上下文虚拟化 | [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md) |
 > | Memory 生产门禁 | [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md) |
 > | MCP Capability Plane | [MCP_SYSTEM.md](./MCP_SYSTEM.md) |

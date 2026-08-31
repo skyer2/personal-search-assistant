@@ -2,7 +2,8 @@
 
 > **权威模型**：Domain Harness（领域控制面）+ **Research StateGraph Runtime**（生产调度权威）+ Leaf Workers（按步直调）+ **MCP Capability Plane**（工具治理）。  
 > LangGraph 跑整个研究工作流（intent → plan → dispatch / Send → synthesis）；DeepAgents 只在需要 filesystem 时组装工人，不再当第二导演。  
-> MCP 是 pluggable provider 边界，不污染 Research Domain Model。全貌见 [MCP_SYSTEM.md](./MCP_SYSTEM.md)。
+> MCP 是 pluggable provider 边界，不污染 Research Domain Model。全貌见 [MCP_SYSTEM.md](./MCP_SYSTEM.md)。  
+> **产品层**：Quick / Deep 分流、Conversation、个人默认能力面见 [PERSONAL_SEARCH.md](./PERSONAL_SEARCH.md)（Harness 层本文描述的部分 **不推翻**，在其前面加 Mode Router）。
 
 对照：[教学版 deepsearch-agents](https://github.com/didilili/deepsearch-agents) 是一次 `create_deep_agent` 黑盒跑完全程。本仓库在其上加了显式 Loop 之后，Phase 20 把执行入口收成「计划指定谁就直调谁」；当前生产配置 `orchestration.graph_runtime_enabled: true`，调度权威是 Research StateGraph，`AgentHarness._run_legacy_loop()` 仅作回退。
 

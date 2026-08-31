@@ -2,6 +2,8 @@
 
 > **原则**：One authoritative control plane, one durable workflow state, bounded local agent autonomy.
 
+> **产品方向（2026-08）**：仓库产品目标正从「企业多数据源研搜 Demo」转向「个人 Search Assistant + 按需 Deep Research」。Harness / StateGraph **保留**；入口分流、默认能力面、Conversation 与 UI 见 [PERSONAL_SEARCH.md](./PERSONAL_SEARCH.md)。本文仍是 Harness 运行时决策边界的权威说明。
+
 本仓库的 Harness 是 **领域控制面**，LangGraph 是它选择的 **execution runtime**，不是上一层产品。
 
 ```text

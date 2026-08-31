@@ -29,8 +29,10 @@
 
 | 文档 | 内容 |
 |------|------|
+| [**Personal Search 产品架构**](docs/PERSONAL_SEARCH.md) | **Mode Router、Quick/Deep 分流、Conversation、模块拆分、业务规则** |
 | [Harness 运行时架构](docs/HARNESS_ARCHITECTURE.md) | StateGraph + Worker Profile + 与教学版对照 |
 | [领域 Harness 决策边界](docs/RESEARCH_HARNESS.md) | 谁是 Agent、谁是控制面 |
+| [Research Intelligence 闭环](docs/RESEARCH_INTELLIGENCE.md) | Progress Evaluator / Replan / 真并行（Deep 路径） |
 | [上下文工程](docs/CONTEXT_SYSTEM.md) | Artifact / Evidence / JIT / glm-5.2 预算 |
 | [Memory 系统](docs/MEMORY_SYSTEM.md) | 身份四元组、信任分级、来源台账 |
 | [MCP Capability Plane](docs/MCP_SYSTEM.md) | 真身份、并发池、durable Tasks、DB 护栏 |

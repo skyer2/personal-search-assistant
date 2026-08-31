@@ -4,7 +4,8 @@
 >
 > **一句话**：LLM 负责研究语义，Harness 负责运行时权力。
 >
-> 日期：2026-08-28。本文是 Progress Evaluator / 真并行 / Durable ResearchState / 语义再规划 的权威设计；实现以本文为准。
+> 日期：2026-08-28。本文是 Progress Evaluator / 真并行 / Durable ResearchState / 语义再规划 的权威设计；实现以本文为准。  
+> **适用范围**：本文描述的 Progress / Replan 闭环仅适用于 **Deep 路径**；Quick 路径不进 Progress Evaluator。产品入口分流见 [PERSONAL_SEARCH.md](./PERSONAL_SEARCH.md)。
 
 ---
 
