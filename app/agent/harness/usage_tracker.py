@@ -147,6 +147,29 @@ class UsageTracker:
     def record(self, rec: LLMCallRecord) -> None:
         with self._lock:
             self._by_session.setdefault(rec.session_id, []).append(rec)
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.GEN_AI_CHAT,
+                    phase=rec.phase,
+                    status="ok",
+                    attributes={
+                        "model": rec.model,
+                        "prompt_tokens": rec.prompt_tokens,
+                        "completion_tokens": rec.completion_tokens,
+                        "total_tokens": rec.total_tokens,
+                        "cache_read_tokens": rec.cache_read_tokens,
+                        "cost_usd": rec.cost_usd,
+                        "usage_missing": bool((rec.extra or {}).get("usage_missing")),
+                        "run_id": rec.run_id,
+                    },
+                )
+                return
+        except Exception:
+            pass
         log_dir = self._ensure_log_dir()
         if log_dir is None:
             return

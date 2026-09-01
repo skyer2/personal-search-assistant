@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import uuid
 from datetime import datetime
@@ -203,6 +204,7 @@ async def run_live_eval(tasks: list[dict], min_trajectory_similarity: float = 0.
             )
             if report_judge_passed is False and eval_cfg.eval_heuristic_judge_enabled:
                 success = False
+            variant = str(task.get("variant") or os.getenv("HARNESS_EVAL_VARIANT") or "full_harness")
             results.append(
                 TaskEvalResult(
                     task_id=task["id"],
@@ -236,12 +238,44 @@ async def run_live_eval(tasks: list[dict], min_trajectory_similarity: float = 0.
                     estimated_tokens_saved=tokens_saved,
                     report_judge_score=report_judge_score,
                     report_judge_passed=report_judge_passed,
+                    session_id=session_id,
+                    run_id=str(harness_result.metadata.get("run_id") or session_id),
+                    trace_id=str(harness_result.metadata.get("trace_id") or ""),
+                    variant=variant,
                     metadata={
                         **harness_result.metadata,
                         "actual_trajectory": actual_traj,
+                        "case_id": task["id"],
+                        "variant": variant,
                     },
                 )
             )
+            try:
+                from app.observability import EventType, get_recorder
+
+                recorder = get_recorder()
+                recorder.emit(
+                    EventType.EVAL_SCORED,
+                    phase="eval",
+                    status="pass" if success else "fail",
+                    session_id=session_id,
+                    run_id=str(harness_result.metadata.get("run_id") or session_id),
+                    trace_id=str(harness_result.metadata.get("trace_id") or ""),
+                    attributes={
+                        "case_id": task["id"],
+                        "benchmark": str(task.get("benchmark") or "harness_eval"),
+                        "variant": variant,
+                        "accuracy": 1.0 if success else 0.0,
+                        "citation_score": float(ccr) if ccr is not None else None,
+                        "tool_calls": int(harness_result.metadata.get("tool_calls_count", 0)),
+                        "tokens": (harness_result.metadata.get("usage") or {}).get("total"),
+                        "replan_count": int(harness_result.metadata.get("replan_count") or 0),
+                        "latency_ms": int(harness_result.metadata.get("latency_ms", 0)),
+                        "trace_id": harness_result.metadata.get("trace_id"),
+                    },
+                )
+            except Exception:
+                pass
         except Exception as exc:
             results.append(
                 TaskEvalResult(

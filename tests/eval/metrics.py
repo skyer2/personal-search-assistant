@@ -42,6 +42,11 @@ class TaskEvalResult:
     estimated_tokens_saved: int = 0
     report_judge_score: float | None = None
     report_judge_passed: bool | None = None
+    # Agent Flight Recorder
+    session_id: str = ""
+    run_id: str = ""
+    trace_id: str = ""
+    variant: str = ""
     # 【Phase 14】Intent / Plan 评测
     intent_deliverable_ok: bool = True
     intent_slots_ok: bool = True
@@ -223,6 +228,10 @@ class EvalReport:
                     "intent_slots_ok": r.intent_slots_ok,
                     "plan_validation_ok": r.plan_validation_ok,
                     "intent_confidence": r.intent_confidence,
+                    "session_id": r.session_id,
+                    "run_id": r.run_id,
+                    "trace_id": r.trace_id,
+                    "variant": r.variant,
                     "error": r.error,
                 }
                 for r in self.results

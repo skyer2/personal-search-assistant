@@ -35,4 +35,9 @@ package = false
 
 [project.optional-dependencies]
 memory = ["mem0ai>=0.1.0"]
+otel = [
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27.0",
+]
 pdf = ["reportlab>=4.0.0"]

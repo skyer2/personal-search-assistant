@@ -83,6 +83,28 @@ class LangChainWorkerRuntime:
             return WorkerResult(ok=False, task_id=task.task_id, fail_reason="missing_step")
         step = plan.steps[step_index]
 
+        import time
+
+        from app.observability import EventType, get_recorder
+
+        recorder = get_recorder()
+        worker_started = time.perf_counter()
+        if recorder.is_active:
+            recorder.emit(
+                EventType.WORKER_STARTED,
+                phase="execute",
+                status="start",
+                task_id=task.task_id,
+                attempt=int(step.metadata.get("attempt") or 1),
+                plan_version=int(task.plan_version or 1),
+                attributes={
+                    "objective": task.objective,
+                    "worker_runtime": "langchain",
+                    "step_type": task.step_type,
+                    "allowed_tools": list(task.allowed_tools or []),
+                },
+            )
+
         async with session.worker_sem:
             async with session.lock:
                 child = snapshot_worker_loop_state(session.state)
@@ -147,6 +169,21 @@ class LangChainWorkerRuntime:
         row = worker_row(task.task_id, step, bool(ok), result)
         findings = findings_from_worker_row(row)
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        duration_ms = int((time.perf_counter() - worker_started) * 1000)
+        if recorder.is_active:
+            recorder.emit(
+                EventType.WORKER_COMPLETED if ok else EventType.WORKER_FAILED,
+                phase="execute",
+                status="ok" if ok else "failed",
+                duration_ms=duration_ms,
+                task_id=task.task_id,
+                attempt=int(step.metadata.get("attempt") or 1),
+                plan_version=int(task.plan_version or 1),
+                attributes={
+                    "evidence_ids": [task.task_id] if ok else [],
+                    "fail_reason": "" if ok else "worker_failed",
+                },
+            )
         return WorkerResult(
             ok=bool(ok),
             task_id=task.task_id,
