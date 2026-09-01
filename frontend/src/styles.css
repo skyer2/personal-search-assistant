@@ -917,11 +917,22 @@ textarea {
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
 }
 
+.process-dock--inline {
+  z-index: 1;
+  height: auto;
+  max-width: none;
+  margin: 0;
+}
+
 .process-dock-progress {
   flex: 0 0 auto;
   padding: 12px 14px 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(8, 14, 22, 0.92);
+}
+
+.process-dock--inline .process-dock-progress {
+  border-bottom: 0;
 }
 
 .process-dock-stream {
@@ -1345,6 +1356,7 @@ textarea {
 }
 
 .thinking-block {
+  position: relative;
   margin: 4px 0 18px;
   border: 1px solid rgba(113, 247, 255, 0.14);
   border-radius: 12px;
@@ -2369,6 +2381,14 @@ textarea {
   color: var(--amber);
   border-color: rgba(255, 200, 87, 0.36);
   background: rgba(255, 200, 87, 0.1);
+}
+
+.conversation-layout-preview {
+  display: grid;
+  gap: 24px;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 24px 20px 80px;
 }
 
 .run-states-preview {

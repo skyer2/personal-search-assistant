@@ -16,8 +16,12 @@ import {
 import { Button, Tooltip } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { getDownloadUrl } from "../lib/api";
+import { formatElapsedClock } from "../lib/elapsedClock";
+import { computePhaseProgress } from "../lib/phaseProgress";
 import { type RunStatus } from "../lib/runStatus";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { ResizeHandle } from "./ResizeHandle";
+import { RunProgress } from "./RunProgress";
 import type { MonitorMessage, OutputFile } from "../types";
 
 export interface ChatTurn {
@@ -28,10 +32,13 @@ export interface ChatTurn {
   isRunning: boolean;
   result: string;
   timestamp: string;
+  elapsedMs: number;
 }
 
 interface ConversationThreadProps {
+  onProcessHeightChange?: (value: number) => void;
   onUseExample: (prompt: string) => void;
+  processHeight?: number;
   runStatus?: RunStatus;
   turns: ChatTurn[];
 }
@@ -79,57 +86,6 @@ function formatBytes(value: number): string {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function parseTime(value: string): number | null {
-  const time = new Date(value).getTime();
-  return Number.isNaN(time) ? null : time;
-}
-
-function formatDuration(value: number): string {
-  const totalSeconds = Math.max(0, Math.floor(value / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const paddedMinutes = String(minutes).padStart(2, "0");
-  const paddedSeconds = String(seconds).padStart(2, "0");
-
-  if (hours > 0) {
-    return `${hours}:${paddedMinutes}:${paddedSeconds}`;
-  }
-  return `${paddedMinutes}:${paddedSeconds}`;
-}
-
-function getLastEventTime(
-  events: MonitorMessage[],
-  eventName?: string,
-): number | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (!eventName || event.event === eventName) {
-      return parseTime(event.timestamp);
-    }
-  }
-  return null;
-}
-
-function getThinkingDuration(
-  events: MonitorMessage[],
-  fallbackStart: string,
-  freezeClock: boolean,
-  now: number,
-): string {
-  const startedAt =
-    (events[0] ? parseTime(events[0].timestamp) : null) ??
-    parseTime(fallbackStart) ??
-    now;
-  const finishedAt =
-    getLastEventTime(events, "task_result") ??
-    (freezeClock
-      ? getLastEventTime(events, "hitl_interrupt") ?? getLastEventTime(events)
-      : null) ??
-    now;
-  return formatDuration(finishedAt - startedAt);
-}
-
 function EventIcon({ event }: { event: string }) {
   if (event === "assistant_call") {
     return <BranchesOutlined aria-hidden />;
@@ -165,7 +121,13 @@ function FileIcon({ name }: { name: string }) {
   return <FileTextOutlined aria-hidden />;
 }
 
-function ThinkingTimeline({ events }: { events: MonitorMessage[] }) {
+function ThinkingTimeline({
+  events,
+  maxHeight,
+}: {
+  events: MonitorMessage[];
+  maxHeight?: number;
+}) {
   const timelineRef = useRef<HTMLOListElement | null>(null);
 
   useEffect(() => {
@@ -189,7 +151,11 @@ function ThinkingTimeline({ events }: { events: MonitorMessage[] }) {
   }
 
   return (
-    <ol className="thinking-timeline" ref={timelineRef}>
+    <ol
+      className="thinking-timeline"
+      ref={timelineRef}
+      style={maxHeight ? { maxHeight, minHeight: Math.min(120, maxHeight) } : undefined}
+    >
       {events.map((event, index) => (
         <li
           className={`thinking-event thinking-event--${event.event}`}
@@ -254,33 +220,26 @@ function ArtifactShelf({ files }: { files: OutputFile[] }) {
 }
 
 function AssistantMessage({
+  elapsedMs,
   events,
   files,
+  isLatest,
   isRunning,
+  onProcessHeightChange,
+  processHeight,
   result,
   runStatus,
-  timestamp,
-}: Pick<ChatTurn, "events" | "files" | "isRunning" | "result" | "timestamp"> & {
+}: Pick<ChatTurn, "events" | "files" | "isRunning" | "result"> & {
+  elapsedMs: number;
+  isLatest: boolean;
+  onProcessHeightChange?: (value: number) => void;
+  processHeight?: number;
   runStatus: RunStatus;
 }) {
-  const [now, setNow] = useState(Date.now());
-  const clockLive = runStatus === "running" || runStatus === "cancelling";
-
-  useEffect(() => {
-    if (!clockLive) {
-      return;
-    }
-
-    const timer = window.setInterval(() => {
-      setNow(Date.now());
-    }, 1000);
-
-    return () => window.clearInterval(timer);
-  }, [clockLive]);
-
-  const freezeClock = !clockLive;
-  const durationLabel = getThinkingDuration(events, timestamp, freezeClock, now);
+  const [processOpen, setProcessOpen] = useState(isLatest);
+  const durationLabel = formatElapsedClock(elapsedMs);
   const isCancelled = events.some((event) => event.event === "task_cancelled");
+  const clockLive = runStatus === "running" || runStatus === "cancelling";
   const syncLabel =
     runStatus === "awaiting_approval"
       ? `已暂停 · ${durationLabel}`
@@ -297,7 +256,11 @@ function AssistantMessage({
           <time>{syncLabel}</time>
         </div>
 
-        <details className="thinking-block">
+        <details
+          className="thinking-block"
+          open={processOpen}
+          onToggle={(event) => setProcessOpen(event.currentTarget.open)}
+        >
           <summary>
             <span>
               <BranchesOutlined aria-hidden />
@@ -305,7 +268,17 @@ function AssistantMessage({
             </span>
             <strong>{events.length}</strong>
           </summary>
-          <ThinkingTimeline events={events} />
+          <ThinkingTimeline events={events} maxHeight={isLatest ? processHeight : undefined} />
+          {isLatest && processHeight && onProcessHeightChange ? (
+            <ResizeHandle
+              axis="y"
+              label="拖动调整执行过程高度"
+              max={720}
+              min={120}
+              onChange={onProcessHeightChange}
+              value={processHeight}
+            />
+          ) : null}
         </details>
 
         {result ? (
@@ -320,7 +293,7 @@ function AssistantMessage({
             }`}
           >
             {isRunning || runStatus === "awaiting_approval" ? (
-              <p className="assistant-pending-copy">过程框在上方固定，完成后回复会落在这里。</p>
+              <p className="assistant-pending-copy">提问下方会依次显示过程框、执行过程，完成后回复落在这里。</p>
             ) : (
               "任务完成后会在这里显示最终回复。"
             )}
@@ -349,11 +322,16 @@ function resultStatus(turn: ChatTurn): RunStatus {
   if (turn.result || turn.events.some((event) => event.event === "task_result")) {
     return "completed";
   }
+  if (turn.events.some((event) => event.event === "task_cancelled")) {
+    return "idle";
+  }
   return "idle";
 }
 
 export function ConversationThread({
+  onProcessHeightChange,
   onUseExample,
+  processHeight,
   runStatus = "idle",
   turns,
 }: ConversationThreadProps) {
@@ -393,29 +371,55 @@ export function ConversationThread({
 
   return (
     <div className="conversation-thread" aria-label="聊天消息流">
-      {turns.map((turn) => (
-        <div className="conversation-turn" key={turn.id}>
-          <article className="chat-message chat-message--user">
-            <div className="message-bubble">
-              <div className="message-meta">
-                <span>你</span>
-                <time dateTime={turn.timestamp}>
-                  {formatTime(turn.timestamp)}
-                </time>
+      {turns.map((turn, index) => {
+        const isLatest = index === turns.length - 1;
+        const turnStatus = turn.isRunning ? runStatus : resultStatus(turn);
+        const showProcess = turn.events.length > 0 || turn.isRunning || turnStatus !== "idle";
+        const phaseProgress = computePhaseProgress(turn.events, {
+          paused: turnStatus === "awaiting_approval",
+          completed: turnStatus === "completed",
+        });
+
+        return (
+          <div className="conversation-turn" key={turn.id}>
+            <article className="chat-message chat-message--user">
+              <div className="message-bubble">
+                <div className="message-meta">
+                  <span>你</span>
+                  <time dateTime={turn.timestamp}>
+                    {formatTime(turn.timestamp)}
+                  </time>
+                </div>
+                <p>{turn.content}</p>
               </div>
-              <p>{turn.content}</p>
-            </div>
-          </article>
-          <AssistantMessage
-            events={turn.events}
-            files={turn.files}
-            isRunning={turn.isRunning}
-            result={turn.result}
-            runStatus={turn.isRunning ? runStatus : resultStatus(turn)}
-            timestamp={turn.timestamp}
-          />
-        </div>
-      ))}
+            </article>
+
+            {showProcess ? (
+              <section className="process-dock process-dock--inline" aria-label="过程框">
+                <div className="process-dock-progress">
+                  <RunProgress
+                    durationLabel={formatElapsedClock(turn.elapsedMs)}
+                    progress={phaseProgress}
+                    runStatus={turnStatus}
+                  />
+                </div>
+              </section>
+            ) : null}
+
+            <AssistantMessage
+              elapsedMs={turn.elapsedMs}
+              events={turn.events}
+              files={turn.files}
+              isLatest={isLatest}
+              isRunning={turn.isRunning}
+              onProcessHeightChange={onProcessHeightChange}
+              processHeight={processHeight}
+              result={turn.result}
+              runStatus={turnStatus}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }

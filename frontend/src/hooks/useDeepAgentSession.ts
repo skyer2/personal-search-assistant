@@ -2,6 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cancelTask, listSessionFiles, resumeHitl, startTask, uploadSessionFiles } from "../lib/api";
 import { WS_BASE_URL, wsUrl } from "../lib/config";
 import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
+import {
+  IDLE_ELAPSED_CLOCK,
+  elapsedClockIsTicking,
+  pauseElapsedClock,
+  readElapsedMs,
+  resumeElapsedClock,
+  startElapsedClock,
+  stopElapsedClock
+} from "../lib/elapsedClock";
 import { deriveRunStatus } from "../lib/runStatus";
 import type {
   ConnectionState,
@@ -40,6 +49,8 @@ export function useDeepAgentSession() {
   const [hitlPending, setHitlPending] = useState<HitlInterruptPayload | null>(null);
   const [isHitlSubmitting, setIsHitlSubmitting] = useState(false);
   const [taskFailure, setTaskFailure] = useState<{ message: string } | null>(null);
+  const [elapsedClock, setElapsedClock] = useState(IDLE_ELAPSED_CLOCK);
+  const [elapsedNow, setElapsedNow] = useState(() => Date.now());
 
   const clearSocketTimers = useCallback(() => {
     if (reconnectTimerRef.current) {
@@ -68,6 +79,8 @@ export function useDeepAgentSession() {
     setHitlPending(null);
     setIsHitlSubmitting(false);
     setTaskFailure(null);
+    setElapsedClock(IDLE_ELAPSED_CLOCK);
+    setElapsedNow(Date.now());
   }, []);
 
   const discardFailedTask = useCallback(() => {
@@ -84,6 +97,8 @@ export function useDeepAgentSession() {
     setIsRunning(false);
     setIsCancelling(false);
     setTaskFailure(null);
+    setElapsedClock(IDLE_ELAPSED_CLOCK);
+    setElapsedNow(Date.now());
   }, []);
 
   const refreshFiles = useCallback(async () => {
@@ -152,6 +167,7 @@ export function useDeepAgentSession() {
           }
 
           if (payload.event === "hitl_interrupt") {
+            setElapsedClock((previous) => pauseElapsedClock(previous, Date.now()));
             setHitlPending({
               session_id: extractString(payload.data, "session_id") || threadId,
               action_requests: Array.isArray(payload.data.action_requests)
@@ -174,18 +190,21 @@ export function useDeepAgentSession() {
 
           if (payload.event === "task_result") {
             const finalResult = extractString(payload.data, "result");
+            setElapsedClock((previous) => stopElapsedClock(previous, Date.now()));
             setResult(finalResult || payload.message);
             setIsRunning(false);
             setIsCancelling(false);
           }
 
           if (payload.event === "task_cancelled") {
+            setElapsedClock((previous) => stopElapsedClock(previous, Date.now()));
             setResult((previous) => previous || payload.message);
             setIsRunning(false);
             setIsCancelling(false);
           }
 
           if (payload.event === "error") {
+            setElapsedClock((previous) => stopElapsedClock(previous, Date.now()));
             setLastError(payload.message);
             setTaskFailure({ message: payload.message });
             setIsRunning(false);
@@ -252,6 +271,9 @@ export function useDeepAgentSession() {
         throw new Error("请输入研究任务");
       }
 
+      const startedAt = Date.now();
+      setElapsedNow(startedAt);
+      setElapsedClock(startElapsedClock(startedAt));
       setIsRunning(true);
       setIsCancelling(false);
       setEvents([]);
@@ -267,6 +289,7 @@ export function useDeepAgentSession() {
         }
         return response;
       } catch (error) {
+        setElapsedClock(IDLE_ELAPSED_CLOCK);
         setIsRunning(false);
         setIsCancelling(false);
         throw error;
@@ -285,6 +308,7 @@ export function useDeepAgentSession() {
     try {
       const response = await cancelTask(threadId);
       if (response.status === "cancelled") {
+        setElapsedClock((previous) => stopElapsedClock(previous, Date.now()));
         setIsRunning(false);
         setIsCancelling(false);
         setResult((previous) => previous || "任务已取消");
@@ -357,6 +381,7 @@ export function useDeepAgentSession() {
             ? decisions
             : Array.from({ length: count }, () => decisions[0] || { type: "approve" as const });
         await resumeHitl(threadId, normalized);
+        setElapsedClock((previous) => resumeElapsedClock(previous, Date.now()));
         setHitlPending(null);
       } finally {
         setIsHitlSubmitting(false);
@@ -391,8 +416,21 @@ export function useDeepAgentSession() {
     [events, hitlPending, isCancelling, isRunning, result, taskFailure]
   );
 
+  useEffect(() => {
+    if (!elapsedClockIsTicking(elapsedClock)) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setElapsedNow(Date.now());
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [elapsedClock]);
+
+  const elapsedMs = readElapsedMs(elapsedClock, elapsedNow);
+
   return {
     connectionState,
+    elapsedMs,
     events,
     files,
     isCancelling,
