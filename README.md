@@ -25,6 +25,7 @@ Search is only a tool environment used to study:
 - [docs/HARNESS_ARCHITECTURE.md](docs/HARNESS_ARCHITECTURE.md) — StateGraph 运行时
 - [docs/CONTEXT_SYSTEM.md](docs/CONTEXT_SYSTEM.md) — 上下文外置与压缩
 - [docs/BROWSECOMP_PLUS_EVAL.md](docs/BROWSECOMP_PLUS_EVAL.md) — BrowseComp-Plus 评测
+- [docs/OPENEULER_BARE_METAL.md](docs/OPENEULER_BARE_METAL.md) — openEuler 22.03 裸机安装、`.env`、启停与 systemd
 
 ## 研究什么
 
@@ -56,12 +57,14 @@ Query → single agent + search tool → Answer
 
 ## 快速启动
 
-```bash
-pip install -r requirements.txt
-export OPENAI_API_KEY=...
-export TAVILY_API_KEY=...   # 仅作为 environment 的 search 实现
+**openEuler 裸机（Python 3.12、密钥、防火墙、systemd）逐步说明：** [docs/OPENEULER_BARE_METAL.md](docs/OPENEULER_BARE_METAL.md)
 
-uvicorn app.api.server:app --reload --app-dir .
+已有 3.12 与 Node 的开发机：
+
+```bash
+cp .env.example .env          # 填写 OPENAI_* 与 TAVILY_API_KEY
+pip install -r requirements.txt
+uvicorn app.api.server:app --reload --app-dir . --host 0.0.0.0 --port 8000
 cd frontend && pnpm install && pnpm dev
 ```
 

@@ -24,7 +24,9 @@ pnpm install
 pnpm dev
 ```
 
-默认连接 `http://localhost:8000` 和 `ws://localhost:8000`。
+openEuler 裸机逐步说明见仓库 [docs/OPENEULER_BARE_METAL.md](../docs/OPENEULER_BARE_METAL.md)。
+
+默认开发态由 Vite 把 `/api`、`/ws` 代理到 `http://localhost:8000`。
 可用 `.env.local` 覆盖：
 
 ```bash

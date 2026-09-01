@@ -207,3 +207,4 @@ Query → single agent               Brief → Plan →                   关掉
 - [HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md) — StateGraph 运行时细节
 - [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md) — Context / Artifact / Evidence
 - [BROWSECOMP_PLUS_EVAL.md](./BROWSECOMP_PLUS_EVAL.md) — 固定语料评测
+- [OPENEULER_BARE_METAL.md](./OPENEULER_BARE_METAL.md) — openEuler 裸机部署（非架构范围）
