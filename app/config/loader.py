@@ -106,6 +106,7 @@ class HarnessConfig:
     metrics_enabled: bool = True
     metrics_window_hours: int = 168
     prometheus_enabled: bool = True
+    obs_content_mode: str = "redacted"
 
     max_total_tokens: int = 100_000
     max_tool_calls: int = 20
@@ -456,6 +457,11 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         prometheus_enabled=_env_bool(
             "HARNESS_PROMETHEUS_ENABLED",
             bool(observability.get("prometheus_enabled", True)),
+        ),
+        obs_content_mode=str(
+            os.getenv("OBS_CONTENT_MODE")
+            or os.getenv("HARNESS_OBS_CONTENT_MODE")
+            or observability.get("content_mode", "redacted")
         ),
         max_total_tokens=int(budget.get("max_total_tokens", 100_000)),
         max_tool_calls=int(budget.get("max_tool_calls", 20)),

@@ -22,6 +22,7 @@ Search is only a tool environment used to study:
 
 补充文档：
 
+- [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) — Agent Flight Recorder（统一 Trace / Replan / Eval）
 - [docs/HARNESS_ARCHITECTURE.md](docs/HARNESS_ARCHITECTURE.md) — StateGraph 运行时
 - [docs/CONTEXT_SYSTEM.md](docs/CONTEXT_SYSTEM.md) — 上下文外置与压缩
 - [docs/BROWSECOMP_PLUS_EVAL.md](docs/BROWSECOMP_PLUS_EVAL.md) — BrowseComp-Plus 评测
@@ -71,6 +72,7 @@ cd frontend && pnpm install && pnpm dev
 ## 测试
 
 ```bash
+python3 tests/test_flight_recorder.py
 python3 tests/test_architecture_p0.py
 python3 tests/test_research_harness.py
 python3 tests/test_environment_tools.py

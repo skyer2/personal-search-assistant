@@ -31,7 +31,7 @@ P0  单次任务别爆窗              → 步级压缩 + 单步 token 预算
 P0  压缩别把出处压没            → Citation 先登记 + 写报告用 evidence digest
 P1  脏网页别当系统指令          → <untrusted> 包裹，记忆不进 system
 P1  检索步和写报告步要的材料不同 → 检索看近 N 步摘要；写报告看全量 digest
-P2  可观测                      → 分层 token、压缩比、CCR 打进 JSONL
+P2  可观测                      → Agent Flight Recorder：统一 emit，JSONL / WS / OTel 导出（见 docs/OBSERVABILITY.md）
 ```
 
 ### 1.3 一次任务里，上下文怎么转

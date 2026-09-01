@@ -75,4 +75,19 @@ GAP → replan；ENOUGH → synthesis → Quality Gate → finalize
 - 仍没有 JSON 时，用本步已存 Artifact 卡片 salvage
 - 工人已回 `summary`+`facts` 时压缩不再打 LLM
 
-步内 `budget.max_step_tool_calls`（默认 8）硬限制 `internet_search` / `fetch_url`。会话 `max_tool_calls` 默认 40，给并行研究 + 写报告留余量。Monitor 只在 astream 报工具，避免中英双计。
+步内 `budget.max_step_tool_calls`（默认 8）硬限制 `internet_search` / `fetch_url`。会话 `max_tool_calls` 默认 40，给并行研究 + 写报告留余量。工具 start/end 由 Flight Recorder 统一 emit，Monitor 只做 WebSocket exporter，避免双计。
+
+---
+
+## Agent Flight Recorder
+
+一次 Research Run 只 emit 一次语义事件（`app/observability/`）。JSONL、WebSocket、OTLP/Langfuse、进程内 Counter/Histogram 都是 exporter。并行 Worker span 的 key 是 `phase + task_id + attempt`，不再用 phase 当唯一 key。
+
+看哪里：
+
+- 实时 UI：过程框 / 执行过程
+- 因果树：`GET /api/traces/tree/{session_id}` 与 Trace 查看器
+- 落盘：`app/logs/traces/{session_id}.jsonl`
+- 指标：`GET /api/metrics/summary`、`GET /api/metrics/prometheus`（窗口值是 gauge；`harness_live_*` 才是进程内 counter）
+
+细节与事件词表见 [OBSERVABILITY.md](./OBSERVABILITY.md)。

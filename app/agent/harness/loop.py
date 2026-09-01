@@ -316,6 +316,15 @@ class AgentHarness:
         state.metadata["strict_validation"] = self.harness_config.validation_strict_mode
         run_started = time.perf_counter()
         self._current_trace_id = self.trace_logger.new_trace_id()
+        from app.observability import get_recorder
+
+        obs_ctx = get_recorder().start_run(
+            session_id=session_id,
+            run_id=session_id,
+            trace_id=self._current_trace_id,
+            query_preview=task_query,
+        )
+        self._current_trace_id = obs_ctx.trace_id
         session_dir, relative_session_dir, uploaded_prompt, tokens = (
             self._prepare_session(session_id)
         )
@@ -1958,6 +1967,7 @@ class AgentHarness:
         final_content = ""
         tool_calls = 0
         tools_invoked: list[str] = []
+        pending_tools: dict[str, tuple[str, float]] = {}
         step_assistants: list[str] = []
         step_cap = max(0, int(getattr(self.harness_config, "max_step_tool_calls", 8) or 0))
         session_left = max(
@@ -1988,10 +1998,32 @@ class AgentHarness:
                         for tool_call in last_msg.tool_calls:
                             tool_name = tool_call["name"]
                             tools_invoked.append(tool_name)
+                            tool_call_id = str(tool_call.get("id") or tool_call.get("tool_call_id") or "")
+                            pending_tools[tool_call_id or tool_name] = (
+                                tool_name,
+                                time.perf_counter(),
+                            )
                             monitor.report_tool(
                                 tool_name,
                                 tool_call.get("args", {}),
+                                tool_call_id=tool_call_id,
                             )
+                    elif getattr(last_msg, "tool_call_id", None) or type(last_msg).__name__ == "ToolMessage":
+                        tool_call_id = str(getattr(last_msg, "tool_call_id", "") or "")
+                        tool_name, started_at = pending_tools.pop(
+                            tool_call_id,
+                            (str(getattr(last_msg, "name", "") or "tool"), time.perf_counter()),
+                        )
+                        duration_ms = int((time.perf_counter() - started_at) * 1000)
+                        tool_status = str(getattr(last_msg, "status", "success") or "success")
+                        failed = tool_status in {"error", "failed"}
+                        monitor.report_tool_end(
+                            tool_name,
+                            tool_call_id=tool_call_id,
+                            duration_ms=duration_ms,
+                            status="error" if failed else "ok",
+                            error=message_text(last_msg)[:240] if failed else "",
+                        )
                     elif is_assistant_message(last_msg):
                         text = message_text(last_msg)
                         if text.strip():
@@ -2599,6 +2631,8 @@ class AgentHarness:
                 "abort_message": state.abort_message,
                 "observability": obs_snapshot.to_dict(),
                 "usage": usage_summary,
+                "trace_id": self._current_trace_id,
+                "run_id": state.session_id,
             },
         )
         if self._current_tracer is not None:
@@ -2610,13 +2644,24 @@ class AgentHarness:
                     "metadata": result.metadata,
                 }
             )
-        self.trace_logger.log_run_summary(
-            trace_id=self._current_trace_id,
-            session_id=state.session_id,
-            status=result.status,
-            duration_ms=total_latency_ms,
-            metadata=result.metadata,
-        )
+        from app.observability import get_recorder
+
+        recorder = get_recorder()
+        if recorder.is_active:
+            recorder.finish_run(
+                status=result.status,
+                duration_ms=total_latency_ms,
+                metadata=result.metadata,
+                result_preview=state.final_content[:240],
+            )
+        else:
+            self.trace_logger.log_run_summary(
+                trace_id=self._current_trace_id,
+                session_id=state.session_id,
+                status=result.status,
+                duration_ms=total_latency_ms,
+                metadata=result.metadata,
+            )
         return result
 
     def _estimate_run_tokens(self, state: LoopState) -> int:
@@ -2650,6 +2695,18 @@ class AgentHarness:
             estimated_tokens=self._estimate_run_tokens(state),
         ).abort
 
+    def remaining_budget(self, state: LoopState) -> dict[str, int]:
+        return {
+            "tool_calls": max(
+                0,
+                int(self.harness_config.max_tool_calls) - int(state.tool_calls_count or 0),
+            ),
+            "tokens": max(
+                0,
+                int(self.harness_config.max_total_tokens) - self._estimate_run_tokens(state),
+            ),
+        }
+
     def _report_phase(
         self,
         phase: Phase,
@@ -2657,19 +2714,69 @@ class AgentHarness:
         state: LoopState,
         **data: Any,
     ) -> None:
-        # 并行子任务共享一个 HarnessTracer 时，按 phase 作为 key 会互相覆盖 span。
-        # 子任务仍写 JSONL/内存 trace；父级保留 parallel_execute 聚合 span。
-        tracer = None if state.metadata.get("_parallel_child") else self._current_tracer
-        if tracer is not None:
-            if status == "start":
-                tracer.phase_start(phase.value, data)
-            else:
-                tracer.phase_end(phase.value, status, data)
-
         event = PhaseEvent(phase=phase.value, status=status, data=data)
         if "duration_ms" in data:
             event.duration_ms = data["duration_ms"]
         state.trace.append(event)
+
+        from app.observability import EventType, get_recorder
+
+        recorder = get_recorder()
+        task_id = data.get("task_id")
+        if task_id is None and data.get("step_index") is not None:
+            task_id = f"s{data.get('step_index')}"
+        if recorder.is_active:
+            recorder.emit_phase(
+                phase.value,
+                status,
+                task_id=task_id,
+                attempt=data.get("attempt"),
+                plan_version=data.get("plan_version")
+                or (int(getattr(state.plan, "plan_version", 1) or 1) if state.plan else None),
+                duration_ms=data.get("duration_ms"),
+                attributes={k: v for k, v in data.items() if k != "status"},
+            )
+            if phase == Phase.PLAN and status == "done" and state.plan is not None:
+                issues = list(data.get("plan_validation_issues") or [])
+                plan_version = int(getattr(state.plan, "plan_version", 1) or 1)
+                recorder.emit(
+                    EventType.PLAN_CREATED,
+                    phase="plan",
+                    status="ok",
+                    plan_version=plan_version,
+                    attributes={
+                        "task_count": len(state.plan.steps),
+                        "planning_mode": str(
+                            getattr(state.intent, "planning_mode", "") or ""
+                        ),
+                    },
+                )
+                recorder.emit(
+                    EventType.PLAN_VALIDATED,
+                    phase="plan",
+                    status="ok" if not issues else "issues",
+                    plan_version=plan_version,
+                    attributes={"issue_count": len(issues)},
+                )
+            return
+
+        tracer = None if state.metadata.get("_parallel_child") else self._current_tracer
+        if tracer is not None:
+            if status == "start":
+                tracer.phase_start(
+                    phase.value,
+                    data,
+                    task_id=task_id,
+                    attempt=data.get("attempt"),
+                )
+            else:
+                tracer.phase_end(
+                    phase.value,
+                    status,
+                    data,
+                    task_id=task_id,
+                    attempt=data.get("attempt"),
+                )
         monitor_data = {k: v for k, v in data.items() if k != "status"}
         monitor.report_phase(phase.value, status, session_id=state.session_id, **monitor_data)
 

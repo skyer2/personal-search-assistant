@@ -97,6 +97,7 @@ harness:
     metrics_window_hours: 168
     prometheus_enabled: true
     usage_tracking_enabled: true
+    content_mode: "redacted"
 
   budget:
     max_total_tokens: 100000

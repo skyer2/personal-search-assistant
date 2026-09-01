@@ -132,6 +132,9 @@ class HarnessTracer:
         self._spans: dict[str, Any] = {}
 
     def start(self) -> None:
+        from app.observability.exporters.otel import init_otel
+
+        init_otel()
         client = _get_langfuse_client()
         if client is None:
             return
@@ -145,14 +148,28 @@ class HarnessTracer:
         except Exception as exc:
             print(f"[Tracing] harness trace start failed: {exc}")
 
-    def phase_start(self, phase: str, data: Optional[dict[str, Any]] = None) -> None:
+    def phase_start(
+        self,
+        phase: str,
+        data: Optional[dict[str, Any]] = None,
+        *,
+        task_id: str | None = None,
+        attempt: int | None = None,
+    ) -> None:
         if self._trace is None:
             return
         try:
-            self._spans[phase] = self._trace.span(
+            from app.observability.events import span_identity
+
+            key = span_identity(phase, task_id=task_id, attempt=attempt)
+            self._spans[key] = self._trace.span(
                 name=phase,
                 input=data or {},
-                metadata={"status": "start"},
+                metadata={
+                    "status": "start",
+                    "task_id": task_id,
+                    "attempt": attempt,
+                },
             )
         except Exception as exc:
             print(f"[Tracing] phase span start failed: {exc}")
@@ -162,8 +179,16 @@ class HarnessTracer:
         phase: str,
         status: str,
         data: Optional[dict[str, Any]] = None,
+        *,
+        task_id: str | None = None,
+        attempt: int | None = None,
     ) -> None:
-        span = self._spans.pop(phase, None)
+        from app.observability.events import span_identity
+
+        key = span_identity(phase, task_id=task_id, attempt=attempt)
+        span = self._spans.pop(key, None)
+        if span is None:
+            span = self._spans.pop(phase, None)
         if span is None:
             return
         try:

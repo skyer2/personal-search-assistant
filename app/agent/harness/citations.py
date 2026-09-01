@@ -111,6 +111,29 @@ class CitationManager:
             self.sources.append(src)
             registered.append(src)
 
+        if registered:
+            try:
+                from app.observability import EventType, get_recorder
+
+                recorder = get_recorder()
+                if recorder.is_active:
+                    for src in registered:
+                        recorder.emit(
+                            EventType.EVIDENCE_REGISTERED,
+                            phase="execute",
+                            status="ok",
+                            attributes={
+                                "evidence_id": src.source_id,
+                                "source_id": src.source_id,
+                                "artifact_id": src.artifact_id,
+                                "source_kind": src.source_kind,
+                                "step_index": src.step_index,
+                                "step_type": src.step_type,
+                            },
+                        )
+            except Exception:
+                pass
+
         return registered
 
     def bind_worker_facts(

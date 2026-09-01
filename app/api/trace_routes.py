@@ -9,20 +9,18 @@ import os
 from pathlib import Path
 from typing import Any
 
-import requests
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from app.api.tracing import is_langfuse_enabled
 from app.config.loader import get_harness_config
-
-ROOT = Path(__file__).resolve().parents[1]
+from app.observability.journal import build_span_tree
+from app.observability.paths import traces_log_dir
 
 router = APIRouter(prefix="/api/traces", tags=["traces"])
 
 
 def _jsonl_path(session_id: str) -> Path:
-    config = get_harness_config()
-    log_dir = ROOT / config.jsonl_log_dir
+    log_dir = traces_log_dir()
     safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id)
     return log_dir / f"{safe_id}.jsonl"
 
@@ -64,52 +62,40 @@ def get_jsonl_trace(session_id: str) -> dict[str, Any]:
         "total": len(events),
         "source": "jsonl",
         "path": str(path),
+        "tree": build_span_tree(events),
+    }
+
+
+@router.get("/tree/{session_id}")
+def get_trace_tree(session_id: str) -> dict[str, Any]:
+    payload = get_jsonl_trace(session_id)
+    return {
+        "session_id": session_id,
+        "source": "agent_event.v1",
+        "tree": payload.get("tree") or build_span_tree(payload.get("events") or []),
+        "total": payload.get("total") or 0,
     }
 
 
 @router.get("/langfuse/{session_id}")
 def get_langfuse_traces(session_id: str) -> dict[str, Any]:
-    if not is_langfuse_enabled() or not get_harness_config().langfuse_enabled:
-        return {
-            "session_id": session_id,
-            "enabled": False,
-            "traces": [],
-            "message": "Langfuse 未配置，请设置 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY",
-        }
-
+    """不再调用已弃用的 GET /api/public/traces。本地因果树 + Langfuse UI 链接。"""
     host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com").rstrip("/")
-    public_key = os.getenv("LANGFUSE_PUBLIC_KEY", "")
-    secret_key = os.getenv("LANGFUSE_SECRET_KEY", "")
-
-    try:
-        resp = requests.get(
-            f"{host}/api/public/traces",
-            params={"sessionId": session_id, "limit": 20},
-            auth=(public_key, secret_key),
-            timeout=8,
-        )
-        if resp.status_code == 404:
-            return {
-                "session_id": session_id,
-                "enabled": True,
-                "traces": [],
-                "message": "Langfuse 中暂无该 session 的 trace",
-            }
-        resp.raise_for_status()
-        payload = resp.json()
-        traces = payload.get("data", payload if isinstance(payload, list) else [])
-        return {
-            "session_id": session_id,
-            "enabled": True,
-            "traces": traces,
-            "total": len(traces),
-            "ui_url": f"{host}/",
-        }
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Langfuse API 请求失败: {exc}",
-        ) from exc
+    enabled = is_langfuse_enabled() and get_harness_config().langfuse_enabled
+    tree = get_trace_tree(session_id)
+    return {
+        "session_id": session_id,
+        "enabled": enabled,
+        "export": "otlp",
+        "traces": [],
+        "tree": tree.get("tree"),
+        "message": (
+            "Langfuse 通过 OpenTelemetry OTLP 导出（不再使用 /api/public/traces）。"
+            if enabled
+            else "Langfuse 未配置；下方是本地 Agent span tree。"
+        ),
+        "ui_url": f"{host}/" if enabled else None,
+    }
 
 
 @router.get("/citations/{session_id}")

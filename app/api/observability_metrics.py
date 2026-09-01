@@ -53,6 +53,11 @@ class AggregatedMetrics:
     avg_tokens_saved: float = 0.0
     parallel_batch_total: int = 0
     parallel_steps_total: int = 0
+    latency_p50_ms: float = 0.0
+    latency_p90_ms: float = 0.0
+    latency_p95_ms: float = 0.0
+    replan_trigger_rate: float | None = None
+    avg_replan_count: float = 0.0
     source_files_scanned: int = 0
     oldest_run_at: str | None = None
     newest_run_at: str | None = None
@@ -83,6 +88,11 @@ class AggregatedMetrics:
             "avg_tokens_saved": round(self.avg_tokens_saved, 1),
             "parallel_batch_total": self.parallel_batch_total,
             "parallel_steps_total": self.parallel_steps_total,
+            "latency_p50_ms": round(self.latency_p50_ms, 1),
+            "latency_p90_ms": round(self.latency_p90_ms, 1),
+            "latency_p95_ms": round(self.latency_p95_ms, 1),
+            "replan_trigger_rate": self.replan_trigger_rate,
+            "avg_replan_count": round(self.avg_replan_count, 2),
             "source_files_scanned": self.source_files_scanned,
             "oldest_run_at": self.oldest_run_at,
             "newest_run_at": self.newest_run_at,
@@ -112,17 +122,20 @@ def collect_run_summaries(
                 continue
             if record.get("phase") != "run":
                 continue
-            extra = record.get("extra") or {}
-            if extra.get("event") != "run_summary":
+            extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
+            event_name = str(extra.get("event") or record.get("event") or "")
+            if event_name != "run_summary":
                 continue
             ts = _parse_ts(record.get("timestamp"))
             if ts is not None and ts < cutoff:
                 continue
-            metadata = extra.get("metadata") or {}
+            metadata = extra.get("metadata") or record.get("metadata") or {}
             summaries.append(
                 {
                     "timestamp": record.get("timestamp"),
                     "session_id": record.get("session_id"),
+                    "run_id": record.get("run_id") or record.get("session_id"),
+                    "trace_id": record.get("trace_id"),
                     "status": record.get("status"),
                     "duration_ms": record.get("duration_ms"),
                     "metadata": metadata,
@@ -154,6 +167,7 @@ def aggregate_metrics(
     ovr_violations = 0
     ovr_checks = 0
     tokens_saved: list[float] = []
+    replans: list[float] = []
 
     timestamps: list[str] = []
 
@@ -197,12 +211,24 @@ def aggregate_metrics(
         saved = int(obs.get("estimated_tokens_saved") or 0)
         if saved > 0:
             tokens_saved.append(float(saved))
+        replan_count = int(meta.get("replan_count") or 0)
+        replans.append(float(replan_count))
 
         ts = item.get("timestamp")
         if ts:
             timestamps.append(str(ts))
 
     agg.avg_latency_ms = sum(latencies) / len(latencies) if latencies else 0.0
+    from app.observability.metrics import _percentile
+
+    ordered = sorted(latencies)
+    agg.latency_p50_ms = _percentile(ordered, 0.50)
+    agg.latency_p90_ms = _percentile(ordered, 0.90)
+    agg.latency_p95_ms = _percentile(ordered, 0.95)
+    agg.avg_replan_count = sum(replans) / len(replans) if replans else 0.0
+    agg.replan_trigger_rate = (
+        round(sum(1 for item in replans if item > 0) / len(replans), 3) if replans else None
+    )
     agg.avg_tool_calls = sum(tool_calls) / len(tool_calls) if tool_calls else 0.0
     agg.avg_step_success_rate = sum(step_rates) / len(step_rates) if step_rates else 0.0
     agg.avg_compression_ratio = sum(compression) / len(compression) if compression else 1.0
@@ -228,8 +254,11 @@ def aggregate_metrics(
 def render_prometheus_text(metrics: AggregatedMetrics) -> str:
     """Prometheus exposition format（企业监控栈可直接 scrape）。"""
     lines = [
-        "# HELP harness_runs_total Total harness runs in rolling window",
-        "# TYPE harness_runs_total counter",
+        "# HELP harness_window_runs Total harness runs in rolling JSONL window (gauge, not a counter)",
+        "# TYPE harness_window_runs gauge",
+        f"harness_window_runs {metrics.runs_total}",
+        "# HELP harness_runs_total Deprecated alias of harness_window_runs; not a true counter",
+        "# TYPE harness_runs_total gauge",
         f"harness_runs_total {metrics.runs_total}",
         "# HELP harness_task_success_rate Success rate in rolling window",
         "# TYPE harness_task_success_rate gauge",
@@ -237,9 +266,17 @@ def render_prometheus_text(metrics: AggregatedMetrics) -> str:
         "# HELP harness_avg_latency_ms Average end-to-end latency ms",
         "# TYPE harness_avg_latency_ms gauge",
         f"harness_avg_latency_ms {metrics.avg_latency_ms:.1f}",
+        "# HELP harness_latency_ms Run duration percentiles from JSONL window",
+        "# TYPE harness_latency_ms summary",
+        f"harness_latency_ms{{quantile=\"0.5\"}} {metrics.latency_p50_ms:.1f}",
+        f"harness_latency_ms{{quantile=\"0.9\"}} {metrics.latency_p90_ms:.1f}",
+        f"harness_latency_ms{{quantile=\"0.95\"}} {metrics.latency_p95_ms:.1f}",
         "# HELP harness_avg_tool_calls Average tool calls per run",
         "# TYPE harness_avg_tool_calls gauge",
         f"harness_avg_tool_calls {metrics.avg_tool_calls:.2f}",
+        "# HELP harness_replan_trigger_rate Share of runs that replanned",
+        "# TYPE harness_replan_trigger_rate gauge",
+        f"harness_replan_trigger_rate {metrics.replan_trigger_rate if metrics.replan_trigger_rate is not None else 0}",
         "# HELP harness_structured_output_compliance_rate Worker JSON compliance",
         "# TYPE harness_structured_output_compliance_rate gauge",
     ]
@@ -253,7 +290,7 @@ def render_prometheus_text(metrics: AggregatedMetrics) -> str:
             "# TYPE harness_estimated_tokens_saved_avg gauge",
             f"harness_estimated_tokens_saved_avg {metrics.avg_tokens_saved:.1f}",
             "# HELP harness_parallel_batches_total Parallel retrieval batches",
-            "# TYPE harness_parallel_batches_total counter",
+            "# TYPE harness_parallel_batches_total gauge",
             f"harness_parallel_batches_total {metrics.parallel_batch_total}",
         ]
     )

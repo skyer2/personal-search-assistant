@@ -7,22 +7,18 @@ GET /api/metrics/prometheus Prometheus text exposition
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import APIRouter, Query
 from fastapi.responses import PlainTextResponse
 
 from app.api.observability_metrics import aggregate_metrics, render_prometheus_text
 from app.config.loader import get_harness_config
-
-ROOT = Path(__file__).resolve().parents[1]
+from app.observability.paths import traces_log_dir
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
 
-def _log_dir() -> Path:
-    config = get_harness_config()
-    return ROOT / config.jsonl_log_dir
+def _log_dir():
+    return traces_log_dir()
 
 
 @router.get("/summary")
@@ -35,7 +31,10 @@ def metrics_summary(
     metrics = aggregate_metrics(_log_dir(), window_hours=hours)
     payload = metrics.to_dict()
     payload["enabled"] = config.metrics_enabled
-    payload["source"] = "jsonl_run_summary"
+    payload["source"] = "jsonl_run_summary+live_counters"
+    from app.observability.metrics import get_metrics
+
+    payload["live"] = get_metrics().snapshot()
     return payload
 
 
@@ -52,7 +51,11 @@ def metrics_prometheus(
         )
     hours = window_hours or config.metrics_window_hours
     metrics = aggregate_metrics(_log_dir(), window_hours=hours)
+    from app.observability.metrics import get_metrics
+
+    live = get_metrics().render_prometheus()
+    body = render_prometheus_text(metrics) + "\n" + live
     return PlainTextResponse(
-        render_prometheus_text(metrics),
+        body,
         media_type="text/plain; version=0.0.4",
     )

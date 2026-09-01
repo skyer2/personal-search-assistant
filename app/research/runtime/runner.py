@@ -584,6 +584,25 @@ class ResearchGraphRunner:
         )
         if session is not None:
             session.state.metadata["progress_assessment"] = assessment.to_dict()
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.PROGRESS_EVALUATED,
+                    phase="validate",
+                    status=assessment.verdict,
+                    attributes={
+                        "verdict": assessment.verdict,
+                        "reason": assessment.reason,
+                        "gaps": list(assessment.coverage_gaps or []) + list(assessment.missing_dimensions or []),
+                        "conflict_count": len(assessment.conflicts or []),
+                        "missing_dimensions": list(assessment.missing_dimensions or []),
+                    },
+                )
+        except Exception:
+            pass
         payload = {
             "progress_assessment": assessment.to_dict(),
             "progress": "progress_eval",
@@ -686,7 +705,30 @@ class ResearchGraphRunner:
         if issues or int(getattr(plan, "plan_version", 1) or 1) == int(
             getattr(state.plan, "plan_version", 1) or 1
         ):
+            try:
+                from app.observability import EventType, get_recorder
+
+                recorder = get_recorder()
+                if recorder.is_active:
+                    recorder.emit(
+                        EventType.REPLAN_REJECTED,
+                        phase="recover",
+                        status="rejected",
+                        plan_version=int(getattr(state.plan, "plan_version", 1) or 1),
+                        attributes={
+                            "reason": str(assessment.get("reason") or "unchanged"),
+                            "issues": issues,
+                        },
+                    )
+            except Exception:
+                pass
             return exhausted
+        from_version = int(getattr(state.plan, "plan_version", 1) or 1)
+        added = [
+            str(item.get("task_id") or "")
+            for item in list(patch.get("add_tasks") or [])
+            if isinstance(item, dict)
+        ]
         state.plan = plan
         state.replan_count += 1
         self.harness._report_phase(
@@ -696,6 +738,33 @@ class ResearchGraphRunner:
             reason=str(patch.get("reason") or "semantic_gap"),
             new_steps=len(state.plan.steps),
         )
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                budget = {}
+                try:
+                    budget = self.harness.remaining_budget(state)
+                except Exception:
+                    budget = {}
+                recorder.emit(
+                    EventType.REPLAN_APPLIED,
+                    phase="recover",
+                    status="applied",
+                    plan_version=int(getattr(state.plan, "plan_version", 1) or 1),
+                    attributes={
+                        "from_plan_version": from_version,
+                        "to_plan_version": int(getattr(state.plan, "plan_version", 1) or 1),
+                        "reason": str(patch.get("reason") or assessment.get("reason") or "semantic_gap"),
+                        "gaps": list(assessment.get("missing_dimensions") or assessment.get("coverage_gaps") or []),
+                        "added_tasks": [tid for tid in added if tid],
+                        "removed_tasks": [],
+                        "remaining_budget": budget,
+                    },
+                )
+        except Exception:
+            pass
         return {
             "plan": state.plan.to_dict(),
             "plan_version": int(getattr(state.plan, "plan_version", 1) or 1),
@@ -738,6 +807,25 @@ class ResearchGraphRunner:
             scope="finalize",
         )
         passed = bool(outcome.passed or outcome.severity == "warning")
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.QUALITY_EVALUATED,
+                    phase="quality",
+                    status="pass" if passed else "fail",
+                    attributes={
+                        "passed": passed,
+                        "severity": getattr(outcome, "severity", ""),
+                        "citation_coverage_rate": getattr(state, "citation_coverage_rate", None),
+                        "hallucination_rate": getattr(state, "hallucination_rate", None),
+                        "unsupported_claim_rate": getattr(state, "hallucination_rate", None),
+                    },
+                )
+        except Exception:
+            pass
         return {
             "quality_passed": passed,
             "final_content": state.final_content,

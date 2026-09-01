@@ -2178,6 +2178,26 @@ textarea {
   gap: 16px;
 }
 
+.trace-span-tree {
+  margin: 0;
+  padding-left: 18px;
+  list-style: none;
+}
+
+.trace-span-tree .trace-span-tree {
+  margin-top: 8px;
+  border-left: 1px solid rgba(113, 247, 255, 0.16);
+}
+
+.trace-span-node {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-height: 32px;
+  color: #d9faff;
+}
+
 .panel-heading-row {
   display: flex;
   align-items: flex-start;

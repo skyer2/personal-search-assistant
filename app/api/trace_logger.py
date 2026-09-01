@@ -68,7 +68,10 @@ class JsonlTraceLogger:
         if tokens_used is not None:
             record["tokens_used"] = tokens_used
         if extra:
-            record.update(extra)
+            record["extra"] = extra
+            for key, value in extra.items():
+                if key not in record:
+                    record[key] = value
 
         path = self.log_dir / f"{session_id}.jsonl"
         line = json.dumps(record, ensure_ascii=False)

@@ -15,6 +15,7 @@ import type {
   LangfuseTraceResponse,
   SearchMode,
   TaskResponse,
+  TraceTree,
   UploadResponse
 } from "../types";
 
@@ -108,8 +109,8 @@ export async function runEvalDryRun(): Promise<{ status: string; report_file?: s
   return requestJson(apiUrl("/api/eval/run?dry_run=true&report_md=true"), { method: "POST" });
 }
 
-export async function fetchJsonlTrace(sessionId: string): Promise<JsonlTraceResponse> {
-  return requestJson<JsonlTraceResponse>(apiUrl(`/api/traces/jsonl/${encodeURIComponent(sessionId)}`));
+export async function fetchTraceTree(sessionId: string): Promise<{ session_id: string; tree: TraceTree; total: number }> {
+  return requestJson(apiUrl(`/api/traces/tree/${encodeURIComponent(sessionId)}`));
 }
 
 export async function fetchCitations(sessionId: string): Promise<CitationsResponse> {

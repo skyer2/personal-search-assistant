@@ -3,10 +3,17 @@ export type SearchMode = "agent" | "direct";
 export type MonitorEventName =
   | "session_created"
   | "tool_start"
+  | "tool_end"
+  | "tool_error"
   | "assistant_call"
   | "task_result"
   | "task_cancelled"
   | "phase"
+  | "worker"
+  | "progress"
+  | "replan"
+  | "evidence"
+  | "plan"
   | "hitl_interrupt"
   | "error"
   | string;
@@ -141,15 +148,44 @@ export interface EvalReport {
 }
 
 export interface JsonlTraceEvent {
-  phase: string;
-  status: string;
+  phase?: string;
+  status?: string;
   timestamp?: string;
   step_index?: number;
   step_type?: string;
   duration_ms?: number;
   session_id?: string;
+  run_id?: string;
+  trace_id?: string;
+  span_id?: string;
+  parent_span_id?: string;
+  type?: string;
+  event?: string;
+  task_id?: string;
+  plan_version?: number;
+  attempt?: number;
   evidence_sources?: EvidenceSource[];
   [key: string]: unknown;
+}
+
+export interface TraceSpanNode {
+  span_id: string;
+  parent_span_id?: string | null;
+  name: string;
+  phase?: string;
+  status?: string;
+  duration_ms?: number;
+  task_id?: string;
+  plan_version?: number;
+  attempt?: number;
+  timestamp?: string;
+  children: TraceSpanNode[];
+}
+
+export interface TraceTree {
+  roots: TraceSpanNode[];
+  span_count: number;
+  event_count: number;
 }
 
 export interface EvidenceSource {
@@ -186,6 +222,7 @@ export interface JsonlTraceResponse {
   events: JsonlTraceEvent[];
   total: number;
   message?: string;
+  tree?: TraceTree;
 }
 
 export interface LangfuseTraceResponse {

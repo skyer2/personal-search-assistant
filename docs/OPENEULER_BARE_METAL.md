@@ -291,7 +291,8 @@ HARNESS_HITL_ENABLED=false
 | 变量 | 默认/说明 |
 |------|-----------|
 | `HARNESS_LANGFUSE_ENABLED` | 不配则无云端 Trace |
-| `LANGFUSE_PUBLIC_KEY` / `SECRET_KEY` / `HOST` | Langfuse |
+| `LANGFUSE_PUBLIC_KEY` / `SECRET_KEY` / `HOST` | Langfuse；trace 走 OTLP，不再用 `/api/public/traces` |
+| `OBS_CONTENT_MODE` | `redacted`（默认）或 `full` |
 | `HARNESS_GRAPH_CHECKPOINT_PATH` | 默认 `output/.harness/graph_checkpoints.sqlite` |
 | `HARNESS_MAX_RUN_SEC` | 单次任务墙钟上限，yaml 默认 600 |
 | `HARNESS_MAX_PARALLEL_WORKERS` | 默认 3 |

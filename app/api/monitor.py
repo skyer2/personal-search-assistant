@@ -76,6 +76,15 @@ class ToolMonitor:
         # 控制台保底输出，便于无前端场景下观察执行过程
         print(f"\n[Monitor:{event_type}] {message}")
 
+    def forward_canonical_event(
+        self,
+        event_type: str,
+        message: str,
+        data: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Flight Recorder → UI。不要再走 report_*，避免二次语义化。"""
+        self._emit(event_type, message, data)
+
     def _send_to_websocket(
         self,
         payload: dict[str, Any],
@@ -103,12 +112,74 @@ class ToolMonitor:
         self,
         tool_name: str,
         args: Optional[dict[str, Any]] = None,
+        *,
+        tool_call_id: str = "",
     ) -> None:
-        """报告开始执行某个工具"""
+        """报告开始执行某个工具。运行中由 Flight Recorder 统一 emit，避免双计。"""
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.TOOL_STARTED,
+                    phase="execute",
+                    status="start",
+                    attributes={
+                        "tool_name": tool_name,
+                        "tool_call_id": tool_call_id,
+                        "args": args or {},
+                    },
+                )
+                return
+        except Exception:
+            pass
         self._emit(
             "tool_start",
             f"开始执行工具: {tool_name}",
-            {"tool_name": tool_name, "args": args},
+            {"tool_name": tool_name, "args": args, "tool_call_id": tool_call_id},
+        )
+
+    def report_tool_end(
+        self,
+        tool_name: str,
+        *,
+        tool_call_id: str = "",
+        duration_ms: int | None = None,
+        status: str = "ok",
+        error: str = "",
+    ) -> None:
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            event_type = EventType.TOOL_COMPLETED if status == "ok" else EventType.TOOL_FAILED
+            if recorder.is_active:
+                recorder.emit(
+                    event_type,
+                    phase="execute",
+                    status=status,
+                    duration_ms=duration_ms,
+                    attributes={
+                        "tool_name": tool_name,
+                        "tool_call_id": tool_call_id,
+                        "error": error,
+                    },
+                )
+                return
+        except Exception:
+            pass
+        event_name = "tool_end" if status == "ok" else "tool_error"
+        self._emit(
+            event_name,
+            f"工具{'完成' if status == 'ok' else '失败'}: {tool_name}",
+            {
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "duration_ms": duration_ms,
+                "status": status,
+                "error": error,
+            },
         )
 
     def report_assistant(
@@ -145,6 +216,23 @@ class ToolMonitor:
         status_icon = {"start": "→", "done": "✓", "failed": "✗", "cancelled": "⊗"}.get(
             status, "·"
         )
+        try:
+            from app.observability import get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit_phase(
+                    phase,
+                    status,
+                    task_id=data.get("task_id"),
+                    attempt=data.get("attempt"),
+                    plan_version=data.get("plan_version"),
+                    duration_ms=data.get("duration_ms"),
+                    attributes={k: v for k, v in data.items() if k not in {"status"}},
+                )
+                return
+        except Exception:
+            pass
         self._emit(
             "phase",
             f"[{phase}] {status_icon} {status}",
@@ -159,6 +247,23 @@ class ToolMonitor:
         **extra: Any,
     ) -> None:
         """报告 interrupt_on 命中，等待人工审批。"""
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.HITL_INTERRUPT,
+                    phase="hitl",
+                    status="waiting",
+                    attributes={
+                        "gate_type": extra.get("gate_type"),
+                        "action_count": len(action_requests),
+                    },
+                    to_ws=False,
+                )
+        except Exception:
+            pass
         self._emit(
             "hitl_interrupt",
             f"等待人工审批（{len(action_requests)} 个动作）",

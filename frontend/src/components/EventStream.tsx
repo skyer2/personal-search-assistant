@@ -52,6 +52,15 @@ function EventIcon({ event, phase }: { event: string; phase?: string }) {
   if (event === "tool_start") {
     return <ToolOutlined aria-hidden />;
   }
+  if (event === "tool_end") {
+    return <CheckCircleOutlined aria-hidden />;
+  }
+  if (event === "tool_error") {
+    return <CloseCircleOutlined aria-hidden />;
+  }
+  if (event === "worker" || event === "replan" || event === "progress") {
+    return <BranchesOutlined aria-hidden />;
+  }
   if (event === "session_created") {
     return <FileSearchOutlined aria-hidden />;
   }
