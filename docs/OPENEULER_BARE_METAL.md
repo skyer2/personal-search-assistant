@@ -501,7 +501,7 @@ cd frontend && pnpm install
 | `Address already in use` | `ss -lntp \| grep 8000` 杀掉旧进程 |
 | TLS / certificate verify failed | 系统时间、`ca-certificates` |
 | `uv python install` 超时 | 代理，或改路径 B/C |
-| `sudo: corepack: command not found` | `sudo` 没有 `/usr/local/node/bin`。用 `/usr/local/node/bin/corepack enable`，或 `/usr/local/node/bin/npm install -g pnpm@10.33.0` |
+| `SqliteSaver does not support async methods` | 已修：生产用 AsyncSqliteSaver。`git pull origin main` 后重启 uvicorn |
 | SELinux AVC | `ausearch -m avc -ts recent` |
 
 看后端终端里 `[MainAgent]`、`[PlannerLLM]`、工具报错。
