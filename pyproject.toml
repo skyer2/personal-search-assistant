@@ -28,6 +28,7 @@ dependencies = [
     "typing-extensions>=4.5.0",
     "uvicorn[standard]>=0.20.0",
     "langfuse>=2.0.0",
+    "reportlab>=4.0.0",
 ]
 
 [tool.uv]
