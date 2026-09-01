@@ -1,3 +1,4 @@
+import { elapsedClockSelfCheck } from "./elapsedClock";
 import { deriveRunStatus } from "./runStatus";
 import { computePhaseProgress } from "./phaseProgress";
 import type { MonitorMessage } from "../types";
@@ -51,5 +52,8 @@ export function runProgressSelfCheck(): string[] {
   if (completed.items.some((item) => item.tone !== "done")) {
     errors.push("completed pipeline should mark every phase done");
   }
+
+  const elapsedErrors = elapsedClockSelfCheck();
+  errors.push(...elapsedErrors.map((error) => `elapsed: ${error}`));
   return errors;
 }

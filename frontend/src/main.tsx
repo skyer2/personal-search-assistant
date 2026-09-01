@@ -3,11 +3,13 @@ import { App as AntApp, ConfigProvider, theme } from "antd";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { ConversationLayoutPreview } from "./preview/ConversationLayoutPreview";
 import { RunStatesPreview } from "./preview/RunStatesPreview";
 import "./styles.css";
 
-const showRunStatesPreview =
-  import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "run-states";
+const preview = import.meta.env.DEV
+  ? new URLSearchParams(window.location.search).get("preview")
+  : null;
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
@@ -41,7 +43,15 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         }
       }}
     >
-      <AntApp>{showRunStatesPreview ? <RunStatesPreview /> : <App />}</AntApp>
+      <AntApp>
+        {preview === "run-states" ? (
+          <RunStatesPreview />
+        ) : preview === "conversation-layout" ? (
+          <ConversationLayoutPreview />
+        ) : (
+          <App />
+        )}
+      </AntApp>
     </ConfigProvider>
   </React.StrictMode>
 );
