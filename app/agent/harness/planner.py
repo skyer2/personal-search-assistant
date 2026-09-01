@@ -18,14 +18,27 @@ NETWORK_KEYWORDS = ("搜索", "网络", "互联网", "公开", "新闻", "趋势
 FILE_READ_KEYWORDS = ("上传", "附件", "读取文件", "文档内容")
 PDF_KEYWORDS = ("pdf", "PDF")
 MD_KEYWORDS = ("markdown", "Markdown", "MD", "md")
-REPORT_KEYWORDS = ("报告", "研报", "白皮书")
+REPORT_KEYWORDS = ("报告", "研报", "白皮书", "调研文档", "调研报告")
 REPORT_ACTION_KEYWORDS = ("生成", "整理", "撰写", "输出", "导出")
 
 
 def _looks_like_report_request(query: str) -> bool:
     has_report = any(k in query for k in REPORT_KEYWORDS)
     has_action = any(k in query for k in REPORT_ACTION_KEYWORDS)
-    return has_report and has_action
+    if has_report and has_action:
+        return True
+    return "调研" in query and "文档" in query and has_action
+
+
+def lock_file_deliverable(query: str, rule_deliverable: str, proposed: str) -> str:
+    """规则已认出文件交付时，禁止 LLM / auto_resolve 降成对话 text。"""
+    proposed = proposed if proposed in {"text", "md", "pdf"} else rule_deliverable
+    q = (query or "").lower()
+    if "pdf" in q or rule_deliverable == "pdf":
+        return "pdf"
+    if rule_deliverable == "md" and proposed == "text":
+        return "md"
+    return proposed
 
 
 def _infer_deliverable(query: str, slots: IntentSlots) -> str:
@@ -216,8 +229,17 @@ def auto_resolve_clarification(intent: TaskIntent) -> TaskIntent:
         return intent
     resolved = TaskIntent.from_dict(intent.to_dict())
     if "deliverable_ambiguous" in resolved.ambiguity_flags:
-        resolved.deliverable = "text"
-        resolved.slots.output_preference = "chat"
+        locked = lock_file_deliverable(
+            resolved.raw_query,
+            resolved.deliverable,
+            "text",
+        )
+        if locked in {"md", "pdf"}:
+            resolved.deliverable = locked  # type: ignore[assignment]
+            resolved.slots.output_preference = "file_pdf" if locked == "pdf" else "file_md"
+        else:
+            resolved.deliverable = "text"
+            resolved.slots.output_preference = "chat"
     resolved.needs_clarification = False
     resolved.clarification_resolved = True
     resolved.clarification_question = ""

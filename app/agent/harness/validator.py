@@ -8,6 +8,14 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from app.agent.harness.deliverables import (
+    best_report_text,
+    content_from_loop_state,
+    ensure_pdf_from_markdown,
+    list_markdown_files,
+    list_pdf_files,
+    persist_markdown_if_missing,
+)
 from app.agent.harness.state import (
     ExecutionPlan,
     LoopState,
@@ -71,12 +79,20 @@ class ResultValidator:
                 return ValidationOutcome(False, "no_content", "error")
 
         if step.step_type == "generate_markdown":
-            md_files = list(session_dir.glob("*.md"))
+            persist_markdown_if_missing(
+                session_dir,
+                best_report_text(content, content_from_loop_state(state)),
+            )
+            md_files = list_markdown_files(session_dir)
             if not md_files:
                 return ValidationOutcome(False, "no_file_generated", "warning")
 
         if step.step_type == "convert_pdf":
-            pdf_files = list(session_dir.glob("*.pdf"))
+            ensure_pdf_from_markdown(
+                session_dir,
+                content=best_report_text(content, content_from_loop_state(state)),
+            )
+            pdf_files = list_pdf_files(session_dir)
             if not pdf_files:
                 return ValidationOutcome(False, "no_file_generated", "error")
 
@@ -99,12 +115,23 @@ class ResultValidator:
             return ValidationOutcome(False, "no_error", "error")
 
         if intent and intent.deliverable in ("md", "pdf"):
-            md_files = list(session_dir.glob("*.md"))
+            from app.agent.harness.deliverables import (
+                content_from_loop_state,
+                materialize_requested_files,
+            )
+
+            materialize_requested_files(
+                session_dir,
+                deliverable=intent.deliverable,
+                content=content_from_loop_state(state) or content,
+                query=intent.raw_query,
+            )
+            md_files = list_markdown_files(session_dir)
             if not md_files:
                 return ValidationOutcome(False, "no_file_generated", "error")
 
         if intent and intent.deliverable == "pdf":
-            pdf_files = list(session_dir.glob("*.pdf"))
+            pdf_files = list_pdf_files(session_dir)
             if not pdf_files:
                 return ValidationOutcome(False, "no_file_generated", "error")
 

@@ -14,6 +14,7 @@ from typing import Any, Optional
 from app.agent.harness.intent_slots import IntentSlots, build_clarification_question, detect_ambiguity_flags
 from app.agent.harness.planner import (
     auto_resolve_clarification,
+    lock_file_deliverable,
     understand_task as understand_task_rules,
 )
 from app.agent.harness.state import ExecutionPlan, TaskIntent
@@ -30,12 +31,13 @@ PLANNER_LLM_PROMPT = """你是个人搜索助手的意图理解助手。根据�
 
 要求：
 1. 只输出一个 JSON 对象，不要 markdown 代码块
-2. deliverable 只能是 text、md、pdf；默认 text（对话回答）
-3. 只有用户明确要求生成报告/Markdown/PDF 时才用 md 或 pdf
-4. 「列出 N 条 + 来源」仍用 text，在对话中附来源
-5. slots 含 topic、item_count、require_citations、output_preference、time_range
-6. confidence 0~1；reason 一句话
-7. 可选 brief：entities、dimensions、depth(shallow|standard|thorough)、freshness、prefer_primary
+2. deliverable 只能是 text、md、pdf；未要求文件时默认 text（对话回答）
+3. 用户明确要求 PDF / Markdown / 调研文档 / 报告文件时必须用 pdf 或 md，禁止降成 text
+4. 规则引擎候选里 deliverable 已是 pdf 或 md 时，不得改成 text
+5. 「列出 N 条 + 来源」且未要求文件时仍用 text，在对话中附来源
+6. slots 含 topic、item_count、require_citations、output_preference、time_range
+7. confidence 0~1；reason 一句话
+8. 可选 brief：entities、dimensions、depth(shallow|standard|thorough)、freshness、prefer_primary
 
 输出格式：
 {{
@@ -81,12 +83,18 @@ def merge_intent_from_llm(
         rule_intent.intent_confidence = rule_intent.rule_confidence
         return rule_intent
 
-    deliverable = str(llm_patch.get("deliverable", rule_intent.deliverable))
-    if deliverable not in {"text", "md", "pdf"}:
-        deliverable = rule_intent.deliverable
+    deliverable = lock_file_deliverable(
+        rule_intent.raw_query,
+        rule_intent.deliverable,
+        str(llm_patch.get("deliverable", rule_intent.deliverable)),
+    )
 
     slots_data = llm_patch.get("slots") if isinstance(llm_patch.get("slots"), dict) else {}
     merged_slots = IntentSlots.from_dict({**rule_intent.slots.to_dict(), **slots_data})
+    if deliverable == "pdf":
+        merged_slots.output_preference = "file_pdf"
+    elif deliverable == "md" and merged_slots.output_preference in {"auto", "chat"}:
+        merged_slots.output_preference = "file_md"
 
     merged = TaskIntent(
         raw_query=rule_intent.raw_query,
@@ -261,3 +269,4 @@ async def plan_task(
 
 # 向后兼容别名
 confirm_intent_with_llm = understand_with_llm
+merge_intent = merge_intent_from_llm
