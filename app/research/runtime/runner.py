@@ -63,7 +63,7 @@ class ResearchGraphRunner:
         from app.research.runtime.graph import compile_research_graph
 
         return compile_research_graph(
-            checkpointer=checkpointer or _default_checkpointer(),
+            checkpointer=checkpointer,
             runtime=self,
             profile=profile,
         )
@@ -105,7 +105,10 @@ class ResearchGraphRunner:
             search_mode=profile,
         )
         try:
-            graph = self.compile(checkpointer=checkpointer, profile=profile)
+            graph = self.compile(
+                checkpointer=checkpointer or await _default_checkpointer(),
+                profile=profile,
+            )
             result = await _ainvoke_resilient(
                 graph, await _initial_or_resume_payload(graph, payload, config, ctx), config
             )
@@ -809,8 +812,8 @@ def _failed_worker(task_id: str, step_type: str, reason: str) -> dict[str, Any]:
     }
 
 
-def _default_checkpointer():
-    from app.research.runtime.checkpointer import default_research_checkpointer
+async def _default_checkpointer():
+    from app.research.runtime.checkpointer import aget_research_checkpointer
 
     backend = None
     path = None
@@ -822,7 +825,7 @@ def _default_checkpointer():
         path = getattr(cfg, "graph_checkpoint_path", None) or None
     except Exception:
         pass
-    return default_research_checkpointer(backend=backend, path=path)
+    return await aget_research_checkpointer(backend=backend, path=path)
 
 
 async def _initial_or_resume_payload(

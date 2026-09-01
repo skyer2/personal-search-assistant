@@ -76,7 +76,43 @@ def test_default_checkpointer_sqlite_helper():
     print("[OK] checkpointer helpers")
 
 
+def test_async_sqlite_checkpointer_ainvoke():
+    import asyncio
+    import tempfile
+
+    from app.research.runtime.checkpointer import (
+        async_sqlite_checkpointer,
+        reset_async_checkpointer_cache,
+        reset_checkpointer_cache,
+    )
+    from app.research.runtime.graph import compile_research_graph, initial_graph_state
+
+    async def _run() -> None:
+        reset_checkpointer_cache()
+        await reset_async_checkpointer_cache()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "async-graph.sqlite")
+            saver = await async_sqlite_checkpointer(path)
+            graph = compile_research_graph(checkpointer=saver)
+            state = initial_graph_state(
+                run_id="ackpt-1",
+                session_id="ackpt-1",
+                task_query="比较 Tesla 和 Figure 的差异并生成 Markdown 报告",
+            )
+            config = {"configurable": {"thread_id": "ackpt-1"}, "recursion_limit": 50}
+            result = await graph.ainvoke(state, config=config)
+            assert result.get("plan")
+            snapshot = await graph.aget_state(config)
+            assert snapshot.values.get("task_status")
+        await reset_async_checkpointer_cache()
+        reset_checkpointer_cache()
+
+    asyncio.run(_run())
+    print("[OK] async sqlite ainvoke")
+
+
 if __name__ == "__main__":
     test_default_checkpointer_sqlite_helper()
     test_sqlite_checkpointer_roundtrip_plan_and_progress()
+    test_async_sqlite_checkpointer_ainvoke()
     print("\n=== Checkpoint tests passed ===")
