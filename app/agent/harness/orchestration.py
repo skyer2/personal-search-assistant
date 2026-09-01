@@ -31,6 +31,16 @@ FORBIDDEN_TOOLS_BY_STEP: dict[str, frozenset[str]] = {
     "generate_markdown": frozenset({"internet_search"}),
 }
 
+# 缺 JSON / 越权后的内层重试：禁止再搜，只补 JSON。
+JSON_ONLY_FAIL_REASONS = frozenset(
+    {
+        "invalid_structured_output",
+        "empty_worker_result",
+        "unauthorized_tool",
+        "worker_failed",
+    }
+)
+
 
 @dataclass
 class WorkerResultPayload:
@@ -222,11 +232,13 @@ def validate_structured_worker_payload(
 
 
 def build_strict_json_retry_instruction(step: PlanStep) -> str:
-    """【Phase 8】结构化回传失败后的重试指令。"""
+    """结构化回传失败后的重试指令：禁止再搜，只补 JSON。"""
     worker = step.subagent or step.step_type
     return f"""
-    【重试 — 必须纯 JSON】
-    上次回传不符合结构化格式。请仅输出 JSON，不要任何解释文字：
+    【重试 — 禁止再检索，只输出 JSON】
+    上次回传不符合结构化格式。禁止调用 internet_search / fetch_url，不要重新搜索或抓页。
+    已抓取的网页如需核对，只用 read_artifact / read_evidence。
+    请仅输出 JSON，不要任何解释文字：
     {{"ok":true,"summary":"...","facts":["..."],"sources":["..."],"confidence":0.9,"error_code":"","worker":"{worker}","step_type":"{step.step_type}"}}
     """
 
@@ -343,15 +355,22 @@ def check_unauthorized_tools(
     *,
     enforce: bool,
 ) -> tuple[bool, list[str]]:
-    """校验本步是否调用了禁止工具（计划绑定）。"""
+    """校验本步是否调用了禁止工具（计划绑定）。
+
+    JIT 回读工具始终允许：研究工人提示词会要求 read_artifact / read_evidence，
+    计划白名单漏了它们时不应整步判越权重搜。
+    """
     if not enforce:
         return True, []
+    from app.agent.harness.worker_profiles import CONTEXT_TOOLS
+
+    always_allowed = set(CONTEXT_TOOLS)
     if step.allowed_tools:
-        allowed = set(step.allowed_tools)
+        allowed = set(step.allowed_tools) | always_allowed
         bad = [t for t in tools_invoked if t not in allowed]
         return len(bad) == 0, bad
     forbidden = FORBIDDEN_TOOLS_BY_STEP.get(step.step_type, frozenset())
-    bad = [t for t in tools_invoked if t in forbidden]
+    bad = [t for t in tools_invoked if t in forbidden and t not in always_allowed]
     return len(bad) == 0, bad
 
 
@@ -510,6 +529,113 @@ def apply_step_status(plan: ExecutionPlan, completed_count: int) -> None:
             step.metadata["status"] = StepStatus.DONE.value
         else:
             step.metadata.setdefault("status", StepStatus.PENDING.value)
+
+
+def message_text(msg: Any) -> str:
+    """把 LangChain / dict 消息的 content 收成纯文本。"""
+    content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+        return "\n".join(p for p in parts if p)
+    return "" if content is None else str(content)
+
+
+def _message_role(msg: Any) -> str:
+    if isinstance(msg, dict):
+        return str(msg.get("role") or msg.get("type") or "").lower()
+    type_attr = str(getattr(msg, "type", "") or "").lower()
+    role_attr = str(getattr(msg, "role", "") or "").lower()
+    class_name = type(msg).__name__.lower()
+    return type_attr or role_attr or class_name
+
+
+def is_tool_message(msg: Any) -> bool:
+    role = _message_role(msg)
+    class_name = type(msg).__name__.lower()
+    return role in {"tool", "toolmessage"} or "toolmessage" in class_name
+
+
+def is_assistant_message(msg: Any) -> bool:
+    role = _message_role(msg)
+    class_name = type(msg).__name__.lower()
+    return role in {"ai", "assistant", "aimessage", "aimessagechunk"} or "aimessage" in class_name
+
+
+def extract_last_assistant_text(messages: list[Any] | None) -> str:
+    """倒着找最后一条有正文的助手消息，跳过 ToolMessage / 纯 tool_calls。"""
+    for msg in reversed(messages or []):
+        if is_tool_message(msg):
+            continue
+        text = message_text(msg).strip()
+        if not text:
+            continue
+        if is_assistant_message(msg):
+            return text
+        role = _message_role(msg)
+        if role in {"human", "user", "system", "humanmessage", "systemmessage"}:
+            continue
+        if text.startswith("{") or _extract_json_object(text) is not None:
+            return text
+    return ""
+
+
+def salvage_payload_from_artifacts(
+    payload: WorkerResultPayload,
+    *,
+    step: PlanStep | None = None,
+    step_index: int = -1,
+) -> WorkerResultPayload:
+    """JSON 解析失败时，用本步已抓原文卡片拼一份可用载荷，避免整步重搜。"""
+    if payload.facts or payload.sources or payload.findings:
+        return payload
+    try:
+        from app.agent.harness.artifacts import get_artifact_store
+
+        store = get_artifact_store()
+    except Exception:
+        return payload
+    items = store.iter_artifacts()
+    if not items:
+        return payload
+    if step_index >= 0:
+        scoped = [a for a in items if int(getattr(a, "step_index", -1) or -1) == step_index]
+        if scoped:
+            items = scoped
+    items = items[-12:]
+    sources: list[str] = []
+    facts: list[str] = []
+    ids: list[str] = []
+    for art in items:
+        ids.append(art.artifact_id)
+        loc = str(getattr(art, "locator", "") or "")
+        if loc.startswith("http"):
+            sources.append(loc)
+        title = str(getattr(art, "title", "") or art.artifact_id)
+        snippet = str(getattr(art, "summary", "") or getattr(art, "content", "") or "")[:240]
+        if snippet:
+            facts.append(f"{title}: {snippet}")
+        elif loc and loc not in sources:
+            sources.append(loc)
+    if not facts and not sources:
+        return payload
+    payload.ok = True
+    payload.error_code = ""
+    payload.facts = facts[:10]
+    payload.sources = list(dict.fromkeys(sources))[:10]
+    payload.artifact_ids = list(dict.fromkeys(list(payload.artifact_ids or []) + ids))[:20]
+    if not payload.summary.strip():
+        payload.summary = f"已根据 {len(ids)} 份已存原文整理要点，未重新检索。"
+    if step is not None:
+        payload.worker = payload.worker or (step.subagent or "")
+        payload.step_type = payload.step_type or step.step_type
+    return payload
 
 
 def _extract_json_object(text: str) -> Optional[dict[str, Any]]:

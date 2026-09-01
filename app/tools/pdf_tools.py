@@ -16,7 +16,6 @@ except ImportError:
 from langchain_core.tools import tool
 
 from app.api.context import get_session_context
-from app.api.monitor import monitor
 from app.utils.path_utils import resolve_path
 from app.utils.word_converter import convert_md_to_pdf as convert_md_to_pdf_via_word
 
@@ -35,8 +34,6 @@ def convert_md_to_pdf(
     :param pdf_filename: 可选 PDF 输出文件名；不传时与 Markdown 同名
     :return: 转换结果说明
     """
-    monitor.report_tool("Markdown转PDF工具")
-
     try:
         # 输入路径必须先落到当前会话目录，避免模型传入任意系统路径
         session_dir = get_session_context()

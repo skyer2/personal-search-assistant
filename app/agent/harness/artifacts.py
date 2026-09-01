@@ -276,6 +276,9 @@ class ArtifactStore:
             "text": text,
         }
 
+    def iter_artifacts(self) -> list[Artifact]:
+        return list(self._items.values())
+
     def list_cards(self, *, limit: int = 40) -> list[dict[str, Any]]:
         return [item.compact_card() for item in list(self._items.values())[:limit]]
 

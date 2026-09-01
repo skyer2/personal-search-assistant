@@ -9,7 +9,7 @@ from typing import Literal
 
 from langchain_core.tools import tool
 
-from app.api.monitor import monitor
+from app.agent.harness.step_budget import consume_retrieval_or_block
 from app.tools.tavily_core import search_internet
 
 
@@ -30,16 +30,9 @@ def internet_search(
     :param include_raw_content: 是否返回网页原文内容；False 返回摘要，True 尝试返回更完整正文
     :return: Tavily 返回的结构化搜索结果
     """
-    monitor.report_tool(
-        tool_name="网络搜索工具",
-        args={
-            "query": query,
-            "topic": topic,
-            "max_results": max_results,
-            "include_raw_content": include_raw_content,
-            "transport": "langchain-tool",
-        },
-    )
+    blocked = consume_retrieval_or_block("internet_search")
+    if blocked:
+        return blocked
     return search_internet(
         query=query,
         topic=topic,

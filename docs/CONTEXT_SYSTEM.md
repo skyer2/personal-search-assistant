@@ -174,7 +174,8 @@ compress(原文)            →  compressed_content 进 StepResult
 - `obs_estimated_tokens_saved`：按「少掉的字符 / 4」估算
 - 最终报告：finalize 时 Citation 再给正文加 `[n]` 和参考文献，**不是**把各步压缩文简单拼接
 
-短结果不压：避免「本来就 800 字还调一次 LLM」。
+短结果不压：避免「本来就 800 字还调一次 LLM」。  
+工人 JSON 已有可用 `summary` + `facts`/`sources` 时，压缩阶段直接用这份摘要，**不再同步打压缩 LLM**（避免网关超时数分钟后 fallback truncate）。
 
 ---
 
@@ -188,7 +189,9 @@ compress(原文)            →  compressed_content 进 StepResult
 {"ok": true, "summary": "...", "facts": ["..."], "sources": ["URL或表名"], "confidence": 0.9, ...}
 ```
 
-解析后放进 `result.metadata["worker_payload"]`。校验失败会 `structured_retry` 一次。
+解析后放进 `result.metadata["worker_payload"]`。缺 JSON 时 **只补 JSON、禁止再搜**：`structured_retry` 把 `internet_search` / `fetch_url` 额度置 0，并尽量从最后一条 **AIMessage**（不是 ToolMessage）抽 JSON；仍没有则用已存 Artifact 卡片 salvage。不要整步 ReAct 重搜。
+
+研究步 `allowed_tools` 必须包含 `read_artifact` / `read_evidence`（JIT 回读原文）。计划白名单漏了它们时，校验也会把这两个工具视为始终允许，避免 `unauthorized_tool` 空转。
 
 **为什么这是上下文工程：**  
 后面的 prior 和 digest **吃的是 facts/sources，不是网页 HTML**。没有这层，压缩只能对一坨散文做摘要，来源更容易丢。并行检索三路时，各路互不通信，join 后靠 digest 汇总，避免把三路原文同时塞进写报告窗口。
@@ -239,9 +242,12 @@ Finalize：
 `harness.yml` `budget`：
 
 - `max_total_tokens`（对 step 原文 + final 的粗估）
-- `max_tool_calls`
+- `max_tool_calls`（会话上限；默认 40，给并行研究 + 写报告留余量）
+- `max_step_tool_calls`（**步内** `internet_search` / `fetch_url` 硬上限，默认 8；超限工具返回「停止检索，立刻输出 JSON」，不是等下一步才 abort）
 - `max_run_sec`
 - `max_plan_steps` / `max_replan_count`
+
+步内上限拦的是「一个工人一次 astream 连打 20～40 次」；会话上限仍在下一步开始前评估。Monitor 只在 astream 报一次工具名，工具函数内不再中英双报。
 
 命中则 abort，避免「为了搜全而无限加步、无限加上下文」。
 
@@ -295,6 +301,10 @@ orchestration:
   require_structured_worker_output: true
   structured_output_retry: true
   parallel_retrieval_enabled: true
+
+budget:
+  max_tool_calls: 40
+  max_step_tool_calls: 8
 ```
 
 ---

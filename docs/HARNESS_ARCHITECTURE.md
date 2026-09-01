@@ -59,3 +59,20 @@ GAP → replan；ENOUGH → synthesis → Quality Gate → finalize
 权威设计：[ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 面试运维面：`GET /api/harness/capabilities` 返回当前 `graph_runtime_enabled`、实验档 `agent|direct`、environment tools。
+
+---
+
+## 工人契约与重试（避免研究空转）
+
+研究步 `allowed_tools` = 来源工具（`internet_search` / `fetch_url` 或 `read_file_content`）**加上** JIT 回读 `read_artifact` / `read_evidence`。越权校验对这两个上下文工具始终放行。
+
+`ResultValidator.no_error` 只认明确执行失败模板（如「步骤执行超时」），不扫摘要里的「失败 / 错误 / 异常」。
+
+缺 JSON 时的 `structured_retry` / 外层 recover：
+
+- **禁止**整步再搜再抓；检索额度置 0，指令要求只输出 JSON
+- 产出抽取走最后一条助手正文，跳过 ToolMessage（避免对着 Tavily 文本找 `facts`）
+- 仍没有 JSON 时，用本步已存 Artifact 卡片 salvage
+- 工人已回 `summary`+`facts` 时压缩不再打 LLM
+
+步内 `budget.max_step_tool_calls`（默认 8）硬限制 `internet_search` / `fetch_url`。会话 `max_tool_calls` 默认 40，给并行研究 + 写报告留余量。Monitor 只在 astream 报工具，避免中英双计。

@@ -19,7 +19,13 @@ from app.agent.harness.state import (
 if TYPE_CHECKING:
     from app.agent.harness.citations import CitationManager
 
-ERROR_KEYWORDS = ("异常", "错误", "失败", "查询出现异常", "没有可用的表")
+# 只匹配明确的执行失败模板，避免研究报告里的「失败模式 / 错误处理」误伤。
+EXECUTION_ERROR_MARKERS = (
+    "查询出现异常",
+    "没有可用的表",
+    "步骤执行超时",
+    "并行步骤执行异常",
+)
 SQL_EMPTY_KEYWORDS = ("没有可用的", "0 条", "空", "未找到")
 
 
@@ -48,7 +54,7 @@ class ResultValidator:
         if result.metadata.get("invalid_structured_output"):
             return ValidationOutcome(False, "invalid_structured_output", "error")
 
-        if any(kw in content for kw in ERROR_KEYWORDS):
+        if any(marker in content for marker in EXECUTION_ERROR_MARKERS):
             return ValidationOutcome(False, "no_error", "error")
 
         if step.step_type == "network_search":
@@ -89,7 +95,7 @@ class ResultValidator:
         if not content.strip() and not state.step_results:
             return ValidationOutcome(False, "no_content", "error")
 
-        if any(kw in content for kw in ERROR_KEYWORDS):
+        if any(marker in content for marker in EXECUTION_ERROR_MARKERS):
             return ValidationOutcome(False, "no_error", "error")
 
         if intent and intent.deliverable in ("md", "pdf"):

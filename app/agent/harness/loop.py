@@ -52,13 +52,18 @@ from app.agent.harness.planner import (
 )
 from app.agent.harness.orchestration import (
     IdempotencyRegistry,
+    JSON_ONLY_FAIL_REASONS,
     StepCheckpointStore,
     attach_structured_payload,
     build_strict_json_retry_instruction,
     check_subagent_binding,
     check_unauthorized_tools,
+    extract_last_assistant_text,
     find_parallel_batch,
+    is_assistant_message,
+    message_text,
     parse_worker_payload,
+    salvage_payload_from_artifacts,
     step_idempotency_key,
     task_query_fingerprint,
     validate_structured_worker_payload,
@@ -66,6 +71,7 @@ from app.agent.harness.orchestration import (
 from app.agent.harness.loop_state_store import deserialize_loop_state, serialize_loop_state
 from app.agent.harness.worker_runtime import resolve_execute_target
 from app.agent.harness.guardrails import can_replan, evaluate_run_guardrails
+from app.agent.harness.step_budget import retrieval_budget
 from app.agent.harness.observability import build_observability_snapshot
 from app.agent.harness.planner_llm import build_plan_for_intent, understand_intent
 from app.agent.harness.recovery import RecoveryManager
@@ -665,6 +671,7 @@ class AgentHarness:
         timeout_sec: int,
         context_builder: Optional[ContextBuilder] = None,
         run_session_id: str = "",
+        json_only: bool = False,
     ) -> tuple[bool, StepResult, str]:
         """执行单步（含超时、结构化重试）并校验，不写入 state.step_results。"""
         max_attempts = (
@@ -675,9 +682,12 @@ class AgentHarness:
             )
             else 1
         )
-        extra_instruction = ""
+        extra_instruction = (
+            build_strict_json_retry_instruction(step) if json_only else ""
+        )
         result: Optional[StepResult] = None
         fail_reason = ""
+        json_only_attempt = json_only
 
         for attempt in range(max_attempts):
             try:
@@ -693,14 +703,22 @@ class AgentHarness:
                         extra_instruction=extra_instruction,
                         context_builder=context_builder,
                         run_session_id=run_session_id,
+                        json_only=json_only_attempt,
                     ),
                     timeout=timeout_sec,
                 )
             except asyncio.TimeoutError:
+                timeout_meta: dict[str, Any] = {
+                    "step_timeout": True,
+                    "timeout_sec": timeout_sec,
+                    "worker_dispatch": "direct",
+                }
+                if step.subagent:
+                    timeout_meta["step_assistants_called"] = [step.subagent]
                 result = StepResult(
                     step_type=step.step_type,
                     content="步骤执行超时",
-                    metadata={"step_timeout": True, "timeout_sec": timeout_sec},
+                    metadata=timeout_meta,
                 )
 
             assert result is not None
@@ -712,8 +730,11 @@ class AgentHarness:
                     state.obs_structured_passes += 1
             if structured_ok or attempt >= max_attempts - 1:
                 break
+            if result.metadata.get("step_timeout"):
+                break
             state.obs_structured_retries += 1
             extra_instruction = build_strict_json_retry_instruction(step)
+            json_only_attempt = True
             self._report_phase(
                 Phase.RECOVER,
                 "structured_retry",
@@ -751,6 +772,7 @@ class AgentHarness:
             summary=str(payload_raw.get("summary", "")),
             facts=list(payload_raw.get("facts") or []),
             sources=list(payload_raw.get("sources") or []),
+            findings=list(payload_raw.get("findings") or []),
             confidence=float(payload_raw.get("confidence", 1.0) or 1.0),
             error_code=str(payload_raw.get("error_code", "")),
             worker=str(payload_raw.get("worker", "")),
@@ -789,6 +811,7 @@ class AgentHarness:
 
         step_retry = 0
         timeout_sec = max(10, int(self.harness_config.step_timeout_sec))
+        json_only = False
         while step_retry <= state.max_retries:
             passed, result, fail_reason = await self._execute_and_validate_step(
                 state,
@@ -802,6 +825,7 @@ class AgentHarness:
                 citation_manager,
                 timeout_sec=timeout_sec,
                 run_session_id=self._graph_thread_id(session_id, step_index),
+                json_only=json_only,
             )
             if passed:
                 state.step_results.append(result)
@@ -829,7 +853,7 @@ class AgentHarness:
                 can_replan(state, self.harness_config)
                 and not state.metadata.get("graph_runtime")
                 and fail_reason
-                in {"sql_empty", "search_too_short", "wrong_subagent", "step_timeout", "invalid_structured_output"}
+                in {"sql_empty", "search_too_short", "wrong_subagent", "step_timeout"}
             ):
                 state.plan = dynamic_replan(state.plan, step_index, fail_reason)
                 state.replan_count += 1
@@ -843,6 +867,7 @@ class AgentHarness:
                 )
             step_retry += 1
             state.retry_count += 1
+            json_only = fail_reason in JSON_ONLY_FAIL_REASONS
 
         return False
 
@@ -1059,19 +1084,16 @@ class AgentHarness:
             step_type=step.step_type,
             subagent=step.subagent or "",
         )
+        if not (payload.facts or payload.sources or payload.findings):
+            payload = salvage_payload_from_artifacts(
+                payload,
+                step=step,
+                step_index=int(result.metadata.get("step_index") or state.step_index or 0),
+            )
+            if payload.facts or payload.sources or payload.findings:
+                result.metadata["salvaged_from_artifacts"] = True
         attach_structured_payload(result, payload)
         self._ingest_evidence(step, result, payload, state)
-
-        struct_ok, struct_reason = validate_structured_worker_payload(
-            payload,
-            step,
-            require_json=self.harness_config.require_structured_worker_output,
-        )
-        if not struct_ok:
-            result.metadata["invalid_structured_output"] = True
-            result.metadata["error_code"] = struct_reason
-            payload.ok = False
-            attach_structured_payload(result, payload)
 
         tools_invoked = list(result.metadata.get("tools_invoked") or [])
         enforce = self.harness_config.enforce_subagent_binding
@@ -1106,6 +1128,26 @@ class AgentHarness:
             attach_structured_payload(result, payload)
             state.obs_unauthorized_tool_hits += len(unauthorized)
             state.obs_orchestration_violations += 1
+        elif (
+            (payload.facts or payload.sources or payload.findings)
+            and not result.metadata.get("step_timeout")
+        ):
+            payload.ok = True
+            payload.error_code = ""
+            attach_structured_payload(result, payload)
+
+        struct_ok, struct_reason = validate_structured_worker_payload(
+            payload,
+            step,
+            require_json=self.harness_config.require_structured_worker_output,
+        )
+        if struct_ok:
+            result.metadata.pop("invalid_structured_output", None)
+        else:
+            result.metadata["invalid_structured_output"] = True
+            result.metadata["error_code"] = struct_reason
+            payload.ok = False
+            attach_structured_payload(result, payload)
         return result
 
     def _ingest_evidence(
@@ -1832,6 +1874,7 @@ class AgentHarness:
         extra_instruction: str = "",
         context_builder: Optional[ContextBuilder] = None,
         run_session_id: str = "",
+        json_only: bool = False,
     ) -> StepResult:
         started = time.perf_counter()
         self._report_phase(
@@ -1916,31 +1959,43 @@ class AgentHarness:
         tool_calls = 0
         tools_invoked: list[str] = []
         step_assistants: list[str] = []
+        step_cap = max(0, int(getattr(self.harness_config, "max_step_tool_calls", 8) or 0))
+        session_left = max(
+            0,
+            int(self.harness_config.max_tool_calls) - int(state.tool_calls_count or 0),
+        )
+        if json_only:
+            retrieval_remaining: int | None = 0
+        elif step_cap > 0:
+            retrieval_remaining = min(step_cap, session_left if session_left else step_cap)
+        else:
+            retrieval_remaining = None
 
-        async for chunk in execute_agent.astream(
-            {"messages": [{"role": "user", "content": user_message}]},
-            config=config,
-        ):
-            for _node_name, node_state in chunk.items():
-                if not node_state or "messages" not in node_state:
-                    continue
-                messages = node_state["messages"]
-                if not messages or not isinstance(messages, list):
-                    continue
-                last_msg = messages[-1]
-                if getattr(last_msg, "tool_calls", None):
-                    tool_calls += len(last_msg.tool_calls)
-                    for tool_call in last_msg.tool_calls:
-                        tool_name = tool_call["name"]
-                        tools_invoked.append(tool_name)
-                        monitor.report_tool(
-                            tool_name,
-                            tool_call.get("args", {}),
-                        )
-                elif getattr(last_msg, "content", None):
-                    content = last_msg.content
-                    if isinstance(content, str):
-                        final_content = content
+        with retrieval_budget(retrieval_remaining):
+            async for chunk in execute_agent.astream(
+                {"messages": [{"role": "user", "content": user_message}]},
+                config=config,
+            ):
+                for _node_name, node_state in chunk.items():
+                    if not node_state or "messages" not in node_state:
+                        continue
+                    messages = node_state["messages"]
+                    if not messages or not isinstance(messages, list):
+                        continue
+                    last_msg = messages[-1]
+                    if getattr(last_msg, "tool_calls", None):
+                        tool_calls += len(last_msg.tool_calls)
+                        for tool_call in last_msg.tool_calls:
+                            tool_name = tool_call["name"]
+                            tools_invoked.append(tool_name)
+                            monitor.report_tool(
+                                tool_name,
+                                tool_call.get("args", {}),
+                            )
+                    elif is_assistant_message(last_msg):
+                        text = message_text(last_msg)
+                        if text.strip():
+                            final_content = text
 
         if dispatch_mode == "direct" and step.subagent:
             if step.subagent not in step_assistants:
@@ -2179,11 +2234,32 @@ class AgentHarness:
     def _extract_final_content_from_snapshot(self, snapshot: Any) -> str:
         values = getattr(snapshot, "values", None) or {}
         messages = values.get("messages", [])
-        for msg in reversed(messages):
-            content = getattr(msg, "content", None)
-            if isinstance(content, str) and content.strip():
-                return content
-        return ""
+        return extract_last_assistant_text(messages)
+
+    @staticmethod
+    def _compressed_from_worker_payload(result: StepResult) -> str:
+        """工人已给出 summary+facts 时跳过再调一次压缩 LLM。"""
+        payload = (result.metadata or {}).get("worker_payload") or {}
+        if not isinstance(payload, dict):
+            return ""
+        if result.metadata.get("structured_ok") is False:
+            return ""
+        summary = str(payload.get("summary") or "").strip()
+        facts = [str(f) for f in (payload.get("facts") or []) if f]
+        sources = [str(s) for s in (payload.get("sources") or []) if s]
+        findings = payload.get("findings") or []
+        if not summary or not (facts or sources or findings):
+            return ""
+        bits = [summary]
+        if facts:
+            bits.append("要点: " + "; ".join(facts[:8]))
+        if sources:
+            bits.append("来源: " + "; ".join(sources[:8]))
+        text = "\n".join(bits).strip()
+        if result.step_type in {"network_search", "research"} and len(text) < 120:
+            extra = " ".join(facts + sources)
+            text = (text + "\n" + extra).strip()
+        return text if len(text) >= 80 else ""
 
     async def _phase_compress_step(
         self,
@@ -2230,6 +2306,30 @@ class AgentHarness:
                 if bound:
                     extra_ids = [s.source_id for s in bound]
                     source_meta["source_ids"] = list(source_meta.get("source_ids") or []) + extra_ids
+
+        worker_summary = self._compressed_from_worker_payload(result)
+        if worker_summary:
+            result.compressed_content = worker_summary
+            result.metadata["method"] = "worker_summary"
+            original_chars = len(result.content or "")
+            result.metadata["original_chars"] = original_chars
+            result.metadata["compressed_chars"] = len(worker_summary)
+            result.metadata["compression_ratio"] = (
+                round(len(worker_summary) / original_chars, 3) if original_chars else 1.0
+            )
+            duration = int((time.perf_counter() - started) * 1000)
+            self._report_phase(
+                Phase.COMPRESS,
+                "done",
+                state=state,
+                duration_ms=duration,
+                step_index=step_index,
+                step_type=result.step_type,
+                compression_method="worker_summary",
+                compression_ratio=result.metadata.get("compression_ratio"),
+                evidence_sources=result.metadata.get("evidence_sources"),
+            )
+            return result
 
         compressed, meta = await self.compressor.compress(
             result.content,

@@ -100,7 +100,8 @@ harness:
 
   budget:
     max_total_tokens: 100000
-    max_tool_calls: 15
+    max_tool_calls: 40
+    max_step_tool_calls: 8
     max_run_sec: 600
     max_replan_count: 2
     max_plan_steps: 8
@@ -111,7 +112,7 @@ harness:
       web: true
       file: true
     agent:
-      max_tool_calls: 15
+      max_tool_calls: 40
       max_research_tasks: 5
       max_replan: 2
       parallel: true
@@ -133,7 +134,7 @@ harness:
       file: true
     experiment:
       agent:
-        max_tool_calls: 15
+        max_tool_calls: 40
         max_research_tasks: 5
         max_replan: 2
         parallel: true

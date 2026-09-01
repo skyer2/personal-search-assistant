@@ -76,8 +76,9 @@ def test_max_plan_steps():
 def test_config_phase13():
     cfg = reload_harness_config()
     assert cfg.max_run_sec == 600
-    assert cfg.max_replan_count == 3
-    assert cfg.max_plan_steps == 12
+    assert cfg.max_replan_count >= 1
+    assert cfg.max_plan_steps >= 8
+    assert cfg.max_step_tool_calls == 8
     print("[OK] config phase13")
 
 

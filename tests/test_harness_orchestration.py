@@ -73,6 +73,12 @@ def test_binding_and_unauthorized_tools():
         enforce=True,
     )
     assert not ok2 and "generate_markdown" in bad
+    ok3, bad3 = check_unauthorized_tools(
+        step,
+        ["read_artifact", "read_evidence"],
+        enforce=True,
+    )
+    assert ok3 and not bad3
     print("[OK] binding + unauthorized tool checks")
 
 
@@ -117,6 +123,7 @@ def test_harness_config_orchestration():
     assert cfg.graph_runtime_enabled is True
     assert cfg.progress_eval_enabled is True
     assert cfg.graph_checkpoint_backend == "sqlite"
+    assert cfg.max_step_tool_calls >= 1
     print("[OK] orchestration config loaded")
 
 

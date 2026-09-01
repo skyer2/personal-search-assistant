@@ -102,12 +102,15 @@ def understand_task(task_query: str, has_uploaded_files: bool = False) -> TaskIn
 
 
 def build_plan(intent: TaskIntent) -> ExecutionPlan:
+    from app.research.planning.policy import tools_for_sources
+
     steps: list[PlanStep] = []
     if intent.needs_file_read:
         steps.append(
             PlanStep(
                 step_type="file_read",
                 description="读取用户上传的附件内容",
+                allowed_tools=tools_for_sources(["file"]),
             )
         )
     if intent.needs_network:
@@ -116,6 +119,7 @@ def build_plan(intent: TaskIntent) -> ExecutionPlan:
                 step_type="network_search",
                 description="检索互联网公开资料",
                 subagent="网络搜索助手",
+                allowed_tools=tools_for_sources(["web"]),
             )
         )
     if intent.deliverable == "md":
@@ -250,6 +254,8 @@ def dynamic_replan(
     reason: str,
     extra_steps: list[PlanStep] | None = None,
 ) -> ExecutionPlan:
+    from app.research.planning.policy import tools_for_sources
+
     steps = list(plan.steps)
     inserts: list[PlanStep] = list(extra_steps or [])
     if not inserts:
@@ -259,6 +265,7 @@ def dynamic_replan(
                     step_type="network_search",
                     description="【动态重规划】补充公开资料交叉验证",
                     subagent="网络搜索助手",
+                    allowed_tools=tools_for_sources(["web"]),
                     metadata={"replan_reason": reason},
                 )
             )

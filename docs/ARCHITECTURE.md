@@ -188,6 +188,8 @@ Query → single agent               Brief → Plan →                   关掉
 - **原文外置**：Artifact / Evidence（Claim → Evidence → Artifact → Source）
 - `LoopState` 只是进程内 handles
 - `WorkerRuntime` 是图与 Agent 框架的边界
+- 研究步允许 JIT 回读（`read_artifact` / `read_evidence`）；缺 JSON 时补 JSON，不整步重搜
+- 步内限制联网工具次数（`max_step_tool_calls`），会话预算拦下一步而不是步内连打
 
 ---
 
