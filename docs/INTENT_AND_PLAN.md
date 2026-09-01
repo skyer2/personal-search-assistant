@@ -1,8 +1,7 @@
-# 个人搜索助手 — Intent 与 Plan 方案
+# Intent 与 Plan
 
-> **定位**：仅 **RESEARCH** 路径的任务理解与执行计划。ANSWER / SEARCH **不走** Intent/Plan。  
-> **原则**：Intent 写「怎样算做对」（Research Brief）；Plan 写「先做哪些可并行目标」。调度权在 StateGraph，Planner 不调工具。  
-> **权威架构**：[ARCHITECTURE.md](ARCHITECTURE.md)。
+> **权威范围**：[ARCHITECTURE.md](ARCHITECTURE.md)。全部任务走 Harness（Brief → Plan → Progress）。  
+> `direct` 仅对照实验，不走 Intent/Plan。Search 不是产品路径。
 
 ---
 

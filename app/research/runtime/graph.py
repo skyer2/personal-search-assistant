@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from app.agent.harness.planner import build_plan, understand_task
 from app.agent.harness.state import ExecutionPlan
-from app.research.routing.mode_router import graph_branch_for_mode
+from app.research.routing.mode_router import canonicalize_mode
 from app.research.runtime.project import brief_from_intent
 from app.research.runtime.scheduler import (
     annotate_plan_tasks,
@@ -35,6 +35,7 @@ def intent_node(state: ResearchState) -> dict[str, Any]:
         "intent": payload,
         "brief": brief_from_intent(payload),
         "needs_clarification": bool(intent.needs_clarification),
+        "search_mode": "agent",
         "progress": "intent",
     }
 
@@ -59,89 +60,16 @@ def plan_node(state: ResearchState) -> dict[str, Any]:
     }
 
 
-def conversation_node(state: ResearchState) -> dict[str, Any]:
-    from app.conversation.store import ConversationStore, rewrite_query
-
-    store = ConversationStore.default(
-        user_id=str(state.get("user_id") or "me"),
-        project_id=str(state.get("project_id") or "Inbox"),
-    )
-    thread = store.get(str(state.get("session_id") or ""))
-    original = str(state.get("task_query") or "")
-    resolved = rewrite_query(original, thread)
-    return {
-        "conversation_summary": thread.rolling_summary,
-        "resolved_query": resolved,
-        "progress": "conversation",
-    }
-
-
-def mode_router_node(state: ResearchState) -> dict[str, Any]:
-    from app.research.routing.mode_router import budget_for_mode, route
-
-    decision = route(
-        str(state.get("resolved_query") or state.get("task_query") or ""),
-        user_mode=str(state.get("search_mode_requested") or "auto"),
-        conversation_summary=str(state.get("conversation_summary") or ""),
-    )
-    budget_cfg = budget_for_mode(decision.mode)
-    current = dict(state.get("budget") or {})
-    current["max_tool_calls"] = int(budget_cfg["max_tool_calls"])
-    current["max_replan_count"] = int(budget_cfg["max_replan_count"])
-    return {
-        "search_mode": decision.mode,
-        "route_signals": decision.signals,
-        "budget": current,
-        "progress": "routed",
-    }
-
-
-def route_after_mode(state: ResearchState) -> Literal["direct_answer", "quick_search", "intent"]:
-    return graph_branch_for_mode(str(state.get("search_mode") or ""))
-
-
-def direct_answer_node(state: ResearchState) -> dict[str, Any]:
-    from app.research.runtime.direct import compose_direct_answer
-
+def vanilla_agent_node(state: ResearchState) -> dict[str, Any]:
+    """Direct baseline：单 Agent + search tool，无 Brief/Plan/Progress。仅对照实验。"""
     query = str(state.get("resolved_query") or state.get("task_query") or "")
     return {
-        "final_content": compose_direct_answer(query),
+        "final_content": f"[direct baseline] {query}".strip(),
+        "search_mode": "direct",
         "status": "completed",
         "quality_passed": True,
-        "progress": "direct_answer",
+        "progress": "vanilla",
         "plan": None,
-    }
-
-
-def quick_search_node(state: ResearchState) -> dict[str, Any]:
-    query = str(state.get("resolved_query") or state.get("task_query") or "")
-    cards = [
-        {
-            "title": "placeholder",
-            "url": "https://example.com",
-            "snippet": query[:120],
-        }
-    ]
-    return {"search_cards": cards, "progress": "quick_search"}
-
-
-def quick_fetch_node(state: ResearchState) -> dict[str, Any]:
-    cards = list(state.get("search_cards") or [])
-    refs = [str(c.get("url") or "") for c in cards if c.get("url")]
-    return {"evidence_refs": refs[:2], "progress": "quick_fetch"}
-
-
-def quick_synthesize_node(state: ResearchState) -> dict[str, Any]:
-    from app.research.runtime.quick import compose_quick_answer
-
-    query = str(state.get("resolved_query") or state.get("task_query") or "")
-    cards = list(state.get("search_cards") or [])
-    answer = compose_quick_answer(query, cards)
-    return {
-        "final_content": answer,
-        "status": "completed",
-        "quality_passed": True,
-        "progress": "quick_synth",
     }
 
 
@@ -326,9 +254,12 @@ def compile_research_graph(
     checkpointer: Any = None,
     invoke_worker: Any = None,
     runtime: Any = None,
+    profile: str = "agent",
 ):
-    """可执行的 Domain Harness 表示。runtime 注入后走真实 Leaf / 领域服务。"""
+    """可执行的 Domain Harness。profile=agent 走完整图；direct 仅对照实验。"""
     from langgraph.graph import END, START, StateGraph
+
+    mode = canonicalize_mode(profile)
 
     def _worker(payload: dict[str, Any]) -> dict[str, Any]:
         if invoke_worker is not None:
@@ -338,59 +269,58 @@ def compile_research_graph(
 
     builder = StateGraph(ResearchState)
     if runtime is not None:
-        builder.add_node("conversation", runtime.node_conversation)
-        builder.add_node("mode_router", runtime.node_mode_router)
-        builder.add_node("direct_answer", runtime.node_direct_answer)
-        builder.add_node("quick_search", runtime.node_quick_search)
-        builder.add_node("quick_fetch", runtime.node_quick_fetch)
-        builder.add_node("quick_synthesize", runtime.node_quick_synthesize)
-        builder.add_node("intent", runtime.node_intent)
-        builder.add_node("clarify", runtime.node_clarify)
-        builder.add_node("plan", runtime.node_plan)
-        builder.add_node("plan_validate", runtime.node_plan_validate)
-        builder.add_node("dispatch", runtime.node_dispatch)
-        builder.add_node("research_worker", runtime.node_research_worker)
-        builder.add_node("progress", runtime.node_progress)
-        builder.add_node("synthesize", runtime.node_synthesize)
-        builder.add_node("replan", runtime.node_replan)
-        builder.add_node("quality_gate", runtime.node_quality_gate)
-        builder.add_node("finalize", runtime.node_finalize)
-        builder.add_node("abort", runtime.node_abort)
+        vanilla = runtime.node_vanilla_agent
+        intent = runtime.node_intent
+        clarify = runtime.node_clarify
+        plan = runtime.node_plan
+        plan_validate = runtime.node_plan_validate
+        dispatch = runtime.node_dispatch
+        worker = runtime.node_research_worker
+        progress = runtime.node_progress
+        synthesize = runtime.node_synthesize
+        replan = runtime.node_replan
+        quality_gate = runtime.node_quality_gate
+        finalize = runtime.node_finalize
+        abort = runtime.node_abort
     else:
-        builder.add_node("conversation", conversation_node)
-        builder.add_node("mode_router", mode_router_node)
-        builder.add_node("direct_answer", direct_answer_node)
-        builder.add_node("quick_search", quick_search_node)
-        builder.add_node("quick_fetch", quick_fetch_node)
-        builder.add_node("quick_synthesize", quick_synthesize_node)
-        builder.add_node("intent", intent_node)
-        builder.add_node("clarify", clarify_node)
-        builder.add_node("plan", plan_node)
-        builder.add_node("plan_validate", plan_validate_node)
-        builder.add_node("dispatch", dispatch_node)
-        builder.add_node("research_worker", _worker)
-        builder.add_node("progress", progress_node)
-        builder.add_node("synthesize", synthesize_node)
-        builder.add_node("replan", replan_node)
-        builder.add_node("quality_gate", quality_gate_node)
-        builder.add_node("finalize", finalize_node)
-        builder.add_node("abort", abort_node)
+        vanilla = vanilla_agent_node
+        intent = intent_node
+        clarify = clarify_node
+        plan = plan_node
+        plan_validate = plan_validate_node
+        dispatch = dispatch_node
+        worker = _worker
+        progress = progress_node
+        synthesize = synthesize_node
+        replan = replan_node
+        quality_gate = quality_gate_node
+        finalize = finalize_node
+        abort = abort_node
 
-    builder.add_edge(START, "conversation")
-    builder.add_edge("conversation", "mode_router")
-    builder.add_conditional_edges(
-        "mode_router",
-        route_after_mode,
-        {
-            "direct_answer": "direct_answer",
-            "quick_search": "quick_search",
-            "intent": "intent",
-        },
-    )
-    builder.add_edge("direct_answer", "finalize")
-    builder.add_edge("quick_search", "quick_fetch")
-    builder.add_edge("quick_fetch", "quick_synthesize")
-    builder.add_edge("quick_synthesize", "finalize")
+    builder.add_node("finalize", finalize)
+    builder.add_node("abort", abort)
+    if mode == "direct":
+        builder.add_node("vanilla", vanilla)
+        builder.add_edge(START, "vanilla")
+        builder.add_edge("vanilla", "finalize")
+        builder.add_edge("finalize", END)
+        builder.add_edge("abort", END)
+        kwargs: dict[str, Any] = {}
+        if checkpointer is not None:
+            kwargs["checkpointer"] = checkpointer
+        return builder.compile(**kwargs)
+
+    builder.add_node("intent", intent)
+    builder.add_node("clarify", clarify)
+    builder.add_node("plan", plan)
+    builder.add_node("plan_validate", plan_validate)
+    builder.add_node("dispatch", dispatch)
+    builder.add_node("research_worker", worker)
+    builder.add_node("progress", progress)
+    builder.add_node("synthesize", synthesize)
+    builder.add_node("replan", replan)
+    builder.add_node("quality_gate", quality_gate)
+    builder.add_edge(START, "intent")
     builder.add_conditional_edges(
         "intent",
         route_after_intent,
@@ -416,7 +346,7 @@ def compile_research_graph(
     builder.add_edge("finalize", END)
     builder.add_edge("abort", END)
 
-    kwargs: dict[str, Any] = {}
+    kwargs = {}
     if checkpointer is not None:
         kwargs["checkpointer"] = checkpointer
     return builder.compile(**kwargs)
@@ -443,13 +373,10 @@ __all__ = [
     "compile_research_graph",
     "dispatch_sends",
     "initial_graph_state",
-    "conversation_node",
-    "mode_router_node",
-    "direct_answer_node",
+    "vanilla_agent_node",
     "intent_node",
     "plan_node",
     "progress_node",
-    "route_after_mode",
     "route_dispatch",
     "route_progress",
 ]

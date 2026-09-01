@@ -60,7 +60,7 @@ class HarnessConfig:
     compression_retention_min_number: float = 0.5
 
     memory_provider: str = "sqlite"
-    memory_enabled: bool = True
+    memory_enabled: bool = False
     memory_recall_top_k: int = 5
     memory_ttl_days: int = 90
     memory_max_facts_per_remember: int = 5
@@ -193,7 +193,12 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
     observability = raw.get("observability", {})
     budget = raw.get("budget", {})
     mcp = raw.get("mcp", {})
-    personal = raw.get("personal_search", {})
+    personal = dict(raw.get("personal_search", {}) or {})
+    experiment = dict(raw.get("experiment", {}) or {})
+    if experiment:
+        personal.setdefault("experiment", experiment)
+        personal.setdefault("default_mode", experiment.get("default_mode", "agent"))
+        personal.setdefault("enabled_sources", experiment.get("enabled_sources") or {"web": True, "file": True})
     _ = mcp  # legacy yaml key ignored
     hitl = raw.get("hitl", {})
     citations = raw.get("citations", {})
@@ -319,7 +324,7 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         memory_recall_top_k=int(memory.get("recall_top_k", 5)),
         memory_enabled=_env_bool(
             "HARNESS_MEMORY_ENABLED",
-            bool(memory.get("enabled", True)),
+            bool(memory.get("enabled", False)),
         ),
         memory_ttl_days=int(memory.get("ttl_days", 90)),
         memory_max_facts_per_remember=int(memory.get("max_facts_per_remember", 5)),

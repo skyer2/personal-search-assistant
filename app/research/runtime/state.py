@@ -88,7 +88,7 @@ def empty_research_state(
     project_id: str = "",
     max_tool_calls: int = 80,
     max_replan_count: int = 3,
-    search_mode: str = "auto",
+    search_mode: str = "agent",
 ) -> ResearchState:
     return {
         "run_id": run_id,
@@ -97,8 +97,8 @@ def empty_research_state(
         "user_id": user_id,
         "tenant_id": tenant_id,
         "project_id": project_id,
-        "search_mode": "",
-        "search_mode_requested": search_mode or "auto",
+        "search_mode": search_mode or "agent",
+        "search_mode_requested": search_mode or "agent",
         "route_signals": [],
         "conversation_summary": "",
         "resolved_query": task_query,

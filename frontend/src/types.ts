@@ -1,4 +1,4 @@
-export type SearchMode = "auto" | "answer" | "search" | "research";
+export type SearchMode = "agent" | "direct";
 
 export type MonitorEventName =
   | "session_created"

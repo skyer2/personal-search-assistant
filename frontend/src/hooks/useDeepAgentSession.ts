@@ -246,10 +246,10 @@ export function useDeepAgentSession() {
   }, [hitlPending, isRunning, refreshFiles, sessionPath]);
 
   const submitTask = useCallback(
-    async (query: string, mode: SearchMode = "auto") => {
+    async (query: string, mode: SearchMode = "agent") => {
       const cleanQuery = query.trim();
       if (!cleanQuery) {
-        throw new Error("请输入搜索问题");
+        throw new Error("请输入研究任务");
       }
 
       setIsRunning(true);

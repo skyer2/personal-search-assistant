@@ -1,280 +1,203 @@
-# Personal Search Assistant — 架构方案
+# Research Agent Harness — 架构范围（框死）
 
-> **一句话：** Personal Search Assistant 是一个 adaptive research agent：简单问题直接回答，需要最新信息时搜索，复杂问题进入可恢复的 Research StateGraph；Research Domain 负责分解、证据充分性和 Replan，Worker Runtime 负责局部自主执行，所有事实通过 Evidence/Artifact 可追溯。
+> **A controllable and evaluable harness for long-running research agents.**
 >
-> 本文是本仓库的**权威架构**。旧文档（Harness / Memory / Intent）只描述子域细节；与本文冲突时以本文为准。
+> This project is not a search engine.
 >
-> 本轮做减法，不再从「还缺什么 Agent 能力」加功能。
+> Search is only a tool environment used to study:
+> - planning
+> - multi-agent orchestration
+> - progress evaluation
+> - replanning
+> - context management
+> - durability
+> - evidence grounding
+> - evaluation
+>
+> **Deep Research 只是 Agent Harness 的 workload。Search 只是 Agent 可调用的一种环境能力。**
+>
+> 本文是本仓库的**唯一权威范围**。与本文冲突的旧文档（Personal Search、三档路由、Memory 主故事）一律视为历史。
 
 ---
 
-## 0. 从哪来，到哪去
+## 0. 研究问题（只这十个）
 
-上一阶段仓库仍是 `deepsearch-agents` 的演进：StateGraph 方向正确，但作为 **Personal Search Assistant** 不合格。
+1. Agent 如何把复杂任务拆成稳定 Research Plan？
+2. 多 Worker 怎么并行且避免状态污染？
+3. Worker 都完成后，怎么判断任务真的完成？
+4. 什么情况下需要 Replan？
+5. Replan 怎么限制，防止无限自治？
+6. 长任务 Context 怎么控制？
+7. 原始 Evidence 怎么在不塞爆窗口的情况下保留？
+8. Agent 崩溃后如何恢复？
+9. 如何确定失败发生在 Planning / Retrieval / Worker / Synthesis 哪一层？
+10. Harness 的这些机制到底有没有实际增益？
 
-| 问题 | 表现 | 本轮收敛 |
-|------|------|----------|
-| 双 Source of Truth | `ResearchState`（LangGraph SQLite）+ `LoopState`（`checkpoint.json` + 进程内 `_SESSIONS`）都描述 workflow | **只有 `ResearchState` 负责 resume / interrupt / progression** |
-| StateGraph 是壳 | 节点直接调 `AgentHarness._phase_*` / `_run_single_step`，另有 100KB+ legacy while-loop | 图拥有 workflow；领域服务只提供 Intent/Plan/Progress；工人走 `WorkerRuntime` |
-| 功能面过宽 | OAuth / SQL replica / MCP durable / RAGFlow / DB gate 混进核心 | 核心 = Web + Files + Evidence + Memory；DB/RAG/MCP/PDF 退出默认故事 |
-| Worker 按工具种类分 | `network_search` / `file_read` 变成 Tool Planning | Research 路径按 **objective / dimension** 拆任务；工人自己选 Web / File |
-
-不继续加 Feature。P0 先把边界改对。
-
----
-
-## 1. 四层（加一层产品路由）
-
-```text
-┌──────────────────────────────────────────┐
-│ Personal Research API / UI               │
-│ 自动 / 直答 / 搜索 / 研搜                 │
-└───────────────────┬──────────────────────┘
-                    │
-                    ▼
-┌──────────────────────────────────────────┐
-│ Task Router                              │
-│                                          │
-│   ANSWER     SEARCH      RESEARCH        │
-└──────┬──────────┬────────────┬───────────┘
-       │          │            │
-       ▼          ▼            ▼
-     LLM     Search+Fetch   Research Domain
-                               │
-┌──────────────────────────────────────────┐
-│ Research Domain                          │
-│                                          │
-│ ResearchBrief  Planner  ProgressEvaluator│
-│ EvidencePolicy  QualityGate              │
-└───────────────────┬──────────────────────┘
-                    │
-                    ▼
-┌──────────────────────────────────────────┐
-│ Research Runtime                         │
-│                                          │
-│ StateGraph  Checkpoint  Budget           │
-│ Parallelism  Replan                      │
-│ 唯一 workflow truth = ResearchState      │
-└───────────────────┬──────────────────────┘
-                    │
-                    ▼
-┌──────────────────────────────────────────┐
-│ Worker Runtime                           │
-│                                          │
-│ WorkerRuntime Protocol                   │
-│  ├─ LangChainWorkerRuntime   (now)       │
-│  └─ DeepSeekHarnessRuntime   (future)    │
-└───────────────────┬──────────────────────┘
-                    │
-                    ▼
-┌──────────────────────────────────────────┐
-│ Capabilities                             │
-│                                          │
-│ Web Search · Web Fetch · Local Files     │
-│ optional: GitHub / MCP                   │
-│                                          │
-│ Artifact Store  ·  Evidence Store        │
-└──────────────────────────────────────────┘
-```
-
-| 层 | 负责 | 明确不负责 |
-|----|------|------------|
-| API / UI | 对话、模式、来源展示 | 不编排研究步骤 |
-| Task Router | 决定 ANSWER / SEARCH / RESEARCH | 不规划 DAG |
-| Research Domain | Brief、按维度拆任务、证据是否够、Replan | 不调工具、不 while-loop |
-| Research Runtime | 图、checkpoint、并行、预算 | 不把原文塞进 Graph State |
-| Worker Runtime | 局部自主执行一个 ResearchTask | 不改全局 workflow |
-| Capabilities | 搜索、抓取、读文件 | 不决定「要不要再搜一轮」 |
+**Search 不是第 11 个研究问题。** 不研究排序、query rewrite、召回质量、搜索引擎对比、freshness 产品化。
 
 ---
 
-## 2. 三档路由（Fast Path 必须有）
-
-不是每句都走 `intent → plan → dispatch → progress → quality gate`。
+## 1. 四层：Search 不是一层
 
 ```text
-                     User Query
-                         │
-                         ▼
-                   Task Router
-                /        |        \
-               /         |         \
-           ANSWER      SEARCH    RESEARCH
-             │           │          │
-             ▼           ▼          ▼
-           LLM       Search+LLM   ResearchGraph
+┌─────────────────────────────┐
+│ Research Domain             │
+│ Brief / Plan / Progress     │
+└──────────────┬──────────────┘
+               ▼
+┌─────────────────────────────┐
+│ Agent Runtime               │
+│ StateGraph / Budget /       │
+│ Checkpoint / Parallelism    │
+└──────────────┬──────────────┘
+               ▼
+┌─────────────────────────────┐
+│ Worker Runtime              │
+│ LangChain / DeepSeekHarness │
+└──────────────┬──────────────┘
+               ▼
+┌─────────────────────────────┐
+│ Environment                 │
+│ Search / Fetch / File       │
+│ Artifact / Evidence         │
+└─────────────────────────────┘
 ```
 
-| 档 | 何时 | 图路径 | 不做 |
-|----|------|--------|------|
-| **ANSWER**（直答） | 概念题、不需要最新网页。例：「std::apply 是什么」 | `conversation → router → direct_answer → finalize` | 搜索、Plan、Progress |
-| **SEARCH**（搜索） | 要最新事实，但仍是单目标。例：「glibc 2.42 release notes 改了什么」 | `conversation → router → search → fetch → synthesize → finalize` | Intent DAG、Replan、并行工人 |
-| **RESEARCH**（研搜） | 多实体/多维度/要对证。例：「对比 LangGraph、Temporal 与 DeepSeek Harness 的 durable workflow」 | 完整 StateGraph | 不把简单定义题拉进研搜 |
+Search 相当于强化学习里的 environment：Agent 与外界交互的接口，不是研究主体。
 
-用户显式选择优先于 Auto。Auto 用信号：时效词 → SEARCH；比较/多维度/报告 → RESEARCH；定义/短概念 → ANSWER。
-
-API 兼容旧值：`quick` → SEARCH，`deep` → RESEARCH，`direct` → ANSWER。
-
-PlanningMode（`DIRECT` / `TEMPLATE` / `DYNAMIC`）只存在于 **RESEARCH 内部**，与产品三档同名但不同层，不要混用。
-
----
-
-## 3. ResearchState 是唯一 Workflow Truth
-
-```text
-ResearchState
-├─ brief
-├─ plan
-├─ task_status
-├─ findings          # 结构化摘要，不是原文
-├─ progress_assessment
-├─ replan_count
-├─ budget
-├─ final_answer / final_content
-└─ status
-      ↓
-LangGraph Checkpointer（SQLite）
-      = 唯一 resume / interrupt / progression
-```
-
-**砍掉的是「LoopState 作为第二套 workflow state」**，不是立刻删光 `LoopState` 这个 dataclass。
-
-`LoopState` 降级为 **进程内 Runtime Handles**：
-
-```text
-LoopState（不再 checkpoint 为 workflow）
-├─ artifact / evidence 句柄
-├─ tracer / lock / citation_manager
-├─ step_results 等工人副作用缓存
-└─ 由 ResearchState 单向投影而来的 plan/intent 副本
-```
-
-投影方向固定：
-
-```text
-ResearchState  ──apply──▶  LoopState（给仍吃 LoopState 的领域函数）
-领域函数返回值 ──写入──▶  ResearchState
-```
-
-禁止再维护：
-
-```text
-Graph SQLite  +  LoopState checkpoint.json
-```
-
-两套恢复系统。`persist_loop_state` **默认关闭**。进程崩溃后只从 LangGraph checkpoint 恢复控制流；原文仍在 Artifact / Evidence Store。
-
-`RunSession` / `_SESSIONS` 只活在一次 `ainvoke` 期间，给工人适配器拿 handles，不是第二套 durable state。
-
-### 3.1 为什么原文不进 Graph
-
-```text
-Claim  →  Evidence  →  Artifact  →  Original Source
-```
-
-Graph State 只留 `Finding` / `EvidenceRef` / `ArtifactRef`。这是现有设计里最值得留下的部分。
-
----
-
-## 4. WorkerRuntime：图不再直调 Harness 工人循环
+环境工具固定、尽量简单：
 
 ```python
-class WorkerRuntime(Protocol):
-    async def execute(
-        self,
-        task: ResearchTask,
-        context: ResearchContext,
-    ) -> WorkerResult: ...
+search(query) -> SearchResult[]   # 标题 / URL / snippet
+fetch(url)    -> Artifact         # 正文外置，不进 Graph State
+file_read     -> Artifact         # 本地附件
 ```
+
+实验时要：**same model + same search + same corpus**，只改变 Harness 机制。
+
+---
+
+## 2. 主路径只有 AGENT
+
+产品路径 **ANSWER / SEARCH 删除**。不问「这是事实题还是概念题」，每个任务都是研究 workload。
 
 ```text
-StateGraph.research_worker
-        │
-        ▼
-  WorkerRuntime.execute(ResearchTask)
-        │
-        ├─ LangChainWorkerRuntime     # 现在：create_agent / DeepAgents
-        └─ DeepSeekHarnessRuntime     # 将来：换 runtime 不改 Domain
+                    User Task
+                       │
+                       ▼
+                 Research Brief
+                       │
+                       ▼
+                    Planner
+                       │
+                 Objective DAG
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+       Worker 1     Worker 2     Worker N
+          │            │            │
+          └────── WorkerRuntime ─────┘
+                       │
+              Minimal Capabilities
+               ├── web_search
+               ├── fetch_url
+               └── file_read
+                       │
+                       ▼
+              Artifact / Evidence
+                       │
+                       ▼
+              ProgressEvaluator
+                /             \
+            ENOUGH             GAP
+              │                │
+              │            PlanPatch
+              │                │
+              └───────◄────────┘
+                       │
+                   Synthesis
+                       │
+                 Quality Gate
+                       │
+                    Answer
 ```
 
-`ResearchTask` 带的是 **objective + source_policy**，不是「请调用 network_search 工具」。工人自己决定 Web / Fetch / File。
+最多两档，且第二档**不是产品能力**：
 
-本轮适配器仍会复用 `_run_single_step`（避免一次拆光 100KB loop 导致全红），但 **图节点只依赖 Protocol**。后续把 `_phase_*` 收成 Domain 包时，图不用再改。
+| 档 | 用途 | 路径 |
+|----|------|------|
+| **agent**（默认） | 研究对象 | Brief → Plan → Workers → Progress / Replan → Answer |
+| **direct** | 对照实验 baseline | Query → single agent + search tool → Answer |
+
+Direct 用来回答：
+
+> 同一个模型、同一个搜索工具，为什么增加 Agent Harness？增加以后得到了什么，又付出了什么？
 
 ---
 
-## 5. RESEARCH 内：Brief 驱动，而不是 Tool Planning
+## 3. 保留 / 砍掉
 
-Planner 先决定研究深度与维度，再拆并行 `ResearchTask`：
+| 保留 | 为什么 |
+|------|--------|
+| Research Brief | 任务目标的稳定表示 |
+| Planner | semantic decomposition |
+| Objective DAG | multi-agent orchestration |
+| Parallel Worker | 并行执行 + 隔离 |
+| WorkerRuntime | Agent framework 解耦 |
+| ProgressEvaluator | semantic stopping |
+| Replan / PlanPatch | 动态规划 + 有界自治 |
+| Context Engineering | 长任务核心问题 |
+| Artifact / Evidence | 上下文外置和可追溯 |
+| Checkpoint | durability |
+| Budget / Guardrail | bounded autonomy |
+| Trace | failure attribution |
+| Eval / Ablation | 证明机制有效 |
 
-```json
-{
-  "mode": "research",
-  "objective": "比较三个 Agent Runtime",
-  "dimensions": ["durability", "context", "scheduling", "tool isolation"],
-  "source_policy": { "prefer_primary": true }
-}
+| 砍掉或降到最低 | |
+|----------------|--|
+| ANSWER 产品路径 | × |
+| SEARCH 产品路径 | × |
+| Search ranking / query expansion / 召回优化 | × |
+| RAGFlow / DB / MCP plane / PDF | × |
+| Personal Search UX / 复杂前端产品 | × |
+| Cross-session Memory（Phase 2 课题） | 默认关闭 |
+
+**可以砍掉 SEARCH 产品路径，不要砍掉 search tool。**
+
+Memory：Phase 1 只研究单次 long-running Agent。`Context ≠ Memory`，`Checkpoint ≠ Memory`，`Evidence ≠ Memory`。跨任务经验积累放到 Phase 2。
+
+---
+
+## 4. 实验主线
+
+```text
+Vanilla Agent          vs          Full Harness          vs          Harness - Replan
+Query → single agent               Brief → Plan →                   关掉 PlanPatch
+     + search → answer             Workers → Progress               其余相同
 ```
 
-Progress Evaluator 对照 Brief 的维度与证据要求，而不是对照「还剩几个 network_search 步」。细节见 [INTENT_AND_PLAN.md](INTENT_AND_PLAN.md)。
+控制：same model / same search tool / same corpus / same tasks / same prompt budget。
+
+观测：Accuracy、Citation、Success Rate、Tool Calls、Tokens、Latency，以及 Failure Attribution、Replan Trigger Rate、Recovery Rate、Context Consumption。
 
 ---
 
-## 6. 能力面（Core vs Optional）
+## 5. 状态模型（不变）
 
-| Core（默认故事） | Optional / 非核心 | 已移出产品 |
-|------------------|-------------------|------------|
-| Web Search / Fetch | GitHub | DB / SQL gate |
-| Local Files | MCP | RAGFlow |
-| Evidence / Artifact | PDF 导出 | OAuth audience |
-| Personal Research Memory | Prometheus / Langfuse | MCP durable task |
-
-Memory **留下**，但主故事是：
-
-- 用户上次研究过什么？
-- 当时结论是什么？
-- 哪些证据过期了？
-- 这次是不是上次研究的 continuation？
-
-而不是 TTL / half-life / SUPERSEDE 展览。实现可以保留，文档与产品叙事不再以它们为中心。见 [MEMORY_SYSTEM.md](MEMORY_SYSTEM.md)。
+- **唯一 workflow truth**：`ResearchState` → LangGraph SQLite
+- **原文外置**：Artifact / Evidence（Claim → Evidence → Artifact → Source）
+- `LoopState` 只是进程内 handles
+- `WorkerRuntime` 是图与 Agent 框架的边界
 
 ---
 
-## 7. 本轮落地范围（P0）与刻意不做的
-
-**P0（本 PR）**
-
-1. 项目身份：`personal-search-assistant`（pyproject / API / 前端包名 / README）
-2. `ResearchState` 增加 `brief` / `findings`；workflow 字段以 Graph 为准
-3. 默认关闭 `persist_loop_state`；生产路径不走 `_run_legacy_loop`
-4. `WorkerRuntime` + `LangChainWorkerRuntime`；工人节点走接口
-5. Task Router：ANSWER / SEARCH / RESEARCH（含 auto 与旧别名）
-6. 图增加 `direct_answer`；SEARCH 沿用 search→fetch→synthesize；RESEARCH 沿用 StateGraph
-7. 前端四档：自动 / 直答 / 搜索 / 研搜
-
-**刻意留给后续 PR**
-
-- 物理删除 `LoopState` 与拆光 `loop.py` 的 `_phase_*`（本轮已切断「它是 workflow SoT」）
-- GitHub 能力接入
-- Personal Research Memory 存储模型重做（本轮只改叙事与入口）
-- 把 Planner step_type 从 `network_search` 完全改成 `research_task`
-
-**P2 不做**
-
-- 把 DB / RAG / PDF 加回核心路径
-- 继续堆 MCP / HITL / 企业护栏当产品卖点
-
----
-
-## 8. 与代码的对应
+## 6. 代码对应
 
 | 概念 | 代码 |
 |------|------|
-| Task Router | `app/research/routing/mode_router.py` |
-| ResearchState | `app/research/runtime/state.py` |
+| Experiment mode `agent` / `direct` | `app/research/routing/mode_router.py` |
 | StateGraph | `app/research/runtime/graph.py` |
-| Runner / 投影 | `app/research/runtime/runner.py`、`project.py` |
 | WorkerRuntime | `app/research/runtime/worker.py` |
-| Brief / Plan / Progress | `app/agent/harness/research_brief.py`、`planner.py`、`app/research/planning/` |
-| Artifact / Evidence | `app/agent/harness/artifacts.py`、`evidence_store.py` |
-| Conversation | `app/conversation/store.py` |
+| Brief / Plan / Progress | `research_brief.py` / `planner.py` / `app/research/planning/` |
+| Environment search/fetch | `app/tools/`（`internet_search`、`fetch_url`） |
+| Artifact / Evidence | `artifacts.py`、`evidence_store.py` |

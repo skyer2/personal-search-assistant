@@ -59,16 +59,19 @@ class ResearchGraphRunner:
     def __init__(self, harness: Any):
         self.harness = harness
 
-    def compile(self, checkpointer: Any = None):
+    def compile(self, checkpointer: Any = None, profile: str = "agent"):
         from app.research.runtime.graph import compile_research_graph
 
         return compile_research_graph(
             checkpointer=checkpointer or _default_checkpointer(),
             runtime=self,
+            profile=profile,
         )
 
     async def execute(self, ctx: Any, *, checkpointer: Any = None) -> Any:
         from langgraph.types import Command
+
+        from app.research.routing.mode_router import budget_for_mode, canonicalize_mode
 
         session = RunSession(self.harness, ctx)
         bind_session(session)
@@ -87,6 +90,9 @@ class ResearchGraphRunner:
             "configurable": {"thread_id": session.run_id},
             "recursion_limit": 80,
         }
+        profile = canonicalize_mode(getattr(ctx, "search_mode", "agent") or "agent")
+        personal = getattr(self.harness.harness_config, "personal_search", None) or {}
+        budget_cfg = budget_for_mode(profile, personal)
         payload = empty_research_state(
             run_id=session.run_id,
             session_id=session.session_id,
@@ -94,12 +100,12 @@ class ResearchGraphRunner:
             user_id=ctx.user_id,
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
-            max_tool_calls=self.harness.harness_config.max_tool_calls,
-            max_replan_count=self.harness.harness_config.max_replan_count,
-            search_mode=getattr(ctx, "search_mode", "auto") or "auto",
+            max_tool_calls=int(budget_cfg["max_tool_calls"]),
+            max_replan_count=int(budget_cfg["max_replan_count"]),
+            search_mode=profile,
         )
         try:
-            graph = self.compile(checkpointer=checkpointer)
+            graph = self.compile(checkpointer=checkpointer, profile=profile)
             result = await _ainvoke_resilient(
                 graph, await _initial_or_resume_payload(graph, payload, config, ctx), config
             )
@@ -213,160 +219,76 @@ class ResearchGraphRunner:
 
     # --- nodes ---
 
-    async def node_conversation(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.conversation.store import ConversationStore, rewrite_query
-
-        session = _require_session(gstate)
-        ctx = session.ctx
-        store = ConversationStore.default(user_id=ctx.user_id or "me", project_id=ctx.project_id or "Inbox")
-        thread = store.get(ctx.session_id)
-        original = ctx.original_query or ctx.task_query
-        resolved = rewrite_query(original, thread)
-        ctx.original_query = original
-        if resolved != ctx.task_query:
-            ctx.task_query = resolved
-        session.state.metadata["conversation_summary"] = thread.rolling_summary
-        session.state.metadata["resolved_query"] = resolved
-        return {
-            "conversation_summary": thread.rolling_summary,
-            "resolved_query": resolved,
-            "progress": "conversation",
-        }
-
-    async def node_direct_answer(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.direct import compose_direct_answer, try_direct_llm
+    async def node_vanilla_agent(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        """对照实验：单 Worker + search/fetch/file，不跑 Brief/Plan/Progress。"""
+        from app.agent.harness.state import ExecutionPlan, PlanStep
+        from app.research.runtime.isolation import worker_row
         from app.research.runtime.project import apply_graph_to_loop
+        from app.research.runtime.worker import LangChainWorkerRuntime, ResearchContext, ResearchTask
 
         session = _require_session(gstate)
         apply_graph_to_loop(session.state, gstate)
-        query = str(gstate.get("resolved_query") or session.ctx.original_query or session.ctx.task_query)
-        answer = await try_direct_llm(
-            query,
-            conversation_summary=str(gstate.get("conversation_summary") or ""),
+        query = str(gstate.get("resolved_query") or session.ctx.task_query or "")
+        step = PlanStep(
+            step_type="research",
+            description=query,
+            objective=query,
+            task_id="vanilla",
+            allowed_tools=["internet_search", "fetch_url", "read_file_content"],
         )
-        if not answer:
-            answer = compose_direct_answer(query)
+        session.state.plan = ExecutionPlan(
+            summary="direct baseline",
+            steps=[step],
+            planning_mode="direct",
+        )
+        result = await LangChainWorkerRuntime(self.harness, session).execute(
+            ResearchTask(
+                task_id="vanilla",
+                objective=query,
+                step_type="research",
+                step_index=0,
+                description=query,
+                allowed_tools=list(step.allowed_tools),
+            ),
+            ResearchContext(
+                run_id=str(gstate.get("run_id") or session.run_id),
+                query=query,
+                user_id=session.ctx.user_id,
+                tenant_id=session.ctx.tenant_id,
+                project_id=session.ctx.project_id,
+                session_id=session.session_id,
+            ),
+        )
+        answer = result.summary or query
+        if result.findings:
+            bits = [str(item.get("summary") or "") for item in result.findings if isinstance(item, dict)]
+            bits = [b for b in bits if b]
+            if bits:
+                answer = "\n".join(bits[:8])
         session.state.final_content = answer
         session.state.phase = Phase.FINALIZE
-        try:
-            from app.api.monitor import monitor
-
-            monitor.report_phase(
-                "direct_answer",
-                "done",
-                session_id=session.session_id,
-                search_mode="answer",
-            )
-        except Exception:
-            pass
+        outcome = result.raw
+        row = (
+            worker_row("vanilla", step, result.ok, getattr(outcome, "result", None))
+            if outcome is not None
+            else {
+                "task_id": "vanilla",
+                "ok": result.ok,
+                "summary": result.summary,
+                "step_type": "research",
+                "payload": {"summary": result.summary, "facts": result.facts, "sources": result.sources},
+            }
+        )
         return {
             "final_content": answer,
-            "status": "completed",
-            "quality_passed": True,
-            "progress": "direct_answer",
+            "search_mode": "direct",
+            "status": "completed" if result.ok else "aborted",
+            "quality_passed": bool(result.ok),
+            "progress": "vanilla",
             "plan": None,
-        }
-
-    async def node_mode_router(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.routing.mode_router import budget_for_mode, route
-        from app.research.runtime.project import apply_graph_to_loop
-
-        session = _require_session(gstate)
-        apply_graph_to_loop(session.state, gstate)
-        ctx = session.ctx
-        personal = getattr(self.harness.harness_config, "personal_search", None) or {}
-        decision = route(
-            str(gstate.get("resolved_query") or ctx.task_query),
-            user_mode=getattr(ctx, "search_mode", "auto") or "auto",
-            conversation_summary=str(gstate.get("conversation_summary") or ""),
-        )
-        budget_cfg = budget_for_mode(decision.mode, personal)
-        session.state.metadata["search_mode"] = decision.mode
-        session.state.metadata["route_signals"] = decision.signals
-        current = dict(gstate.get("budget") or {})
-        current["max_tool_calls"] = int(budget_cfg["max_tool_calls"])
-        current["max_replan_count"] = int(budget_cfg["max_replan_count"])
-        try:
-            from app.api.monitor import monitor
-
-            monitor.report_phase(
-                "mode_router",
-                "done",
-                session_id=session.session_id,
-                search_mode=decision.mode,
-                signals=decision.signals,
-                user_override=decision.user_override,
-            )
-        except Exception:
-            pass
-        return {
-            "search_mode": decision.mode,
-            "route_signals": decision.signals,
-            "budget": current,
-            "progress": "routed",
-        }
-
-    async def node_quick_search(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.quick import run_quick_search
-
-        session = _require_session(gstate)
-        query = str(gstate.get("resolved_query") or session.ctx.task_query)
-        try:
-            cards = run_quick_search(query, max_queries=2, max_results=4)
-        except Exception as exc:
-            cards = []
-            session.state.metadata["quick_search_error"] = str(exc)[:200]
-        session.state.metadata["search_cards"] = cards
-        return {"search_cards": cards, "progress": "quick_search"}
-
-    async def node_quick_fetch(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.quick import run_quick_fetch
-
-        session = _require_session(gstate)
-        cards = list(gstate.get("search_cards") or [])
-        try:
-            fetched = run_quick_fetch(cards, limit=2)
-        except Exception as exc:
-            fetched = []
-            session.state.metadata["quick_fetch_error"] = str(exc)[:200]
-        session.state.metadata["fetched_pages"] = fetched
-        refs = [str(item.get("artifact_id") or item.get("url") or "") for item in fetched if item]
-        citation_manager = session.ctx.citation_manager
-        if citation_manager is not None:
-            from app.agent.harness.citations import EvidenceSource
-
-            for i, item in enumerate(fetched or cards[:2]):
-                url = str(item.get("url") or "")
-                if not url:
-                    continue
-                citation_manager.sources.append(
-                    EvidenceSource(
-                        source_id=f"Q{i+1}",
-                        step_index=0,
-                        step_type="network_search",
-                        source_kind="url",
-                        locator=url,
-                        excerpt=str(item.get("snippet") or "")[:400],
-                        artifact_id=str(item.get("artifact_id") or ""),
-                    )
-                )
-        return {"search_cards": cards, "evidence_refs": [r for r in refs if r], "progress": "quick_fetch"}
-
-    async def node_quick_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.quick import compose_quick_answer
-
-        session = _require_session(gstate)
-        query = str(gstate.get("resolved_query") or session.ctx.original_query or session.ctx.task_query)
-        cards = list(gstate.get("search_cards") or [])
-        fetched = list((session.state.metadata or {}).get("fetched_pages") or [])
-        answer = compose_quick_answer(query, cards, fetched or None)
-        session.state.final_content = answer
-        session.state.phase = Phase.FINALIZE
-        return {
-            "final_content": answer,
-            "status": "completed",
-            "quality_passed": True,
-            "progress": "quick_synth",
+            "findings": result.findings,
+            "worker_results": [row],
+            "evidence_refs": result.evidence_refs,
         }
 
     async def node_intent(self, gstate: dict[str, Any]) -> dict[str, Any]:
@@ -403,6 +325,7 @@ class ResearchGraphRunner:
             "intent": intent_payload,
             "brief": brief_from_intent(intent_payload),
             "needs_clarification": needs,
+            "search_mode": "agent",
             "progress": "intent",
         }
 

@@ -1,7 +1,7 @@
 [project]
-name = "personal-search-assistant"
+name = "research-agent-harness"
 version = "0.1.0"
-description = "Adaptive personal research assistant: answer, search, or recoverable deep research."
+description = "A controllable and evaluable harness for long-running research agents. Search is a tool environment, not the product."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiofiles>=23.0.0",

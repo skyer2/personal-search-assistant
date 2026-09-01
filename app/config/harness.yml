@@ -1,5 +1,5 @@
 harness:
-  version: "1.0.0-personal-search"
+  version: "1.0.0-research-agent-harness"
   max_retries: 2
 
   compression:
@@ -44,7 +44,7 @@ harness:
   memory:
     provider: "sqlite"
     dsn: ""
-    enabled: true
+    enabled: false
     recall_top_k: 5
     ttl_days: 90
     ttl_by_type:
@@ -105,48 +105,45 @@ harness:
     max_replan_count: 2
     max_plan_steps: 8
 
+  experiment:
+    default_mode: agent
+    enabled_sources:
+      web: true
+      file: true
+    agent:
+      max_tool_calls: 15
+      max_research_tasks: 5
+      max_replan: 2
+      parallel: true
+      progress_eval: true
+      compression: true
+    direct:
+      max_tool_calls: 8
+      max_search_queries: 4
+      max_replan: 0
+      parallel: false
+      progress_eval: false
+      compression: false
+
   personal_search:
-    default_mode: auto
+    default_mode: agent
     default_deliverable: chat
     enabled_sources:
       web: true
       file: true
-    answer:
-      max_tool_calls: 0
-      max_search_queries: 0
-      max_replan: 0
-      parallel: false
-      progress_eval: false
-      compression: false
-    search:
-      max_tool_calls: 3
-      max_search_queries: 2
-      max_replan: 0
-      parallel: false
-      progress_eval: false
-      compression: false
-    research:
-      max_tool_calls: 15
-      max_research_tasks: 5
-      max_replan: 2
-      parallel: true
-      progress_eval: true
-      compression: true
-    # 旧 key 别名，budget_for_mode 仍可读
-    quick:
-      max_tool_calls: 3
-      max_search_queries: 2
-      max_replan: 0
-      parallel: false
-      progress_eval: false
-      compression: false
-    deep:
-      max_tool_calls: 15
-      max_research_tasks: 5
-      max_replan: 2
-      parallel: true
-      progress_eval: true
-      compression: true
+    experiment:
+      agent:
+        max_tool_calls: 15
+        max_research_tasks: 5
+        max_replan: 2
+        parallel: true
+        progress_eval: true
+      direct:
+        max_tool_calls: 8
+        max_search_queries: 4
+        max_replan: 0
+        parallel: false
+        progress_eval: false
 
   tools:
     fail_closed: true

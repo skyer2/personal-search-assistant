@@ -130,7 +130,7 @@ class HarnessRunContext:
     restored_full: bool = False
     step_index: int = 0
     original_query: str = ""
-    search_mode: str = "auto"
+    search_mode: str = "agent"
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     context_built: bool = False
 
@@ -304,7 +304,7 @@ class AgentHarness:
         user_id: str = "",
         tenant_id: str = "",
         project_id: str = "",
-        mode: str = "auto",
+        mode: str = "agent",
     ) -> HarnessRunContext:
         state = LoopState(session_id=session_id, max_retries=self.max_retries)
         state.metadata["strict_validation"] = self.harness_config.validation_strict_mode
@@ -384,7 +384,7 @@ class AgentHarness:
             policy_token=policy_token,
             restored_full=restored_full,
             step_index=step_index,
-            search_mode=mode or "auto",
+            search_mode=mode or "agent",
             original_query=task_query,
         )
 
@@ -405,7 +405,7 @@ class AgentHarness:
         user_id: str = "me",
         tenant_id: str = "local",
         project_id: str = "Inbox",
-        mode: str = "auto",
+        mode: str = "agent",
     ) -> HarnessResult:
         ctx = self._bootstrap_run(
             task_query,

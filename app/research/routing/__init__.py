@@ -1,1 +1,1 @@
-"""Task Router：ANSWER / SEARCH / RESEARCH。"""
+"""Experiment mode：agent（Harness）或 direct（baseline）。"""

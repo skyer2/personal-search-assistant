@@ -1,6 +1,4 @@
-"""
-【Phase 13】Harness 能力清单 API — 个人搜索助手 defaults
-"""
+"""Harness 能力清单：实验档 agent / direct，不是搜索产品。"""
 
 from __future__ import annotations
 
@@ -19,22 +17,21 @@ def harness_capabilities() -> dict[str, Any]:
     personal = getattr(config, "personal_search", {}) or {}
     return {
         "version": config.version,
-        "product": "personal-search-assistant",
-        "search_modes": ["auto", "answer", "search", "research"],
-        "search_mode_aliases": {"quick": "search", "deep": "research", "direct": "answer"},
-        "default_mode": personal.get("default_mode", "auto"),
-        "default_deliverable": personal.get("default_deliverable", "chat"),
+        "product": "research-agent-harness",
+        "not_a_search_engine": True,
+        "experiment_modes": ["agent", "direct"],
+        "default_mode": "agent",
+        "environment_tools": ["internet_search", "fetch_url", "read_file_content"],
         "enabled_sources": personal.get("enabled_sources", {"web": True, "file": True}),
-        "projects": ["Inbox", "C++", "Agent", "KRX"],
         "identity": {"tenant_id": "local", "user_id": "me"},
         "loop": [
-            "task_router (answer | search | research)",
-            "research: brief → plan → dispatch → progress / replan",
-            "finalize",
+            "agent: brief → plan → dispatch → progress / replan → synthesize",
+            "direct (baseline only): single worker + search tool",
         ],
         "control_plane": {
-            "domain_harness": "app.research",
+            "domain": "app.research",
             "runtime": "langgraph",
+            "worker_runtime": "WorkerRuntime",
             "leaf": "langchain.create_agent",
         },
         "guardrails": {
@@ -44,7 +41,7 @@ def harness_capabilities() -> dict[str, Any]:
             "max_replan_count": config.max_replan_count,
             "max_plan_steps": config.max_plan_steps,
         },
-        "personal_search": personal,
+        "memory_enabled": bool(getattr(config, "memory_enabled", False)),
         "developer_mode": {
             "eval": True,
             "trace": True,

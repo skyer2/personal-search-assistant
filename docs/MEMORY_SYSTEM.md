@@ -1,8 +1,10 @@
-# 个人研究 Memory
+# Memory（Phase 2，默认关闭）
 
-> 权威产品叙事见 [ARCHITECTURE.md](ARCHITECTURE.md)。实现仍在 `app/agent/memory/`；**主故事不是 TTL / half-life / SUPERSEDE**，而是个人研究记忆。
+> **Phase 1 不研究跨任务 Memory。** 权威范围见 [ARCHITECTURE.md](ARCHITECTURE.md)。  
+> `Context ≠ Memory`，`Checkpoint ≠ Memory`，`Evidence ≠ Memory`。  
+> `harness.yml` 中 `memory.enabled: false`。实现仍在 `app/agent/memory/`，等明确研究「跨任务如何积累经验」再打开。
 >
-> 面试精简版见 [MEMORY_INTERVIEW.md](./MEMORY_INTERVIEW.md)。单次任务窗口见 [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md)。
+> 下文是历史实现说明，不是当前项目主故事。
 
 ---
 

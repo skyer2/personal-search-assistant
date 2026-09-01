@@ -49,7 +49,7 @@ export async function startTask(
     body: JSON.stringify({
       query,
       thread_id: threadId,
-      mode: options?.mode ?? "auto",
+      mode: options?.mode ?? "agent",
       user_id: options?.userId ?? "me",
       tenant_id: "local",
       project_id: options?.projectId ?? "Inbox"

@@ -4,17 +4,15 @@ import {
   SendOutlined,
   StopOutlined
 } from "@ant-design/icons";
-import { Button, Segmented, Tooltip, Upload } from "antd";
+import { Button, Tooltip, Upload } from "antd";
 import type { UploadFile } from "antd";
-import type { SearchMode, UploadedItem } from "../types";
+import type { UploadedItem } from "../types";
 
 interface ChatComposerProps {
   isAwaitingApproval?: boolean;
   isCancelling: boolean;
   isRunning: boolean;
   isUploading: boolean;
-  mode: SearchMode;
-  onModeChange: (mode: SearchMode) => void;
   onNewSession: () => void;
   onCancel: () => void;
   onQueryChange: (value: string) => void;
@@ -55,8 +53,6 @@ export function ChatComposer({
   isCancelling,
   isRunning,
   isUploading,
-  mode,
-  onModeChange,
   onCancel,
   onNewSession,
   onQueryChange,
@@ -88,22 +84,7 @@ export function ChatComposer({
   }
 
   return (
-    <section className="chat-composer" aria-label="发送搜索任务">
-      <div className="composer-mode-row">
-        <Segmented
-          aria-label="搜索模式"
-          disabled={isRunning}
-          onChange={(value) => onModeChange(value as SearchMode)}
-          options={[
-            { label: "自动", value: "auto" },
-            { label: "直答", value: "answer" },
-            { label: "搜索", value: "search" },
-            { label: "研搜", value: "research" }
-          ]}
-          value={mode}
-        />
-      </div>
-
+    <section className="chat-composer" aria-label="发送研究任务">
       {uploadedItems.length > 0 ? (
         <div className="attachment-strip" aria-label="当前会话附件">
           {uploadedItems.map((item) => (
@@ -135,7 +116,7 @@ export function ChatComposer({
 
       <div className="composer-shell">
         <textarea
-          aria-label="搜索问题"
+          aria-label="研究任务"
           disabled={isRunning}
           onChange={(event) => onQueryChange(event.target.value)}
           onKeyDown={(event) => {
@@ -144,7 +125,7 @@ export function ChatComposer({
               onSubmit();
             }
           }}
-          placeholder="向 Personal Search Assistant 提问..."
+          placeholder="输入研究任务。Harness 会规划、并行执行、评估进度并按需 Replan。"
           value={query}
         />
 

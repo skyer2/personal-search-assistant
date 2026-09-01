@@ -67,6 +67,6 @@ async def collect_health() -> dict[str, Any]:
         "status": overall,
         "dependencies": dependencies,
         "version": config.version,
-        "product": "personal-search-assistant",
+        "product": "research-agent-harness",
         "enabled_sources": {"web": True, "file": True},
     }

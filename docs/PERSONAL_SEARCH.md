@@ -1,3 +1,8 @@
+# Personal Search Assistant — 历史文档（已废弃产品定位）
+
+> **作废。** 本仓库已框死为 **Research Agent Harness**。权威范围见 [ARCHITECTURE.md](ARCHITECTURE.md)。  
+> Search 是 environment tool，不是产品路径。下文仅作历史对照，不要按本文实现。
+
 # Personal Search Assistant — 产品架构与模块拆分
 
 > **权威架构**见 [ARCHITECTURE.md](ARCHITECTURE.md)。本文保留产品层细节（对话、UI、模块清单），与权威文档冲突时以 ARCHITECTURE 为准。

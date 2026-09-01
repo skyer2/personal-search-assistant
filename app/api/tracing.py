@@ -84,7 +84,7 @@ def create_langfuse_handler(
         return handler_cls(
             session_id=session_id,
             metadata={
-                "project": "personal-search-assistant",
+                "project": "research-agent-harness",
                 "harness_version": "2.0",
                 **(metadata or {}),
             },

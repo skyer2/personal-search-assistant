@@ -56,7 +56,7 @@ async def lifespan(_app: FastAPI):
 current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent
 
-app = FastAPI(title="Personal Search Assistant", lifespan=lifespan)
+app = FastAPI(title="Research Agent Harness", lifespan=lifespan)
 app.include_router(eval_router)
 app.include_router(harness_router)
 app.include_router(trace_routes)
@@ -90,7 +90,7 @@ class TaskRequest(BaseModel):
 
     query: str
     thread_id: str = None
-    mode: str = "auto"
+    mode: str = "agent"
     user_id: str = "me"
     tenant_id: str = "local"
     project_id: str = "Inbox"
@@ -145,7 +145,7 @@ async def run_task(request: TaskRequest):
             user_id=request.user_id or "me",
             tenant_id=request.tenant_id or "local",
             project_id=request.project_id or "Inbox",
-            mode=request.mode or "auto",
+            mode=request.mode or "agent",
         )
     )
     active_tasks[thread_id] = task

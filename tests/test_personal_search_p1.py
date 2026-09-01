@@ -13,33 +13,30 @@ from app.tools.fetch_url import fetch_url_content, strip_html
 
 
 def test_user_override_mode():
-    quick = route("比较 A 和 B", user_mode="quick")
-    assert quick.mode == "search" and quick.user_override
-    deep = route("今天休市吗", user_mode="deep")
-    assert deep.mode == "research" and deep.user_override
-    print("[OK] user override SearchMode")
+    harness = route("比较 A 和 B", user_mode="quick")
+    assert harness.mode == "agent"
+    baseline = route("今天休市吗", user_mode="direct")
+    assert baseline.mode == "direct" and baseline.user_override
+    print("[OK] experiment modes")
 
 
-def test_auto_quick_vs_deep():
+def test_auto_always_agent():
     fact = classify_auto("纳斯达克今天休市了吗")
-    assert fact.mode == "search"
+    assert fact.mode == "agent"
     compare = classify_auto("比较 Tesla / Figure / Unitree 的差异")
-    assert compare.mode == "research"
-    report = classify_auto("搜索 AI 趋势并生成 Markdown 报告")
-    assert report.mode == "research"
+    assert compare.mode == "agent"
     definition = classify_auto("std::apply是什么")
-    assert definition.mode == "answer"
-    print("[OK] auto classify answer/search/research")
+    assert definition.mode == "agent"
+    print("[OK] no product SEARCH/ANSWER path")
 
 
 def test_budget_for_mode():
-    q = budget_for_mode("quick")
-    d = budget_for_mode("deep")
-    assert q["max_replan_count"] == 0
-    assert q["max_tool_calls"] == 3
-    assert d["max_replan_count"] == 2
-    assert d["max_tool_calls"] == 15
-    print("[OK] mode budgets")
+    d = budget_for_mode("direct")
+    a = budget_for_mode("agent")
+    assert d["max_replan_count"] == 0
+    assert a["max_replan_count"] == 2
+    assert a["max_tool_calls"] == 15
+    print("[OK] experiment budgets")
 
 
 def test_conversation_follow_up(tmp_path: Path | None = None):
@@ -99,20 +96,13 @@ def test_fetch_url_strips_html_and_stores_artifact():
         reset_evidence_store()
 
 
-def test_route_after_mode_and_fetch_url_in_web_tools():
-    from app.research.runtime.graph import route_after_mode
+def test_fetch_url_in_web_tools():
     from app.research.workers.registry import worker_tools_for_step
 
-    assert route_after_mode({"search_mode": "quick"}) == "quick_search"
-    assert route_after_mode({"search_mode": "search"}) == "quick_search"
-    assert route_after_mode({"search_mode": "deep"}) == "intent"
-    assert route_after_mode({"search_mode": "research"}) == "intent"
-    assert route_after_mode({"search_mode": "answer"}) == "direct_answer"
-    assert route_after_mode({"search_mode": ""}) == "intent"
     tools = worker_tools_for_step("network_search")
     assert "internet_search" in tools
     assert "fetch_url" in tools
-    print("[OK] route_after_mode + fetch_url on web worker")
+    print("[OK] search+fetch remain environment tools")
 
 
 def test_quick_compose_and_pick_urls():
@@ -130,11 +120,11 @@ def test_quick_compose_and_pick_urls():
 
 if __name__ == "__main__":
     test_user_override_mode()
-    test_auto_quick_vs_deep()
+    test_auto_always_agent()
     test_budget_for_mode()
     test_conversation_follow_up()
     test_conversation_evicts_to_summary()
     test_fetch_url_strips_html_and_stores_artifact()
     test_quick_compose_and_pick_urls()
-    test_route_after_mode_and_fetch_url_in_web_tools()
-    print("\n=== P1 personal search tests passed ===")
+    test_fetch_url_in_web_tools()
+    print("\n=== environment tool tests passed ===")

@@ -1,4 +1,4 @@
-const STORAGE_KEY = "personal-search.thread_id";
+const STORAGE_KEY = "research-agent-harness.thread_id";
 
 export function createThreadId(): string {
   if (crypto.randomUUID) {

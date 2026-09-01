@@ -41,28 +41,22 @@ interface ConversationThreadProps {
 
 const TASK_EXAMPLES = [
   {
-    tool: "网络搜索",
-    title: "快速事实查询",
-    prompt: "2026 年清明节放假安排是什么？请附来源链接。",
+    tool: "Harness",
+    title: "多实体对照",
+    prompt: "对比 LangGraph、Temporal 和 DeepSeek Harness 在 durable agent workflow 上的设计，要求引用一手资料。",
     icon: <CloudServerOutlined aria-hidden />,
   },
   {
-    tool: "网络搜索",
-    title: "趋势对比",
-    prompt: "比较 React 19 和 Vue 3.5 在 2026 年的主要变化，附来源。",
+    tool: "Harness",
+    title: "机制分解",
+    prompt: "研究 Agent 长任务里 Progress Evaluator 和 Replan 应该如何分工，列出证据缺口。",
     icon: <CloudServerOutlined aria-hidden />,
   },
   {
-    tool: "文件读取",
-    title: "上传文件分析",
-    prompt: "请读取我上传的文件，提炼核心观点、风险点和待补充信息。",
+    tool: "Environment",
+    title: "本地附件",
+    prompt: "请读取我上传的文件，提炼核心主张、冲突点和仍缺的证据。",
     icon: <FileTextOutlined aria-hidden />,
-  },
-  {
-    tool: "Markdown/PDF",
-    title: "显式生成报告",
-    prompt: "请基于本次调研生成一份 Markdown 报告，并转换成 PDF。",
-    icon: <FileMarkdownOutlined aria-hidden />,
   },
 ];
 
@@ -389,9 +383,10 @@ export function ConversationThread({
         <div className="empty-examples">
           <div className="empty-examples-copy">
             <span className="panel-kicker">TASK EXAMPLES</span>
-            <h3>选择一个工具任务开始</h3>
+            <h3>用研究任务驱动 Harness</h3>
             <p>
-              每个示例会触发不同工具路径，执行轨迹和输出文件会直接出现在对话里。
+              这不是搜索产品。每个任务走 Brief → Plan → Worker → Progress / Replan。
+              Search 只是 environment tool。
             </p>
           </div>
 
