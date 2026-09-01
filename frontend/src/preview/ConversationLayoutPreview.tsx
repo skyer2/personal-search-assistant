@@ -33,7 +33,7 @@ const mockFiles: OutputFile[] = [
 ];
 
 export function ConversationLayoutPreview() {
-  const started = startElapsedClock(Date.now() - 18_000);
+  const [started] = useState(() => startElapsedClock(Date.now()));
   const [now, setNow] = useState(Date.now());
   const checkErrors = runProgressSelfCheck();
 
