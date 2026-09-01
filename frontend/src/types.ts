@@ -1,5 +1,7 @@
 export type SearchMode = "agent" | "direct";
 
+export type ConnectionState = "connecting" | "connected" | "reconnecting" | "closed";
+
 export type MonitorEventName =
   | "session_created"
   | "tool_start"
