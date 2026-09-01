@@ -180,12 +180,6 @@ command -v pnpm
 pnpm -v
 ```
 
-pnpm 10 默认**不跑**依赖的安装脚本。本仓库已在 `frontend/package.json` 里允许 `esbuild`。若页面白屏且没有 `node_modules/.bin/esbuild`：
-
-```bash
-bash /opt/research-agent-harness/frontend/scripts/fix-dev.sh --start
-```
-
 若 `corepack` 仍不可用，改用 npm 全局安装（同样用绝对路径）：
 
 ```bash
@@ -504,7 +498,7 @@ cd frontend && pnpm install
 | `ModuleNotFoundError: app` | 在仓库根启动，并带 `--app-dir .` |
 | `llm=down` | `.env` 路径、Key、`OPENAI_BASE_URL`、机器能否访问百炼 |
 | 能规划不能搜 | `TAVILY_API_KEY`；公司网关是否拦 `api.tavily.com` |
-| 5173 白屏 / `esbuild: No such file` | pnpm 10 没装 esbuild。`bash frontend/scripts/fix-dev.sh --start`。不要空回车跑 `pnpm approve-builds` |
+| 页面一直转圈、WS 失败 | 8000 没起来；或远程访问却配了 localhost |
 | `Address already in use` | `ss -lntp \| grep 8000` 杀掉旧进程 |
 | TLS / certificate verify failed | 系统时间、`ca-certificates` |
 | `uv python install` 超时 | 代理，或改路径 B/C |
