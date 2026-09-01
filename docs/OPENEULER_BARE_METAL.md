@@ -154,7 +154,9 @@ source ~/.bashrc
 
 ## 5. 安装 Node.js 20 与 pnpm
 
-前端 `packageManager` 为 **pnpm@10.33.0**。系统 `dnf install nodejs` 通常版本过旧，用官方二进制：
+前端 `packageManager` 为 **pnpm@10.33.0**。系统 `dnf install nodejs` 通常版本过旧，用官方二进制。
+
+**不要对 `corepack`/`pnpm` 使用裸的 `sudo`。** `sudo` 默认 PATH 不含 `/usr/local/node/bin`，会报 `corepack: command not found`。用绝对路径，或先 `export PATH` 再执行（你已是 root 则全程不必 sudo）。
 
 ```bash
 NODE_VER=20.19.0
@@ -162,15 +164,27 @@ cd /tmp
 curl -LO "https://nodejs.org/dist/v${NODE_VER}/node-v${NODE_VER}-linux-x64.tar.xz"
 # 国内镜像示例：
 # curl -LO "https://npmmirror.com/mirrors/node/v${NODE_VER}/node-v${NODE_VER}-linux-x64.tar.xz"
-sudo mkdir -p /usr/local/node
-sudo tar -xJf "node-v${NODE_VER}-linux-x64.tar.xz" -C /usr/local/node --strip-components=1
-echo 'export PATH="/usr/local/node/bin:$PATH"' | sudo tee /etc/profile.d/node.sh
+mkdir -p /usr/local/node
+tar -xJf "node-v${NODE_VER}-linux-x64.tar.xz" -C /usr/local/node --strip-components=1
+echo 'export PATH="/usr/local/node/bin:$PATH"' > /etc/profile.d/node.sh
 source /etc/profile.d/node.sh
+hash -r
 node -v
 npm -v
 
-sudo corepack enable
-sudo corepack prepare pnpm@10.33.0 --activate
+# 必须用绝对路径（sudo 会丢掉上面的 PATH）
+/usr/local/node/bin/corepack enable
+/usr/local/node/bin/corepack prepare pnpm@10.33.0 --activate
+hash -r
+command -v pnpm
+pnpm -v
+```
+
+若 `corepack` 仍不可用，改用 npm 全局安装（同样用绝对路径）：
+
+```bash
+/usr/local/node/bin/npm install -g pnpm@10.33.0
+hash -r
 pnpm -v
 ```
 
@@ -179,6 +193,8 @@ pnpm -v
 ```bash
 pnpm config set registry https://registry.npmmirror.com
 ```
+
+**检查：** `node -v` 为 `v20.x`，`pnpm -v` 为 `10.33.x`。新开的 SSH 会话会自动读 `/etc/profile.d/node.sh`；当前会话若找不到 `pnpm`，再执行一次 `source /etc/profile.d/node.sh && hash -r`。
 
 ---
 
@@ -465,7 +481,7 @@ cd frontend && pnpm install
 | `Address already in use` | `ss -lntp \| grep 8000` 杀掉旧进程 |
 | TLS / certificate verify failed | 系统时间、`ca-certificates` |
 | `uv python install` 超时 | 代理，或改路径 B/C |
-| pnpm 权限 / corepack | 确认 `/usr/local/node/bin` 在 PATH |
+| `sudo: corepack: command not found` | `sudo` 没有 `/usr/local/node/bin`。用 `/usr/local/node/bin/corepack enable`，或 `/usr/local/node/bin/npm install -g pnpm@10.33.0` |
 | SELinux AVC | `ausearch -m avc -ts recent` |
 
 看后端终端里 `[MainAgent]`、`[PlannerLLM]`、工具报错。
