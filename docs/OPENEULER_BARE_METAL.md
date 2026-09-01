@@ -253,6 +253,26 @@ LLM_COMPRESSION_MODEL=gpt-4o-mini
 
 `LLM_QWEN_MAX` 这个名字是历史变量名，值填**实际模型 ID**，不要求一定是 Qwen。
 
+### 7.1.1 火山 AI 网关（蓝区 Chat 兼容）
+
+本仓库只走 **OpenAI Chat Completions**（`POST …/v1/chat/completions`）。`.env` 必须用网关说明里的 **「OpenAI 协议、chat 格式」** 地址，**不要**填 Responses（`/v1/responses`），**不要**填 Anthropic（`/compatible`）。
+
+网络：仅蓝区；须 **断开 XGate**。密钥向网关重新申请（一个 key 可调该网关上已开通的模型）。内测若偶发失败，先重试一次。
+
+```bash
+OPENAI_BASE_URL=https://st8tp3ajl0df3n8b8l8qu.apigateway-cn-beijing.volceapi.com/v1
+OPENAI_API_KEY=网关新发的key
+LLM_QWEN_MAX=控制台里的模型ID
+LLM_COMPRESSION_MODEL=控制台里的轻量模型ID
+LLM_TIMEOUT_SEC=180
+```
+
+`LLM_QWEN_MAX` / `LLM_COMPRESSION_MODEL` 填网关模型列表中的 ID（例如豆包、DeepSeek 等），不要再写 `qwen-max`，除非网关确实挂了同名模型。
+
+Tavily 仍要单独配：`search` 不走火山网关。
+
+改完 `.env` 后必须重启 uvicorn。若 `GET /v1/models` 网关未实现，新版 `/health` 会改打一条极短 chat；仍 `llm=down` 则检查蓝区网络、XGate、Key、模型 ID。
+
 ### 7.2 建议保持默认（Phase 1）
 
 ```bash

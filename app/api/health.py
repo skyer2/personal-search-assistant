@@ -22,7 +22,7 @@ def _status_from_bool(ok: bool, configured: bool = True) -> DependencyStatus:
     return "ok" if ok else "down"
 
 
-async def _check_llm(timeout: float = 3.0) -> DependencyStatus:
+async def _check_llm(timeout: float = 8.0) -> DependencyStatus:
     if not os.getenv("OPENAI_API_KEY"):
         return "down"
 
@@ -35,8 +35,20 @@ async def _check_llm(timeout: float = 3.0) -> DependencyStatus:
                 base_url=os.getenv("OPENAI_BASE_URL"),
                 timeout=timeout,
             )
-            client.models.list()
-            return True
+            try:
+                client.models.list()
+                return True
+            except Exception:
+                # 部分网关不实现 GET /v1/models，改打一条极短 chat
+                model = (os.getenv("LLM_QWEN_MAX") or "").strip()
+                if not model:
+                    return False
+                client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=1,
+                )
+                return True
         except Exception:
             return False
 

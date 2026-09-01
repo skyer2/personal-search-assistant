@@ -14,12 +14,16 @@ load_dotenv(find_dotenv())
 
 _llm_timeout = float(os.getenv("LLM_TIMEOUT_SEC", "120"))
 _supervisor_temperature = float(os.getenv("HARNESS_SUPERVISOR_TEMPERATURE", "0.1"))
+_openai_base_url = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
+_openai_api_key = (os.getenv("OPENAI_API_KEY") or "").strip() or None
 
 model = init_chat_model(
     model=os.getenv("LLM_QWEN_MAX"),
     model_provider="openai",
     timeout=_llm_timeout,
     temperature=_supervisor_temperature,
+    base_url=_openai_base_url,
+    api_key=_openai_api_key,
 )
 
 _compression_model_name = os.getenv("LLM_COMPRESSION_MODEL", "qwen-turbo")
@@ -32,6 +36,8 @@ if _compression_enabled:
             model=_compression_model_name,
             model_provider="openai",
             timeout=_llm_timeout,
+            base_url=_openai_base_url,
+            api_key=_openai_api_key,
         )
     except Exception as exc:
         print(f"[LLM] compression_model init failed, will use truncate: {exc}")
