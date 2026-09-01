@@ -201,3 +201,9 @@ Query → single agent               Brief → Plan →                   关掉
 | Brief / Plan / Progress | `research_brief.py` / `planner.py` / `app/research/planning/` |
 | Environment search/fetch | `app/tools/`（`internet_search`、`fetch_url`） |
 | Artifact / Evidence | `artifacts.py`、`evidence_store.py` |
+
+补充文档（非范围权威）：
+
+- [HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md) — StateGraph 运行时细节
+- [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md) — Context / Artifact / Evidence
+- [BROWSECOMP_PLUS_EVAL.md](./BROWSECOMP_PLUS_EVAL.md) — 固定语料评测

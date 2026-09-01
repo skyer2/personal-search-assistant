@@ -1,11 +1,10 @@
 # 深度研搜上下文工程与压缩（对照现行代码）
 
 > 对照 `app/agent/harness/context_builder.py`、`compressor.py`、`context_budget.py`、`citations.py`、`orchestration.py`、`loop.py`。
-> 面试精简版与问题清单见 [CONTEXT_INTERVIEW.md](./CONTEXT_INTERVIEW.md)。
-> Phase 19 七项改进对照见 [CONTEXT_IMPROVEMENTS.md](./CONTEXT_IMPROVEMENTS.md)。
-> Phase 23：Context Virtualization — Artifact/Evidence Store + 可恢复压缩 + glm-5.2 tokenizer + JIT。  
-> 工具侧短卡合同见 [MCP_SYSTEM.md](./MCP_SYSTEM.md) 的 Tool Output Contract；Memory 见 [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md)。
+> 范围权威：[ARCHITECTURE.md](./ARCHITECTURE.md)。运行时：[HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md)。
+> Phase 23：Context Virtualization — Artifact/Evidence Store + 可恢复压缩 + glm-5.2 tokenizer + JIT。
 > 原则：**LLM context 只保存当前决策真正需要的信息**；可重新取得的大内容放窗口外，用 ref 按需读取。
+> 跨任务 Memory 默认关闭，不是本层职责。MCP / RAGFlow 已移除；环境工具只有 search / fetch / file。
 
 ---
 
@@ -68,10 +67,10 @@ POST /api/task
 | `compressed_content` | 下一步 prior / 最终拼接 | 本任务内 |
 | evidence digest | 合成步 | 本任务内，从工人 JSON 汇总 |
 | `CitationManager.sources` | finalize 参考文献 | 本任务内，另存 `evidence.json` |
-| 长期 Memory | 跨任务 | 见 MEMORY_SYSTEM.md |
+| 长期 Memory | 跨任务（Phase 2，默认关闭） | `app/agent/memory/`，不进本层 |
 | LangGraph messages | Leaf Worker 图内 replay | 进程内 |
 
-**RAGFlow 不是上下文工程。** 它是工具检索；检索结果进入本步 `StepResult`，再被压缩/digest。
+检索工具不是上下文工程。search / fetch / file 的结果进入本步 `StepResult`，再被压缩/digest。
 
 ---
 
@@ -134,7 +133,7 @@ POST /api/task
 
 ### 2.4 工具描述按步裁剪
 
-`mcp_registry.build_tool_context(step_type)`：搜网步看不到 `generate_markdown`，写报告步看不到 `internet_search`。再叠加绑定指令：禁止越权调其它子 Agent。这是上下文工程的一部分——**工具表也占窗口，也诱导模型乱调工具。**
+`worker_tools_for_step(step_type)`：搜网步看不到 `generate_markdown`，写报告步看不到 `internet_search`。再叠加绑定指令：禁止越权调其它子 Agent。这是上下文工程的一部分——**工具表也占窗口，也诱导模型乱调工具。**
 
 ---
 
@@ -327,4 +326,4 @@ tests/test_harness_phase19_context.py  窗口卫生 / 保留 / 笔记 / 绑定
 - `prompts.yml` 原文仍偏「团队负责人」叙事，已在 `main_agent.py` 追加 Harness 约束，未整篇重写。
 - CCR 仍是启发式字符串匹配，不是 NLI / 事实验证模型。
 
-Phase 19 已落地的七项（窗口卫生、证据回读、保留检查、分层淘汰、fact 绑定、工作笔记/tool 清除、观测）见 [CONTEXT_IMPROVEMENTS.md](./CONTEXT_IMPROVEMENTS.md)。
+Phase 19 已落地：窗口卫生、证据回读、保留检查、分层淘汰、fact 绑定、工作笔记/tool 清除、观测。

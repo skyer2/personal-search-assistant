@@ -752,7 +752,6 @@ class ResearchGraphRunner:
             started_at=session.ctx.run_started,
         )
         session.result = result
-        _persist_conversation(session, result)
         return {
             "status": "completed" if result.status != "failed" else "aborted",
             "final_content": session.state.final_content,
@@ -783,7 +782,6 @@ class ResearchGraphRunner:
             started_at=session.ctx.run_started,
         )
         session.result = result
-        _persist_conversation(session, result)
         return {
             "status": "aborted",
             "abort_reason": session.state.abort_reason or "aborted",
@@ -797,34 +795,6 @@ def _require_session(gstate: dict[str, Any]) -> RunSession:
     if session is None:
         raise RuntimeError("research graph session missing")
     return session
-
-
-def _persist_conversation(session: RunSession, result: Any) -> None:
-    try:
-        from app.conversation.store import ConversationStore, ConversationTurn
-
-        ctx = session.ctx
-        store = ConversationStore.default(user_id=ctx.user_id or "me", project_id=ctx.project_id or "Inbox")
-        user_text = ctx.original_query or ctx.task_query
-        store.append_turn(ctx.session_id, ConversationTurn(role="user", content=user_text, run_id=session.run_id))
-        assistant = str(getattr(result, "content", None) or session.state.final_content or "")
-        sources: list[str] = []
-        for card in list((session.state.metadata or {}).get("search_cards") or []):
-            url = str((card or {}).get("url") or "")
-            if url and url not in sources:
-                sources.append(url)
-        if assistant:
-            store.append_turn(
-                ctx.session_id,
-                ConversationTurn(
-                    role="assistant",
-                    content=assistant[:4000],
-                    run_id=session.run_id,
-                    sources=sources[:12],
-                ),
-            )
-    except Exception as exc:
-        logger.warning("conversation persist skipped: %s", exc)
 
 
 def _failed_worker(task_id: str, step_type: str, reason: str) -> dict[str, Any]:

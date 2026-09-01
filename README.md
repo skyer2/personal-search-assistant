@@ -20,6 +20,12 @@ Search is only a tool environment used to study:
 
 权威范围：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
+补充文档：
+
+- [docs/HARNESS_ARCHITECTURE.md](docs/HARNESS_ARCHITECTURE.md) — StateGraph 运行时
+- [docs/CONTEXT_SYSTEM.md](docs/CONTEXT_SYSTEM.md) — 上下文外置与压缩
+- [docs/BROWSECOMP_PLUS_EVAL.md](docs/BROWSECOMP_PLUS_EVAL.md) — BrowseComp-Plus 评测
+
 ## 研究什么
 
 1. 复杂任务如何拆成稳定 Research Plan  
@@ -64,6 +70,7 @@ cd frontend && pnpm install && pnpm dev
 ```bash
 python3 tests/test_architecture_p0.py
 python3 tests/test_research_harness.py
+python3 tests/test_environment_tools.py
 python3 tests/test_intent_and_plan.py
 python3 tests/test_progress_evaluator.py
 python3 tests/test_research_checkpoint.py

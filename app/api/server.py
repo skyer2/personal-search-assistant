@@ -32,10 +32,8 @@ from app.agent.main_agent import run_deep_agent
 from app.api.eval_routes import router as eval_router
 from app.api.harness_routes import router as harness_router
 from app.api.health import collect_health
-from app.api.memory_routes import router as memory_router
 from app.api.metrics_routes import router as metrics_router
 from app.api.monitor import manager
-from app.api.tools_routes import router as tools_router
 from app.api.trace_routes import router as trace_routes
 
 @asynccontextmanager
@@ -61,8 +59,6 @@ app.include_router(eval_router)
 app.include_router(harness_router)
 app.include_router(trace_routes)
 app.include_router(metrics_router)
-app.include_router(tools_router)
-app.include_router(memory_router)
 
 # 保存 thread_id -> 后台 Agent 任务，用于同一会话任务替换和主动取消
 active_tasks: dict[str, asyncio.Task] = {}
