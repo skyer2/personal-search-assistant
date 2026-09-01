@@ -113,6 +113,10 @@ export async function fetchTraceTree(sessionId: string): Promise<{ session_id: s
   return requestJson(apiUrl(`/api/traces/tree/${encodeURIComponent(sessionId)}`));
 }
 
+export async function fetchJsonlTrace(sessionId: string): Promise<JsonlTraceResponse> {
+  return requestJson<JsonlTraceResponse>(apiUrl(`/api/traces/jsonl/${encodeURIComponent(sessionId)}`));
+}
+
 export async function fetchCitations(sessionId: string): Promise<CitationsResponse> {
   return requestJson<CitationsResponse>(apiUrl(`/api/traces/citations/${encodeURIComponent(sessionId)}`));
 }
