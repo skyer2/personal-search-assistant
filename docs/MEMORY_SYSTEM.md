@@ -1,9 +1,8 @@
-# 深度研搜 Memory 系统全貌
+# 个人研究 Memory
 
-> 对照代码仓 `app/agent/memory/` + `app/agent/harness/loop.py` 的现行实现。
-> 面试精简版与问题清单见 [MEMORY_INTERVIEW.md](./MEMORY_INTERVIEW.md)。  
-> 单次任务的窗口与压缩见 [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md)（压缩 ≠ Memory）。  
-> 工具身份与 MCP token 与 MemoryIdentity 同源，见 [MCP_SYSTEM.md](./MCP_SYSTEM.md)。
+> 权威产品叙事见 [ARCHITECTURE.md](ARCHITECTURE.md)。实现仍在 `app/agent/memory/`；**主故事不是 TTL / half-life / SUPERSEDE**，而是个人研究记忆。
+>
+> 面试精简版见 [MEMORY_INTERVIEW.md](./MEMORY_INTERVIEW.md)。单次任务窗口见 [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md)。
 
 ---
 
@@ -11,40 +10,49 @@
 
 ### 1.1 一句话定位
 
-本仓的 Memory **不是 RAG，也不是把对话 dump 进向量库**。它是一套挂在 Agent Harness 上的 **分层状态系统**：单次任务靠压缩撑住窗口，同一次运行靠 checkpoint/trace 可续跑，跨任务只持久化 **经过筛选、带信任等级、可溯源的结论**。
-
-深度研搜和普通聊天的差别，决定了设计优先级：
+个人助手真正要记住的是：
 
 ```text
-P0  单次任务别爆窗、别丢来源     → Compaction + Citation
-P1  同项目别重复搜同一批源       → Findings + Source Ledger
-P2  用户偏好（要 PDF、关注医药） → Preference
-P3  Agent 越用越会查             → Procedural / HITL 沉淀
+用户上次研究过什么？
+当时得出了什么结论？
+哪些证据已经过期？
+这次问题是不是之前研究的 continuation？
 ```
+
+这叫 **Personal Research Memory**。压缩、checkpoint、trace 仍然存在，但它们不是 Memory 的主故事。
+
+实现上仍是分层状态：单次任务靠压缩撑住窗口，同一次运行靠 **LangGraph checkpoint** 可续跑，跨任务只持久化经过筛选、可溯源的结论与来源。
+
+```text
+P0  上次研究过什么、结论是什么     → Research History + Findings
+P1  证据是否过期、来源是否还可信   → Source History + freshness
+P2  这次是不是 continuation        → Conversation + project context
+P3  用户偏好（要短答、关注 C++）   → Preference
+```
+
+TTL / consolidation durable job / trust SUPERSEDE 可以留在实现里，但不要当成产品卖点。
 
 ### 1.2 和另外三套「存东西」的关系（不要混）
 
-一次 Deep Research 运行里，仓库里其实有 **四套独立持久化**，只有第一套叫 Memory：
+一次运行里仓库里其实有多套持久化，只有长期层叫 Memory：
 
 | 层 | 实现 | 生命周期 | 记什么 |
 |---|---|---|---|
-| **长期记忆 Memory** | `MemoryStore`（SQLite 默认） | 跨 session、跨任务 | curated fact、偏好、HITL 教训、已查来源 |
-| **工作记忆 Compaction** | `ContextCompressor` + `ContextBuilder` | 单次任务内 | 步骤摘要、evidence digest、token 预算 |
-| **会话续跑 Checkpoint** | `StepCheckpointStore`（`output/session_*/.harness/checkpoint.json`） | 同 session 同任务指纹 | 已完成步骤，进程重启可续 |
-| **图内 Checkpointer** | LangGraph SQLite（失败回退 `InMemorySaver`） | 单实例文件、Research StateGraph interrupt/resume | 图内控制流；多副本需 Redis/Postgres |
-| **可观测 Trace** | JSONL `logs/traces/{session_id}.jsonl` | 离线分析 | phase 事件，含 memory 指标 |
+| **长期记忆 Memory** | `MemoryStore`（SQLite 默认） | 跨 session、跨任务 | 研究结论、偏好、已查来源 |
+| **工作记忆 Compaction** | `ContextCompressor` + `ContextBuilder` | 单次任务内 | 步骤摘要、evidence digest |
+| **图内 Checkpointer** | LangGraph SQLite | 单次 RESEARCH 工作流 | **唯一** workflow resume |
+| **可观测 Trace** | JSONL `logs/traces/{session_id}.jsonl` | 离线分析 | phase 事件 |
 
-**RAGFlow 不是 Memory。** RAG 是外部、多人共享、相对静态的知识库，走工具/子 Agent，结果进入本次 `step_results`。Memory 是「这个用户 / 这个项目 / 这个 Agent 自己」的状态。
+`LoopState checkpoint.json` **不再**作为第二套恢复系统。
 
 ### 1.3 业界五层 ↔ 本仓映射
 
 ```text
 业界工作记忆     →  ContextCompressor + prior 摘要 + evidence digest + token 预算
-业界会话记忆     →  LoopState + StepCheckpointStore + JSONL；DeepAgent 用 InMemorySaver
+业界会话记忆     →  Conversation Store + LangGraph ResearchState checkpoint
 业界情节记忆     →  MemoryStore.semantic / episodic + 项目加权召回
 业界用户记忆     →  MemoryStore.preference（user_explicit = trusted）
-业界程序性记忆   →  MemoryStore.procedural（HITL）+ 来源台账；Skills/提示词仍不算 Memory
-业界 RAG         →  RAGFlow 工具（隔离）
+业界程序性记忆   →  MemoryStore.procedural + 来源台账
 ```
 
 ### 1.4 一次任务里 Memory 怎么转起来

@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from app.agent.harness.planner import build_plan, understand_task
 from app.agent.harness.state import ExecutionPlan
+from app.research.routing.mode_router import graph_branch_for_mode
+from app.research.runtime.project import brief_from_intent
 from app.research.runtime.scheduler import (
     annotate_plan_tasks,
     next_synthesis_step,
@@ -28,8 +30,10 @@ def _plan_from_state(state: ResearchState) -> ExecutionPlan | None:
 def intent_node(state: ResearchState) -> dict[str, Any]:
     query = str(state.get("resolved_query") or state.get("task_query") or "")
     intent = understand_task(query)
+    payload = intent.to_dict()
     return {
-        "intent": intent.to_dict(),
+        "intent": payload,
+        "brief": brief_from_intent(payload),
         "needs_clarification": bool(intent.needs_clarification),
         "progress": "intent",
     }
@@ -92,8 +96,21 @@ def mode_router_node(state: ResearchState) -> dict[str, Any]:
     }
 
 
-def route_after_mode(state: ResearchState) -> Literal["quick_search", "intent"]:
-    return "quick_search" if str(state.get("search_mode") or "") == "quick" else "intent"
+def route_after_mode(state: ResearchState) -> Literal["direct_answer", "quick_search", "intent"]:
+    return graph_branch_for_mode(str(state.get("search_mode") or ""))
+
+
+def direct_answer_node(state: ResearchState) -> dict[str, Any]:
+    from app.research.runtime.direct import compose_direct_answer
+
+    query = str(state.get("resolved_query") or state.get("task_query") or "")
+    return {
+        "final_content": compose_direct_answer(query),
+        "status": "completed",
+        "quality_passed": True,
+        "progress": "direct_answer",
+        "plan": None,
+    }
 
 
 def quick_search_node(state: ResearchState) -> dict[str, Any]:
@@ -246,17 +263,22 @@ def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
     if callable(invoke):
         return invoke(state)
     task_id = str(state.get("task_id") or "")
+    finding = {
+        "task_id": task_id,
+        "summary": str(state.get("description") or state.get("objective") or "placeholder")[:400],
+    }
     return {
         "worker_results": [
             {
                 "task_id": task_id,
                 "step_type": state.get("step_type"),
                 "ok": True,
-                "payload": {"summary": "placeholder", "facts": [], "sources": []},
+                "payload": {"summary": "placeholder", "facts": [], "sources": [], "findings": [finding]},
             }
         ],
         "task_status": {task_id: "done"},
         "evidence_refs": [task_id] if task_id else [],
+        "findings": [finding],
     }
 
 
@@ -318,6 +340,7 @@ def compile_research_graph(
     if runtime is not None:
         builder.add_node("conversation", runtime.node_conversation)
         builder.add_node("mode_router", runtime.node_mode_router)
+        builder.add_node("direct_answer", runtime.node_direct_answer)
         builder.add_node("quick_search", runtime.node_quick_search)
         builder.add_node("quick_fetch", runtime.node_quick_fetch)
         builder.add_node("quick_synthesize", runtime.node_quick_synthesize)
@@ -336,6 +359,7 @@ def compile_research_graph(
     else:
         builder.add_node("conversation", conversation_node)
         builder.add_node("mode_router", mode_router_node)
+        builder.add_node("direct_answer", direct_answer_node)
         builder.add_node("quick_search", quick_search_node)
         builder.add_node("quick_fetch", quick_fetch_node)
         builder.add_node("quick_synthesize", quick_synthesize_node)
@@ -357,8 +381,13 @@ def compile_research_graph(
     builder.add_conditional_edges(
         "mode_router",
         route_after_mode,
-        {"quick_search": "quick_search", "intent": "intent"},
+        {
+            "direct_answer": "direct_answer",
+            "quick_search": "quick_search",
+            "intent": "intent",
+        },
     )
+    builder.add_edge("direct_answer", "finalize")
     builder.add_edge("quick_search", "quick_fetch")
     builder.add_edge("quick_fetch", "quick_synthesize")
     builder.add_edge("quick_synthesize", "finalize")
@@ -416,6 +445,7 @@ __all__ = [
     "initial_graph_state",
     "conversation_node",
     "mode_router_node",
+    "direct_answer_node",
     "intent_node",
     "plan_node",
     "progress_node",

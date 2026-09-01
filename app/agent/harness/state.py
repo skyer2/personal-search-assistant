@@ -224,7 +224,12 @@ class ValidationOutcome:
 
 @dataclass
 class LoopState:
-    """Harness 运行时的完整状态。"""
+    """进程内 Runtime Handles，不是第二套 workflow checkpoint。
+
+    plan / intent / replan_count / abort 等 workflow 字段以 ResearchState
+    （LangGraph SQLite）为准；本对象只给领域服务和工人适配器提供句柄
+    （trace、step_results、stores 投影）。不要把本对象写入第二套恢复系统。
+    """
 
     session_id: str
     phase: Phase = Phase.UNDERSTAND

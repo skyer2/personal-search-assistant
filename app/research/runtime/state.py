@@ -34,6 +34,7 @@ class ResearchState(TypedDict):
     resolved_query: str
     search_cards: list[dict[str, Any]]
 
+    brief: dict[str, Any]
     intent: dict[str, Any] | None
     plan: dict[str, Any] | None
     plan_version: int
@@ -41,6 +42,7 @@ class ResearchState(TypedDict):
     task_status: Annotated[dict[str, str], merge_dicts]
 
     worker_results: Annotated[list[dict[str, Any]], operator.add]
+    findings: Annotated[list[dict[str, Any]], operator.add]
     evidence_refs: Annotated[list[str], operator.add]
 
     budget: BudgetState
@@ -101,11 +103,13 @@ def empty_research_state(
         "conversation_summary": "",
         "resolved_query": task_query,
         "search_cards": [],
+        "brief": {},
         "intent": None,
         "plan": None,
         "plan_version": 1,
         "task_status": {},
         "worker_results": [],
+        "findings": [],
         "evidence_refs": [],
         "budget": {
             "tool_calls": 0,

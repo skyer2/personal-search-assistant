@@ -1,26 +1,28 @@
 # Personal Search Assistant — 产品架构与模块拆分
 
-> **定位**：本仓库产品目标从「企业多数据源研搜 Demo」转向「个人 Search Assistant；复杂问题按需升级 Deep Research」。  
-> **原则**：底层 Harness / StateGraph **保留**；真正要动的是入口分流、默认能力面、身份/对话、Progress 通用化与 UI。  
-> **状态**：架构设计文档（2026-08-31）。**P0 / P1 已落地**；Intent/Plan 方案见 [INTENT_AND_PLAN.md](INTENT_AND_PLAN.md)。
+> **权威架构**见 [ARCHITECTURE.md](ARCHITECTURE.md)。本文保留产品层细节（对话、UI、模块清单），与权威文档冲突时以 ARCHITECTURE 为准。
+>
+> **一句话：** Personal Search Assistant 是一个 adaptive research agent：简单问题直接回答，需要最新信息时搜索，复杂问题进入可恢复的 Research StateGraph；Research Domain 负责分解、证据充分性和 Replan，Worker Runtime 负责局部自主执行，所有事实通过 Evidence/Artifact 可追溯。
 
 ---
 
 ## 0. 一句话与两层模式
 
-**一句话：** 做一个能日常用的个人搜索助手；Deep Research 是按需启用的重型执行引擎，不是每条消息的唯一工作流。
+产品入口是 **Task Router 三档**，不是每条消息都进 Deep Research。
 
 ```text
-SearchMode（新，产品入口）     决定：要不要进 Deep Research
-PlanningMode（已有）            决定：进 Deep 之后怎么规划
-  DIRECT / TEMPLATE / DYNAMIC
+TaskMode（产品入口）              决定：ANSWER / SEARCH / RESEARCH
+PlanningMode（仅 RESEARCH 内）    决定：进研搜之后怎么规划
+  DIRECT / TEMPLATE / DYNAMIC     ← 不要和产品档 ANSWER 混名理解
 ```
+
+兼容旧 API：`quick` → SEARCH，`deep` → RESEARCH，`direct` → ANSWER。
 
 | 层 | 目标 | 明确不是 |
 |----|------|----------|
-| **产品** | 平时像 ChatGPT 搜索一样快；复杂、多实体、要对照/修订/多资料时自动升 Deep | 不是每个问题都跑完整研搜；不是默认出 Markdown/PDF |
-| **架构** | 在现有 Runtime **前面**加 Search Mode Router；Quick / Deep 共用 Evidence / Artifact / Citation / Finalize | 不是推翻 StateGraph、Planner、Progress、Checkpoint |
-| **能力面** | 个人默认 Web + URL + File；DB / RAGFlow / MCP / HITL 变成可选插件 | 不是删企业能力；面试时仍可打开 Developer Mode 展示 |
+| **产品** | 概念题直答；要新信息再搜；多实体/多维度才研搜 | 不是每个问题都跑完整 StateGraph |
+| **架构** | ResearchState 唯一 workflow truth；工人走 WorkerRuntime | 不是 LoopState 第二套 checkpoint |
+| **能力面** | 个人默认 Web + Fetch + File；Evidence / Memory | 不是 DB / RAGFlow / MCP 企业 Demo |
 
 ---
 
@@ -595,7 +597,7 @@ Deep 模式时 `research_details` 含 plan / progress / workers（默认折叠�
 
 ```json
 {
-  "search_modes": ["auto", "quick", "deep"],
+  "search_modes": ["auto", "answer", "search", "research"],
   "enabled_sources": {"web": true, "file": true, "db": false, "kb": false},
   "default_deliverable": "chat",
   "developer_mode": false,

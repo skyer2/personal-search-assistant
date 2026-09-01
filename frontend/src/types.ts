@@ -1,4 +1,4 @@
-export type SearchMode = "auto" | "quick" | "deep";
+export type SearchMode = "auto" | "answer" | "search" | "research";
 
 export type MonitorEventName =
   | "session_created"

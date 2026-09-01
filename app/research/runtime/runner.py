@@ -21,7 +21,11 @@ _SESSIONS: dict[str, "RunSession"] = {}
 
 
 class RunSession:
-    """进程内会话：LoopState 等大对象不进 Graph checkpoint。"""
+    """进程内 handles：LoopState 不是 workflow checkpoint。
+
+    resume / interrupt / plan / task_status 只存在 ResearchState（SQLite）。
+    本对象只在一次 ainvoke 期间给 WorkerRuntime 和领域服务提供锁、stores、tracer。
+    """
 
     def __init__(self, harness: Any, ctx: Any):
         self.harness = harness
@@ -69,8 +73,10 @@ class ResearchGraphRunner:
         session = RunSession(self.harness, ctx)
         bind_session(session)
         session.state.metadata["graph_runtime"] = True
-        session.state.metadata["workflow_authority"] = "state_graph"
-        if ctx.restored_full:
+        session.state.metadata["workflow_authority"] = "research_state"
+        persist_loop = bool(getattr(self.harness.harness_config, "persist_loop_state", False))
+        # LoopState checkpoint 不再作为 Graph 的种子。仅当显式打开旧 persist 时保留 HITL 桥。
+        if persist_loop and ctx.restored_full:
             waiting = dict((session.state.metadata or {}).get("hitl_waiting") or {})
             gate = str(waiting.get("gate_type") or "")
             if gate in {"clarification", "intent_clarification"}:
@@ -92,13 +98,6 @@ class ResearchGraphRunner:
             max_replan_count=self.harness.harness_config.max_replan_count,
             search_mode=getattr(ctx, "search_mode", "auto") or "auto",
         )
-        if ctx.restored_full and session.state.intent is not None:
-            payload["intent"] = session.state.intent.to_dict()
-            payload["needs_clarification"] = False
-        if ctx.restored_full and session.state.plan is not None:
-            payload["plan"] = session.state.plan.to_dict()
-            payload["plan_version"] = int(getattr(session.state.plan, "plan_version", 1) or 1)
-            payload["task_status"] = task_status_map(session.state.plan)
         try:
             graph = self.compile(checkpointer=checkpointer)
             result = await _ainvoke_resilient(
@@ -234,10 +233,46 @@ class ResearchGraphRunner:
             "progress": "conversation",
         }
 
-    async def node_mode_router(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.routing.mode_router import budget_for_mode, route
+    async def node_direct_answer(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.direct import compose_direct_answer, try_direct_llm
+        from app.research.runtime.project import apply_graph_to_loop
 
         session = _require_session(gstate)
+        apply_graph_to_loop(session.state, gstate)
+        query = str(gstate.get("resolved_query") or session.ctx.original_query or session.ctx.task_query)
+        answer = await try_direct_llm(
+            query,
+            conversation_summary=str(gstate.get("conversation_summary") or ""),
+        )
+        if not answer:
+            answer = compose_direct_answer(query)
+        session.state.final_content = answer
+        session.state.phase = Phase.FINALIZE
+        try:
+            from app.api.monitor import monitor
+
+            monitor.report_phase(
+                "direct_answer",
+                "done",
+                session_id=session.session_id,
+                search_mode="answer",
+            )
+        except Exception:
+            pass
+        return {
+            "final_content": answer,
+            "status": "completed",
+            "quality_passed": True,
+            "progress": "direct_answer",
+            "plan": None,
+        }
+
+    async def node_mode_router(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.routing.mode_router import budget_for_mode, route
+        from app.research.runtime.project import apply_graph_to_loop
+
+        session = _require_session(gstate)
+        apply_graph_to_loop(session.state, gstate)
         ctx = session.ctx
         personal = getattr(self.harness.harness_config, "personal_search", None) or {}
         decision = route(
@@ -335,11 +370,17 @@ class ResearchGraphRunner:
         }
 
     async def node_intent(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.project import apply_graph_to_loop, brief_from_intent
+
         session = _require_session(gstate)
+        apply_graph_to_loop(session.state, gstate)
         state = session.state
         ctx = session.ctx
-        if state.intent is not None and ctx.restored_full:
-            needs = False
+        if gstate.get("intent"):
+            from app.agent.harness.state import TaskIntent
+
+            state.intent = TaskIntent.from_dict(gstate["intent"])
+            needs = bool(gstate.get("needs_clarification"))
         else:
             session.state = await self.harness._phase_understand(
                 state,
@@ -357,8 +398,10 @@ class ResearchGraphRunner:
             if needs and self.harness.harness_config.planner_clarification_auto_resolve:
                 state.intent = auto_resolve_clarification(state.intent)
                 needs = False
+        intent_payload = state.intent.to_dict() if state.intent is not None else None
         return {
-            "intent": state.intent.to_dict() if state.intent is not None else None,
+            "intent": intent_payload,
+            "brief": brief_from_intent(intent_payload),
             "needs_clarification": needs,
             "progress": "intent",
         }
@@ -397,9 +440,15 @@ class ResearchGraphRunner:
         }
 
     async def node_plan(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.project import apply_graph_to_loop
+
         session = _require_session(gstate)
+        apply_graph_to_loop(session.state, gstate)
         ctx = session.ctx
-        if session.state.plan is not None and ctx.restored_full:
+        if gstate.get("plan"):
+            from app.agent.harness.state import ExecutionPlan
+
+            session.state.plan = ExecutionPlan.from_dict(gstate["plan"])
             plan = session.state.plan
         else:
             session.state = await self.harness._phase_plan(session.state)
@@ -431,7 +480,10 @@ class ResearchGraphRunner:
     async def node_plan_validate(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from langgraph.types import interrupt
 
+        from app.research.runtime.project import apply_graph_to_loop
+
         session = _require_session(gstate)
+        apply_graph_to_loop(session.state, gstate)
         ctx = session.ctx
         state = session.state
         if state.abort_reason:
@@ -470,8 +522,13 @@ class ResearchGraphRunner:
         }
 
     async def node_dispatch(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.project import apply_graph_to_loop
+
         session = get_session(str(gstate.get("run_id") or ""))
-        if session is None or session.state.plan is None:
+        if session is None:
+            return {"progress": "dispatch"}
+        apply_graph_to_loop(session.state, gstate)
+        if session.state.plan is None:
             return {"progress": "dispatch"}
         if self.harness._apply_run_guardrails(session.state, session.ctx.run_started):
             return {
@@ -479,23 +536,26 @@ class ResearchGraphRunner:
                 "abort_reason": session.state.abort_reason or "guardrail",
                 "progress": "abort",
             }
-        plan = session.state.plan
         return {
-            "plan": plan.to_dict(),
-            "plan_version": int(getattr(plan, "plan_version", 1) or 1),
-            "task_status": task_status_map(plan),
-            "replan_count": session.state.replan_count,
+            "replan_count": int(gstate.get("replan_count") or session.state.replan_count),
             "progress": "dispatch",
         }
 
     async def node_research_worker(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from langgraph.types import interrupt
 
+        from app.research.runtime.isolation import worker_row
+        from app.research.runtime.project import apply_graph_to_loop
+        from app.research.runtime.worker import LangChainWorkerRuntime, ResearchContext, ResearchTask
+
         session = get_session(str(gstate.get("run_id") or ""))
         step_index = int(gstate.get("step_index") or 0)
         task_id = str(gstate.get("task_id") or f"s{step_index}")
         step_type = str(gstate.get("step_type") or "")
-        if session is None or session.state.plan is None:
+        if session is None:
+            return _failed_worker(task_id, step_type, "missing_session")
+        apply_graph_to_loop(session.state, gstate)
+        if session.state.plan is None:
             return _failed_worker(task_id, step_type, "missing_session")
         plan = session.state.plan
         if step_index >= len(plan.steps):
@@ -524,105 +584,55 @@ class ResearchGraphRunner:
             )
             await self.harness._flush_hitl_memories(session.state)
             session.state.metadata["graph_step_gated"] = True
-        outcome = await self._run_isolated_worker(
-            session, step, step_index, task_id
-        )
-        tid = step.resolved_task_id(step_index)
-        from app.research.runtime.isolation import worker_row
-
-        return {
-            "worker_results": [
-                worker_row(tid, step, outcome.ok, outcome.result)
-            ],
-            "task_status": {tid: "done" if outcome.ok else "failed"},
-            "evidence_refs": [tid] if outcome.ok else [],
-        }
-
-    async def _run_isolated_worker(
-        self, session: RunSession, step: Any, step_index: int, task_id: str
-    ) -> Any:
-        from app.research.runtime.isolation import (
-            IsolatedWorkerOutcome,
-            apply_isolated_outcome,
-            snapshot_worker_loop_state,
-        )
-
-        async with session.worker_sem:
-            async with session.lock:
-                child = snapshot_worker_loop_state(session.state)
-                child.step_index = step_index
-                if session.state.plan is not None and step_index < len(session.state.plan.steps):
-                    session.state.plan.steps[step_index].metadata["status"] = (
-                        StepStatus.RUNNING.value
-                    )
-            child_step = child.plan.steps[step_index] if child.plan is not None else step
-            ok = await self.harness._run_single_step(
-                child,
-                child_step,
-                step_index,
-                session.ctx.task_query,
-                session.ctx.relative_session_dir,
-                session.ctx.uploaded_prompt,
-                session.session_id,
-                session.ctx.session_dir,
-                None,
-                session.ctx.idempotency,
-                None,
-            )
-            result = child.step_results[-1] if child.step_results else None
-            outcome = IsolatedWorkerOutcome(
-                step_index=step_index,
+        runtime = LangChainWorkerRuntime(self.harness, session)
+        result = await runtime.execute(
+            ResearchTask(
                 task_id=task_id,
-                ok=bool(ok),
-                result=result,
-                child_state=child,
-                fail_reason="" if ok else "worker_failed",
-            )
-            async with session.lock:
-                apply_isolated_outcome(session.state, outcome)
-                session.state.step_validation_results.append(
-                    {
-                        "step_index": step_index,
-                        "step_type": step.step_type,
-                        "passed": bool(ok),
-                        "parallel": True,
-                    }
-                )
-                if result is not None and session.ctx.citation_manager is not None:
-                    session.ctx.citation_manager.register_from_step(
-                        step_index,
-                        step.step_type,
-                        result.content,
-                        result.metadata,
-                    )
-                    payload = (result.metadata or {}).get("worker_payload") or {}
-                    if isinstance(payload, dict):
-                        session.ctx.citation_manager.bind_worker_facts(
-                            step_index,
-                            step.step_type,
-                            list(payload.get("facts") or []),
-                            list(payload.get("sources") or []),
-                        )
-                self.harness._refresh_working_memory(
-                    session.state,
-                    session.ctx.citation_manager,
-                    session.ctx.session_dir,
-                    session.ctx.task_query,
-                )
-                if session.ctx.checkpoint_store is not None:
-                    self.harness._save_step_checkpoint(
-                        session.state,
-                        session.session_id,
-                        step_index + 1,
-                        session.ctx.checkpoint_store,
-                    )
-                session.state.metadata.pop("graph_step_gated", None)
-        return outcome
+                objective=str(step.objective or step.description or ""),
+                step_type=step.step_type,
+                step_index=step_index,
+                description=step.description,
+                subagent=step.subagent or "",
+                allowed_tools=list(step.allowed_tools or []),
+                plan_version=int(gstate.get("plan_version") or 1),
+            ),
+            ResearchContext(
+                run_id=str(gstate.get("run_id") or session.run_id),
+                query=session.ctx.task_query,
+                user_id=session.ctx.user_id,
+                tenant_id=session.ctx.tenant_id,
+                project_id=session.ctx.project_id,
+                session_id=session.session_id,
+            ),
+        )
+        outcome = result.raw
+        tid = step.resolved_task_id(step_index)
+        row = worker_row(tid, step, result.ok, getattr(outcome, "result", None)) if outcome is not None else {
+            "task_id": tid,
+            "ok": result.ok,
+            "summary": result.summary,
+            "step_type": step.step_type,
+            "payload": {
+                "summary": result.summary,
+                "facts": result.facts,
+                "sources": result.sources,
+                "findings": result.findings,
+            },
+        }
+        return {
+            "worker_results": [row],
+            "task_status": {tid: "done" if result.ok else "failed"},
+            "evidence_refs": result.evidence_refs or ([tid] if result.ok else []),
+            "findings": result.findings,
+        }
 
     async def node_progress(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.planning.progress import assess_progress
+        from app.research.runtime.project import apply_graph_to_loop
 
         session = get_session(str(gstate.get("run_id") or ""))
+        if session is not None:
+            apply_graph_to_loop(session.state, gstate)
         plan = session.state.plan if session is not None else None
         enabled = True
         query = str(gstate.get("task_query") or "")
@@ -657,8 +667,10 @@ class ResearchGraphRunner:
 
     async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.scheduler import next_synthesis_step
+        from app.research.runtime.project import apply_graph_to_loop
 
         session = _require_session(gstate)
+        apply_graph_to_loop(session.state, gstate)
         plan = session.state.plan
         if plan is None:
             return {"status": "synthesized", "progress": "synthesized"}
@@ -704,8 +716,10 @@ class ResearchGraphRunner:
         from app.agent.harness.guardrails import can_replan
         from app.research.planning.plan_patch import apply_plan_patch, build_progress_patch
         from app.research.planning.policy import parse_source_policy
+        from app.research.runtime.project import apply_graph_to_loop
 
         session = _require_session(gstate)
+        apply_graph_to_loop(session.state, gstate)
         state = session.state
         assessment = dict(gstate.get("progress_assessment") or {})
         exhausted = {
@@ -765,7 +779,10 @@ class ResearchGraphRunner:
         }
 
     async def node_quality_gate(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.project import apply_graph_to_loop
+
         session = _require_session(gstate)
+        apply_graph_to_loop(session.state, gstate)
         ctx = session.ctx
         state = session.state
         citation_manager = ctx.citation_manager
@@ -800,7 +817,10 @@ class ResearchGraphRunner:
         }
 
     async def node_finalize(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.project import apply_graph_to_loop
+
         session = _require_session(gstate)
+        apply_graph_to_loop(session.state, gstate)
         success = bool(gstate.get("quality_passed", True)) and not session.state.abort_reason
         result = await self.harness._phase_finalize(
             session.state,

@@ -346,10 +346,13 @@ class AgentHarness:
 
         restored_full = False
         step_index = 0
+        persist_loop = bool(getattr(self.harness_config, "persist_loop_state", False))
+        # Graph 路径只从 LangGraph SQLite 恢复；不要再 hydrate LoopState checkpoint。
         if (
-            self.harness_config.step_checkpoint_enabled
+            persist_loop
+            and not self._use_graph_runtime()
+            and self.harness_config.step_checkpoint_enabled
             and self.harness_config.resume_checkpoint
-            and getattr(self.harness_config, "persist_loop_state", True)
         ):
             preview = checkpoint_store.load()
             if preview and preview.get("loop_state") and self._checkpoint_matches(
@@ -418,6 +421,9 @@ class AgentHarness:
                 from app.research.runtime.runner import ResearchGraphRunner
 
                 return await ResearchGraphRunner(self).execute(ctx)
+            logger.warning(
+                "graph_runtime_enabled=false：_run_legacy_loop 已弃用，仅作显式回退"
+            )
             return await self._run_legacy_loop(ctx)
         except asyncio.CancelledError:
             state.abort_reason = "cancelled"
@@ -448,7 +454,7 @@ class AgentHarness:
             self._teardown_run(ctx)
 
     async def _run_legacy_loop(self, ctx: HarnessRunContext) -> HarnessResult:
-        """旧 while 调度：graph_runtime_enabled=false 或未安装 langgraph 时使用。"""
+        """已弃用的 while 调度。生产路径是 Research StateGraph。"""
         state = ctx.state
         task_query = ctx.task_query
         session_id = ctx.session_id
@@ -1217,7 +1223,7 @@ class AgentHarness:
             return state, 0, False
         assert data is not None
 
-        if data.get("loop_state") and getattr(self.harness_config, "persist_loop_state", True):
+        if data.get("loop_state") and getattr(self.harness_config, "persist_loop_state", False):
             state, next_index, _ = self._hydrate_loop_checkpoint(
                 state, data, idempotency, citation_manager
             )
@@ -1262,7 +1268,7 @@ class AgentHarness:
             return
         loop_payload = None
         citation_snapshot = None
-        if getattr(self.harness_config, "persist_loop_state", True):
+        if getattr(self.harness_config, "persist_loop_state", False):
             loop_payload = serialize_loop_state(state)
             loop_payload["step_index"] = next_step_index
             if self._run_citation_manager is not None:

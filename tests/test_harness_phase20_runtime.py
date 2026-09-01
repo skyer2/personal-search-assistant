@@ -174,7 +174,7 @@ def test_config_phase20_flags():
     reload_harness_config()
     cfg = get_harness_config()
     assert cfg.direct_worker_invoke is True
-    assert cfg.persist_loop_state is True
+    assert cfg.persist_loop_state is False
     assert cfg.graph_runtime_enabled is True
     print("[OK] phase20 config flags")
 

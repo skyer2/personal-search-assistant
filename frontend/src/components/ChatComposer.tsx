@@ -95,9 +95,10 @@ export function ChatComposer({
           disabled={isRunning}
           onChange={(value) => onModeChange(value as SearchMode)}
           options={[
-            { label: "Auto", value: "auto" },
-            { label: "Quick", value: "quick" },
-            { label: "Deep", value: "deep" }
+            { label: "自动", value: "auto" },
+            { label: "直答", value: "answer" },
+            { label: "搜索", value: "search" },
+            { label: "研搜", value: "research" }
           ]}
           value={mode}
         />

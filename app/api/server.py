@@ -56,7 +56,7 @@ async def lifespan(_app: FastAPI):
 current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent
 
-app = FastAPI(title="DeepAgents API", lifespan=lifespan)
+app = FastAPI(title="Personal Search Assistant", lifespan=lifespan)
 app.include_router(eval_router)
 app.include_router(harness_router)
 app.include_router(trace_routes)

@@ -14,20 +14,22 @@ from app.tools.fetch_url import fetch_url_content, strip_html
 
 def test_user_override_mode():
     quick = route("比较 A 和 B", user_mode="quick")
-    assert quick.mode == "quick" and quick.user_override
+    assert quick.mode == "search" and quick.user_override
     deep = route("今天休市吗", user_mode="deep")
-    assert deep.mode == "deep" and deep.user_override
+    assert deep.mode == "research" and deep.user_override
     print("[OK] user override SearchMode")
 
 
 def test_auto_quick_vs_deep():
     fact = classify_auto("纳斯达克今天休市了吗")
-    assert fact.mode == "quick"
+    assert fact.mode == "search"
     compare = classify_auto("比较 Tesla / Figure / Unitree 的差异")
-    assert compare.mode == "deep"
+    assert compare.mode == "research"
     report = classify_auto("搜索 AI 趋势并生成 Markdown 报告")
-    assert report.mode == "deep"
-    print("[OK] auto classify quick/deep")
+    assert report.mode == "research"
+    definition = classify_auto("std::apply是什么")
+    assert definition.mode == "answer"
+    print("[OK] auto classify answer/search/research")
 
 
 def test_budget_for_mode():
@@ -102,7 +104,10 @@ def test_route_after_mode_and_fetch_url_in_web_tools():
     from app.research.workers.registry import worker_tools_for_step
 
     assert route_after_mode({"search_mode": "quick"}) == "quick_search"
+    assert route_after_mode({"search_mode": "search"}) == "quick_search"
     assert route_after_mode({"search_mode": "deep"}) == "intent"
+    assert route_after_mode({"search_mode": "research"}) == "intent"
+    assert route_after_mode({"search_mode": "answer"}) == "direct_answer"
     assert route_after_mode({"search_mode": ""}) == "intent"
     tools = worker_tools_for_step("network_search")
     assert "internet_search" in tools

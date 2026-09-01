@@ -1,5 +1,8 @@
 # DeepSearch Agents — Agent Harness 企业级升级设计文档
 
+> **已过时。** 本文描述的是 `deepsearch-agents` 企业 Harness 阶段。  
+> Personal Search Assistant 的权威架构是 [ARCHITECTURE.md](ARCHITECTURE.md)。下文仅作历史对照。
+
 > **版本**: v1.0（设计草案 2026-07-15）  
 > **现行实现**：以代码和下列文档为准，本文保留升级动机与早期路线，**不要把第 8 节旧 MCP 方案、Mem0 默认、HITL「暂不实现」当成当前状态**。
 >

@@ -1,8 +1,8 @@
 # 个人搜索助手 — Intent 与 Plan 方案
 
-> **定位**：Deep 路径的任务理解与执行计划。Quick 路径 **不走** Intent/Plan。  
+> **定位**：仅 **RESEARCH** 路径的任务理解与执行计划。ANSWER / SEARCH **不走** Intent/Plan。  
 > **原则**：Intent 写「怎样算做对」（Research Brief）；Plan 写「先做哪些可并行目标」。调度权在 StateGraph，Planner 不调工具。  
-> **状态**：2026-08-31 落地（规则 Brief + 混合 Plan + Brief-driven Progress）。
+> **权威架构**：[ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ---
 
@@ -16,26 +16,26 @@
 - 来源只有 **web + file**
 - 比较题按 **实体/维度** 拆 DAG，不按「先搜网再读库」拆
 - Progress 对照 **这份 Brief**，而不是写死的商业指标
-- 日常事实题在 Mode Router 就结束，不烧规划
+- 概念题在 Task Router 就 **ANSWER** 结束；事实题走 **SEARCH**，不烧规划
 
 ---
 
 ## 1. 三层，不要混
 
 ```text
-① SearchMode Router     要不要进 Deep？（已有 P1）
-② Intent = Research Brief   用户要什么、怎样算够
+① Task Router           ANSWER / SEARCH / RESEARCH（见 ARCHITECTURE）
+② Intent = Research Brief   用户要什么、怎样算够     ← 仅 RESEARCH
 ③ Plan = 目标 DAG           先做哪些任务、依赖、合成
      └─ 执行中 Progress 对照 Brief → enough / gap / replan
 ```
 
 | 层 | 输入 | 输出 | 谁消费 |
 |----|------|------|--------|
-| Route | 用户 mode + 问句 | `quick` / `deep` | 图入口 |
+| Route | 用户 mode + 问句 | `answer` / `search` / `research` | 图入口 |
 | Intent | 改写后的 query + 附件 + 禁令 | `TaskIntent`（内嵌 Brief） | Plan、Context、Progress、写稿 |
 | Plan | Intent | `ExecutionPlan` | dispatch / 工人 / Replan |
 
-**Quick 跳过 ②③。** 用户显式 Quick/Deep 优先于 Auto。
+**ANSWER / SEARCH 跳过 ②③。** 用户显式三档优先于 Auto。旧 API `quick`/`deep` 仍映射到 search/research。
 
 ---
 

@@ -150,8 +150,8 @@ class HarnessConfig:
     require_structured_worker_output: bool = True
     synthesis_use_evidence_digest: bool = True
     direct_worker_invoke: bool = True
-    persist_loop_state: bool = True
-    graph_runtime_enabled: bool = False
+    persist_loop_state: bool = False
+    graph_runtime_enabled: bool = True
     progress_eval_enabled: bool = True
     graph_checkpoint_backend: str = "sqlite"
     graph_checkpoint_path: str = "output/.harness/graph_checkpoints.sqlite"
@@ -563,7 +563,7 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         ),
         persist_loop_state=_env_bool(
             "HARNESS_PERSIST_LOOP_STATE",
-            bool(orch.get("persist_loop_state", True)),
+            bool(orch.get("persist_loop_state", False)),
         ),
         graph_runtime_enabled=_env_bool(
             "HARNESS_GRAPH_RUNTIME",

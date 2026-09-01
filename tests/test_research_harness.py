@@ -148,13 +148,13 @@ def test_compile_research_graph():
         run_id="r1",
         session_id="s1",
         task_query="比较 Tesla 和 Figure 的差异并生成 Markdown 报告",
-        search_mode="deep",
+        search_mode="research",
     )
     result = graph.invoke(
         state,
         config={"configurable": {"thread_id": "s1"}, "recursion_limit": 50},
     )
-    assert result["search_mode"] == "deep"
+    assert result["search_mode"] == "research"
     assert result["plan"]
     assert result["task_status"]
     assert any(v == "done" for v in result["task_status"].values())
@@ -182,10 +182,10 @@ def test_compile_auto_routes_to_quick():
         state,
         config={"configurable": {"thread_id": "s-auto"}, "recursion_limit": 20},
     )
-    assert result["search_mode"] == "quick"
-    assert "fact_or_short" in (result.get("route_signals") or [])
+    assert result["search_mode"] == "search"
+    assert "needs_freshness" in (result.get("route_signals") or [])
     assert result.get("plan") in (None, {})
-    print(f"[OK] auto→quick signals={result.get('route_signals')}")
+    print(f"[OK] auto→search signals={result.get('route_signals')}")
 
 
 def test_compile_quick_graph():
@@ -202,13 +202,13 @@ def test_compile_quick_graph():
         run_id="r-quick",
         session_id="s-quick",
         task_query="今天纳斯达克休市了吗",
-        search_mode="quick",
+        search_mode="search",
     )
     result = graph.invoke(
         state,
         config={"configurable": {"thread_id": "s-quick"}, "recursion_limit": 20},
     )
-    assert result["search_mode"] == "quick"
+    assert result["search_mode"] == "search"
     assert result.get("plan") in (None, {})
     assert result.get("final_content")
     assert "Sources" in result["final_content"] or "来源" in result["final_content"]

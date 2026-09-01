@@ -1,40 +1,39 @@
 # Personal Search Assistant
 
-个人搜索助手：日常 Web + File 搜索，复杂问题按需 Deep Research。底层 Harness / StateGraph 保留，企业 DB/KB/MCP 能力已移除。
+Personal Search Assistant 是一个 adaptive research agent：简单问题直接回答，需要最新信息时搜索，复杂问题进入可恢复的 Research StateGraph；Research Domain 负责分解、证据充分性和 Replan，Worker Runtime 负责局部自主执行，所有事实通过 Evidence/Artifact 可追溯。
+
+权威方案：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ## 文档
 
 | 文档 | 内容 |
 |------|------|
-| [Personal Search 产品架构](docs/PERSONAL_SEARCH.md) | Mode Router、Quick/Deep、模块拆分 |
-| [Intent 与 Plan 方案](docs/INTENT_AND_PLAN.md) | Deep 路径 Brief / 混合规划 / Brief-driven Progress |
-| [Harness 运行时架构](docs/HARNESS_ARCHITECTURE.md) | StateGraph + Worker Profile |
-| [Research Intelligence](docs/RESEARCH_INTELLIGENCE.md) | Progress / Replan（Deep 路径） |
+| [架构方案](docs/ARCHITECTURE.md) | 四层边界、唯一 ResearchState、WorkerRuntime、三档路由 |
+| [Intent 与 Plan](docs/INTENT_AND_PLAN.md) | RESEARCH 路径 Brief / 混合规划 / Progress |
+| [Harness 运行时](docs/HARNESS_ARCHITECTURE.md) | StateGraph Runtime 细节 |
 | [上下文工程](docs/CONTEXT_SYSTEM.md) | Artifact / Evidence / JIT |
-| [Memory 系统](docs/MEMORY_SYSTEM.md) | 身份四元组、Source Ledger |
+| [Memory](docs/MEMORY_SYSTEM.md) | 个人研究记忆（上次结论、过期证据、continuation） |
 
-## P0 已实现
+## 三档，而不是每问都研搜
 
-- 默认 **chat 交付**（带来源不再自动转 Markdown）
-- 来源策略 **web + file** only
-- Worker：**web / file / mixed / synthesis**
-- `harness.yml` **personal_search** 预算段；HITL/DB/KB/MCP 关闭
-- 前端 **Auto / Quick / Deep** + 固定身份 `user_id=me`
-- API `mode` / `project_id` / `tenant_id=local`
-- 删除 MySQL、RAGFlow、MCP 全栈代码
+```text
+用户 → Conversation → Task Router
+  ├─ ANSWER（直答）：概念题，LLM，不检索
+  ├─ SEARCH（搜索）：最新事实，search → fetch → 综合
+  └─ RESEARCH（研搜）：Brief → Plan → 并行 Worker → Progress → Replan
+```
 
-## P1 已实现
+例：
 
-- **Mode Router**：`auto/quick/deep`；用户显式选择优先；Auto 按比较/报告/多 PDF 升 Deep
-- **Quick 子图**：`conversation → mode_router → quick_search → quick_fetch → quick_synthesize → finalize`，不进 Progress/Replan
-- **Conversation Store**：按 `user/project/thread` 存最近 4～8 turn + rolling summary；短追问改写
-- **`fetch_url`**：搜索只出卡片，按需拉正文进 Artifact/Evidence
+- `std::apply 是什么` → ANSWER
+- `glibc 2.42 release notes 改了什么` → SEARCH
+- `对比 LangGraph、Temporal 和 DeepSeek Harness 的 durable workflow` → RESEARCH
 
-## Intent / Plan（Deep）
+## 状态模型
 
-- Intent = **Research Brief**（目标、实体、维度、depth/freshness、官方优先、成功标准）
-- Plan 按 Brief 选 DIRECT / TEMPLATE / DYNAMIC；比较题按实体拆 DAG
-- Progress 对照 Brief 判缺口，不再写死营收/量产词
+- **唯一 workflow truth**：`ResearchState` → LangGraph SQLite checkpointer
+- **原文外置**：Artifact Store / Evidence Store（Claim → Evidence → Artifact → Source）
+- `LoopState` 只是进程内 handles，**不再**作为第二套 `checkpoint.json` 恢复系统
 
 ## 快速启动
 
@@ -50,27 +49,17 @@ uvicorn app.api.server:app --reload --app-dir .
 cd frontend && pnpm install && pnpm dev
 ```
 
-## 架构（个人版）
-
-```text
-用户 → Conversation → Mode Router (auto/quick/deep)
-  ├─ Quick：search 卡片 → fetch_url → Answer + Sources（无 Progress/Replan）
-  └─ Deep：Intent → Plan → DAG Workers → Progress → Replan → Synthesis
-```
+身份固定：`user_id=me`，`tenant_id=local`，`project_id=Inbox`。
 
 ## 测试
 
 ```bash
-python3 tests/test_intent_and_plan.py
+python3 tests/test_architecture_p0.py
 python3 tests/test_personal_search_p1.py
+python3 tests/test_intent_and_plan.py
 python3 tests/test_research_harness.py
 python3 tests/test_harness_phase1.py
 python3 tests/test_hybrid_planning.py
-python3 tests/test_harness_hitl.py
+python3 tests/test_progress_evaluator.py
+python3 tests/test_research_checkpoint.py
 ```
-
-## 下一步（P2）
-
-- History / Projects / Saved Sources UI
-- Developer Mode 折叠 Eval/Trace
-- 中文 2-gram hybrid context selector

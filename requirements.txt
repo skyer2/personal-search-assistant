@@ -1,4 +1,4 @@
-# --- [核心依赖] Deep Agents 框架 ---
+# --- [核心依赖] Personal Search Assistant ---
 deepagents==0.5.7
 
 # --- LangChain 生态 ---
@@ -18,14 +18,14 @@ fastapi>=0.100.0
 uvicorn[standard]>=0.20.0
 python-multipart>=0.0.6
 
-# --- 文件处理 ---
+# --- 文件处理（读本地附件；PDF 导出是可选能力） ---
 python-docx>=1.0.0
 pypdf>=3.0.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 aiofiles>=23.0.0
 markdown>=3.5
-reportlab>=4.0.0
+# reportlab>=4.0.0   # 可选：pip install -e ".[pdf]"
 
 # --- 外部工具 ---
 tavily-python==0.7.24

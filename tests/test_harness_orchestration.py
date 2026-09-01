@@ -23,7 +23,9 @@ from app.config.loader import reload_harness_config
 
 
 def test_parallel_group_marking():
-    intent = understand_task("搜索公开资料，查数据库库存，查知识库，生成Markdown")
+    intent = understand_task("搜索公开资料并读取上传的附件，生成Markdown")
+    intent.needs_file_read = True
+    intent.needs_network = True
     plan = finalize_plan(build_plan(intent))
     groups = [s.metadata.get("parallel_group") for s in plan.steps if "parallel_group" in s.metadata]
     assert groups, "应标记至少一个并行组"
@@ -32,7 +34,9 @@ def test_parallel_group_marking():
 
 
 def test_find_parallel_batch():
-    intent = understand_task("搜索并查数据库，生成报告")
+    intent = understand_task("搜索公开资料并读取附件，生成报告")
+    intent.needs_file_read = True
+    intent.needs_network = True
     plan = finalize_plan(build_plan(intent))
     batch = find_parallel_batch(plan.steps, 0, enabled=True)
     assert len(batch) >= 2
@@ -109,7 +113,7 @@ def test_harness_config_orchestration():
     assert cfg.step_timeout_sec >= 10
     assert cfg.enforce_subagent_binding is True
     assert cfg.direct_worker_invoke is True
-    assert cfg.persist_loop_state is True
+    assert cfg.persist_loop_state is False
     assert cfg.graph_runtime_enabled is True
     assert cfg.progress_eval_enabled is True
     assert cfg.graph_checkpoint_backend == "sqlite"

@@ -111,6 +111,28 @@ harness:
     enabled_sources:
       web: true
       file: true
+    answer:
+      max_tool_calls: 0
+      max_search_queries: 0
+      max_replan: 0
+      parallel: false
+      progress_eval: false
+      compression: false
+    search:
+      max_tool_calls: 3
+      max_search_queries: 2
+      max_replan: 0
+      parallel: false
+      progress_eval: false
+      compression: false
+    research:
+      max_tool_calls: 15
+      max_research_tasks: 5
+      max_replan: 2
+      parallel: true
+      progress_eval: true
+      compression: true
+    # 旧 key 别名，budget_for_mode 仍可读
     quick:
       max_tool_calls: 3
       max_search_queries: 2
@@ -167,7 +189,7 @@ harness:
     require_structured_worker_output: true
     synthesis_use_evidence_digest: true
     direct_worker_invoke: true
-    persist_loop_state: true
+    persist_loop_state: false
     graph_runtime_enabled: true
     progress_eval_enabled: true
     graph_checkpoint_backend: sqlite
