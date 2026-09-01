@@ -373,7 +373,25 @@ textarea {
 }
 
 .event-panel {
-  min-height: 520px;
+  min-height: 0;
+}
+
+.event-panel--compact {
+  min-height: 0;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 8px 12px 18px;
+}
+
+.event-panel--compact .panel-heading {
+  margin-bottom: 8px;
+}
+
+.event-panel--compact .event-stream {
+  max-height: none;
 }
 
 .event-count {
@@ -786,9 +804,10 @@ textarea {
 }
 
 .chat-app-shell {
+  --sidebar-width: 292px;
   position: relative;
   display: grid;
-  grid-template-columns: 292px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width) 8px minmax(0, 1fr);
   min-height: 100dvh;
   background:
     linear-gradient(180deg, rgba(5, 7, 11, 0.88), rgba(5, 7, 11, 0.98)),
@@ -818,17 +837,113 @@ textarea {
   backdrop-filter: blur(18px);
 }
 
-.sidebar-brand h1 {
-  margin: 6px 0 4px;
-  color: var(--text);
-  font-size: 30px;
-  line-height: 1.05;
+.resize-handle {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  z-index: 5;
+  touch-action: none;
+  user-select: none;
 }
 
-.sidebar-brand p {
-  margin: 0;
-  color: var(--muted);
-  line-height: 1.6;
+.resize-handle--x {
+  width: 8px;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.resize-handle--x::after {
+  content: "";
+  display: block;
+  width: 3px;
+  height: 56px;
+  margin: calc(50dvh - 28px) auto 0;
+  border-radius: 99px;
+  background: rgba(32, 214, 255, 0.38);
+}
+
+.resize-handle--x:hover,
+.resize-handle--x:focus-visible {
+  background: rgba(32, 214, 255, 0.06);
+  outline: none;
+}
+
+.resize-handle--x:hover::after,
+.resize-handle--x:focus-visible::after {
+  background: rgba(32, 214, 255, 0.72);
+}
+
+.resize-handle--y {
+  height: 10px;
+  width: 100%;
+  cursor: row-resize;
+}
+
+.resize-handle--y::after {
+  content: "";
+  display: block;
+  width: 56px;
+  height: 4px;
+  margin: 3px auto 0;
+  border-radius: 99px;
+  background: rgba(32, 214, 255, 0.4);
+}
+
+.resize-handle--y:hover,
+.resize-handle--y:focus-visible {
+  outline: none;
+}
+
+.resize-handle--y:hover::after,
+.resize-handle--y:focus-visible::after {
+  background: rgba(32, 214, 255, 0.78);
+}
+
+.process-dock {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto 10px;
+  overflow: hidden;
+  border: 1px solid rgba(113, 247, 255, 0.18);
+  border-radius: 14px;
+  background: rgba(10, 16, 26, 0.94);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+}
+
+.process-dock-progress {
+  flex: 0 0 auto;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(8, 14, 22, 0.92);
+}
+
+.process-dock-stream {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.process-dock > .resize-handle--y {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+.sidebar-brand h1 {
+  margin: 8px 0 0;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.25;
 }
 
 .new-chat-button {
@@ -951,8 +1066,8 @@ textarea {
 .chat-main {
   position: relative;
   z-index: 1;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   height: 100dvh;
   min-height: 100dvh;
   overflow: hidden;
@@ -961,6 +1076,7 @@ textarea {
 
 .chat-topbar {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -1013,17 +1129,19 @@ textarea {
 }
 
 .chat-alert {
+  flex: 0 0 auto;
   max-width: 900px;
   width: 100%;
   margin: 0 auto 12px;
 }
 
 .chat-stream-panel {
+  flex: 1 1 auto;
   min-height: 0;
   max-width: 900px;
   width: 100%;
   margin: 0 auto;
-  padding: 26px 0 210px;
+  padding: 8px 0 210px;
   overflow-y: auto;
   scroll-padding-bottom: 210px;
   scrollbar-color: rgba(32, 214, 255, 0.36) transparent;
@@ -1229,7 +1347,7 @@ textarea {
 .thinking-block {
   margin: 4px 0 18px;
   border: 1px solid rgba(113, 247, 255, 0.14);
-  border-radius: 8px;
+  border-radius: 12px;
   background: rgba(6, 14, 22, 0.62);
   overflow: hidden;
 }
@@ -1266,10 +1384,12 @@ textarea {
 .thinking-timeline {
   display: grid;
   gap: 8px;
-  max-height: 360px;
+  max-height: 280px;
+  min-height: 120px;
   margin: 0;
   padding: 0 12px 12px;
   overflow-y: auto;
+  resize: vertical;
   list-style: none;
 }
 
@@ -1372,8 +1492,33 @@ textarea {
   background: rgba(28, 22, 8, 0.55);
 }
 
-.assistant-answer--pending::before {
-  display: none;
+.assistant-pending-copy {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.result-sheet {
+  margin: 4px 0 16px;
+  padding: 16px 18px 18px;
+  border: 1px solid rgba(93, 255, 159, 0.2);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(93, 255, 159, 0.07), rgba(12, 18, 28, 0.78));
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.22);
+}
+
+.result-sheet-kicker {
+  margin-bottom: 10px;
+  color: var(--green);
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.artifact-block {
+  opacity: 0.88;
 }
 
 .thinking-loader {
@@ -1736,10 +1881,10 @@ textarea {
 
 .chat-composer {
   position: fixed;
-  left: calc(292px + (100vw - 292px) / 2);
+  left: calc(var(--sidebar-width) + (100vw - var(--sidebar-width)) / 2);
   bottom: 22px;
   z-index: 10;
-  width: min(900px, calc(100vw - 292px - 72px));
+  width: min(900px, calc(100vw - var(--sidebar-width) - 72px));
   transform: translateX(-50%);
   margin: 0;
   padding: 34px 0 0;
@@ -1754,7 +1899,7 @@ textarea {
 
 .composer-shell {
   border: 1px solid rgba(113, 247, 255, 0.2);
-  border-radius: 8px;
+  border-radius: 14px;
   background: rgba(10, 15, 23, 0.96);
   box-shadow:
     0 18px 60px rgba(0, 0, 0, 0.46),
@@ -1867,7 +2012,8 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .chat-sidebar {
+  .chat-sidebar,
+  .resize-handle--x {
     display: none;
   }
 
@@ -1963,9 +2109,9 @@ textarea {
 }
 
 .hitl-approval-panel {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 6;
+  flex: 0 0 auto;
   max-width: 900px;
   width: 100%;
   margin: 0 auto 16px;
@@ -2012,6 +2158,9 @@ textarea {
 
 .eval-panel,
 .trace-viewer {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
   padding: 0 4px 20px;
   display: grid;
   gap: 16px;

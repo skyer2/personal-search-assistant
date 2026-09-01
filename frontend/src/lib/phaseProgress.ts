@@ -4,7 +4,7 @@ export const PHASE_LABELS: Record<string, string> = {
   understand: "理解任务",
   plan: "生成计划",
   build_context: "构建上下文",
-  execute: "执行检索",
+  execute: "执行",
   compress: "压缩上下文",
   validate: "结果校验",
   recover: "失败恢复",

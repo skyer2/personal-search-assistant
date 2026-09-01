@@ -18,10 +18,10 @@ export function RunProgress({ durationLabel, progress, runStatus }: RunProgressP
     : cancelling
       ? "正在取消当前任务"
       : runStatus === "completed"
-        ? "研搜完成"
+        ? "运行完成"
         : runStatus === "failed"
           ? "任务失败"
-          : "正在研搜";
+          : "正在运行";
 
   const detail = paused
     ? "计时与进度已冻结，审批通过后才会继续"

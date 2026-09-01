@@ -122,15 +122,19 @@ function HarnessPhaseTimeline({
 }
 
 interface EventStreamProps {
+  compact?: boolean;
   events: MonitorMessage[];
   runStatus?: RunStatus;
 }
 
-export function EventStream({ events, runStatus = "idle" }: EventStreamProps) {
+export function EventStream({ compact = false, events, runStatus = "idle" }: EventStreamProps) {
   const paused = runStatus === "awaiting_approval";
 
   return (
-    <section className="console-panel event-panel" aria-labelledby="event-title">
+    <section
+      className={`console-panel event-panel ${compact ? "event-panel--compact" : ""}`}
+      aria-labelledby="event-title"
+    >
       <div className="panel-heading">
         <div>
           <span className="panel-kicker">{paused ? "PAUSED" : "LIVE TRACE"}</span>

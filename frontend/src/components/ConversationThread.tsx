@@ -4,7 +4,6 @@ import {
   ClockCircleOutlined,
   CloseCircleOutlined,
   CloudServerOutlined,
-  DatabaseOutlined,
   DownloadOutlined,
   FileMarkdownOutlined,
   FilePdfOutlined,
@@ -15,12 +14,10 @@ import {
   ToolOutlined,
 } from "@ant-design/icons";
 import { Button, Tooltip } from "antd";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getDownloadUrl } from "../lib/api";
-import { computePhaseProgress } from "../lib/phaseProgress";
 import { type RunStatus } from "../lib/runStatus";
 import { MarkdownRenderer } from "./MarkdownRenderer";
-import { RunProgress } from "./RunProgress";
 import type { MonitorMessage, OutputFile } from "../types";
 
 export interface ChatTurn {
@@ -284,14 +281,6 @@ function AssistantMessage({
   const freezeClock = !clockLive;
   const durationLabel = getThinkingDuration(events, timestamp, freezeClock, now);
   const isCancelled = events.some((event) => event.event === "task_cancelled");
-  const progress = useMemo(
-    () =>
-      computePhaseProgress(events, {
-        paused: runStatus === "awaiting_approval",
-        completed: runStatus === "completed"
-      }),
-    [events, runStatus]
-  );
   const syncLabel =
     runStatus === "awaiting_approval"
       ? `已暂停 · ${durationLabel}`
@@ -304,18 +293,15 @@ function AssistantMessage({
       <div className="message-avatar">AI</div>
       <div className="message-bubble">
         <div className="message-meta">
-          <span>DeepSearch Agents</span>
+          <span>Harness</span>
           <time>{syncLabel}</time>
         </div>
 
-        <details
-          className="thinking-block"
-          open={isRunning || events.length > 0}
-        >
+        <details className="thinking-block">
           <summary>
             <span>
               <BranchesOutlined aria-hidden />
-              深度研搜过程
+              执行过程
             </span>
             <strong>{events.length}</strong>
           </summary>
@@ -323,7 +309,8 @@ function AssistantMessage({
         </details>
 
         {result ? (
-          <div className="assistant-answer">
+          <div className="assistant-answer result-sheet">
+            <div className="result-sheet-kicker">RESULT</div>
             <MarkdownRenderer content={result} />
           </div>
         ) : (
@@ -333,25 +320,18 @@ function AssistantMessage({
             }`}
           >
             {isRunning || runStatus === "awaiting_approval" ? (
-              <RunProgress
-                durationLabel={durationLabel}
-                progress={progress}
-                runStatus={runStatus}
-              />
+              <p className="assistant-pending-copy">过程框在上方固定，完成后回复会落在这里。</p>
             ) : (
               "任务完成后会在这里显示最终回复。"
             )}
           </div>
         )}
 
-        <details
-          className="thinking-block artifact-block"
-          open={files.length > 0}
-        >
+        <details className="thinking-block artifact-block">
           <summary>
             <span>
               <FileSearchOutlined aria-hidden />
-              输出文件
+              证据与相关文档
             </span>
             <strong>{files.length}</strong>
           </summary>
@@ -383,10 +363,9 @@ export function ConversationThread({
         <div className="empty-examples">
           <div className="empty-examples-copy">
             <span className="panel-kicker">TASK EXAMPLES</span>
-            <h3>用研究任务驱动 Harness</h3>
+            <h3>发起一次长任务</h3>
             <p>
-              这不是搜索产品。每个任务走 Brief → Plan → Worker → Progress / Replan。
-              Search 只是 environment tool。
+              每个任务走 Brief → Plan → Worker → Progress / Replan。
             </p>
           </div>
 

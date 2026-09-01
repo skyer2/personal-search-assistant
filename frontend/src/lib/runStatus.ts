@@ -50,7 +50,7 @@ export function isPausedRun(status: RunStatus): boolean {
 export function runStatusLabel(status: RunStatus): string {
   const labels: Record<RunStatus, string> = {
     idle: "待命",
-    running: "研搜中",
+    running: "运行中",
     awaiting_approval: "等待审批",
     cancelling: "正在取消",
     completed: "已完成",

@@ -19,9 +19,13 @@ import { ConversationThread } from "./components/ConversationThread";
 import type { ChatTurn } from "./components/ConversationThread";
 import { EvalPanel } from "./components/EvalPanel";
 import { EventStream } from "./components/EventStream";
+import { ResizeHandle } from "./components/ResizeHandle";
+import { RunProgress } from "./components/RunProgress";
 import { TraceViewer } from "./components/TraceViewer";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
+import { usePersistentNumber } from "./hooks/usePersistentNumber";
+import { computePhaseProgress } from "./lib/phaseProgress";
 import { isLiveRun, runStatusLabel } from "./lib/runStatus";
 import type { ConnectionState, UploadedItem, WorkspaceTab } from "./types";
 
@@ -47,12 +51,22 @@ function createTurn(content: string): ChatTurn {
   };
 }
 
+function formatClock(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
 export default function App() {
   const { message } = AntApp.useApp();
   const [query, setQuery] = useState("");
   const [stagedItems, setStagedItems] = useState<UploadedItem[]>([]);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [workspace, setWorkspace] = useState<WorkspaceTab>("chat");
+  const [sidebarWidth, setSidebarWidth] = usePersistentNumber("harness-ui-sidebar-width", 292);
+  const [processHeight, setProcessHeight] = usePersistentNumber("harness-ui-process-height", 280);
+  const [now, setNow] = useState(Date.now());
   const streamRef = useRef<HTMLElement | null>(null);
   const failureHandledRef = useRef<string | null>(null);
   const session = useDeepAgentSession();
@@ -75,6 +89,14 @@ export default function App() {
       return [...previous.slice(0, -1), nextLatestTurn];
     });
   }, [session.events, session.files, session.isRunning, session.result]);
+
+  useEffect(() => {
+    if (!isLiveRun(session.runStatus)) {
+      return;
+    }
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [session.runStatus]);
 
   useEffect(() => {
     if (!session.taskFailure) {
@@ -100,20 +122,6 @@ export default function App() {
     message.warning(`任务失败，已撤回本次提问：${failureMessage}`);
   }, [message, session.discardFailedTask, session.taskFailure, session.events.length]);
 
-  useEffect(() => {
-    const streamNode = streamRef.current;
-    if (!streamNode || workspace !== "chat") {
-      return;
-    }
-
-    window.requestAnimationFrame(() => {
-      streamNode.scrollTo({
-        top: streamNode.scrollHeight,
-        behavior: "smooth"
-      });
-    });
-  }, [turns, workspace]);
-
   async function handleSubmit() {
     const cleanQuery = query.trim();
     if (!cleanQuery) {
@@ -125,6 +133,9 @@ export default function App() {
     setTurns((previous) => [...previous, nextTurn]);
     setQuery("");
     setWorkspace("chat");
+    window.requestAnimationFrame(() => {
+      streamRef.current?.scrollTo({ top: 0 });
+    });
 
     try {
       await session.submitTask(cleanQuery, "agent");
@@ -176,14 +187,24 @@ export default function App() {
   }
 
   const online = session.connectionState === "connected";
+  const showProcessDock =
+    workspace === "chat" && (session.events.length > 0 || isLiveRun(session.runStatus));
+  const phaseProgress = computePhaseProgress(session.events, {
+    paused: session.runStatus === "awaiting_approval",
+    completed: session.runStatus === "completed"
+  });
+  const startedAt = session.events[0] ? Date.parse(session.events[0].timestamp) : now;
+  const durationLabel = formatClock(now - (Number.isFinite(startedAt) ? startedAt : now));
 
   return (
-    <div className="chat-app-shell min-h-dvh">
+    <div
+      className="chat-app-shell min-h-dvh"
+      style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` }}
+    >
       <aside className="chat-sidebar" aria-label="会话信息">
         <div className="sidebar-brand">
           <span className="panel-kicker">HARNESS</span>
-          <h1>Research Agent</h1>
-          <p>Long-running agent harness · 不是搜索引擎</p>
+          <h1>Long-running agent harness</h1>
         </div>
 
         <Button className="new-chat-button" block onClick={handleNewSession}>
@@ -282,6 +303,15 @@ export default function App() {
         </div>
       </aside>
 
+      <ResizeHandle
+        axis="x"
+        label="拖动调整侧栏宽度"
+        max={420}
+        min={220}
+        onChange={setSidebarWidth}
+        value={sidebarWidth}
+      />
+
       <main className="chat-main">
         <header className="chat-topbar">
           <div>
@@ -290,7 +320,7 @@ export default function App() {
             </span>
             <h2>
               {workspace === "chat"
-                ? "Harness 运行"
+                ? "运行台"
                 : workspace === "eval"
                   ? "Developer · Eval"
                   : "Developer · Trace"}
@@ -338,9 +368,31 @@ export default function App() {
           />
         ) : null}
 
+        {showProcessDock ? (
+          <section className="process-dock" style={{ height: processHeight }}>
+            <div className="process-dock-progress">
+              <RunProgress
+                durationLabel={durationLabel}
+                progress={phaseProgress}
+                runStatus={session.runStatus}
+              />
+            </div>
+            <div className="process-dock-stream">
+              <EventStream compact events={session.events} runStatus={session.runStatus} />
+            </div>
+            <ResizeHandle
+              axis="y"
+              label="拖动调整过程框高度"
+              max={720}
+              min={168}
+              onChange={setProcessHeight}
+              value={processHeight}
+            />
+          </section>
+        ) : null}
+
         {workspace === "chat" ? (
           <section className="chat-stream-panel" ref={streamRef}>
-            <EventStream events={session.events} runStatus={session.runStatus} />
             <ConversationThread
               onUseExample={setQuery}
               runStatus={session.runStatus}
