@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 
 from langchain_core.tools import tool
 
-from app.api.monitor import monitor
+from app.agent.harness.step_budget import consume_retrieval_or_block
 
 Fetcher = Callable[[str, float], tuple[str, str]]
 
@@ -115,5 +115,7 @@ def fetch_url_content(
 @tool
 def fetch_url(url: str, max_chars: int = 8000) -> dict[str, Any]:
     """按 URL 拉取网页正文并外置为 Artifact。搜索卡片不够用时再调用。"""
-    monitor.report_tool("网页正文抓取", {"url": url, "max_chars": max_chars})
+    blocked = consume_retrieval_or_block("fetch_url")
+    if blocked:
+        return {"ok": False, "error": "step_retrieval_budget", "message": blocked}
     return fetch_url_content(url, max_chars=max_chars)

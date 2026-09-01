@@ -12,7 +12,6 @@ from typing import Annotated
 from langchain_core.tools import tool
 
 from app.api.context import get_session_context
-from app.api.monitor import monitor
 from app.utils.path_utils import resolve_path
 
 # 文档解析依赖按需导入：缺少某类依赖时，只影响对应文件格式，不影响工具整体注册
@@ -49,10 +48,6 @@ def read_file_content(
     :param instruction: 模型传入的读取意图，用于监控展示，不改变底层解析逻辑
     :return: 文件文本内容、表格摘要，或中文错误提示
     """
-    monitor.report_tool(
-        "文件内容读取工具", {"filename": filename, "instruction": instruction}
-    )
-
     # 解析路径时优先约束在当前 session_dir 内，避免模型传入绝对路径导致越界读取
     session_dir = get_session_context()
     file_path = Path(resolve_path(filename, session_dir))

@@ -96,7 +96,7 @@ def budget_for_mode(mode: str | ResolvedMode, personal: dict | None = None) -> d
             "progress_eval": bool(direct.get("progress_eval", False)),
         }
     return {
-        "max_tool_calls": int(agent.get("max_tool_calls", 15)),
+        "max_tool_calls": int(agent.get("max_tool_calls", 40)),
         "max_search_queries": int(agent.get("max_research_tasks", 5)),
         "max_replan_count": int(agent.get("max_replan", 2)),
         "parallel": bool(agent.get("parallel", True)),

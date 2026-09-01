@@ -19,7 +19,7 @@ class ToolMonitor:
     """
     工具和助手调用的统一监控入口
 
-    业务工具只需要导入全局 monitor，并调用 report_tool/report_assistant 等方法
+    业务工具由 Harness astream 统一 report_tool；工具函数内不要再报一遍，避免中英双计。
     具体是通过 WebSocket 推送，还是输出到脚本运行时，由本类内部统一处理
     """
 

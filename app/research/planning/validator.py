@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 from app.agent.harness.state import ExecutionPlan, PlanStep, TaskIntent
-from app.research.planning.policy import (
-    SourcePolicy,
-    parse_source_policy,
-    tools_for_sources,
-)
+from app.research.planning.policy import SOURCE_TOOLS, SourcePolicy, parse_source_policy
 
 SYNTHESIS_TYPES = frozenset({"generate_markdown", "summarize", "convert_pdf"})
 RESEARCH_TYPES = frozenset({"research", "network_search", "file_read"})
 
 
 def _covers_source(plan: ExecutionPlan, source: str) -> bool:
-    need_tools = set(tools_for_sources([source]))
+    need_tools = set(SOURCE_TOOLS.get(source, ()))
     for step in plan.steps:
         if step.step_type == {
             "web": "network_search",

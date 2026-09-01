@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.agent.harness.state import TaskIntent
+from app.agent.harness.worker_profiles import CONTEXT_TOOLS
 
 WEB_FORBIDDEN_MARKERS = (
     "不要联网",
@@ -103,10 +104,15 @@ def intent_allowed_sources(intent: TaskIntent) -> list[str]:
     return [s for s in ("web", "file") if s in allowed]
 
 
-def tools_for_sources(sources: list[str]) -> list[str]:
+def tools_for_sources(sources: list[str], *, include_context: bool = True) -> list[str]:
+    """来源对应的检索工具。研究步默认附带 JIT 回读（read_artifact / read_evidence）。"""
     tools: list[str] = []
     for source in sources:
         for tool in SOURCE_TOOLS.get(source, ()):
+            if tool not in tools:
+                tools.append(tool)
+    if include_context and tools:
+        for tool in CONTEXT_TOOLS:
             if tool not in tools:
                 tools.append(tool)
     return tools

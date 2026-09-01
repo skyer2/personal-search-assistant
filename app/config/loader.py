@@ -109,6 +109,7 @@ class HarnessConfig:
 
     max_total_tokens: int = 100_000
     max_tool_calls: int = 20
+    max_step_tool_calls: int = 8
     max_run_sec: int = 600
     max_replan_count: int = 3
     max_plan_steps: int = 12
@@ -458,6 +459,7 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         ),
         max_total_tokens=int(budget.get("max_total_tokens", 100_000)),
         max_tool_calls=int(budget.get("max_tool_calls", 20)),
+        max_step_tool_calls=int(budget.get("max_step_tool_calls", 8)),
         max_run_sec=int(
             os.getenv("HARNESS_MAX_RUN_SEC", budget.get("max_run_sec", 600))
         ),

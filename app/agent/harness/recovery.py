@@ -23,7 +23,10 @@ class RecoveryManager:
             "引用覆盖率不足。请在报告中为关键结论添加 [n] 引用，并确保文末有参考文献块。"
         ),
         "no_content": "上次未产生有效回答，请重新执行任务。",
-        "no_error": "上次执行返回了错误信息，请分析原因后重试。",
+        "no_error": (
+            "上次步骤本身执行失败（超时或系统异常），请缩小范围后重试；"
+            "不要因为研究内容里出现「失败模式」等词就整步重搜。"
+        ),
         "step_timeout": (
             "上次步骤执行超时。请缩小检索范围、减少工具调用次数，"
             "或拆分更具体的子任务后重试。"
@@ -35,7 +38,8 @@ class RecoveryManager:
         "worker_failed": "工人返回 ok=false，请根据 error_code 调整检索策略后重试。",
         "empty_worker_result": "工人未返回有效内容，请重新委派子 Agent 并确保结构化 JSON 回传。",
         "invalid_structured_output": (
-            "工人未返回含 facts/sources 的 JSON。请严格按【工人结构化回传】格式重试。"
+            "工人未返回含 facts/sources 的 JSON。禁止重新搜索或抓页，"
+            "只根据已有工具结果输出结构化 JSON；需要原文时用 read_artifact。"
         ),
     }
 

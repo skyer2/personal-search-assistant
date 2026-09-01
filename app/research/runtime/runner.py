@@ -232,12 +232,14 @@ class ResearchGraphRunner:
         session = _require_session(gstate)
         apply_graph_to_loop(session.state, gstate)
         query = str(gstate.get("resolved_query") or session.ctx.task_query or "")
+        from app.research.planning.policy import tools_for_sources
+
         step = PlanStep(
             step_type="research",
             description=query,
             objective=query,
             task_id="vanilla",
-            allowed_tools=["internet_search", "fetch_url", "read_file_content"],
+            allowed_tools=tools_for_sources(["web", "file"]),
         )
         session.state.plan = ExecutionPlan(
             summary="direct baseline",

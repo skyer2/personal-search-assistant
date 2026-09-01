@@ -56,6 +56,7 @@ def test_dynamic_compare_builds_objective_dag():
     research = [s for s in plan.steps if s.step_type == "research"]
     assert len(research) >= 3
     assert all("internet_search" in (s.allowed_tools or []) for s in research)
+    assert all("read_artifact" in (s.allowed_tools or []) for s in research)
     print("[OK] dynamic DAG")
 
 
@@ -67,6 +68,10 @@ def test_research_worker_allowlist_and_registry():
     )
     ok, bad = check_unauthorized_tools(step, ["internet_search"], enforce=True)
     assert ok is True and not bad
+    ok_ctx, bad_ctx = check_unauthorized_tools(
+        step, ["read_artifact", "read_evidence"], enforce=True
+    )
+    assert ok_ctx is True and not bad_ctx
     ok2, bad2 = check_unauthorized_tools(step, ["generate_markdown"], enforce=True)
     assert ok2 is False and "generate_markdown" in bad2
     worker = object()
