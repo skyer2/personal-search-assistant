@@ -160,6 +160,76 @@ def test_validator_writes_pdf_when_worker_skips_tool(tmp_path: Path):
     assert pdfs and pdfs[0].read_bytes()[:4] == b"%PDF"
 
 
+CJK_LAYOUT_MD = """# 长中文排版
+
+这是一段没有空格的中文长句用来验证自动换行是否会把文字挤出页边或者叠成一团。智能体编排、长期记忆与工具调用是当前落地主线。""" * 4 + """
+
+## 对照表
+
+| 维度 | 说明 | 证据 | 缺口 | 下一步 |
+| --- | --- | --- | --- | --- |
+| 编排 | 多智能体协作需要可恢复工作流与明确的阶段门。 | 公开报告 | 缺少一手访谈 | 补访谈 |
+| 记忆 | 长期记忆仍依赖外部存储与检索。 | 论文 | 实现细节不足 | 复现实验 |
+
+1. 第一项结论需要完整展示编号
+2. 第二项结论同样不能丢
+
+> 引用块用来检查左边栏和换行。
+
+- 无序列表甲
+- 无序列表乙
+
+[来源](https://example.com/research/agent-harness/very-long-path)
+
+---
+
+```text
+print("code-fence")
+```
+"""
+
+
+def test_pdf_cjk_wrap_and_table_fits_page(tmp_path: Path):
+    from reportlab.platypus import HRFlowable, Paragraph, Table
+
+    from app.utils.word_converter import (
+        _CONTENT_WIDTH,
+        _build_styles,
+        _format_inline,
+        _markdown_to_story,
+        convert_md_to_pdf,
+    )
+
+    styles = _build_styles()
+    assert styles["body"].wordWrap == "CJK"
+    assert styles["cell"].wordWrap == "CJK"
+    assert styles["h1"].wordWrap == "CJK"
+    assert styles["body"].fontName in {"PSA-CJK", "STSong-Light"}
+
+    long_zh = "这是一段没有空格的中文长句用来验证自动换行。" * 20
+    wrapped = Paragraph(_format_inline(long_zh), styles["body"])
+    used_width, used_height = wrapped.wrap(_CONTENT_WIDTH, 4000)
+    assert used_width <= _CONTENT_WIDTH + 0.5
+    assert used_height > 60
+
+    story = _markdown_to_story(CJK_LAYOUT_MD, styles)
+    tables = [item for item in story if isinstance(item, Table)]
+    assert len(tables) >= 1
+    col_widths = list(tables[0]._colWidths)
+    assert len(col_widths) == 5
+    assert abs(sum(col_widths) - _CONTENT_WIDTH) < 1.5
+    assert any(isinstance(item, HRFlowable) for item in story)
+    assert "<link href=" in _format_inline("[来源](https://example.com/x)")
+
+    md_path = tmp_path / "layout.md"
+    pdf_path = tmp_path / "layout.pdf"
+    md_path.write_text(CJK_LAYOUT_MD, encoding="utf-8")
+    result = convert_md_to_pdf(md_path, pdf_path)
+    assert "成功转换" in result
+    assert pdf_path.read_bytes()[:4] == b"%PDF"
+    assert pdf_path.stat().st_size > 1500
+
+
 if __name__ == "__main__":
     test_user_query_locks_pdf_plan()
     test_llm_cannot_downgrade_pdf_to_text()

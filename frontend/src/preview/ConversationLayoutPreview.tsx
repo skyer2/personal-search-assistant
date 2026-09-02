@@ -30,7 +30,9 @@ const mockEvents: MonitorMessage[] = [
 const mockFiles: OutputFile[] = [
   { name: "brief.pdf", type: "file", path: "brief.pdf", size: 2048, mtime: Date.now() },
   { name: "brief.md", type: "file", path: "brief.md", size: 2048, mtime: Date.now() },
-  { name: "working_notes.md", type: "file", path: "working_notes.md", size: 512, mtime: Date.now() }
+  { name: "working_notes.md", type: "file", path: "working_notes.md", size: 512, mtime: Date.now() },
+  { name: "evidence.md", type: "file", path: "evidence.md", size: 768, mtime: Date.now() },
+  { name: "sources.json", type: "file", path: "sources.json", size: 320, mtime: Date.now() }
 ];
 
 export function ConversationLayoutPreview() {
@@ -63,7 +65,7 @@ export function ConversationLayoutPreview() {
       <div>
         <span className="panel-kicker">DEV PREVIEW</span>
         <h1>提问后的排布与用时</h1>
-        <p>顺序必须是：提问 → 过程框 → 执行过程 → 证据与相关文档。已用时应随墙钟增长。</p>
+        <p>顺序必须是：提问 → 外层过程框（可拖高度）→ 折叠 FILES → 回复。证据列表默认收起。</p>
         {checkErrors.length > 0 ? (
           <p role="alert">自检失败：{checkErrors.join("；")}</p>
         ) : (

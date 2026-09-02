@@ -62,6 +62,58 @@ export function linkifyArtifactNames(content: string, files: OutputFile[], sessi
   return next;
 }
 
+function ArtifactRow({
+  compact,
+  file,
+  sessionId,
+}: {
+  compact?: boolean;
+  file: OutputFile;
+  sessionId?: string;
+}) {
+  const openUrl = getDownloadUrl(file.path, sessionId);
+  const saveUrl = getDownloadUrl(file.path, sessionId, { download: true });
+  const isPdf = file.name.toLowerCase().endsWith(".pdf");
+
+  return (
+    <div className={`artifact-card ${isPdf ? "artifact-card--pdf" : ""} ${compact ? "artifact-card--compact" : ""}`}>
+      <span className="artifact-icon">
+        <FileIcon name={file.name} />
+      </span>
+      <div className="artifact-copy">
+        <strong title={file.name}>{file.name}</strong>
+        <span>{formatBytes(file.size)}</span>
+      </div>
+      <div className="artifact-actions">
+        <Tooltip title={isPdf ? "在浏览器中打开" : "打开"}>
+          <Button
+            aria-label={`打开 ${file.name}`}
+            className="artifact-download"
+            href={openUrl}
+            rel="noreferrer"
+            size={compact ? "small" : "middle"}
+            target="_blank"
+            type="primary"
+          >
+            打开
+          </Button>
+        </Tooltip>
+        <Tooltip title="下载到本地">
+          <Button
+            aria-label={`下载 ${file.name}`}
+            className="artifact-download"
+            download={file.name}
+            href={saveUrl}
+            icon={<DownloadOutlined />}
+            shape="circle"
+            size={compact ? "small" : "middle"}
+          />
+        </Tooltip>
+      </div>
+    </div>
+  );
+}
+
 interface DeliverableFilesProps {
   files: OutputFile[];
   sessionId?: string;
@@ -82,48 +134,32 @@ export function DeliverableFiles({ files, sessionId, variant = "shelf" }: Delive
     );
   }
 
+  if (variant === "banner") {
+    const [primary, ...rest] = ordered;
+    return (
+      <div className="artifact-shelf artifact-shelf--banner">
+        <ArtifactRow compact file={primary} sessionId={sessionId} />
+        {rest.length > 0 ? (
+          <details className="deliverable-more">
+            <summary>
+              其余 {rest.length} 个文件
+            </summary>
+            <div className="deliverable-more-list">
+              {rest.map((file) => (
+                <ArtifactRow compact file={file} key={file.path} sessionId={sessionId} />
+              ))}
+            </div>
+          </details>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
-    <div className={variant === "banner" ? "artifact-shelf artifact-shelf--banner" : "artifact-shelf"}>
-      {ordered.map((file) => {
-        const openUrl = getDownloadUrl(file.path, sessionId);
-        const saveUrl = getDownloadUrl(file.path, sessionId, { download: true });
-        const isPdf = file.name.toLowerCase().endsWith(".pdf");
-        return (
-          <div className={isPdf ? "artifact-card artifact-card--pdf" : "artifact-card"} key={file.path}>
-            <span className="artifact-icon">
-              <FileIcon name={file.name} />
-            </span>
-            <div className="artifact-copy">
-              <strong title={file.name}>{file.name}</strong>
-              <span>{formatBytes(file.size)}</span>
-            </div>
-            <div className="artifact-actions">
-              <Tooltip title={isPdf ? "在浏览器中打开" : "打开"}>
-                <Button
-                  aria-label={`打开 ${file.name}`}
-                  className="artifact-download"
-                  href={openUrl}
-                  rel="noreferrer"
-                  target="_blank"
-                  type="primary"
-                >
-                  打开
-                </Button>
-              </Tooltip>
-              <Tooltip title="下载到本地">
-                <Button
-                  aria-label={`下载 ${file.name}`}
-                  className="artifact-download"
-                  download={file.name}
-                  href={saveUrl}
-                  icon={<DownloadOutlined />}
-                  shape="circle"
-                />
-              </Tooltip>
-            </div>
-          </div>
-        );
-      })}
+    <div className="artifact-shelf">
+      {ordered.map((file) => (
+        <ArtifactRow file={file} key={file.path} sessionId={sessionId} />
+      ))}
     </div>
   );
 }

@@ -138,7 +138,7 @@ function ThinkingTimeline({
     <ol
       className="thinking-timeline"
       ref={timelineRef}
-      style={maxHeight ? { maxHeight, minHeight: Math.min(120, maxHeight) } : undefined}
+      style={maxHeight ? { maxHeight, minHeight: Math.min(120, maxHeight), height: maxHeight } : undefined}
     >
       {hasMoreEvents && onLoadOlderEvents ? (
         <li className="thinking-event">
@@ -174,30 +174,100 @@ function ThinkingTimeline({
   );
 }
 
-function AssistantMessage({
+function ProcessDock({
   elapsedMs,
   events,
-  files,
   hasMoreEvents,
   isLatest,
-  isRunning,
   onLoadOlderEvents,
   onProcessHeightChange,
   processHeight,
-  result,
   runStatus,
-  sessionId,
-}: Pick<ChatTurn, "events" | "files" | "isRunning" | "result"> & {
+}: {
   elapsedMs: number;
+  events: MonitorMessage[];
   hasMoreEvents?: boolean;
   isLatest: boolean;
   onLoadOlderEvents?: () => void;
   onProcessHeightChange?: (value: number) => void;
   processHeight?: number;
   runStatus: RunStatus;
+}) {
+  const [open, setOpen] = useState(isLatest);
+  const height = processHeight ?? 280;
+  const phaseProgress = computePhaseProgress(events, {
+    paused: runStatus === "awaiting_approval",
+    completed: runStatus === "completed",
+  });
+
+  function handleResize(next: number) {
+    if (!open) {
+      setOpen(true);
+    }
+    onProcessHeightChange?.(next);
+  }
+
+  return (
+    <section
+      className={`process-dock process-dock--inline ${open ? "process-dock--open" : ""}`}
+      aria-label="过程框"
+    >
+      <div className="process-dock-progress">
+        <RunProgress
+          durationLabel={formatElapsedClock(elapsedMs)}
+          progress={phaseProgress}
+          runStatus={runStatus}
+        />
+        <button
+          aria-expanded={open}
+          className="process-dock-toggle"
+          onClick={() => setOpen((current) => !current)}
+          type="button"
+        >
+          <BranchesOutlined aria-hidden />
+          <span>{open ? "收起执行过程" : "展开执行过程"}</span>
+          <strong>{events.length}</strong>
+        </button>
+      </div>
+      {open ? (
+        <div className="process-dock-stream">
+          <ThinkingTimeline
+            events={events}
+            hasMoreEvents={isLatest ? hasMoreEvents : false}
+            maxHeight={height}
+            onLoadOlderEvents={isLatest ? onLoadOlderEvents : undefined}
+          />
+        </div>
+      ) : null}
+      {isLatest && onProcessHeightChange ? (
+        <ResizeHandle
+          axis="y"
+          label="拖动调整过程框高度"
+          max={720}
+          min={120}
+          onChange={handleResize}
+          value={height}
+        />
+      ) : (
+        <div className="process-dock-rail" aria-hidden />
+      )}
+    </section>
+  );
+}
+
+function AssistantMessage({
+  elapsedMs,
+  events,
+  files,
+  isRunning,
+  result,
+  runStatus,
+  sessionId,
+}: Pick<ChatTurn, "events" | "files" | "isRunning" | "result"> & {
+  elapsedMs: number;
+  runStatus: RunStatus;
   sessionId?: string;
 }) {
-  const [processOpen, setProcessOpen] = useState(isLatest);
   const durationLabel = formatElapsedClock(elapsedMs);
   const isCancelled = events.some((event) => event.event === "task_cancelled");
   const clockLive = runStatus === "running" || runStatus === "cancelling";
@@ -216,36 +286,6 @@ function AssistantMessage({
           <span>Harness</span>
           <time>{syncLabel}</time>
         </div>
-
-        <details
-          className="thinking-block"
-          open={processOpen}
-          onToggle={(event) => setProcessOpen(event.currentTarget.open)}
-        >
-          <summary>
-            <span>
-              <BranchesOutlined aria-hidden />
-              执行过程
-            </span>
-            <strong>{events.length}</strong>
-          </summary>
-          <ThinkingTimeline
-            events={events}
-            hasMoreEvents={isLatest ? hasMoreEvents : false}
-            maxHeight={isLatest ? processHeight : undefined}
-            onLoadOlderEvents={isLatest ? onLoadOlderEvents : undefined}
-          />
-          {isLatest && processHeight && onProcessHeightChange ? (
-            <ResizeHandle
-              axis="y"
-              label="拖动调整执行过程高度"
-              max={720}
-              min={120}
-              onChange={onProcessHeightChange}
-              value={processHeight}
-            />
-          ) : null}
-        </details>
 
         {files.length > 0 ? (
           <div className="deliverable-banner" aria-label="可下载文件">
@@ -273,16 +313,18 @@ function AssistantMessage({
           </div>
         )}
 
-        <details className="thinking-block artifact-block" open={files.length > 0}>
-          <summary>
-            <span>
-              <FileSearchOutlined aria-hidden />
-              证据与相关文档
-            </span>
-            <strong>{files.length}</strong>
-          </summary>
-          <DeliverableFiles files={files} sessionId={sessionId} />
-        </details>
+        {files.length > 0 ? (
+          <details className="thinking-block artifact-block">
+            <summary>
+              <span>
+                <FileSearchOutlined aria-hidden />
+                证据与相关文档
+              </span>
+              <strong>{files.length}</strong>
+            </summary>
+            <DeliverableFiles files={files} sessionId={sessionId} />
+          </details>
+        ) : null}
       </div>
     </article>
   );
@@ -351,10 +393,6 @@ export function ConversationThread({
         const isLatest = index === turns.length - 1;
         const turnStatus = turn.isRunning ? runStatus : resultStatus(turn);
         const showProcess = turn.events.length > 0 || turn.isRunning || turnStatus !== "idle";
-        const phaseProgress = computePhaseProgress(turn.events, {
-          paused: turnStatus === "awaiting_approval",
-          completed: turnStatus === "completed",
-        });
 
         return (
           <div className="conversation-turn" key={turn.id}>
@@ -371,27 +409,23 @@ export function ConversationThread({
             </article>
 
             {showProcess ? (
-              <section className="process-dock process-dock--inline" aria-label="过程框">
-                <div className="process-dock-progress">
-                  <RunProgress
-                    durationLabel={formatElapsedClock(turn.elapsedMs)}
-                    progress={phaseProgress}
-                    runStatus={turnStatus}
-                  />
-                </div>
-              </section>
+              <ProcessDock
+                elapsedMs={turn.elapsedMs}
+                events={turn.events}
+                hasMoreEvents={hasMoreEvents}
+                isLatest={isLatest}
+                onLoadOlderEvents={onLoadOlderEvents}
+                onProcessHeightChange={onProcessHeightChange}
+                processHeight={processHeight}
+                runStatus={turnStatus}
+              />
             ) : null}
 
             <AssistantMessage
               elapsedMs={turn.elapsedMs}
               events={turn.events}
               files={turn.files}
-              hasMoreEvents={hasMoreEvents}
-              isLatest={isLatest}
               isRunning={turn.isRunning}
-              onLoadOlderEvents={onLoadOlderEvents}
-              onProcessHeightChange={onProcessHeightChange}
-              processHeight={processHeight}
               result={turn.result}
               runStatus={turnStatus}
               sessionId={sessionId}
