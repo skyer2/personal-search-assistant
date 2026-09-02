@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 from app.api.observability_metrics import aggregate_metrics, collect_run_summaries, render_prometheus_text
 from app.api.trace_logger import JsonlTraceLogger
 from app.observability.events import EventType, span_identity
-from app.observability.journal import build_span_tree
+from app.observability.journal import build_span_tree, summarize_trace
 from app.observability.privacy import sanitize_attributes
 from app.observability.recorder import AgentTelemetry
 
@@ -164,6 +164,55 @@ def test_recorder_run_summary_is_scanned():
         print("[OK] recorder run_summary collected")
 
 
+def test_summarize_trace_workers_and_replan():
+    events = [
+        {"type": "run.started", "session_id": "s1", "run_id": "r1", "trace_id": "t1", "attributes": {"git_sha": "abc"}},
+        {"type": "worker.started", "task_id": "t_a", "status": "start", "attempt": 1},
+        {"type": "worker.completed", "task_id": "t_a", "status": "ok", "duration_ms": 12},
+        {
+            "type": "replan.applied",
+            "attributes": {
+                "from_plan_version": 1,
+                "to_plan_version": 2,
+                "reason": "missing_dimension",
+                "added_tasks": ["t4"],
+            },
+        },
+        {"type": "gen_ai.chat", "attributes": {"total_tokens": 100, "cost_usd": 0.01}},
+        {"type": "eval.scored", "attributes": {"case_id": "037", "variant": "full_harness", "accuracy": 1}},
+    ]
+    summary = summarize_trace(events)
+    assert summary["identity"]["run_id"] == "r1"
+    assert summary["worker_count"] == 1
+    assert summary["replan_count"] == 1
+    assert summary["usage"]["total_tokens"] == 100
+    assert summary["evals"][0]["case_id"] == "037"
+    print("[OK] summarize_trace")
+
+
+def test_bind_worker_isolates_span_context():
+    from app.observability.context import bind_worker, current_context, reset_run, set_context
+
+    tel = AgentTelemetry()
+    tel._ws_enabled = False
+    tel.start_run(session_id="s_iso", run_id="r_iso", trace_id="tr_iso")
+    parent = current_context()
+    assert parent is not None
+    parent_span = parent.span_id
+    restored, _token = bind_worker(task_id="t1", attempt=1)
+    child = current_context()
+    assert child is not None
+    assert child.task_id == "t1"
+    assert child.span_id != parent_span
+    assert restored is parent
+    set_context(parent)
+    assert current_context() is not None
+    assert current_context().span_id == parent_span
+    tel.finish_run(status="success", duration_ms=1)
+    reset_run(None)
+    print("[OK] bind_worker isolates context")
+
+
 def test_eval_score_attaches_to_existing_trace():
     tel = AgentTelemetry()
     tel._ws_enabled = False
@@ -191,4 +240,6 @@ if __name__ == "__main__":
     test_parallel_phase_spans_and_intermediate_status()
     test_recorder_run_summary_is_scanned()
     test_eval_score_attaches_to_existing_trace()
+    test_summarize_trace_workers_and_replan()
+    test_bind_worker_isolates_span_context()
     print("\n=== Flight recorder tests passed ===")

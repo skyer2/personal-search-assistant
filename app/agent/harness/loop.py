@@ -118,6 +118,7 @@ class HarnessRunContext:
 
     task_query: str
     session_id: str
+    run_id: str
     user_id: str
     tenant_id: str
     project_id: str
@@ -198,7 +199,7 @@ class AgentHarness:
 
         plan_version = int(getattr(state.plan, "plan_version", 1) or 1) if state.plan else 1
         return action_idempotency_key(
-            run_id=state.session_id,
+            run_id=state.run_id or state.session_id,
             plan_version=plan_version,
             task_id=step.resolved_task_id(step_index),
             action_id="execute",
@@ -317,14 +318,20 @@ class AgentHarness:
         run_started = time.perf_counter()
         self._current_trace_id = self.trace_logger.new_trace_id()
         from app.observability import get_recorder
+        from app.observability.events import new_id
 
+        run_id = new_id(16)
         obs_ctx = get_recorder().start_run(
             session_id=session_id,
-            run_id=session_id,
+            run_id=run_id,
             trace_id=self._current_trace_id,
             query_preview=task_query,
         )
         self._current_trace_id = obs_ctx.trace_id
+        state.run_id = obs_ctx.run_id
+        state.trace_id = obs_ctx.trace_id
+        state.metadata["run_id"] = obs_ctx.run_id
+        state.metadata["trace_id"] = obs_ctx.trace_id
         session_dir, relative_session_dir, uploaded_prompt, tokens = (
             self._prepare_session(session_id)
         )
@@ -382,6 +389,7 @@ class AgentHarness:
         return HarnessRunContext(
             task_query=task_query,
             session_id=session_id,
+            run_id=state.run_id,
             user_id=user_id,
             tenant_id=tenant_id,
             project_id=project_id,
@@ -1778,7 +1786,7 @@ class AgentHarness:
             step_type=step.step_type,
             content=result.content,
             metadata=result.metadata,
-            run_id=state.session_id,
+            run_id=state.run_id or state.session_id,
         )
         content = result.compressed_content or result.content
         writes = self.memory_extractor.extract_step_writes(
@@ -2491,7 +2499,7 @@ class AgentHarness:
                 step_type="finalize",
                 content=state.final_content,
                 metadata={"evidence_sources": []},
-                run_id=state.session_id,
+                run_id=state.run_id or state.session_id,
             )
             writes = await self.memory_extractor.extract_writes(
                 state.final_content,
@@ -2632,7 +2640,7 @@ class AgentHarness:
                 "observability": obs_snapshot.to_dict(),
                 "usage": usage_summary,
                 "trace_id": self._current_trace_id,
-                "run_id": state.session_id,
+                "run_id": state.run_id or state.session_id,
             },
         )
         if self._current_tracer is not None:

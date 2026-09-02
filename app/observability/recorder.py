@@ -399,6 +399,14 @@ class AgentTelemetry:
             self.metrics.inc("harness.replan.rejected")
         if event.type == EventType.PROGRESS_EVALUATED and str((event.attributes or {}).get("verdict") or "") == "gap":
             self.metrics.inc("harness.progress.gap")
+        if event.type == EventType.GEN_AI_CHAT:
+            tokens = float((event.attributes or {}).get("total_tokens") or 0)
+            cost = float((event.attributes or {}).get("cost_usd") or 0)
+            self.metrics.inc("harness.llm.calls")
+            if tokens:
+                self.metrics.observe("harness.llm.tokens", tokens)
+            if cost:
+                self.metrics.observe("harness.llm.cost_usd", cost)
         if event.status in {"budget_exceeded", "budget_tool_calls", "budget_tokens", "deadline_exceeded"}:
             self.metrics.inc("harness.budget.exhausted")
 

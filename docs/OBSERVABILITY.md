@@ -24,13 +24,13 @@ Langfuse  TraceViewer / Metrics
 | 字段 | 含义 |
 |------|------|
 | `session_id` | 前端 thread / 工作目录 `session_*` |
-| `run_id` | 本次 harness run（当前等于 session_id） |
-| `trace_id` | 因果树根 ID |
-| `span_id` / `parent_span_id` | 并行 Worker 用 `phase + task_id + attempt`，不再只用 phase 当 key |
+| `run_id` | 本次 harness run（16 位独立 ID，同一 thread 多轮互不覆盖） |
+| `trace_id` | 因果树根 ID（与 `run_id` 一起写入 LoopState / eval metadata） |
+| `span_id` / `parent_span_id` | 并行 Worker 用 `bind_worker()` 复制 context，span key = `phase + task_id + attempt` |
 
 ## 事件词表
 
-`run.started/completed/failed` · `plan.created` · `worker.*` · `tool.*` · `gen_ai.chat` · `evidence.registered` · `progress.evaluated` · `replan.applied/rejected` · `quality.evaluated` · `eval.scored`
+`run.started/completed/failed` · `plan.created/validated` · `worker.*` · `tool.*` · `gen_ai.chat` · `evidence.registered` · `progress.evaluated` · `replan.proposed/applied/rejected` · `quality.evaluated` · `eval.scored`
 
 ## 看哪里
 
@@ -38,6 +38,7 @@ Langfuse  TraceViewer / Metrics
 |------|------|
 | 实时 UI | 提问后的过程框 / 执行过程（WebSocket `monitor_event`） |
 | 因果树 | Trace 查看器「因果树」页签；`GET /api/traces/tree/{session_id}` |
+| Worker / Replan / Eval | Trace 查看器对应页签；JSONL/tree 响应里的 `summary`（identity、workers、replans、evals、usage） |
 | 落盘 journal | `app/logs/traces/{session_id}.jsonl`（运行时根是 `app/`，`schema=agent_event.v1`） |
 | 窗口聚合 | `GET /api/metrics/summary`（同时读 nested `extra` 和顶层 `event=run_summary`） |
 | 进程内 Counter/Histogram | `GET /api/metrics/prometheus` 中 `harness_live_*` |
@@ -49,7 +50,7 @@ Langfuse  TraceViewer / Metrics
 
 ## Replan 指标
 
-`replan.applied` 记录 `from_plan_version` / `to_plan_version` / `reason` / `added_tasks` / `remaining_budget`。窗口聚合给出 `replan_trigger_rate`、`avg_replan_count`。进程内 Counter：`harness_live_replan_applied_total`、`harness_live_replan_recovered_total`（replan 后 run 仍成功）、`harness_live_replan_waste_total`（replan 后仍失败）。
+`replan.proposed` → `replan.applied` / `replan.rejected` 记录 `from_plan_version` / `to_plan_version` / `reason` / `gaps` / `added_tasks` / `remaining_budget`。窗口聚合给出 `replan_trigger_rate`、`replan_recovery_rate`（触发 replan 后仍 success 的比例）、`avg_replan_count`。进程内 Counter：`harness_live_replan_applied_total`、`harness_live_replan_recovered_total`（replan 后 run 仍成功）、`harness_live_replan_waste_total`（replan 后仍失败）。
 
 ## Eval 关联
 

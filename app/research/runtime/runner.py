@@ -628,6 +628,14 @@ class ResearchGraphRunner:
         index, step = nxt
         session.state.step_index = index
         step.metadata["status"] = StepStatus.RUNNING.value
+        try:
+            from app.observability import get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit_phase("synthesis", "start", task_id=step.resolved_task_id(index))
+        except Exception:
+            pass
         async with session.lock:
             ok = await self.harness._run_single_step(
                 session.state,
@@ -653,6 +661,18 @@ class ResearchGraphRunner:
                 StepStatus.DONE.value if ok else StepStatus.FAILED.value
             )
         tid = step.resolved_task_id(index)
+        try:
+            from app.observability import get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit_phase(
+                    "synthesis",
+                    "done" if ok else "failed",
+                    task_id=tid,
+                )
+        except Exception:
+            pass
         return {
             "task_status": {tid: "done" if ok else "failed"},
             "status": "synthesized" if ok else "running",
@@ -694,6 +714,28 @@ class ResearchGraphRunner:
             worker_results=list(gstate.get("worker_results") or []),
             max_new_tasks=max_new,
         )
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.REPLAN_PROPOSED,
+                    phase="recover",
+                    status="proposed",
+                    plan_version=int(getattr(state.plan, "plan_version", 1) or 1),
+                    attributes={
+                        "reason": str(patch.get("reason") or assessment.get("reason") or "semantic_gap"),
+                        "gaps": list(assessment.get("missing_dimensions") or assessment.get("coverage_gaps") or []),
+                        "added_tasks": [
+                            str(item.get("task_id") or "")
+                            for item in list(patch.get("add_tasks") or [])
+                            if isinstance(item, dict)
+                        ],
+                    },
+                )
+        except Exception:
+            pass
         plan, issues = apply_plan_patch(
             state.plan,
             patch,

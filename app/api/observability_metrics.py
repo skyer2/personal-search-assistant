@@ -57,6 +57,7 @@ class AggregatedMetrics:
     latency_p90_ms: float = 0.0
     latency_p95_ms: float = 0.0
     replan_trigger_rate: float | None = None
+    replan_recovery_rate: float | None = None
     avg_replan_count: float = 0.0
     source_files_scanned: int = 0
     oldest_run_at: str | None = None
@@ -92,6 +93,7 @@ class AggregatedMetrics:
             "latency_p90_ms": round(self.latency_p90_ms, 1),
             "latency_p95_ms": round(self.latency_p95_ms, 1),
             "replan_trigger_rate": self.replan_trigger_rate,
+            "replan_recovery_rate": self.replan_recovery_rate,
             "avg_replan_count": round(self.avg_replan_count, 2),
             "source_files_scanned": self.source_files_scanned,
             "oldest_run_at": self.oldest_run_at,
@@ -226,8 +228,16 @@ def aggregate_metrics(
     agg.latency_p90_ms = _percentile(ordered, 0.90)
     agg.latency_p95_ms = _percentile(ordered, 0.95)
     agg.avg_replan_count = sum(replans) / len(replans) if replans else 0.0
+    replan_runs = sum(1 for item in replans if item > 0)
+    replan_recovered = 0
+    for item, row in zip(replans, summaries):
+        if item > 0 and str(row.get("status") or "") == "success":
+            replan_recovered += 1
     agg.replan_trigger_rate = (
-        round(sum(1 for item in replans if item > 0) / len(replans), 3) if replans else None
+        round(replan_runs / len(replans), 3) if replans else None
+    )
+    agg.replan_recovery_rate = (
+        round(replan_recovered / replan_runs, 3) if replan_runs else None
     )
     agg.avg_tool_calls = sum(tool_calls) / len(tool_calls) if tool_calls else 0.0
     agg.avg_step_success_rate = sum(step_rates) / len(step_rates) if step_rates else 0.0
@@ -277,6 +287,9 @@ def render_prometheus_text(metrics: AggregatedMetrics) -> str:
         "# HELP harness_replan_trigger_rate Share of runs that replanned",
         "# TYPE harness_replan_trigger_rate gauge",
         f"harness_replan_trigger_rate {metrics.replan_trigger_rate if metrics.replan_trigger_rate is not None else 0}",
+        "# HELP harness_replan_recovery_rate Share of replanned runs that still succeeded",
+        "# TYPE harness_replan_recovery_rate gauge",
+        f"harness_replan_recovery_rate {metrics.replan_recovery_rate if metrics.replan_recovery_rate is not None else 0}",
         "# HELP harness_structured_output_compliance_rate Worker JSON compliance",
         "# TYPE harness_structured_output_compliance_rate gauge",
     ]

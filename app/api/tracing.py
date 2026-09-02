@@ -11,8 +11,6 @@ from typing import Any, Optional
 
 from dotenv import find_dotenv, load_dotenv
 
-from app.config.loader import get_harness_config
-
 load_dotenv(find_dotenv())
 
 _langfuse_client: Any = None
@@ -101,12 +99,6 @@ def build_run_config(
     config: dict[str, Any] = {"configurable": {"thread_id": session_id}}
     callbacks: list[Any] = []
 
-    harness_config = get_harness_config()
-    if harness_config.langfuse_enabled:
-        handler = create_langfuse_handler(session_id, metadata)
-        if handler is not None:
-            callbacks.append(handler)
-
     from app.agent.harness.usage_tracker import build_usage_callback
 
     usage_session_id = str((metadata or {}).get("usage_session_id") or session_id)
@@ -123,30 +115,16 @@ def build_run_config(
 
 
 class HarnessTracer:
-    """Harness 阶段级 trace，补充 CallbackHandler 之外的宏观阶段观测。"""
+    """兼容壳：宏观 span 由 AgentTelemetry + OTel 负责，不再走 Langfuse 旧 trace API。"""
 
     def __init__(self, session_id: str, task_query: str):
         self.session_id = session_id
         self.task_query = task_query
-        self._trace: Any = None
-        self._spans: dict[str, Any] = {}
 
     def start(self) -> None:
         from app.observability.exporters.otel import init_otel
 
         init_otel()
-        client = _get_langfuse_client()
-        if client is None:
-            return
-        try:
-            self._trace = client.trace(
-                name="harness_run",
-                session_id=self.session_id,
-                input={"query": self.task_query},
-                metadata={"component": "AgentHarness"},
-            )
-        except Exception as exc:
-            print(f"[Tracing] harness trace start failed: {exc}")
 
     def phase_start(
         self,
@@ -156,23 +134,7 @@ class HarnessTracer:
         task_id: str | None = None,
         attempt: int | None = None,
     ) -> None:
-        if self._trace is None:
-            return
-        try:
-            from app.observability.events import span_identity
-
-            key = span_identity(phase, task_id=task_id, attempt=attempt)
-            self._spans[key] = self._trace.span(
-                name=phase,
-                input=data or {},
-                metadata={
-                    "status": "start",
-                    "task_id": task_id,
-                    "attempt": attempt,
-                },
-            )
-        except Exception as exc:
-            print(f"[Tracing] phase span start failed: {exc}")
+        return
 
     def phase_end(
         self,
@@ -183,26 +145,9 @@ class HarnessTracer:
         task_id: str | None = None,
         attempt: int | None = None,
     ) -> None:
-        from app.observability.events import span_identity
-
-        key = span_identity(phase, task_id=task_id, attempt=attempt)
-        span = self._spans.pop(key, None)
-        if span is None:
-            span = self._spans.pop(phase, None)
-        if span is None:
-            return
-        try:
-            span.end(output={"status": status, **(data or {})})
-        except Exception as exc:
-            print(f"[Tracing] phase span end failed: {exc}")
+        return
 
     def finish(self, result: dict[str, Any]) -> None:
-        if self._trace is None:
-            return
-        try:
-            self._trace.update(output=result)
-            client = _get_langfuse_client()
-            if client is not None:
-                client.flush()
-        except Exception as exc:
-            print(f"[Tracing] harness trace finish failed: {exc}")
+        from app.observability.exporters.otel import flush_otel
+
+        flush_otel()

@@ -50,6 +50,10 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
             "progress",
             f"[progress] {attrs.get('verdict') or event.status or ''}",
         ),
+        EventType.REPLAN_PROPOSED: (
+            "replan",
+            f"[replan] proposed {attrs.get('reason') or ''}".strip(),
+        ),
         EventType.REPLAN_APPLIED: (
             "replan",
             f"[replan] {attrs.get('from_plan_version')}→{attrs.get('to_plan_version')}",

@@ -90,6 +90,7 @@ class InProcessMetrics:
             ("harness.budget.exhausted", "harness_live_budget_exhausted_total", "Budget/deadline aborts"),
             ("harness.plan.validation_failed", "harness_live_plan_validation_failed_total", "Plans with validation issues"),
             ("harness.quality.failed", "harness_live_quality_failed_total", "Quality gate failures"),
+            ("harness.llm.calls", "harness_live_llm_calls_total", "gen_ai.chat events"),
         ]
         counters = snap["counters"]
         lines: list[str] = []
@@ -106,6 +107,7 @@ class InProcessMetrics:
             ("harness.run.duration_ms", "harness_live_run_duration_ms"),
             ("harness.worker.duration_ms", "harness_live_worker_duration_ms"),
             ("harness.tool.duration_ms", "harness_live_tool_duration_ms"),
+            ("harness.llm.tokens", "harness_live_llm_tokens"),
         ]
         for internal, prom in hist_names:
             stats = snap["histograms"].get(internal) or {

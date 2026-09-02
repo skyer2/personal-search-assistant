@@ -190,6 +190,32 @@ export interface TraceTree {
   event_count: number;
 }
 
+export interface TraceSummary {
+  identity?: {
+    session_id?: string;
+    run_id?: string;
+    trace_id?: string;
+    git_sha?: string;
+    config_hash?: string;
+    variant?: string;
+  };
+  workers?: Array<Record<string, unknown>>;
+  replans?: Array<Record<string, unknown>>;
+  evidence?: Array<Record<string, unknown>>;
+  evals?: Array<Record<string, unknown>>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    cache_read_tokens?: number;
+    cost_usd?: number;
+    calls?: number;
+  };
+  event_count?: number;
+  worker_count?: number;
+  replan_count?: number;
+}
+
 export interface EvidenceSource {
   source_id: string;
   step_index: number;
@@ -225,6 +251,7 @@ export interface JsonlTraceResponse {
   total: number;
   message?: string;
   tree?: TraceTree;
+  summary?: TraceSummary;
 }
 
 export interface LangfuseTraceResponse {

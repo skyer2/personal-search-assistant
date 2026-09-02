@@ -7,7 +7,7 @@ import {
   fetchLangfuseConfig,
   fetchLangfuseTraces
 } from "../lib/api";
-import type { EvidenceSource, JsonlTraceEvent, TraceSpanNode, TraceTree } from "../types";
+import type { EvidenceSource, JsonlTraceEvent, TraceSpanNode, TraceSummary, TraceTree } from "../types";
 
 interface TraceViewerProps {
   sessionId: string;
@@ -38,6 +38,7 @@ function SpanTree({ nodes }: { nodes: TraceSpanNode[] }) {
 export function TraceViewer({ sessionId }: TraceViewerProps) {
   const [jsonlEvents, setJsonlEvents] = useState<JsonlTraceEvent[]>([]);
   const [traceTree, setTraceTree] = useState<TraceTree>({ roots: [], span_count: 0, event_count: 0 });
+  const [summary, setSummary] = useState<TraceSummary>({});
   const [citations, setCitations] = useState<EvidenceSource[]>([]);
   const [highlightSourceId, setHighlightSourceId] = useState<string | null>(null);
   const [langfuseEnabled, setLangfuseEnabled] = useState(false);
@@ -88,6 +89,7 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
         jsonl.tree ||
           (lfTraces as { tree?: TraceTree }).tree || { roots: [], span_count: 0, event_count: 0 }
       );
+      setSummary(jsonl.summary || {});
       setCitations(citationsResp.sources || []);
       setCitationsMessage(citationsResp.message || "");
       setLangfuseEnabled(Boolean(lfConfig.enabled));
@@ -120,7 +122,11 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
         <div>
           <span className="panel-kicker">OBSERVABILITY</span>
           <Typography.Title level={4}>Trace 查看器</Typography.Title>
-          <Typography.Text type="secondary">session_id = {sessionId}</Typography.Text>
+          <Typography.Text type="secondary">
+            session={summary.identity?.session_id || sessionId}
+            {summary.identity?.run_id ? ` · run=${summary.identity.run_id}` : ""}
+            {summary.identity?.trace_id ? ` · trace=${String(summary.identity.trace_id).slice(0, 12)}` : ""}
+          </Typography.Text>
         </div>
         <Button icon={<ReloadOutlined aria-hidden />} loading={loading} onClick={() => void load()}>
           刷新
@@ -137,6 +143,80 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
             children: (
               <Card size="small">
                 <SpanTree nodes={traceTree.roots || []} />
+              </Card>
+            )
+          },
+          {
+            key: "workers",
+            label: `Worker (${summary.worker_count || 0})`,
+            children: (
+              <Card size="small">
+                <Table
+                  dataSource={(summary.workers || []).map((row, index) => ({ ...row, key: `w-${index}` }))}
+                  pagination={{ pageSize: 12 }}
+                  size="small"
+                  columns={[
+                    { title: "Event", dataIndex: "type", width: 160 },
+                    { title: "Task", dataIndex: "task_id", width: 110 },
+                    { title: "Status", dataIndex: "status", width: 90 },
+                    { title: "ms", dataIndex: "duration_ms", width: 80 },
+                    { title: "Attempt", dataIndex: "attempt", width: 80 },
+                    { title: "Objective", dataIndex: "objective", ellipsis: true }
+                  ]}
+                />
+              </Card>
+            )
+          },
+          {
+            key: "replan",
+            label: `Replan (${summary.replan_count || 0})`,
+            children: (
+              <Card size="small">
+                <Table
+                  dataSource={(summary.replans || []).map((row, index) => ({ ...row, key: `r-${index}` }))}
+                  pagination={false}
+                  size="small"
+                  columns={[
+                    { title: "Event", dataIndex: "type", width: 140 },
+                    {
+                      title: "Version",
+                      render: (_, row) => `${row.from_plan_version ?? "-"} → ${row.to_plan_version ?? "-"}`
+                    },
+                    { title: "Reason", dataIndex: "reason", ellipsis: true },
+                    {
+                      title: "Added",
+                      render: (_, row) => (Array.isArray(row.added_tasks) ? row.added_tasks.join(", ") : "-")
+                    }
+                  ]}
+                />
+              </Card>
+            )
+          },
+          {
+            key: "eval",
+            label: `Eval (${(summary.evals || []).length})`,
+            children: (
+              <Card size="small">
+                {summary.usage ? (
+                  <Alert
+                    message={`LLM ${summary.usage.calls || 0} calls · tokens ${summary.usage.total_tokens || 0} · cost $${Number(summary.usage.cost_usd || 0).toFixed(4)}`}
+                    showIcon
+                    type="info"
+                  />
+                ) : null}
+                <Table
+                  dataSource={(summary.evals || []).map((row, index) => ({ ...row, key: `e-${index}` }))}
+                  pagination={false}
+                  size="small"
+                  columns={[
+                    { title: "Case", dataIndex: "case_id" },
+                    { title: "Variant", dataIndex: "variant" },
+                    { title: "Accuracy", dataIndex: "accuracy" },
+                    { title: "Citation", dataIndex: "citation_score" },
+                    { title: "Replan", dataIndex: "replan_count" },
+                    { title: "ms", dataIndex: "latency_ms" }
+                  ]}
+                />
               </Card>
             )
           },

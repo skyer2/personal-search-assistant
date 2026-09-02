@@ -90,3 +90,24 @@ def reset_run(token: Token | None) -> None:
 
 def set_context(ctx: ObservabilityContext) -> Token:
     return _current.set(ctx)
+
+
+def bind_worker(
+    *,
+    task_id: str,
+    attempt: int | None = None,
+    plan_version: int | None = None,
+) -> tuple[ObservabilityContext | None, Token | None]:
+    """并行 Worker 各自一份 context，避免抢占父 run 的 span_id。"""
+    parent = current_context()
+    if parent is None:
+        return None, None
+    child = parent.child(
+        task_id=task_id,
+        attempt=attempt if attempt is not None else parent.attempt,
+        plan_version=plan_version if plan_version is not None else parent.plan_version,
+        parent_span_id=parent.root_span_id or parent.span_id,
+        span_id=new_id(),
+    )
+    token = set_context(child)
+    return parent, token

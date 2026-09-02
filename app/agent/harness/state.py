@@ -232,6 +232,8 @@ class LoopState:
     """
 
     session_id: str
+    run_id: str = ""
+    trace_id: str = ""
     phase: Phase = Phase.UNDERSTAND
     intent: Optional[TaskIntent] = None
     plan: Optional[ExecutionPlan] = None

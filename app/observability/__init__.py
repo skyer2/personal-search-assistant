@@ -6,6 +6,7 @@
 from app.observability.context import (
     ObservabilityContext,
     bind_run,
+    bind_worker,
     current_context,
     reset_run,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "EventType",
     "ObservabilityContext",
     "bind_run",
+    "bind_worker",
     "current_context",
     "get_recorder",
     "reset_run",

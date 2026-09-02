@@ -13,7 +13,7 @@ from fastapi import APIRouter
 
 from app.api.tracing import is_langfuse_enabled
 from app.config.loader import get_harness_config
-from app.observability.journal import build_span_tree
+from app.observability.journal import build_span_tree, summarize_trace
 from app.observability.paths import APP_ROOT, traces_log_dir
 
 router = APIRouter(prefix="/api/traces", tags=["traces"])
@@ -48,6 +48,7 @@ def get_jsonl_trace(session_id: str) -> dict[str, Any]:
             "source": "jsonl",
             "path": str(path),
             "message": "暂无 JSONL trace，请先完成一次 Harness run",
+            "summary": summarize_trace([]),
         }
 
     events = []
@@ -67,6 +68,7 @@ def get_jsonl_trace(session_id: str) -> dict[str, Any]:
         "source": "jsonl",
         "path": str(path),
         "tree": build_span_tree(events),
+        "summary": summarize_trace(events),
     }
 
 
@@ -77,6 +79,7 @@ def get_trace_tree(session_id: str) -> dict[str, Any]:
         "session_id": session_id,
         "source": "agent_event.v1",
         "tree": payload.get("tree") or build_span_tree(payload.get("events") or []),
+        "summary": payload.get("summary") or summarize_trace(payload.get("events") or []),
         "total": payload.get("total") or 0,
     }
 

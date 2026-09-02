@@ -52,6 +52,7 @@ def test_jsonl_skips_bad_lines(tmp_path, monkeypatch):
     payload = get_jsonl_trace("sess")
     assert payload["total"] == 2
     assert payload["tree"]["span_count"] == 1
+    assert payload["summary"]["event_count"] == 2
 
 
 def test_langfuse_unconfigured_returns_local_tree():
