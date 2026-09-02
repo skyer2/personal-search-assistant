@@ -9,6 +9,10 @@ import {
 } from "../lib/api";
 import type { EvidenceSource, JsonlTraceEvent, TraceSpanNode, TraceTree } from "../types";
 
+interface TraceViewerProps {
+  sessionId: string;
+}
+
 function SpanTree({ nodes }: { nodes: TraceSpanNode[] }) {
   if (!nodes.length) {
     return <Typography.Text type="secondary">暂无 span 树，先完成一次 Harness run</Typography.Text>;
@@ -51,16 +55,33 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
     setLoading(true);
     setError("");
     try {
-      const [jsonl, citationsResp, lfConfig, lfTraces] = await Promise.all([
-        fetchJsonlTrace(sessionId),
-        fetchCitations(sessionId),
-        fetchLangfuseConfig(),
-        fetchLangfuseTraces(sessionId).catch(() => ({
+      const [jsonl, citationsResp, lfConfig] = await Promise.all([
+        fetchJsonlTrace(sessionId).catch((err: unknown) => ({
+          events: [],
+          message: err instanceof Error ? err.message : "JSONL 加载失败",
+          tree: undefined
+        })),
+        fetchCitations(sessionId).catch((err: unknown) => ({
+          sources: [],
+          message: err instanceof Error ? err.message : "证据链加载失败"
+        })),
+        fetchLangfuseConfig().catch(() => ({
           enabled: false,
-          traces: [],
-          message: "Langfuse 请求失败"
+          host: "",
+          ui_url: null
         }))
       ]);
+      const lfTraces = lfConfig.enabled
+        ? await fetchLangfuseTraces(sessionId).catch(() => ({
+            enabled: false,
+            traces: [],
+            message: "Langfuse 请求失败，已回退本地因果树"
+          }))
+        : {
+            enabled: false,
+            traces: [],
+            message: "Langfuse 未配置，已跳过"
+          };
       setJsonlEvents(jsonl.events || []);
       setJsonlMessage(jsonl.message || "");
       setTraceTree(
@@ -70,7 +91,7 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
       setCitations(citationsResp.sources || []);
       setCitationsMessage(citationsResp.message || "");
       setLangfuseEnabled(Boolean(lfConfig.enabled));
-      setLangfuseUrl(lfConfig.ui_url || lfConfig.host || null);
+      setLangfuseUrl(lfConfig.enabled ? lfConfig.ui_url || lfConfig.host || null : null);
       setLangfuseMessage(lfTraces.message || "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载 Trace 失败");
