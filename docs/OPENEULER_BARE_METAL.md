@@ -1,55 +1,11 @@
-# 裸机部署：Research Agent Harness
+# openEuler 裸机部署：Research Agent Harness
 
-> 主目标：Alibaba Cloud Linux 4 x86_64（`uname -a` 类似 `Linux … 6.6.*-*.alnx4.x86_64 GNU/Linux`）  
-> 兼容：openEuler 22.03 SP3、Alibaba Cloud Linux 3 / Anolis / 同类 dnf 系统  
+> 适用系统：openEuler 22.03 SP3 x86_64（`uname -a` 类似 `Linux … 5.10.0-*.oe2203sp3.x86_64`）  
 > 形态：**单机裸机**，不用 Docker / K8s / MySQL / RAGFlow / MCP。  
 > 代码身份：Research Agent Harness。GitHub 仓库名仍可能是 `personal-search-assistant`。  
 > 权威范围：[ARCHITECTURE.md](./ARCHITECTURE.md)
 
-下文第 2 节起是逐步手册。复制到内部 Wiki 时，把 `/opt/research-agent-harness`、密钥、IP 换成你们的值。
-
----
-
-## 0. 一键安装（推荐）
-
-在目标裸机上用 **root** 执行。`sudo -E` 会把当前 shell 里的密钥带进脚本。
-
-```bash
-export OPENAI_API_KEY='你的百炼或兼容接口 Key'
-export TAVILY_API_KEY='你的 Tavily Key'
-# 可选：改模型 / 强制国内镜像
-# export OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-# export LLM_QWEN_MAX=qwen-max
-# export LLM_COMPRESSION_MODEL=qwen-turbo
-# export USE_CN_MIRROR=1
-
-curl -fsSL https://raw.githubusercontent.com/skyer2/personal-search-assistant/main/scripts/bootstrap_bare_metal.sh \
-  | sudo -E bash
-```
-
-脚本会：装 gcc / git / 文泉驿字体 → 建 `harness` 用户 → uv + **Python 3.12** → Node 20 + pnpm → clone 到 `/opt/research-agent-harness` → 写 `.env` → `uv sync` + `pnpm install` → systemd 拉起 API `:8000` 与 Vite `:5173` → 跑 `--dry-run` 冒烟。
-
-已把仓库 clone 到本机时：
-
-```bash
-cd /path/to/personal-search-assistant
-export OPENAI_API_KEY=...
-export TAVILY_API_KEY=...
-sudo -E bash scripts/bootstrap_bare_metal.sh
-```
-
-装完：
-
-```bash
-curl -sS http://127.0.0.1:8000/health
-# 浏览器：http://<裸机IP>:5173
-# 阿里云 ECS 安全组放行 8000、5173（本机通常没有 firewalld）
-journalctl -u research-harness-api -f
-```
-
-密钥没带进脚本也没关系：`nano /opt/research-agent-harness/.env` 后 `systemctl restart research-harness-api`。
-
-关闭 Vite 常驻、只装 API：`START_UI=0 sudo -E bash scripts/bootstrap_bare_metal.sh`。生产静态页走本文附录 B。
+本文按「能照着敲、能沉淀进运维手册」写。复制到内部 Wiki 时，把文中的 `/opt/research-agent-harness`、密钥、IP 换成你们的值即可。
 
 ---
 
@@ -408,7 +364,7 @@ pnpm install
 
 ## 9. 启动（开发 / 验证）
 
-一键脚本已 `systemctl enable --now research-harness-api` 与 `research-harness-ui` 时，不必再手工起进程。手工启动用两个会话（`tmux` / `screen` 均可）。
+开两个会话（`tmux` / `screen` 均可）。
 
 **会话 A — API：**
 
@@ -430,7 +386,7 @@ uv run uvicorn app.api.server:app --app-dir . --host 0.0.0.0 --port 8000
 
 ```bash
 cd /opt/research-agent-harness/frontend
-pnpm dev --host 0.0.0.0 --port 5173
+pnpm dev
 ```
 
 浏览器：
@@ -565,8 +521,6 @@ Search 只是 Worker 可调用的 Tavily + `fetch_url` + 本地读文件。
 
 ## 附录 A — systemd 常驻 API
 
-仓库模板：`deploy/systemd/research-harness-api.service`（一键脚本会按实际路径生成到 `/etc/systemd/system/`）。
-
 `/etc/systemd/system/research-harness-api.service`：
 
 ```ini
@@ -677,7 +631,7 @@ HTTPS 则用 `https://` / `wss://`。改 IP 后必须重新 `pnpm build`。
 ## 附录 C — 检查清单（可打印）
 
 ```text
-[ ] uname 确认 alnx4.x86_64 或 oe2203sp3 x86_64
+[ ] uname 确认 oe2203sp3 x86_64
 [ ] python 3.12.x（不是系统 python3）
 [ ] node 20.x + pnpm 10.33.x
 [ ] 仓库在 /opt/research-agent-harness，分支 main
