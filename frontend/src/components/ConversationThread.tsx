@@ -36,10 +36,13 @@ export interface ChatTurn {
 }
 
 interface ConversationThreadProps {
+  hasMoreEvents?: boolean;
+  onLoadOlderEvents?: () => void;
   onProcessHeightChange?: (value: number) => void;
   onUseExample: (prompt: string) => void;
   processHeight?: number;
   runStatus?: RunStatus;
+  sessionId?: string;
   turns: ChatTurn[];
 }
 
@@ -124,9 +127,13 @@ function FileIcon({ name }: { name: string }) {
 function ThinkingTimeline({
   events,
   maxHeight,
+  hasMoreEvents,
+  onLoadOlderEvents,
 }: {
   events: MonitorMessage[];
   maxHeight?: number;
+  hasMoreEvents?: boolean;
+  onLoadOlderEvents?: () => void;
 }) {
   const timelineRef = useRef<HTMLOListElement | null>(null);
 
@@ -156,10 +163,17 @@ function ThinkingTimeline({
       ref={timelineRef}
       style={maxHeight ? { maxHeight, minHeight: Math.min(120, maxHeight) } : undefined}
     >
+      {hasMoreEvents && onLoadOlderEvents ? (
+        <li className="thinking-event">
+          <Button size="small" type="link" onClick={onLoadOlderEvents}>
+            加载更早事件
+          </Button>
+        </li>
+      ) : null}
       {events.map((event, index) => (
         <li
           className={`thinking-event thinking-event--${event.event}`}
-          key={`${event.timestamp}-${index}`}
+          key={event.event_id || `${event.run_id || "run"}:${event.seq ?? index}:${event.timestamp}`}
         >
           <span className="thinking-event-icon">
             <EventIcon event={event.event} />
@@ -183,7 +197,7 @@ function ThinkingTimeline({
   );
 }
 
-function ArtifactShelf({ files }: { files: OutputFile[] }) {
+function ArtifactShelf({ files, sessionId }: { files: OutputFile[]; sessionId?: string }) {
   if (files.length === 0) {
     return (
       <div className="artifact-empty">
@@ -208,7 +222,7 @@ function ArtifactShelf({ files }: { files: OutputFile[] }) {
             <Button
               aria-label={`下载 ${file.name}`}
               className="artifact-download"
-              href={getDownloadUrl(file.path)}
+              href={getDownloadUrl(file.path, sessionId)}
               icon={<DownloadOutlined />}
               shape="circle"
             />
@@ -223,18 +237,24 @@ function AssistantMessage({
   elapsedMs,
   events,
   files,
+  hasMoreEvents,
   isLatest,
   isRunning,
+  onLoadOlderEvents,
   onProcessHeightChange,
   processHeight,
   result,
   runStatus,
+  sessionId,
 }: Pick<ChatTurn, "events" | "files" | "isRunning" | "result"> & {
   elapsedMs: number;
+  hasMoreEvents?: boolean;
   isLatest: boolean;
+  onLoadOlderEvents?: () => void;
   onProcessHeightChange?: (value: number) => void;
   processHeight?: number;
   runStatus: RunStatus;
+  sessionId?: string;
 }) {
   const [processOpen, setProcessOpen] = useState(isLatest);
   const durationLabel = formatElapsedClock(elapsedMs);
@@ -268,7 +288,12 @@ function AssistantMessage({
             </span>
             <strong>{events.length}</strong>
           </summary>
-          <ThinkingTimeline events={events} maxHeight={isLatest ? processHeight : undefined} />
+          <ThinkingTimeline
+            events={events}
+            hasMoreEvents={isLatest ? hasMoreEvents : false}
+            maxHeight={isLatest ? processHeight : undefined}
+            onLoadOlderEvents={isLatest ? onLoadOlderEvents : undefined}
+          />
           {isLatest && processHeight && onProcessHeightChange ? (
             <ResizeHandle
               axis="y"
@@ -308,7 +333,7 @@ function AssistantMessage({
             </span>
             <strong>{files.length}</strong>
           </summary>
-          <ArtifactShelf files={files} />
+          <ArtifactShelf files={files} sessionId={sessionId} />
         </details>
       </div>
     </article>
@@ -329,10 +354,13 @@ function resultStatus(turn: ChatTurn): RunStatus {
 }
 
 export function ConversationThread({
+  hasMoreEvents,
+  onLoadOlderEvents,
   onProcessHeightChange,
   onUseExample,
   processHeight,
   runStatus = "idle",
+  sessionId,
   turns,
 }: ConversationThreadProps) {
   if (turns.length === 0) {
@@ -410,12 +438,15 @@ export function ConversationThread({
               elapsedMs={turn.elapsedMs}
               events={turn.events}
               files={turn.files}
+              hasMoreEvents={hasMoreEvents}
               isLatest={isLatest}
               isRunning={turn.isRunning}
+              onLoadOlderEvents={onLoadOlderEvents}
               onProcessHeightChange={onProcessHeightChange}
               processHeight={processHeight}
               result={turn.result}
               runStatus={turnStatus}
+              sessionId={sessionId}
             />
           </div>
         );

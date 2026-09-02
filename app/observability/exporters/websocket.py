@@ -61,6 +61,7 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
         EventType.REPLAN_REJECTED: ("replan", "[replan] rejected"),
         EventType.HITL_INTERRUPT: ("hitl_interrupt", "等待人工审批"),
         EventType.RUN_FAILED: ("error", str(attrs.get("error") or "任务失败")),
+        EventType.RUN_COMPLETED: ("task_result", "任务执行完成"),
         EventType.PLAN_CREATED: ("plan", "[plan] created"),
         EventType.EVIDENCE_REGISTERED: (
             "evidence",
@@ -71,6 +72,12 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
     if mapped is None:
         return None
     event_type, message = mapped
+    # finish_run 只带 result_preview；完整正文走 persist + report_task_result。
+    # 只有显式 result 才能作为 UI 最终答案，避免 240 字预览覆盖完整结果。
+    if event.type == EventType.RUN_COMPLETED and not attrs.get("result"):
+        return None
+    data["seq"] = event.seq
+    data["event_id"] = event.event_id
     if event.type == EventType.PHASE:
         data.setdefault("phase", event.phase)
         data.setdefault("status", event.status)
@@ -82,6 +89,28 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
         "monitor_event": event_type,
         "message": message.strip(),
         "data": {k: v for k, v in data.items() if v is not None},
+    }
+
+
+def wire_payload(event: AgentEvent, *, replay: bool = False) -> dict[str, Any] | None:
+    """Canonical AgentEvent → 前端 monitor_event 线路格式，含 seq 以便去重 / replay."""
+    mapped = monitor_payload(event)
+    if mapped is None:
+        return None
+    data = dict(mapped["data"])
+    if replay:
+        data["replay"] = True
+    return {
+        "type": "monitor_event",
+        "event": mapped["monitor_event"],
+        "message": mapped["message"],
+        "data": data,
+        "timestamp": event.timestamp,
+        "run_id": event.run_id,
+        "session_id": event.session_id,
+        "seq": event.seq,
+        "event_id": event.event_id,
+        "replay": replay,
     }
 
 

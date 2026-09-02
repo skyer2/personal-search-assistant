@@ -31,7 +31,11 @@ class RunSession:
         self.harness = harness
         self.ctx = ctx
         self.state: LoopState = ctx.state
-        self.run_id: str = ctx.session_id
+        self.run_id: str = (
+            getattr(ctx, "run_id", None)
+            or getattr(getattr(ctx, "state", None), "run_id", None)
+            or ctx.session_id
+        )
         self.session_id: str = ctx.session_id
         self.lock = ctx.lock
         self.result: Any = None

@@ -185,11 +185,27 @@ Query → single agent               Brief → Plan →                   关掉
 ## 5. 状态模型（不变）
 
 - **唯一 workflow truth**：`ResearchState` → LangGraph SQLite
+- **Run / UI projection truth**：`RunStore` SQLite（`app/run_store/`）。刷新、断线、HITL、计时、文件列表都从这里 hydrate，不从 Trace 反推业务状态
+- **Agent history / debug**：Flight Recorder `AgentEvent` journal + JSONL。WebSocket 是 tail：先 `after_seq` replay，再 live
 - **原文外置**：Artifact / Evidence（Claim → Evidence → Artifact → Source）
 - `LoopState` 只是进程内 handles
+- `active_tasks` / HITL `Future` / `RunJournal` 只是 execution cache
 - `WorkerRuntime` 是图与 Agent 框架的边界
 - 研究步允许 JIT 回读（`read_artifact` / `read_evidence`）；缺 JSON 时补 JSON，不整步重搜
 - 步内限制联网工具次数（`max_step_tool_calls`），会话预算拦下一步而不是步内连打
+- **部署不变量**：single backend process。不要用 `uvicorn --workers > 1`
+
+```text
+session_id / thread_id  = 一段会话（localStorage 只存这个）
+run_id                  = 一次 Agent 执行（POST /api/task 每次新建）
+turn_id                 = 前端一条用户问题（= run_id）
+```
+
+原则：
+
+> Frontend state is a projection, not a source of truth.
+> Persist before publish.
+> Checkpoint restores execution; RunStore restores UX; Event Journal restores history.
 
 ---
 
@@ -203,6 +219,8 @@ Query → single agent               Brief → Plan →                   关掉
 | Brief / Plan / Progress | `research_brief.py` / `planner.py` / `app/research/planning/` |
 | Environment search/fetch | `app/tools/`（`internet_search`、`fetch_url`） |
 | Artifact / Evidence | `artifacts.py`、`evidence_store.py` |
+| Run / UI projection | `app/run_store/` + `GET /api/sessions/{id}/bootstrap` |
+| Event replay | `app/observability/replay.py` + WS `subscribe.after_seq` |
 
 补充文档（非范围权威）：
 

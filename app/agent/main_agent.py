@@ -73,9 +73,10 @@ async def run_deep_agent(
     tenant_id="local",
     project_id="Inbox",
     mode="auto",
+    run_id="",
 ):
     """异步执行入口 — StateGraph 为 workflow 权威，领域服务仍由 harness 提供。"""
-    print(f"[MainAgent] Harness 开始执行，session_id={session_id}, mode={mode}")
+    print(f"[MainAgent] Harness 开始执行，session_id={session_id}, run_id={run_id}, mode={mode}")
     result = await harness.run(
         task_query,
         session_id,
@@ -83,6 +84,7 @@ async def run_deep_agent(
         tenant_id=tenant_id or "local",
         project_id=project_id or "Inbox",
         mode=mode,
+        run_id=run_id,
     )
     print(
         f"[MainAgent] Harness 完成，status={result.status}, "

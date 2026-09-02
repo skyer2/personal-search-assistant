@@ -81,4 +81,8 @@ async def collect_health() -> dict[str, Any]:
         "version": config.version,
         "product": "research-agent-harness",
         "enabled_sources": {"web": True, "file": True},
+        "deployment": {
+            "invariant": "single_backend_process",
+            "note": "active_tasks、HITL Future、WebSocket fanout、RunJournal 都是进程内 cache。不要用 uvicorn --workers > 1。",
+        },
     }

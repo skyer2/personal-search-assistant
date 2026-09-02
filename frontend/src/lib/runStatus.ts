@@ -6,7 +6,9 @@ export type RunStatus =
   | "awaiting_approval"
   | "cancelling"
   | "completed"
-  | "failed";
+  | "failed"
+  | "recoverable"
+  | "partial";
 
 export function deriveRunStatus(input: {
   isRunning: boolean;
@@ -15,25 +17,32 @@ export function deriveRunStatus(input: {
   events: MonitorMessage[];
   result?: string;
   taskFailed?: boolean;
+  serverStatus?: string;
 }): RunStatus {
-  if (input.hitlPending) {
+  if (input.serverStatus === "recoverable") {
+    return "recoverable";
+  }
+  if (input.hitlPending || input.serverStatus === "awaiting_approval") {
     return "awaiting_approval";
   }
-  if (input.isCancelling) {
+  if (input.isCancelling || input.serverStatus === "cancelling") {
     return "cancelling";
   }
-  if (input.taskFailed || input.events.some((event) => event.event === "error")) {
+  if (input.taskFailed || input.events.some((event) => event.event === "error") || input.serverStatus === "failed") {
     if (!input.isRunning) {
       return "failed";
     }
   }
-  if (input.isRunning) {
+  if (input.isRunning || input.serverStatus === "running" || input.serverStatus === "queued") {
     return "running";
   }
-  if (input.result || input.events.some((event) => event.event === "task_result")) {
+  if (input.serverStatus === "partial") {
+    return "partial";
+  }
+  if (input.result || input.events.some((event) => event.event === "task_result") || input.serverStatus === "completed") {
     return "completed";
   }
-  if (input.events.some((event) => event.event === "task_cancelled")) {
+  if (input.events.some((event) => event.event === "task_cancelled") || input.serverStatus === "interrupted") {
     return "idle";
   }
   return "idle";
@@ -54,7 +63,9 @@ export function runStatusLabel(status: RunStatus): string {
     awaiting_approval: "等待审批",
     cancelling: "正在取消",
     completed: "已完成",
-    failed: "失败"
+    failed: "失败",
+    recoverable: "可恢复",
+    partial: "部分完成"
   };
   return labels[status];
 }

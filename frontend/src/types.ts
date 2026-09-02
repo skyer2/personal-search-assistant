@@ -47,6 +47,11 @@ export interface MonitorMessage {
   message: string;
   data: Record<string, unknown>;
   timestamp: string;
+  run_id?: string;
+  session_id?: string;
+  seq?: number;
+  event_id?: string;
+  replay?: boolean;
 }
 
 export interface PongMessage {
@@ -54,11 +59,19 @@ export interface PongMessage {
   message: string;
 }
 
-export type SocketMessage = MonitorMessage | PongMessage;
+export interface ReplayCompleteMessage {
+  type: "replay_complete";
+  run_id?: string;
+  after_seq?: number;
+  count?: number;
+}
+
+export type SocketMessage = MonitorMessage | PongMessage | ReplayCompleteMessage;
 
 export interface TaskResponse {
   status: "started" | string;
   thread_id: string;
+  run_id?: string;
 }
 
 export interface CancelTaskResponse {
@@ -89,7 +102,9 @@ export interface UploadedItem {
   uid: string;
   name: string;
   size: number;
-  raw: File;
+  raw?: File;
+  uploadedAt?: string;
+  serverFileId?: number | string;
 }
 
 export type WorkspaceTab = "chat" | "eval" | "trace";
@@ -278,4 +293,72 @@ export interface LangfuseConfigResponse {
   enabled: boolean;
   host: string;
   ui_url?: string | null;
+}
+
+export type ServerRunStatus =
+  | "queued"
+  | "running"
+  | "awaiting_approval"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "partial"
+  | "recoverable"
+  | "interrupted"
+  | string;
+
+export interface RunSnapshot {
+  run_id: string;
+  session_id: string;
+  query: string;
+  status: ServerRunStatus;
+  mode?: string;
+  created_at?: string;
+  started_at?: string | null;
+  ended_at?: string | null;
+  current_phase?: string | null;
+  plan_version?: number | null;
+  final_result?: string;
+  error?: string;
+  session_workspace?: string;
+  last_event_seq?: number;
+  hitl_status?: string | null;
+  hitl_payload?: HitlInterruptPayload | null;
+  paused_total_ms?: number;
+  pause_started_at?: string | null;
+  tool_calls?: number;
+  assistant_calls?: number;
+  errors?: number;
+  elapsed_ms?: number;
+}
+
+export interface SessionBootstrap {
+  found: boolean;
+  session_id: string;
+  runs: RunSnapshot[];
+  current_run: RunSnapshot | null;
+  hitl: HitlInterruptPayload | null;
+  uploaded_files: Array<{
+    name: string;
+    size: number;
+    uploaded_at?: string;
+    server_file_id?: number | string;
+  }>;
+  output_files: OutputFile[];
+  stats: {
+    tool_calls: number;
+    assistant_calls: number;
+    errors: number;
+  };
+  last_event_seq: number;
+  events: MonitorMessage[];
+  notice?: string;
+}
+
+export interface RunEventsResponse {
+  run_id: string;
+  session_id: string;
+  events: MonitorMessage[];
+  last_event_seq: number;
+  count: number;
 }

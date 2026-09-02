@@ -312,6 +312,7 @@ class AgentHarness:
         tenant_id: str = "",
         project_id: str = "",
         mode: str = "agent",
+        run_id: str = "",
     ) -> HarnessRunContext:
         state = LoopState(session_id=session_id, max_retries=self.max_retries)
         state.metadata["strict_validation"] = self.harness_config.validation_strict_mode
@@ -320,7 +321,7 @@ class AgentHarness:
         from app.observability import get_recorder
         from app.observability.events import new_id
 
-        run_id = new_id(16)
+        run_id = run_id or new_id(16)
         obs_ctx = get_recorder().start_run(
             session_id=session_id,
             run_id=run_id,
@@ -429,6 +430,7 @@ class AgentHarness:
         tenant_id: str = "local",
         project_id: str = "Inbox",
         mode: str = "agent",
+        run_id: str = "",
     ) -> HarnessResult:
         ctx = self._bootstrap_run(
             task_query,
@@ -437,8 +439,10 @@ class AgentHarness:
             tenant_id=tenant_id,
             project_id=project_id,
             mode=mode,
+            run_id=run_id,
         )
         state = ctx.state
+        _project_run_running(ctx)
         try:
             if self._use_graph_runtime():
                 from app.research.runtime.runner import ResearchGraphRunner
@@ -452,6 +456,7 @@ class AgentHarness:
             state.abort_reason = "cancelled"
             state.abort_message = "任务被取消"
             self._report_phase(Phase.ABORT, "cancelled", state=state)
+            _project_run_interrupt(state.run_id, "cancelled")
             monitor.report_task_cancelled()
             ctx.tracer.finish({"status": "cancelled"})
             raise
@@ -459,6 +464,7 @@ class AgentHarness:
             state.abort_reason = "error"
             state.abort_message = str(e)
             self._report_phase(Phase.ABORT, "error", state=state, error=str(e))
+            _project_run_fail(state.run_id, str(e))
             monitor._emit("error", f"Harness 执行异常：{str(e)}")
             ctx.tracer.finish({"status": "failed", "error": str(e)})
             return HarnessResult(
@@ -2575,6 +2581,18 @@ class AgentHarness:
                 )
             else:
                 state.final_content = "任务已结束，但没有可展示的正文。"
+        persist_status = "success" if success else "partial"
+        if abort_reason == "cancelled":
+            persist_status = "interrupted"
+        elif abort_reason and not success:
+            persist_status = "partial"
+        # Persist-before-publish：先写 RunStore，再推 WS，刷新后才能 hydrate 出结果。
+        _project_run_complete(
+            state.run_id,
+            result=state.final_content,
+            status=persist_status,
+            error=state.abort_message or abort_reason,
+        )
         monitor.report_task_result(state.final_content)
 
         duration = int((time.perf_counter() - phase_started) * 1000)
@@ -2847,3 +2865,62 @@ class AgentHarness:
                 "step_index", "step_type", "duration_ms", "tool_calls", "tokens_used"
             }},
         )
+
+
+def _project_run_running(ctx: HarnessRunContext) -> None:
+    try:
+        from app.run_store import get_run_store
+
+        workspace = ""
+        if getattr(ctx, "session_dir", None):
+            workspace = str(ctx.session_dir)
+        get_run_store().mark_running(ctx.run_id, session_workspace=workspace)
+    except Exception as exc:
+        logger.warning("RunStore mark_running skipped: %s", exc)
+
+
+def _project_run_complete(run_id: str, *, result: str, status: str, error: str = "") -> None:
+    if not run_id:
+        return
+    try:
+        from app.run_store import (
+            STATUS_COMPLETED,
+            STATUS_FAILED,
+            STATUS_INTERRUPTED,
+            STATUS_PARTIAL,
+            get_run_store,
+        )
+
+        mapped = {
+            "success": STATUS_COMPLETED,
+            "completed": STATUS_COMPLETED,
+            "partial": STATUS_PARTIAL,
+            "interrupted": STATUS_INTERRUPTED,
+            "failed": STATUS_FAILED,
+            "cancelled": STATUS_INTERRUPTED,
+        }.get(status, STATUS_COMPLETED)
+        get_run_store().complete_run(run_id, result=result, status=mapped, error=error)
+    except Exception as exc:
+        logger.warning("RunStore complete skipped: %s", exc)
+
+
+def _project_run_fail(run_id: str, error: str) -> None:
+    if not run_id:
+        return
+    try:
+        from app.run_store import get_run_store
+
+        get_run_store().fail_run(run_id, error)
+    except Exception as exc:
+        logger.warning("RunStore fail skipped: %s", exc)
+
+
+def _project_run_interrupt(run_id: str, error: str = "cancelled") -> None:
+    if not run_id:
+        return
+    try:
+        from app.run_store import get_run_store
+
+        get_run_store().interrupt_run(run_id, error=error)
+    except Exception as exc:
+        logger.warning("RunStore interrupt skipped: %s", exc)

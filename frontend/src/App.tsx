@@ -59,7 +59,16 @@ export default function App() {
   const [processHeight, setProcessHeight] = usePersistentNumber("harness-ui-process-height", 280);
   const streamRef = useRef<HTMLElement | null>(null);
   const failureHandledRef = useRef<string | null>(null);
+  const hydratedTurnsRef = useRef(false);
   const session = useDeepAgentSession();
+
+  useEffect(() => {
+    if (!session.hydrated || hydratedTurnsRef.current) {
+      return;
+    }
+    hydratedTurnsRef.current = true;
+    setTurns(session.initialTurns);
+  }, [session.hydrated, session.initialTurns]);
 
   useEffect(() => {
     setTurns((previous) => {
@@ -67,7 +76,12 @@ export default function App() {
         return previous;
       }
 
-      const latestTurn = previous[previous.length - 1];
+      const runId = session.currentRunId;
+      const targetIndex = runId
+        ? previous.findIndex((turn) => turn.id === runId)
+        : previous.length - 1;
+      const index = targetIndex >= 0 ? targetIndex : previous.length - 1;
+      const latestTurn = previous[index];
       const nextLatestTurn = {
         ...latestTurn,
         events: session.events,
@@ -77,9 +91,9 @@ export default function App() {
         elapsedMs: session.elapsedMs
       };
 
-      return [...previous.slice(0, -1), nextLatestTurn];
+      return [...previous.slice(0, index), nextLatestTurn, ...previous.slice(index + 1)];
     });
-  }, [session.elapsedMs, session.events, session.files, session.isRunning, session.result]);
+  }, [session.currentRunId, session.elapsedMs, session.events, session.files, session.isRunning, session.result]);
 
   useEffect(() => {
     if (!session.taskFailure) {
@@ -101,6 +115,7 @@ export default function App() {
       setQuery(lastTurn.content);
       return previous.slice(0, -1);
     });
+    hydratedTurnsRef.current = false;
     session.discardFailedTask();
     message.warning(`任务失败，已撤回本次提问：${failureMessage}`);
   }, [message, session.discardFailedTask, session.taskFailure, session.events.length]);
@@ -121,7 +136,16 @@ export default function App() {
     });
 
     try {
-      await session.submitTask(cleanQuery, "agent");
+      const response = await session.submitTask(cleanQuery, "agent");
+      if (response.run_id) {
+        setTurns((previous) => {
+          if (previous.length === 0) {
+            return previous;
+          }
+          const last = previous[previous.length - 1];
+          return [...previous.slice(0, -1), { ...last, id: response.run_id || last.id }];
+        });
+      }
       message.success("任务已启动，执行过程会显示在对话中");
     } catch (error) {
       setTurns((previous) => previous.slice(0, -1));
@@ -151,6 +175,7 @@ export default function App() {
 
   function handleNewSession() {
     failureHandledRef.current = null;
+    hydratedTurnsRef.current = false;
     session.resetSession();
     setTurns([]);
     setQuery("");
@@ -231,6 +256,8 @@ export default function App() {
           </div>
           <div className={`sidebar-status sidebar-status--${session.runStatus}`}>
             {session.runStatus === "awaiting_approval" ? (
+              <PauseCircleOutlined aria-hidden />
+            ) : session.runStatus === "recoverable" ? (
               <PauseCircleOutlined aria-hidden />
             ) : session.runStatus === "failed" ? (
               <CloseCircleOutlined aria-hidden />
@@ -321,6 +348,24 @@ export default function App() {
           </div>
         </header>
 
+        {!session.sessionFound && session.hydrated ? (
+          <Alert
+            className="chat-alert"
+            message="未找到该会话的持久化记录。若这是新会话，直接提问即可；若是旧 thread，数据可能已清理。"
+            showIcon
+            type="info"
+          />
+        ) : null}
+
+        {session.runStatus === "recoverable" ? (
+          <Alert
+            className="chat-alert"
+            message="后端重启后该任务处于可恢复状态，不会显示假的空闲。可以取消，或重新提交同一问题继续。"
+            showIcon
+            type="warning"
+          />
+        ) : null}
+
         {session.lastError ? (
           <Alert className="chat-alert" message={session.lastError} showIcon type="error" />
         ) : null}
@@ -346,10 +391,13 @@ export default function App() {
         {workspace === "chat" ? (
           <section className="chat-stream-panel" ref={streamRef}>
             <ConversationThread
+              hasMoreEvents={session.hasMoreEvents}
+              onLoadOlderEvents={() => void session.loadOlderEvents()}
               onProcessHeightChange={setProcessHeight}
               onUseExample={setQuery}
               processHeight={processHeight}
               runStatus={session.runStatus}
+              sessionId={session.threadId}
               turns={turns}
             />
           </section>

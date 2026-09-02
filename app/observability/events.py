@@ -108,6 +108,38 @@ class AgentEvent:
         payload["event"] = self.type
         return payload
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "AgentEvent":
+        attrs = raw.get("attributes") if isinstance(raw.get("attributes"), dict) else {}
+        event_type = str(raw.get("type") or raw.get("event") or "")
+        try:
+            seq = int(raw.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        try:
+            duration = raw.get("duration_ms")
+            duration_ms = int(duration) if duration is not None else None
+        except (TypeError, ValueError):
+            duration_ms = None
+        return cls(
+            event_id=str(raw.get("event_id") or ""),
+            trace_id=str(raw.get("trace_id") or ""),
+            span_id=str(raw.get("span_id") or raw.get("event_id") or ""),
+            parent_span_id=raw.get("parent_span_id"),
+            run_id=str(raw.get("run_id") or ""),
+            session_id=str(raw.get("session_id") or ""),
+            seq=seq,
+            timestamp=str(raw.get("timestamp") or utc_now()),
+            type=event_type,
+            plan_version=raw.get("plan_version"),
+            task_id=raw.get("task_id"),
+            attempt=raw.get("attempt"),
+            phase=raw.get("phase"),
+            status=raw.get("status"),
+            duration_ms=duration_ms,
+            attributes=dict(attrs),
+        )
+
     def to_jsonl_record(self) -> dict[str, Any]:
         """双写：新 envelope + 旧 JSONL 顶层字段，兼容 analyze_usage / TraceViewer。"""
         record = self.to_dict()

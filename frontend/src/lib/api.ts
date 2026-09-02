@@ -13,7 +13,9 @@ import type {
   JsonlTraceResponse,
   LangfuseConfigResponse,
   LangfuseTraceResponse,
+  RunEventsResponse,
   SearchMode,
+  SessionBootstrap,
   TaskResponse,
   TraceTree,
   UploadResponse
@@ -82,7 +84,37 @@ export async function listSessionFiles(path: string): Promise<FileListResponse> 
   return requestJson<FileListResponse>(buildApiUrl("/api/files", { path }));
 }
 
-export function getDownloadUrl(path: string): string {
+export async function fetchSessionBootstrap(sessionId: string): Promise<SessionBootstrap> {
+  return requestJson<SessionBootstrap>(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`));
+}
+
+export async function listSessionArtifacts(sessionId: string): Promise<FileListResponse> {
+  return requestJson<FileListResponse>(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts`));
+}
+
+export async function fetchRunEvents(
+  runId: string,
+  options?: { afterSeq?: number; beforeSeq?: number; limit?: number }
+): Promise<RunEventsResponse> {
+  const params = new URLSearchParams();
+  if (options?.afterSeq != null) {
+    params.set("after_seq", String(options.afterSeq));
+  }
+  if (options?.beforeSeq != null) {
+    params.set("before_seq", String(options.beforeSeq));
+  }
+  if (options?.limit != null) {
+    params.set("limit", String(options.limit));
+  }
+  const query = params.toString();
+  const path = `/api/runs/${encodeURIComponent(runId)}/events${query ? `?${query}` : ""}`;
+  return requestJson<RunEventsResponse>(apiUrl(path));
+}
+
+export function getDownloadUrl(path: string, sessionId?: string): string {
+  if (sessionId && path && !path.startsWith("/") && !path.includes(":\\")) {
+    return buildApiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/download`, { name: path }).toString();
+  }
   return buildApiUrl("/api/download", { path }).toString();
 }
 

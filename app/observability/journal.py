@@ -22,6 +22,9 @@ class RunJournal:
         with self._lock:
             return list(self._by_session.get(session_id, []))
 
+    def events_for_run(self, session_id: str, run_id: str) -> list[AgentEvent]:
+        return [event for event in self.replay(session_id) if event.run_id == run_id]
+
     def clear(self, session_id: str | None = None) -> None:
         with self._lock:
             if session_id is None:

@@ -36,7 +36,8 @@ Langfuse  TraceViewer / Metrics
 
 | 目的 | 位置 |
 |------|------|
-| 实时 UI | 提问后的过程框 / 执行过程（WebSocket `monitor_event`） |
+| 实时 UI | 提问后的过程框 / 执行过程（WebSocket `monitor_event`）。刷新后走 `GET /api/sessions/{id}/bootstrap`，WS `subscribe.after_seq` replay，按 `(run_id, seq)` 去重 |
+| Run 投影 | `RunStore` SQLite：query / status / result / HITL / timestamps / 文件 metadata。不要从 Trace 重建业务状态 |
 | 因果树 | 阶段与 Worker 的父子 span。默认不展示 `llm_usage` / `gen_ai.chat`（仍在 JSONL）。`GET /api/traces/tree/{session_id}` |
 | Worker / 进度 / Replan / Eval | Trace 查看器对应页签；JSONL/tree 响应里的 `summary`（identity、workers 按 `task_id+attempt` 合并 started/completed、progress、replans、evals、usage） |
 | JSONL | 该 session 全部事件时间线，含每次 LLM 调用。用来对耗时、重试、abort |

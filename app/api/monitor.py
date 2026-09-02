@@ -48,13 +48,22 @@ class ToolMonitor:
         :param message: 面向前端展示的事件说明
         :param data: 附加结构化数据
         """
+        data = data or {}
         payload = {
             "type": "monitor_event",
             "event": event_type,
             "message": message,
-            "data": data or {},
+            "data": data,
             "timestamp": datetime.datetime.now().isoformat(),
         }
+        if data.get("seq") is not None:
+            payload["seq"] = data.get("seq")
+        if data.get("run_id"):
+            payload["run_id"] = data.get("run_id")
+        if data.get("event_id"):
+            payload["event_id"] = data.get("event_id")
+        if data.get("session_id"):
+            payload["session_id"] = data.get("session_id")
 
         if self.websocket_manager:
             try:
@@ -283,11 +292,12 @@ class ConnectionManager:
     """
     WebSocket 连接管理器
 
-    active_connections 使用 thread_id 作为 key，保证监控事件只推送给对应任务的前端连接
+    一个 session / thread_id 可以同时挂多个 socket（多 Tab、Trace Viewer）。
+    部署不变量：单后端进程。多 worker 时本 fanout 看不到别的进程的连接。
     """
 
     def __init__(self) -> None:
-        self.active_connections: dict[str, WebSocket] = {}
+        self.active_connections: dict[str, set[WebSocket]] = {}
         # WebSocket 发送必须回到创建连接的事件循环，因此启动时需要显式绑定 loop
         self.loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -298,28 +308,37 @@ class ConnectionManager:
         print(f"[Monitor] ConnectionManager manually bound to loop: {id(self.loop)}")
 
     async def connect(self, websocket: WebSocket, thread_id: str) -> None:
-        """接受 WebSocket 连接，并按 thread_id 保存"""
+        """接受 WebSocket 连接，并按 thread_id 加入 fanout set"""
         await websocket.accept()
-        self.active_connections[thread_id] = websocket
-        print(f"Client connected: {thread_id}")
+        sockets = self.active_connections.setdefault(thread_id, set())
+        sockets.add(websocket)
+        print(f"Client connected: {thread_id} ({len(sockets)} sockets)")
 
     def disconnect(self, websocket: WebSocket, thread_id: str) -> None:
-        """移除已经断开的 WebSocket 连接"""
-        if self.active_connections.get(thread_id) is websocket:
-            del self.active_connections[thread_id]
-            print(f"Client disconnected: {thread_id}")
-        else:
-            print(f"Stale websocket disconnected, current connection kept: {thread_id}")
+        """只移除当前 WebSocket，不影响同 thread 的其他 Tab"""
+        sockets = self.active_connections.get(thread_id)
+        if not sockets:
+            return
+        sockets.discard(websocket)
+        if not sockets:
+            self.active_connections.pop(thread_id, None)
+        print(f"Client disconnected: {thread_id} ({len(sockets)} remaining)")
 
     async def send_personal_message(self, message: str, websocket: WebSocket) -> None:
         """向指定 WebSocket 发送纯文本消息"""
         await websocket.send_text(message)
 
     async def send_to_thread(self, message: dict[str, Any], thread_id: str) -> None:
-        """向指定 thread_id 对应的前端连接发送 JSON 消息"""
-        if thread_id in self.active_connections:
-            websocket = self.active_connections[thread_id]
-            await websocket.send_json(message)
+        """向该 thread_id 下所有前端连接发送 JSON"""
+        sockets = list(self.active_connections.get(thread_id) or [])
+        dead: list[WebSocket] = []
+        for websocket in sockets:
+            try:
+                await websocket.send_json(message)
+            except Exception:
+                dead.append(websocket)
+        for websocket in dead:
+            self.disconnect(websocket, thread_id)
 
 
 manager = ConnectionManager()
