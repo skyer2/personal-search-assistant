@@ -61,9 +61,9 @@ def _check_tavily() -> DependencyStatus:
 
 def _check_langfuse() -> DependencyStatus:
     config = get_harness_config()
-    if not config.langfuse_enabled:
+    if not config.langfuse_enabled or not is_langfuse_enabled():
         return "disabled"
-    return _status_from_bool(is_langfuse_enabled())
+    return "ok"
 
 
 async def collect_health() -> dict[str, Any]:

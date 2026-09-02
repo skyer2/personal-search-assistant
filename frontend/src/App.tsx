@@ -219,7 +219,7 @@ export default function App() {
         <div className="sidebar-section">
           <span className="sidebar-label">THREAD</span>
           <strong className="thread-id" title={session.threadId}>
-            {session.threadId.slice(0, 8)}
+            {session.threadId}
           </strong>
         </div>
 

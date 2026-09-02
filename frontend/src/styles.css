@@ -984,7 +984,12 @@ textarea {
   margin-top: 4px;
   color: var(--text);
   font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
-  font-size: 22px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  user-select: all;
 }
 
 .sidebar-status-list {
