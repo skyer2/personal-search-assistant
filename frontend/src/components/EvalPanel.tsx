@@ -5,17 +5,15 @@ import { fetchEvalBaseline, fetchEvalLatest, runEvalDryRun } from "../lib/api";
 import type { EvalReport } from "../types";
 
 const METRIC_ROWS = [
-  { key: "task_success_rate", label: "TSR", suffix: "%", scale: 100 },
-  { key: "tool_selection_accuracy", label: "TSA", suffix: "%", scale: 100 },
-  { key: "step_success_rate", label: "SSR", suffix: "%", scale: 100 },
-  { key: "recovery_rate", label: "RR", suffix: "%", scale: 100 },
-  { key: "trajectory_similarity", label: "TDS", suffix: "%", scale: 100 },
+  { key: "task_success_rate", label: "Gate", suffix: "%", scale: 100 },
+  { key: "outcome_score", label: "Outcome", suffix: "%", scale: 100 },
+  { key: "grounding_score", label: "Grounding", suffix: "%", scale: 100 },
+  { key: "trajectory_score", label: "Trajectory", suffix: "%", scale: 100 },
+  { key: "plan_validation_pass_rate", label: "Invariants", suffix: "%", scale: 100 },
+  { key: "replan_recovery_rate", label: "Replan Recovery", suffix: "%", scale: 100 },
   { key: "citation_coverage_rate", label: "CCR", suffix: "%", scale: 100 },
-  { key: "hallucination_rate", label: "HR", suffix: "%", scale: 100 },
-  { key: "avg_tool_calls", label: "ATC", suffix: "", scale: 1 },
-  { key: "avg_latency_ms", label: "AL", suffix: "ms", scale: 1 },
-  { key: "avg_compression_ratio", label: "CR", suffix: "", scale: 1 },
-  { key: "memory_recall_hit_rate", label: "MRH", suffix: "%", scale: 100 }
+  { key: "avg_tool_calls", label: "Tool Calls", suffix: "", scale: 1 },
+  { key: "latency_p95_ms", label: "P95", suffix: "ms", scale: 1 }
 ] as const;
 
 function formatMetric(report: EvalReport, key: string, scale: number, suffix: string): string {
@@ -75,7 +73,7 @@ export function EvalPanel() {
       <div className="panel-heading-row">
         <div>
           <span className="panel-kicker">HARNESS EVAL</span>
-          <Typography.Title level={4}>Golden Task 评测面板</Typography.Title>
+          <Typography.Title level={4}>Harness Eval</Typography.Title>
         </div>
         <Space>
           <Button icon={<ReloadOutlined aria-hidden />} loading={loading} onClick={() => void load()}>
@@ -119,7 +117,7 @@ export function EvalPanel() {
           pagination={false}
           size="small"
           columns={[
-            { title: "ID", dataIndex: "task_id", width: 72 },
+            { title: "ID", dataIndex: "task_id", width: 160 },
             {
               title: "结果",
               dataIndex: "success",
@@ -129,13 +127,8 @@ export function EvalPanel() {
             },
             { title: "Status", dataIndex: "status" },
             { title: "Retry", dataIndex: "retry_count", width: 72 },
-            {
-              title: "TDS",
-              dataIndex: "trajectory_similarity",
-              width: 72,
-              render: (value: number | undefined) =>
-                typeof value === "number" ? `${(value * 100).toFixed(0)}%` : "-"
-            }
+            { title: "Stage", dataIndex: "failure_stage", width: 100 },
+            { title: "Type", dataIndex: "failure_type" }
           ]}
         />
       </Card>

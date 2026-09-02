@@ -1,0 +1,8 @@
+# V2 Full Harness：完整控制面
+name: full
+mode: agent
+progress_eval: true
+max_replan: 2
+parallel: true
+compression: true
+description: Brief → Plan → Workers → Progress → GAP → Replan → Answer

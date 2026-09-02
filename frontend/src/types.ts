@@ -126,6 +126,13 @@ export interface EvalReport {
   generated_at?: string;
   report_file?: string;
   task_success_rate?: number;
+  gate_pass_rate?: number;
+  outcome_score?: number;
+  grounding_score?: number;
+  trajectory_score?: number;
+  plan_validation_pass_rate?: number;
+  replan_recovery_rate?: number;
+  latency_p95_ms?: number;
   tool_selection_accuracy?: number;
   step_success_rate?: number;
   recovery_rate?: number;
@@ -146,6 +153,8 @@ export interface EvalReport {
     success: boolean;
     status?: string;
     retry_count?: number;
+    failure_stage?: string;
+    failure_type?: string;
   }>;
 }
 

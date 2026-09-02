@@ -8,8 +8,23 @@ Phase 6：CCR / Hallucination Rate / Trajectory Similarity。
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    rank = (len(values) - 1) * pct
+    lo = int(math.floor(rank))
+    hi = int(math.ceil(rank))
+    if lo == hi:
+        return float(values[lo])
+    weight = rank - lo
+    return float(values[lo] * (1 - weight) + values[hi] * weight)
 
 
 @dataclass
@@ -52,6 +67,17 @@ class TaskEvalResult:
     intent_slots_ok: bool = True
     plan_validation_ok: bool = True
     intent_confidence: float | None = None
+    # 分层分数：success 只表示 hard gate，不再混 Outcome/Trajectory/Cost
+    gate_ok: bool = True
+    outcome_score: float | None = None
+    grounding_score: float | None = None
+    trajectory_score: float | None = None
+    failure_stage: str = ""
+    failure_type: str = ""
+    replan_count: int = 0
+    replan_useful: bool | None = None
+    tokens: int = 0
+    cost_usd: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -63,7 +89,73 @@ class EvalReport:
 
     @property
     def task_success_rate(self) -> float:
+        """Gate pass rate。不再把 Trajectory/Format/Memory 混进这一项。"""
         return self.passed / self.total if self.total else 0.0
+
+    @property
+    def gate_pass_rate(self) -> float:
+        items = self.results
+        if not items:
+            return 0.0
+        return sum(1 for r in items if r.gate_ok and r.success) / len(items)
+
+    @property
+    def avg_outcome_score(self) -> float | None:
+        items = [r.outcome_score for r in self.results if r.outcome_score is not None]
+        return sum(items) / len(items) if items else None
+
+    @property
+    def avg_grounding_score(self) -> float | None:
+        items = [r.grounding_score for r in self.results if r.grounding_score is not None]
+        return sum(items) / len(items) if items else None
+
+    @property
+    def avg_trajectory_score(self) -> float | None:
+        items = [r.trajectory_score for r in self.results if r.trajectory_score is not None]
+        return sum(items) / len(items) if items else None
+
+    @property
+    def latency_p50_ms(self) -> float:
+        values = sorted(r.latency_ms for r in self.results if r.latency_ms > 0)
+        return _percentile(values, 0.50)
+
+    @property
+    def latency_p95_ms(self) -> float:
+        values = sorted(r.latency_ms for r in self.results if r.latency_ms > 0)
+        return _percentile(values, 0.95)
+
+    @property
+    def replan_trigger_rate(self) -> float | None:
+        if not self.results:
+            return None
+        triggered = sum(1 for r in self.results if r.replan_count > 0)
+        return triggered / len(self.results)
+
+    @property
+    def replan_recovery_rate(self) -> float | None:
+        triggered = [r for r in self.results if r.replan_count > 0]
+        if not triggered:
+            return None
+        recovered = sum(1 for r in triggered if r.success or r.replan_useful)
+        return recovered / len(triggered)
+
+    @property
+    def replan_trigger_precision(self) -> float | None:
+        judged = [r for r in self.results if r.replan_useful is not None]
+        if not judged:
+            return None
+        useful = sum(1 for r in judged if r.replan_useful)
+        return useful / len(judged)
+
+    @property
+    def failure_distribution(self) -> dict[str, int]:
+        dist: dict[str, int] = {}
+        for row in self.results:
+            if row.success:
+                continue
+            key = row.failure_stage or "other"
+            dist[key] = dist.get(key, 0) + 1
+        return dist
 
     @property
     def tool_selection_accuracy(self) -> float:
@@ -193,6 +285,7 @@ class EvalReport:
             "total": self.total,
             "passed": self.passed,
             "task_success_rate": round(self.task_success_rate, 3),
+            "gate_pass_rate": round(self.gate_pass_rate, 3),
             "tool_selection_accuracy": round(self.tool_selection_accuracy, 3),
             "step_success_rate": round(self.step_success_rate, 3),
             "recovery_rate": round(self.recovery_rate, 3),
@@ -232,6 +325,13 @@ class EvalReport:
                     "run_id": r.run_id,
                     "trace_id": r.trace_id,
                     "variant": r.variant,
+                    "gate_ok": r.gate_ok,
+                    "outcome_score": r.outcome_score,
+                    "grounding_score": r.grounding_score,
+                    "trajectory_score": r.trajectory_score,
+                    "failure_stage": r.failure_stage,
+                    "failure_type": r.failure_type,
+                    "replan_count": r.replan_count,
                     "error": r.error,
                 }
                 for r in self.results
@@ -270,6 +370,29 @@ class EvalReport:
         aic = self.avg_intent_confidence
         if aic is not None:
             payload["avg_intent_confidence"] = round(aic, 3)
+        outcome = self.avg_outcome_score
+        if outcome is not None:
+            payload["outcome_score"] = round(outcome, 3)
+        grounding = self.avg_grounding_score
+        if grounding is not None:
+            payload["grounding_score"] = round(grounding, 3)
+        traj = self.avg_trajectory_score
+        if traj is not None:
+            payload["trajectory_score"] = round(traj, 3)
+        payload["latency_p50_ms"] = round(self.latency_p50_ms, 1)
+        payload["latency_p95_ms"] = round(self.latency_p95_ms, 1)
+        trigger = self.replan_trigger_rate
+        if trigger is not None:
+            payload["replan_trigger_rate"] = round(trigger, 3)
+        recovery = self.replan_recovery_rate
+        if recovery is not None:
+            payload["replan_recovery_rate"] = round(recovery, 3)
+        precision = self.replan_trigger_precision
+        if precision is not None:
+            payload["replan_trigger_precision"] = round(precision, 3)
+        dist = self.failure_distribution
+        if dist:
+            payload["failure_distribution"] = dist
         return payload
 
 
@@ -317,22 +440,18 @@ def compare_with_baseline(
 ) -> dict[str, Any]:
     metric_keys = [
         "task_success_rate",
-        "tool_selection_accuracy",
-        "step_success_rate",
-        "recovery_rate",
+        "gate_pass_rate",
+        "outcome_score",
+        "grounding_score",
+        "trajectory_score",
+        "plan_validation_pass_rate",
+        "replan_trigger_rate",
+        "replan_recovery_rate",
         "avg_tool_calls",
         "avg_latency_ms",
-        "avg_compression_ratio",
-        "memory_recall_hit_rate",
+        "latency_p95_ms",
         "citation_coverage_rate",
-        "hallucination_rate",
-        "trajectory_similarity",
-        "structured_output_compliance_rate",
-        "report_judge_pass_rate",
-        "avg_tokens_saved",
         "intent_deliverable_accuracy",
-        "plan_validation_pass_rate",
-        "avg_intent_confidence",
     ]
     deltas: dict[str, float | None] = {}
     for key in metric_keys:
@@ -345,16 +464,10 @@ def compare_with_baseline(
 
     regressions = []
     if deltas.get("task_success_rate") is not None and deltas["task_success_rate"] < -0.05:
-        regressions.append("TSR dropped > 5%")
-    jcr_delta = deltas.get("structured_output_compliance_rate")
-    if jcr_delta is not None and jcr_delta < -0.1:
-        regressions.append("JCR dropped > 10%")
-    ida_delta = deltas.get("intent_deliverable_accuracy")
-    if ida_delta is not None and ida_delta < -0.05:
-        regressions.append("IDA dropped > 5%")
+        regressions.append("Gate pass rate dropped > 5%")
     pvr = current.get("plan_validation_pass_rate")
     if isinstance(pvr, (int, float)) and pvr < 1.0:
-        regressions.append("Plan validation pass rate < 100%")
+        regressions.append("Planner/component invariants failed")
 
     return {
         "baseline_generated_at": baseline.get("generated_at"),

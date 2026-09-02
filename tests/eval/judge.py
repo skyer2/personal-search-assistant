@@ -1,8 +1,6 @@
-"""
-【Phase 9】报告质量启发式 Judge + 可选 LLM Judge 占位
+"""ReportStructureGrader：只评报告结构（标题/引用标记/参考文献），不评答案对错。
 
-离线 eval live 模式对最终报告做自动化打分，减少纯人工依赖。
-默认 heuristic（无 API）；HARNESS_EVAL_LLM_JUDGE=true 时可扩展 LLM。
+真正的 Answer/Evidence Judge 见 tests/eval/graders/llm_judge.py。
 """
 
 from __future__ import annotations

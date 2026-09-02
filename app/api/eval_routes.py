@@ -78,17 +78,14 @@ async def run_eval(
     dry_run: bool = Query(default=True),
     report_md: bool = Query(default=True),
 ) -> dict[str, Any]:
-    from tests.eval.run_eval import load_tasks, run_dry_eval, save_report, write_comparison_markdown
+    from tests.eval.run_eval import run_dry_eval, run_live_eval, save_report, write_comparison_markdown
     from tests.eval.metrics import build_report, compare_with_baseline
-
-    tasks_path = ROOT / "tests" / "eval" / "tasks.jsonl"
-    tasks = load_tasks(tasks_path)
+    from tests.eval.runners.component import load_jsonl
 
     if dry_run:
-        results = run_dry_eval(tasks)
+        results = run_dry_eval()
     else:
-        from tests.eval.run_eval import run_live_eval
-
+        tasks = load_jsonl(ROOT / "tests" / "eval" / "datasets" / "harness_scenarios_v1.jsonl")
         results = await run_live_eval(tasks)
 
     report = build_report(results)

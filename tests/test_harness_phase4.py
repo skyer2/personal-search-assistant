@@ -78,7 +78,7 @@ def test_eval_comparison_markdown():
     out = write_comparison_markdown(report, comparison, ROOT / "tests" / "eval" / "results")
     assert out.exists()
     text = out.read_text(encoding="utf-8")
-    assert "TSR" in text
+    assert "Gate" in text
     print(f"[OK] comparison markdown: {out.name}")
 
 

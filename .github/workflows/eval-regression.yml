@@ -33,6 +33,9 @@ jobs:
       - name: Eval dry-run smoke
         run: uv run python tests/eval/test_eval_dry_run.py
 
+      - name: Eval hierarchy
+        run: uv run python tests/eval/test_eval_hierarchy.py
+
       - name: Phase 9 observability tests
         run: uv run python tests/test_harness_phase9.py
 

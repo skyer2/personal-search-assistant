@@ -1,0 +1,8 @@
+# V1 Harness without Replan：控制面在，但不能动态补洞
+name: no_replan
+mode: agent
+progress_eval: true
+max_replan: 0
+parallel: true
+compression: true
+description: Brief → Plan → Workers → Progress → Answer

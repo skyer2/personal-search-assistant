@@ -4,7 +4,6 @@
 结构化槽位、置信度、歧义澄清、Plan 校验、HITL 触发条件。
 """
 
-import json
 import sys
 from pathlib import Path
 
@@ -86,23 +85,12 @@ def test_planner_config_phase14():
 
 
 def test_intent_tasks_golden_dry():
-    from tests.eval.intent_metrics import evaluate_intent_and_plan
+    from tests.eval.runners.component import run_planner_eval
 
-    tasks_path = Path(__file__).parents[1] / "tests" / "eval" / "tasks.jsonl"
-    tasks = [
-        json.loads(line)
-        for line in tasks_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    failed = []
-    for task in tasks:
-        bundle = evaluate_intent_and_plan(task)
-        if task.get("expected_deliverable") and not bundle["deliverable_ok"]:
-            failed.append(task["id"])
-        if not bundle["plan_validation_ok"]:
-            failed.append(task["id"] + ":plan")
-    assert not failed, f"intent/plan eval failed: {failed}"
-    print(f"[OK] all {len(tasks)} golden intent/plan tasks")
+    results = run_planner_eval()
+    failed = [row.task_id for row in results if not row.success]
+    assert not failed, f"planner component failed: {failed}"
+    print(f"[OK] all {len(results)} planner_v2 cases")
 
 
 if __name__ == "__main__":
