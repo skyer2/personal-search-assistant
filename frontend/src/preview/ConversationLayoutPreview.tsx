@@ -38,6 +38,7 @@ const mockFiles: OutputFile[] = [
 export function ConversationLayoutPreview() {
   const [started] = useState(() => startElapsedClock(Date.now()));
   const [now, setNow] = useState(Date.now());
+  const [processHeight, setProcessHeight] = useState(220);
   const checkErrors = runProgressSelfCheck();
 
   useEffect(() => {
@@ -73,8 +74,9 @@ export function ConversationLayoutPreview() {
         )}
       </div>
       <ConversationThread
+        onProcessHeightChange={setProcessHeight}
         onUseExample={() => undefined}
-        processHeight={220}
+        processHeight={processHeight}
         runStatus="completed"
         sessionId="preview-session"
         turns={turns}

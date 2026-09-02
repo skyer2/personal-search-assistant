@@ -356,7 +356,7 @@ def _markdown_to_story(
                 item = _parse_bullet(lines[index].strip())
                 if item is None:
                     break
-                story.append(Paragraph(f"• {_format_inline(item)}", styles["list"]))
+                story.append(Paragraph(f"- {_format_inline(item)}", styles["list"]))
                 index += 1
             continue
 
