@@ -69,7 +69,12 @@ def best_report_text(*chunks: str) -> str:
     return max(usable, key=len)
 
 
-def content_from_loop_state(state: object) -> str:
+def all_report_text(*chunks: str) -> str:
+    usable = [usable_report_text(chunk) for chunk in chunks]
+    return "\n\n".join(text for text in usable if text)
+
+
+def _step_result_chunks(state: object) -> list[str]:
     chunks: list[str] = [str(getattr(state, "final_content", "") or "")]
     for result in getattr(state, "step_results", None) or []:
         chunks.append(
@@ -79,7 +84,63 @@ def content_from_loop_state(state: object) -> str:
                 or ""
             )
         )
+    return chunks
+
+
+def content_from_loop_state(state: object, *, join_all: bool = False) -> str:
+    chunks = _step_result_chunks(state)
+    if join_all:
+        return all_report_text(*chunks)
     return best_report_text(*chunks)
+
+
+def report_markdown_from_state(state: object, *, abort_reason: str = "") -> str:
+    """预算中止时仍拼一份可读 Markdown，避免 PDF 交付变成空白聊天。"""
+    title = filename_stem_from_query(
+        str(getattr(getattr(state, "intent", None), "raw_query", "") or ""),
+        "调研报告",
+    )
+    reason = abort_reason or str(getattr(state, "abort_reason", "") or "")
+    body = content_from_loop_state(state, join_all=True)
+    parts: list[str] = []
+    if reason:
+        parts.append(f"> 本次运行因 `{reason}` 提前结束，下文是已收集材料的部分交付，不是完整终稿。")
+    if body.lstrip().startswith("#"):
+        parts.append(body)
+    elif body:
+        parts.append(f"# {title}\n\n{body}")
+    else:
+        parts.append(f"# {title}\n\n没有可用的研究报告正文。")
+    return "\n\n".join(parts).strip()
+
+
+def session_artifact_names(session_dir: Path) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for path in [*list_markdown_files(session_dir), *list_pdf_files(session_dir)]:
+        if path.name in seen:
+            continue
+        seen.add(path.name)
+        names.append(path.name)
+    return names
+
+
+def ensure_requested_deliverables(session_dir: Path, state: object) -> dict[str, Path | None]:
+    intent = getattr(state, "intent", None)
+    deliverable = str(getattr(intent, "deliverable", "") or "")
+    query = str(getattr(intent, "raw_query", "") or "")
+    abort_reason = str(getattr(state, "abort_reason", "") or "")
+    if deliverable not in {"md", "pdf"}:
+        return {"md": None, "pdf": None}
+    content = content_from_loop_state(state, join_all=True)
+    if abort_reason or not usable_report_text(content):
+        content = report_markdown_from_state(state, abort_reason=abort_reason)
+    return materialize_requested_files(
+        session_dir,
+        deliverable=deliverable,
+        content=content,
+        query=query,
+    )
 
 
 def persist_markdown_if_missing(

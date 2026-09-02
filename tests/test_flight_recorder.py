@@ -261,6 +261,23 @@ def test_summarize_trace_progress_without_replan():
     print("[OK] summarize_trace progress without replan")
 
 
+def test_span_tree_omits_llm_usage():
+    events = [
+        {"type": "run.started", "span_id": "root"},
+        {"type": "llm_usage", "span_id": "llm-1", "event": "llm_usage"},
+        {"type": "gen_ai.chat", "span_id": "llm-2"},
+        {"type": "worker.started", "span_id": "w1", "task_id": "t_next_hop"},
+        {"type": "phase", "span_id": "p1", "phase": "abort", "status": "budget_tool_calls"},
+    ]
+    tree = build_span_tree(events)
+    assert tree["event_count"] == 5
+    assert tree["omitted_count"] == 2
+    names = {node["name"] for node in tree["roots"]}
+    assert names == {"run.started", "worker.started", "phase"}
+    assert tree["span_count"] == 3
+    print("[OK] span tree omits llm_usage")
+
+
 def test_bind_worker_isolates_span_context():
     from app.observability.context import bind_worker, current_context, reset_run, set_context
 
@@ -313,5 +330,6 @@ if __name__ == "__main__":
     test_eval_score_attaches_to_existing_trace()
     test_summarize_trace_workers_and_replan()
     test_summarize_trace_progress_without_replan()
+    test_span_tree_omits_llm_usage()
     test_bind_worker_isolates_span_context()
     print("\n=== Flight recorder tests passed ===")

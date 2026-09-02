@@ -37,12 +37,21 @@ Langfuse  TraceViewer / Metrics
 | 目的 | 位置 |
 |------|------|
 | 实时 UI | 提问后的过程框 / 执行过程（WebSocket `monitor_event`） |
-| 因果树 | Trace 查看器「因果树」页签；`GET /api/traces/tree/{session_id}` |
+| 因果树 | 阶段与 Worker 的父子 span。默认不展示 `llm_usage` / `gen_ai.chat`（仍在 JSONL）。`GET /api/traces/tree/{session_id}` |
 | Worker / 进度 / Replan / Eval | Trace 查看器对应页签；JSONL/tree 响应里的 `summary`（identity、workers 按 `task_id+attempt` 合并 started/completed、progress、replans、evals、usage） |
+| JSONL | 该 session 全部事件时间线，含每次 LLM 调用。用来对耗时、重试、abort |
+| 证据链 | `evidence.json` 引用源，不是 JSONL |
 | 落盘 journal | `app/logs/traces/{session_id}.jsonl`（运行时根是 `app/`，`schema=agent_event.v1`） |
 | 窗口聚合 | `GET /api/metrics/summary`（同时读 nested `extra` 和顶层 `event=run_summary`） |
 | 进程内 Counter/Histogram | `GET /api/metrics/prometheus` 中 `harness_live_*` |
 | Langfuse | OTLP：`{LANGFUSE_HOST}/api/public/otel`；**不再**调用已弃用的 `GET /api/public/traces` |
+
+### 排查 PDF 没出现
+
+1. **因果树 / JSONL** 搜 `abort`：`budget_tool_calls` 会跳过 `generate_markdown` / `convert_pdf`。finalize 仍会尽量用已有工人材料写部分 PDF，并在聊天结果里写明原因。
+2. **对话区** 看是否出现「任务因 … 提前结束」；以前 `final_content` 为空时连 `task_result` 都不会推，界面像没结果。
+3. **Worker** 看研究任务是否 `ok`；全失败则没有可转 PDF 的正文。
+4. 左侧文件架刷新依赖 `session_created` 的工作目录；有 PDF 文件但对话空白时点刷新。
 
 ## 隐私
 

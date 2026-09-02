@@ -2484,11 +2484,35 @@ class AgentHarness:
 
         set_llm_phase(Phase.FINALIZE.value)
 
-        artifacts = [
-            f.name
-            for f in session_dir.iterdir()
-            if f.is_file() and f.suffix in (".md", ".pdf", ".txt")
-        ]
+        from app.agent.harness.deliverables import (
+            ensure_requested_deliverables,
+            session_artifact_names,
+            usable_report_text,
+        )
+
+        written = ensure_requested_deliverables(session_dir, state)
+        artifacts = session_artifact_names(session_dir)
+        abort_reason = str(state.abort_reason or "")
+        if abort_reason:
+            pdf_path = written.get("pdf")
+            md_path = written.get("md")
+            if pdf_path is not None:
+                note = (
+                    f"任务因 {abort_reason} 提前结束，已根据已有材料生成部分 PDF：{pdf_path.name}"
+                )
+            elif md_path is not None:
+                note = (
+                    f"任务因 {abort_reason} 提前结束，已写出 Markdown：{md_path.name}，但未能生成 PDF。"
+                )
+            else:
+                note = (
+                    f"任务因 {abort_reason} 提前结束，未能生成请求的文件交付物。"
+                )
+            if usable_report_text(state.final_content):
+                if note not in state.final_content:
+                    state.final_content = f"{state.final_content.rstrip()}\n\n{note}"
+            else:
+                state.final_content = note
 
         saved = 0
         policy = get_memory_policy()
@@ -2544,8 +2568,14 @@ class AgentHarness:
             except Exception as exc:
                 print(f"[Memory] consolidation skipped: {exc}")
 
-        if state.final_content:
-            monitor.report_task_result(state.final_content)
+        if not state.final_content.strip():
+            if abort_reason:
+                state.final_content = (
+                    f"任务因 {abort_reason} 提前结束，未能生成可展示的正文。"
+                )
+            else:
+                state.final_content = "任务已结束，但没有可展示的正文。"
+        monitor.report_task_result(state.final_content)
 
         duration = int((time.perf_counter() - phase_started) * 1000)
         status = "success" if success else "partial"
@@ -2731,8 +2761,6 @@ class AgentHarness:
 
         recorder = get_recorder()
         task_id = data.get("task_id")
-        if task_id is None and data.get("step_index") is not None:
-            task_id = f"s{data.get('step_index')}"
         if recorder.is_active:
             recorder.emit_phase(
                 phase.value,

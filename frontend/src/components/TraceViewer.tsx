@@ -172,6 +172,13 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
             label: `因果树 (${traceTree.span_count})`,
             children: (
               <Card size="small">
+                {typeof traceTree.omitted_count === "number" && traceTree.omitted_count > 0 ? (
+                  <Alert
+                    message={`已从因果树省略 ${traceTree.omitted_count} 条 llm_usage / gen_ai.chat，完整序列见 JSONL 页签。`}
+                    showIcon
+                    type="info"
+                  />
+                ) : null}
                 <SpanTree nodes={traceTree.roots || []} />
               </Card>
             )
