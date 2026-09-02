@@ -1,0 +1,17 @@
+[Unit]
+Description=Research Agent Harness UI (Vite)
+After=network-online.target research-harness-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=harness
+Group=harness
+WorkingDirectory=/opt/research-agent-harness/frontend
+Environment=PATH=/usr/local/node/bin:/home/harness/.local/bin:/usr/bin
+ExecStart=/usr/local/node/bin/pnpm dev --host 0.0.0.0 --port 5173
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

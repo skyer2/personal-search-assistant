@@ -1,0 +1,20 @@
+[Unit]
+Description=Research Agent Harness API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=harness
+Group=harness
+WorkingDirectory=/opt/research-agent-harness
+Environment=PATH=/home/harness/.local/bin:/usr/local/node/bin:/usr/bin
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/research-agent-harness/.env
+ExecStart=/home/harness/.local/bin/uv run --directory /opt/research-agent-harness uvicorn app.api.server:app --app-dir /opt/research-agent-harness --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

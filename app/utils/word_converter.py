@@ -54,7 +54,12 @@ _FONTS_READY = False
 _FONT_CANDIDATES = (
     Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
     Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttf"),
+    Path("/usr/share/fonts/wqy-microhei/wqy-microhei.ttc"),
+    Path("/usr/share/fonts/wqy-microhei/wqy-microhei.ttf"),
+    Path("/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc"),
+    Path("/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttf"),
     Path("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
+    Path("/usr/share/fonts/google-droid/DroidSansFallbackFull.ttf"),
     Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
     Path("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
     Path("/System/Library/Fonts/PingFang.ttc"),
