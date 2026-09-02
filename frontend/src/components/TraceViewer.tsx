@@ -114,7 +114,7 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
         jsonl.tree ||
           (lfTraces as { tree?: TraceTree }).tree || { roots: [], span_count: 0, event_count: 0 }
       );
-      setSummary(jsonl.summary || {});
+      setSummary("summary" in jsonl && jsonl.summary ? jsonl.summary : {});
       setCitations(citationsResp.sources || []);
       setCitationsMessage(citationsResp.message || "");
       setLangfuseEnabled(Boolean(lfConfig.enabled));

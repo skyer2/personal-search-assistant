@@ -1,13 +1,17 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Table } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
 
-interface ResizableTableProps<Row extends object> {
-  columns: ColumnsType<Row>;
-  dataSource: TableProps<Row>["dataSource"];
-  pagination?: TableProps<Row>["pagination"];
-  rowClassName?: TableProps<Row>["rowClassName"];
-  size?: TableProps<Row>["size"];
+// Wrapper around antd Table; row shape varies per Trace tab.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type TableRow = any;
+
+interface ResizableTableProps {
+  columns: ColumnsType<TableRow>;
+  dataSource: TableProps<TableRow>["dataSource"];
+  pagination?: TableProps<TableRow>["pagination"];
+  rowClassName?: TableProps<TableRow>["rowClassName"];
+  size?: TableProps<TableRow>["size"];
 }
 
 interface ResizeState {
@@ -16,30 +20,30 @@ interface ResizeState {
   startWidth: number;
 }
 
-function columnKey(column: ColumnsType<never>[number], index: number): string {
-  return String(column.key || column.dataIndex || index);
+function columnKey(column: ColumnsType<TableRow>[number], index: number): string {
+  const record = column as { key?: unknown; dataIndex?: unknown };
+  return String(record.key || record.dataIndex || index);
 }
 
-export function ResizableTable<Row extends object>({
+export function ResizableTable({
   columns,
   dataSource,
   pagination,
   rowClassName,
   size = "small"
-}: ResizableTableProps<Row>) {
-  const defaults = useMemo(() => {
+}: ResizableTableProps) {
+  const [widths, setWidths] = useState<Record<string, number>>(() => {
     const next: Record<string, number> = {};
     columns.forEach((column, index) => {
       const width = typeof column.width === "number" ? column.width : 220;
-      next[columnKey(column as ColumnsType<never>[number], index)] = width;
+      next[columnKey(column, index)] = width;
     });
     return next;
-  }, [columns]);
-  const [widths, setWidths] = useState<Record<string, number>>(defaults);
+  });
   const dragRef = useRef<ResizeState | null>(null);
 
   const sizedColumns = columns.map((column, index) => {
-    const key = columnKey(column as ColumnsType<never>[number], index);
+    const key = columnKey(column, index);
     const width = widths[key] ?? (typeof column.width === "number" ? column.width : 220);
     const title = column.title;
     return {
@@ -50,7 +54,7 @@ export function ResizableTable<Row extends object>({
         <div className="resizable-th">
           <span className="resizable-th-label">{title as ReactNode}</span>
           <button
-            aria-label={`拖动调整列宽`}
+            aria-label="拖动调整列宽"
             className="col-resize-handle"
             onClick={(event) => event.stopPropagation()}
             onPointerDown={(event) => {
@@ -83,7 +87,7 @@ export function ResizableTable<Row extends object>({
   const scrollX = sizedColumns.reduce((sum, column) => sum + Number(column.width || 0), 0);
 
   return (
-    <Table<Row>
+    <Table
       className="resizable-table"
       columns={sizedColumns}
       dataSource={dataSource}
