@@ -5,13 +5,16 @@ import {
   fetchCitations,
   fetchJsonlTrace,
   fetchLangfuseConfig,
-  fetchLangfuseTraces
+  fetchLangfuseTraces,
+  fetchRunTrace,
+  fetchSessionTraces
 } from "../lib/api";
-import type { EvidenceSource, JsonlTraceEvent, TraceSpanNode, TraceSummary, TraceTree } from "../types";
+import type { EvidenceSource, JsonlTraceEvent, SessionTraceItem, TraceSpanNode, TraceSummary, TraceTree } from "../types";
 import { ResizableTable } from "./ResizableTable";
 
 interface TraceViewerProps {
   sessionId: string;
+  runId?: string;
 }
 
 function statusColor(status: unknown): string {
@@ -60,7 +63,7 @@ function SpanTree({ nodes }: { nodes: TraceSpanNode[] }) {
   );
 }
 
-export function TraceViewer({ sessionId }: TraceViewerProps) {
+export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
   const [jsonlEvents, setJsonlEvents] = useState<JsonlTraceEvent[]>([]);
   const [traceTree, setTraceTree] = useState<TraceTree>({ roots: [], span_count: 0, event_count: 0 });
   const [summary, setSummary] = useState<TraceSummary>({});
@@ -73,6 +76,14 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
   const [langfuseMessage, setLangfuseMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [traces, setTraces] = useState<SessionTraceItem[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState(runId || "");
+
+  useEffect(() => {
+    if (runId) {
+      setSelectedRunId(runId);
+    }
+  }, [runId]);
 
   const load = useCallback(async () => {
     if (!sessionId) {
@@ -81,8 +92,15 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
     setLoading(true);
     setError("");
     try {
+      const listed = await fetchSessionTraces(sessionId).catch(() => ({ traces: [] as SessionTraceItem[], current_run_id: "" }));
+      const nextTraces = listed.traces || [];
+      setTraces(nextTraces);
+      const activeRun = selectedRunId || runId || listed.current_run_id || nextTraces[nextTraces.length - 1]?.run_id || "";
+      if (activeRun && activeRun !== selectedRunId) {
+        setSelectedRunId(activeRun);
+      }
       const [jsonl, citationsResp, lfConfig] = await Promise.all([
-        fetchJsonlTrace(sessionId).catch((err: unknown) => ({
+        (activeRun ? fetchRunTrace(activeRun) : fetchJsonlTrace(sessionId)).catch((err: unknown) => ({
           events: [],
           message: err instanceof Error ? err.message : "JSONL 加载失败",
           tree: undefined
@@ -125,7 +143,7 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
     } finally {
       setLoading(false);
     }
-  }, [sessionId]);
+  }, [runId, selectedRunId, sessionId]);
 
   useEffect(() => {
     void load();
@@ -155,13 +173,29 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
           <Typography.Title level={4}>Trace 查看器</Typography.Title>
           <Typography.Text type="secondary">
             session={summary.identity?.session_id || sessionId}
-            {summary.identity?.run_id ? ` · run=${summary.identity.run_id}` : ""}
+            {summary.identity?.run_id || selectedRunId ? ` · run=${summary.identity?.run_id || selectedRunId}` : ""}
             {summary.identity?.trace_id ? ` · trace=${String(summary.identity.trace_id).slice(0, 12)}` : ""}
           </Typography.Text>
         </div>
-        <Button icon={<ReloadOutlined aria-hidden />} loading={loading} onClick={() => void load()}>
-          刷新
-        </Button>
+        <Space>
+          {traces.length > 0 ? (
+            <select
+              aria-label="选择 run"
+              className="trace-run-select"
+              onChange={(event) => setSelectedRunId(event.target.value)}
+              value={selectedRunId || traces[traces.length - 1]?.run_id || ""}
+            >
+              {traces.map((item) => (
+                <option key={item.run_id} value={item.run_id}>
+                  {(item.run_id || "").slice(0, 8)} · {item.status || "run"}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          <Button icon={<ReloadOutlined aria-hidden />} loading={loading} onClick={() => void load()}>
+            刷新
+          </Button>
+        </Space>
       </div>
 
       {error ? <Alert message={error} showIcon type="error" /> : null}
@@ -346,6 +380,41 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
                     type="info"
                   />
                 ) : null}
+                {summary.failure_counts && Object.keys(summary.failure_counts).length > 0 ? (
+                  <Alert
+                    message={`Failure attribution：${Object.entries(summary.failure_counts)
+                      .map(([stage, count]) => `${stage} ${count}`)
+                      .join(" · ")}`}
+                    showIcon
+                    type="warning"
+                  />
+                ) : null}
+                {(summary.eval_matrix || []).map((matrix, index) => (
+                  <div key={`eval-matrix-${index}`}>
+                    <Typography.Title level={5}>Eval variants</Typography.Title>
+                    <ResizableTable
+                      dataSource={(matrix.cases || []).map((row) => ({ ...row, key: row.case_id }))}
+                      pagination={false}
+                      size="small"
+                      columns={[
+                        { title: "Case", dataIndex: "case_id", width: 120, key: "case_id" },
+                        ...((matrix.variants || []).map((variant) => ({
+                          title: variant,
+                          key: variant,
+                          width: 220,
+                          render: (_: unknown, row: { variants?: Record<string, Record<string, unknown>> }) => {
+                            const cell = row.variants?.[variant] || {};
+                            return (
+                              <div className="table-wrap-cell">
+                                acc {String(cell.accuracy ?? "-")} · cite {String(cell.citation ?? "-")} · {String(cell.latency_ms ?? "-")}ms
+                              </div>
+                            );
+                          }
+                        })))
+                      ]}
+                    />
+                  </div>
+                ))}
                 {evals.length === 0 ? (
                   <Alert
                     message="交互提问不会产生 eval.scored（那是 tests/eval/run_eval.py --live）。Finalize 后应出现 quality.evaluated；若仍为空，说明质量评估尚未发出或 run 未结束。"

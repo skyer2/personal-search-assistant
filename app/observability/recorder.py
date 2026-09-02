@@ -22,6 +22,7 @@ from app.observability.exporters.jsonl import JsonlExporter
 from app.observability.exporters.otel import end_span as otel_end_span
 from app.observability.exporters.otel import flush_otel, init_otel, start_span as otel_start_span
 from app.observability.exporters.websocket import WebSocketExporter
+from app.observability.failure import enrich_failure_attributes
 from app.observability.journal import RunJournal
 from app.observability.metrics import get_metrics
 from app.observability.paths import REPO_ROOT, traces_log_dir
@@ -95,6 +96,7 @@ class AgentTelemetry:
         self._ws_enabled = True
         self._listeners: list[Callable[[AgentEvent], None]] = []
         self._emitting = threading.local()
+        self._tool_spans: dict[str, str] = {}
 
     @property
     def is_active(self) -> bool:
@@ -266,6 +268,19 @@ class AgentTelemetry:
         run_id = run_id or (ctx.run_id if ctx else str((attributes or {}).get("run_id") or session_id))
         trace_id = trace_id or (ctx.trace_id if ctx else str((attributes or {}).get("trace_id") or new_id(32)))
         seq = ctx.next_seq() if ctx else 0
+        attrs = dict(attributes or {})
+        if (
+            event_type.endswith(".failed")
+            or status in {"failed", "error", "fail"}
+            or attrs.get("fail_reason")
+        ):
+            attrs = enrich_failure_attributes(
+                attrs,
+                reason=str(attrs.get("fail_reason") or attrs.get("error") or status or ""),
+                phase=phase,
+                event_type=event_type,
+            )
+        attributes = attrs
         event = AgentEvent(
             event_id=new_id(20),
             trace_id=trace_id,
@@ -357,13 +372,15 @@ class AgentTelemetry:
         parent_span_id: str | None,
         attributes: dict[str, Any] | None = None,
     ) -> OpenSpan:
+        otel_parent = self._otel_parent(parent_span_id)
         otel_span = otel_start_span(
             name,
             {
-                "span.id": span_id,
-                "parent.span.id": parent_span_id or "",
-                **{f"agent.{k}": v for k, v in (attributes or {}).items() if isinstance(v, (str, int, float, bool))},
+                "agent.span_id": span_id,
+                "agent.parent_span_id": parent_span_id or "",
+                **(attributes or {}),
             },
+            parent=otel_parent,
         )
         handle = OpenSpan(
             key=key,
@@ -377,6 +394,118 @@ class AgentTelemetry:
         with self._lock:
             self._spans[key] = handle
         return handle
+
+    def _otel_parent(self, parent_span_id: str | None) -> Any:
+        if not parent_span_id:
+            return None
+        with self._lock:
+            for handle in self._spans.values():
+                if handle.span_id == parent_span_id and handle.otel_span is not None:
+                    return handle.otel_span
+        return None
+
+    def _handle(self, key: str) -> OpenSpan | None:
+        with self._lock:
+            return self._spans.get(key)
+
+    def begin_tool(
+        self,
+        tool_name: str,
+        *,
+        tool_call_id: str = "",
+        args: dict[str, Any] | None = None,
+    ) -> str:
+        call_id = tool_call_id or new_id()
+        key = self.start_span(
+            f"tool.{tool_name}",
+            phase="execute",
+            attributes={"tool_name": tool_name, "tool_call_id": call_id},
+        )
+        with self._lock:
+            self._tool_spans[call_id] = key
+        handle = self._handle(key)
+        self.emit(
+            EventType.TOOL_STARTED,
+            phase="execute",
+            status="start",
+            span_id=handle.span_id if handle else None,
+            parent_span_id=handle.parent_span_id if handle else None,
+            attributes={"tool_name": tool_name, "tool_call_id": call_id, "args": args or {}},
+        )
+        return call_id
+
+    def finish_tool(
+        self,
+        tool_name: str,
+        *,
+        tool_call_id: str = "",
+        duration_ms: int | None = None,
+        status: str = "ok",
+        error: str = "",
+    ) -> None:
+        call_id = tool_call_id or ""
+        with self._lock:
+            key = self._tool_spans.pop(call_id, "") if call_id else ""
+            if not key and not call_id and self._tool_spans:
+                call_id, key = self._tool_spans.popitem()
+        handle = self._handle(key) if key else None
+        event_type = EventType.TOOL_COMPLETED if status == "ok" else EventType.TOOL_FAILED
+        self.emit(
+            event_type,
+            phase="execute",
+            status=status,
+            duration_ms=duration_ms,
+            span_id=handle.span_id if handle else None,
+            parent_span_id=handle.parent_span_id if handle else None,
+            attributes={
+                "tool_name": tool_name,
+                "tool_call_id": call_id,
+                "error": error,
+                "fail_reason": error if status != "ok" else "",
+            },
+        )
+        if key:
+            self.end_span(key, status=status, duration_ms=duration_ms)
+
+    def record_generation(
+        self,
+        *,
+        model: str,
+        phase: str | None = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cost_usd: float = 0.0,
+        duration_ms: int | None = None,
+        finish_reason: str = "",
+        usage_missing: bool = False,
+        extra: dict[str, Any] | None = None,
+    ) -> AgentEvent:
+        attributes = {
+            "model": model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cost_usd": cost_usd,
+            "finish_reason": finish_reason,
+            "usage_missing": usage_missing,
+            **(extra or {}),
+        }
+        key = self.start_span("gen_ai.chat", phase=phase, attributes=attributes)
+        handle = self._handle(key)
+        event = self.emit(
+            EventType.GEN_AI_CHAT,
+            phase=phase,
+            status="ok",
+            duration_ms=duration_ms,
+            span_id=handle.span_id if handle else None,
+            parent_span_id=handle.parent_span_id if handle else None,
+            attributes=attributes,
+        )
+        self.end_span(key, status="ok", duration_ms=duration_ms, attributes={"model": model})
+        return event
 
     def _record_metrics(self, event: AgentEvent) -> None:
         if event.type == EventType.TOOL_STARTED:

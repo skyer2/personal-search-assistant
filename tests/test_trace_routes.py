@@ -41,14 +41,20 @@ def test_citations_reads_app_output(tmp_path, monkeypatch):
 
 def test_jsonl_skips_bad_lines(tmp_path, monkeypatch):
     from app.api import trace_routes
+    from app.observability import replay as replay_mod
 
     log_dir = tmp_path / "traces"
     log_dir.mkdir()
     (log_dir / "sess.jsonl").write_text(
-        '{"type":"run.started","span_id":"a"}\nnot-json\n{"type":"run.completed","span_id":"a"}\n',
+        '{"type":"run.started","span_id":"a","run_id":"r1","session_id":"sess"}\nnot-json\n{"type":"run.completed","span_id":"a","run_id":"r1","session_id":"sess"}\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(trace_routes, "traces_log_dir", lambda: log_dir)
+    monkeypatch.setattr(replay_mod, "traces_log_dir", lambda: log_dir)
+    monkeypatch.setattr(trace_routes, "_latest_run_id", lambda _session: None)
+    from app.observability.recorder import get_recorder
+
+    get_recorder().journal.clear("sess")
     payload = get_jsonl_trace("sess")
     assert payload["total"] == 2
     assert payload["tree"]["span_count"] == 1

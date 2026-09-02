@@ -404,7 +404,7 @@ export default function App() {
         ) : null}
 
         {workspace === "eval" ? <EvalPanel /> : null}
-        {workspace === "trace" ? <TraceViewer sessionId={session.threadId} /> : null}
+        {workspace === "trace" ? <TraceViewer runId={session.currentRunId} sessionId={session.threadId} /> : null}
 
         {workspace === "chat" ? (
           <ChatComposer

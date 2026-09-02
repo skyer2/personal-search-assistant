@@ -16,6 +16,7 @@ import type {
   RunEventsResponse,
   SearchMode,
   SessionBootstrap,
+  SessionTracesResponse,
   TaskResponse,
   TraceTree,
   UploadResponse
@@ -149,8 +150,17 @@ export async function fetchTraceTree(sessionId: string): Promise<{ session_id: s
   return requestJson(apiUrl(`/api/traces/tree/${encodeURIComponent(sessionId)}`));
 }
 
-export async function fetchJsonlTrace(sessionId: string): Promise<JsonlTraceResponse> {
-  return requestJson<JsonlTraceResponse>(apiUrl(`/api/traces/jsonl/${encodeURIComponent(sessionId)}`));
+export async function fetchJsonlTrace(sessionId: string, runId?: string): Promise<JsonlTraceResponse> {
+  const params = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+  return requestJson<JsonlTraceResponse>(apiUrl(`/api/traces/jsonl/${encodeURIComponent(sessionId)}${params}`));
+}
+
+export async function fetchRunTrace(runId: string): Promise<JsonlTraceResponse> {
+  return requestJson<JsonlTraceResponse>(apiUrl(`/api/runs/${encodeURIComponent(runId)}/trace`));
+}
+
+export async function fetchSessionTraces(sessionId: string): Promise<SessionTracesResponse> {
+  return requestJson<SessionTracesResponse>(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/traces`));
 }
 
 export async function fetchCitations(sessionId: string): Promise<CitationsResponse> {

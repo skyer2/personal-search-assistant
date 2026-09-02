@@ -265,17 +265,20 @@ def test_span_tree_omits_llm_usage():
     events = [
         {"type": "run.started", "span_id": "root"},
         {"type": "llm_usage", "span_id": "llm-1", "event": "llm_usage"},
-        {"type": "gen_ai.chat", "span_id": "llm-2"},
-        {"type": "worker.started", "span_id": "w1", "task_id": "t_next_hop"},
+        {"type": "gen_ai.chat", "span_id": "llm-2", "parent_span_id": "root"},
+        {"type": "worker.started", "span_id": "w1", "task_id": "t_next_hop", "parent_span_id": "root"},
         {"type": "phase", "span_id": "p1", "phase": "abort", "status": "budget_tool_calls"},
     ]
     tree = build_span_tree(events)
     assert tree["event_count"] == 5
-    assert tree["omitted_count"] == 2
+    assert tree["omitted_count"] == 1
     names = {node["name"] for node in tree["roots"]}
-    assert names == {"run.started", "worker.started", "phase"}
-    assert tree["span_count"] == 3
-    print("[OK] span tree omits llm_usage")
+    assert "llm_usage" not in names
+    assert tree["span_count"] == 4
+    root = next(node for node in tree["roots"] if node["span_id"] == "root")
+    child_names = {child["name"] for child in root["children"]}
+    assert "gen_ai.chat" in child_names
+    print("[OK] span tree omits llm_usage but keeps gen_ai.chat")
 
 
 def test_bind_worker_isolates_span_context():
@@ -291,8 +294,13 @@ def test_bind_worker_isolates_span_context():
     child = current_context()
     assert child is not None
     assert child.task_id == "t1"
-    assert child.span_id != parent_span
+    assert child.span_id == parent_span
+    assert child.sequence is parent.sequence
     assert restored is parent
+    tel.start_span("worker.execute", phase="execute", task_id="t1", attempt=1)
+    worker_ctx = current_context()
+    assert worker_ctx is not None
+    assert worker_ctx.span_id != parent_span
     set_context(parent)
     assert current_context() is not None
     assert current_context().span_id == parent_span
@@ -319,6 +327,119 @@ def test_eval_score_attaches_to_existing_trace():
     print("[OK] eval score keeps trace identity")
 
 
+def test_run_sequence_is_shared_and_unique():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.observability.context import current_context, reset_run
+
+    tel = AgentTelemetry()
+    tel._ws_enabled = False
+    tel.start_run(session_id="s_seq", run_id="r_seq", trace_id="tr_seq")
+    parent = current_context()
+    assert parent is not None
+
+    def _worker(task_id: str) -> list[int]:
+        from app.observability.context import set_context
+
+        set_context(parent.child(task_id=task_id, attempt=1))
+        return [tel.emit(EventType.WORKER_STARTED, task_id=task_id).seq for _ in range(8)]
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(_worker, ["a", "b", "c"]))
+    flat = [item for row in results for item in row]
+    assert len(flat) == 24
+    assert set(flat) == set(range(2, 26))
+    tel.finish_run(status="success", duration_ms=1)
+    reset_run(None)
+    print("[OK] run sequence unique under parallel workers")
+
+
+def test_otel_parent_context_not_attribute():
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from app.observability.context import bind_worker, reset_run
+    from app.observability.exporters import otel as otel_mod
+
+    exporter = InMemorySpanExporter()
+    otel_mod.reset_for_tests()
+    otel_mod.init_otel(exporter=exporter, force=True)
+    tel = AgentTelemetry()
+    tel._ws_enabled = False
+    tel.start_run(session_id="s_otel", run_id="r_otel", trace_id="tr_otel")
+    bind_worker(task_id="t1", attempt=1)
+    key = tel.start_span("worker.execute", phase="execute", task_id="t1", attempt=1)
+    tel.begin_tool("internet_search", tool_call_id="call-1")
+    tel.finish_tool("internet_search", tool_call_id="call-1", duration_ms=12, status="ok")
+    tel.end_span(key, status="ok", duration_ms=40)
+    tel.finish_run(status="success", duration_ms=80)
+    reset_run(None)
+    otel_mod.flush_otel()
+    spans = exporter.get_finished_spans()
+    by_name = {span.name: span for span in spans}
+    assert "research.run" in by_name
+    assert "worker.execute" in by_name
+    assert "tool.internet_search" in by_name
+    root = by_name["research.run"]
+    worker = by_name["worker.execute"]
+    tool = by_name["tool.internet_search"]
+    assert worker.parent is not None
+    assert worker.parent.span_id == root.context.span_id
+    assert tool.parent is not None
+    assert tool.parent.span_id == worker.context.span_id
+    assert worker.context.trace_id == root.context.trace_id
+    assert "gen_ai.conversation.id" in dict(root.attributes or {})
+    otel_mod.reset_for_tests()
+    print("[OK] OTel parent/child context")
+
+
+def test_tool_and_generation_are_child_spans():
+    tel = AgentTelemetry()
+    tel._ws_enabled = False
+    tel.start_run(session_id="s_span", run_id="r_span")
+    worker_key = tel.start_span("worker.execute", phase="execute", task_id="t1")
+    tel.begin_tool("search", tool_call_id="c1")
+    tel.record_generation(model="qwen-max", phase="execute", prompt_tokens=10, completion_tokens=4, total_tokens=14)
+    tel.finish_tool("search", tool_call_id="c1", duration_ms=9, status="ok")
+    tel.end_span(worker_key, status="ok")
+    events = [item.to_dict() for item in tel.journal.replay("s_span")]
+    types = [item["type"] for item in events]
+    assert "tool.started" in types
+    assert "tool.completed" in types
+    assert "gen_ai.chat" in types
+    tool_started = next(item for item in events if item["type"] == "tool.started")
+    gen = next(item for item in events if item["type"] == "gen_ai.chat")
+    worker_started_span = next(item for item in events if item["span_id"] and item["type"] == "run.started")
+    assert tool_started["parent_span_id"]
+    assert gen["parent_span_id"] == tool_started["span_id"]
+    assert tool_started["span_id"] != worker_started_span["span_id"]
+    tel.finish_run(status="success", duration_ms=1)
+    print("[OK] tool and generation first-class spans")
+
+
+def test_failure_attribution_and_eval_matrix():
+    from app.observability.failure import classify_failure
+
+    classified = classify_failure("budget_tool_calls", phase="abort")
+    assert classified["failure.stage"] == "runtime"
+    assert classified["failure.type"] == "budget_exhausted"
+    events = [
+        {
+            "type": "worker.failed",
+            "task_id": "t1",
+            "status": "failed",
+            "attributes": {"fail_reason": "step_timeout", "failure.stage": "worker", "failure.type": "timeout"},
+        },
+        {"type": "eval.scored", "attributes": {"case_id": "037", "variant": "vanilla", "accuracy": 0, "latency_ms": 10}},
+        {"type": "eval.scored", "attributes": {"case_id": "037", "variant": "full_harness", "accuracy": 1, "latency_ms": 40}},
+    ]
+    summary = summarize_trace(events)
+    assert summary["failure_counts"]["worker"] == 1
+    matrix = summary["eval_matrix"][0]
+    assert "vanilla" in matrix["variants"]
+    assert matrix["cases"][0]["variants"]["full_harness"]["accuracy"] == 1
+    print("[OK] failure attribution + eval matrix")
+
+
 if __name__ == "__main__":
     test_span_identity_parallel_workers()
     test_jsonl_run_summary_dual_schema()
@@ -332,4 +453,7 @@ if __name__ == "__main__":
     test_summarize_trace_progress_without_replan()
     test_span_tree_omits_llm_usage()
     test_bind_worker_isolates_span_context()
+    test_run_sequence_is_shared_and_unique()
+    test_tool_and_generation_are_child_spans()
+    test_failure_attribution_and_eval_matrix()
     print("\n=== Flight recorder tests passed ===")

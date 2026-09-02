@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -148,24 +149,23 @@ class UsageTracker:
         with self._lock:
             self._by_session.setdefault(rec.session_id, []).append(rec)
         try:
-            from app.observability import EventType, get_recorder
+            from app.observability import get_recorder
 
             recorder = get_recorder()
             if recorder.is_active:
-                recorder.emit(
-                    EventType.GEN_AI_CHAT,
+                extra = dict(rec.extra or {})
+                recorder.record_generation(
+                    model=rec.model,
                     phase=rec.phase,
-                    status="ok",
-                    attributes={
-                        "model": rec.model,
-                        "prompt_tokens": rec.prompt_tokens,
-                        "completion_tokens": rec.completion_tokens,
-                        "total_tokens": rec.total_tokens,
-                        "cache_read_tokens": rec.cache_read_tokens,
-                        "cost_usd": rec.cost_usd,
-                        "usage_missing": bool((rec.extra or {}).get("usage_missing")),
-                        "run_id": rec.run_id,
-                    },
+                    prompt_tokens=rec.prompt_tokens,
+                    completion_tokens=rec.completion_tokens,
+                    total_tokens=rec.total_tokens,
+                    cache_read_tokens=rec.cache_read_tokens,
+                    cost_usd=rec.cost_usd,
+                    duration_ms=int(extra.pop("duration_ms", 0) or 0) or None,
+                    finish_reason=str(extra.pop("finish_reason", "") or ""),
+                    usage_missing=bool(extra.get("usage_missing")),
+                    extra=extra,
                 )
                 return
         except Exception:
@@ -259,6 +259,11 @@ class UsageTrackingCallback(BaseCallbackHandler):
         # 这对同一个模型实例被 Planner/Compressor/Memory 并发复用很重要。
         self.session_id = session_id
         self.phase = phase
+        self._starts: dict[str, float] = {}
+
+    def on_llm_start(self, serialized: Any, prompts: Any, **kwargs: Any) -> None:
+        run_id = str(kwargs.get("run_id") or "default")
+        self._starts[run_id] = time.perf_counter()
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         try:
@@ -320,6 +325,11 @@ class UsageTrackingCallback(BaseCallbackHandler):
         phase = self.phase or get_llm_phase()
         session_id = self.session_id or get_llm_session()
         cost = estimate_cost_usd(model_name, prompt_tokens, completion_tokens)
+        started = self._starts.pop(str(kwargs.get("run_id") or "default"), None)
+        duration_ms = int((time.perf_counter() - started) * 1000) if started is not None else None
+        finish_reason = ""
+        if isinstance(llm_output, dict):
+            finish_reason = str(llm_output.get("finish_reason") or "")
         rec = LLMCallRecord(
             session_id=session_id,
             phase=phase,
@@ -330,7 +340,11 @@ class UsageTrackingCallback(BaseCallbackHandler):
             cache_read_tokens=cache_read_tokens,
             cost_usd=cost,
             run_id=str(kwargs.get("run_id") or ""),
-            extra={"usage_missing": usage_missing},
+            extra={
+                "usage_missing": usage_missing,
+                "duration_ms": duration_ms,
+                "finish_reason": finish_reason,
+            },
         )
         get_usage_tracker().record(rec)
 

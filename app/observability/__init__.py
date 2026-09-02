@@ -17,6 +17,7 @@ from app.observability.events import (
     span_identity,
 )
 from app.observability.recorder import AgentTelemetry, get_recorder
+from app.observability.sequence import RunSequence
 
 __all__ = [
     "EVENT_VOCABULARY",
@@ -30,4 +31,5 @@ __all__ = [
     "get_recorder",
     "reset_run",
     "span_identity",
+    "RunSequence",
 ]

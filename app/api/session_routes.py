@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
-from app.observability.replay import load_wire_events
+from app.observability.replay import load_trace_payload, load_wire_events
 from app.run_store import get_run_store
 from app.run_store.files import list_output_files, resolve_output_file
 
@@ -71,6 +71,40 @@ async def download_session_artifact(session_id: str, name: str, download: bool =
         media_type="application/pdf" if is_pdf else None,
         content_disposition_type="attachment" if download or not is_pdf else "inline",
     )
+
+
+@router.get("/api/sessions/{session_id}/traces")
+async def list_session_traces(session_id: str):
+    store = get_run_store()
+    runs = store.list_runs(session_id)
+    return {
+        "session_id": session_id,
+        "traces": [
+            {
+                "run_id": run.run_id,
+                "session_id": run.session_id,
+                "status": run.status,
+                "query": run.query,
+                "created_at": run.created_at,
+                "started_at": run.started_at,
+                "ended_at": run.ended_at,
+                "last_event_seq": run.last_event_seq,
+            }
+            for run in runs
+        ],
+        "current_run_id": runs[-1].run_id if runs else None,
+    }
+
+
+@router.get("/api/runs/{run_id}/trace")
+async def get_run_trace(run_id: str):
+    run = get_run_store().get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run_not_found")
+    payload = load_trace_payload(run.session_id, run_id=run_id)
+    payload["status"] = run.status
+    payload["query"] = run.query
+    return payload
 
 
 @router.get("/api/runs/{run_id}")

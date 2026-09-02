@@ -56,6 +56,10 @@ _KEEP_KEYS = {
     "benchmark",
     "git_sha",
     "config_hash",
+    "finish_reason",
+    "failure.stage",
+    "failure.type",
+    "fail_reason",
 }
 
 

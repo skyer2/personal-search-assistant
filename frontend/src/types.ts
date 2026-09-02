@@ -229,6 +229,15 @@ export interface TraceSummary {
   replans?: Array<Record<string, unknown>>;
   evidence?: Array<Record<string, unknown>>;
   evals?: Array<Record<string, unknown>>;
+  eval_matrix?: Array<{
+    variants?: string[];
+    cases?: Array<{
+      case_id?: string;
+      variants?: Record<string, Record<string, unknown>>;
+    }>;
+  }>;
+  failures?: Array<Record<string, unknown>>;
+  failure_counts?: Record<string, number>;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
@@ -274,11 +283,30 @@ export interface LangfuseTraceItem {
 
 export interface JsonlTraceResponse {
   session_id: string;
+  run_id?: string;
   events: JsonlTraceEvent[];
   total: number;
   message?: string;
   tree?: TraceTree;
   summary?: TraceSummary;
+  scope?: string;
+}
+
+export interface SessionTraceItem {
+  run_id: string;
+  session_id?: string;
+  status?: string;
+  query?: string;
+  created_at?: string;
+  started_at?: string;
+  ended_at?: string;
+  last_event_seq?: number;
+}
+
+export interface SessionTracesResponse {
+  session_id: string;
+  traces: SessionTraceItem[];
+  current_run_id?: string | null;
 }
 
 export interface LangfuseTraceResponse {

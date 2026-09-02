@@ -2296,6 +2296,16 @@ textarea {
   gap: 12px;
 }
 
+.trace-run-select {
+  min-width: 180px;
+  height: 32px;
+  border: 1px solid rgba(113, 247, 255, 0.28);
+  border-radius: 8px;
+  background: rgba(12, 18, 28, 0.9);
+  color: #d9faff;
+  padding: 0 8px;
+}
+
 .eval-stats-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));

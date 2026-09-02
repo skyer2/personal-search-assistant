@@ -136,6 +136,44 @@ def test_bootstrap_api(tmp_path, monkeypatch):
     print("[OK] bootstrap API")
 
 
+def test_session_traces_and_run_trace(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUN_STORE_PATH", str(tmp_path / "run.sqlite"))
+    reset_run_store()
+    store = get_run_store()
+    store.create_run(run_id="r-trace", session_id="sess-trace", query="观测一次 run")
+    store.complete_run("r-trace", result="done", status=STATUS_COMPLETED)
+
+    from app.observability.events import EventType
+    from app.observability.recorder import get_recorder
+
+    recorder = get_recorder()
+    recorder._ws_enabled = False
+    recorder._listeners = [store.on_event]
+    recorder.start_run(session_id="sess-trace", run_id="r-trace")
+    recorder.emit(EventType.WORKER_STARTED, task_id="t1", attributes={"objective": "obs"})
+    recorder.finish_run(status="success", duration_ms=12)
+
+    from fastapi.testclient import TestClient
+
+    from app.api.server import app
+
+    with TestClient(app) as client:
+        listed = client.get("/api/sessions/sess-trace/traces")
+        assert listed.status_code == 200
+        body = listed.json()
+        assert body["current_run_id"] == "r-trace"
+        assert body["traces"][0]["run_id"] == "r-trace"
+        trace = client.get("/api/runs/r-trace/trace")
+        assert trace.status_code == 200
+        payload = trace.json()
+        assert payload["run_id"] == "r-trace"
+        assert payload["scope"] == "run"
+        assert payload["summary"]["identity"]["run_id"] == "r-trace"
+
+    reset_run_store()
+    print("[OK] run-centric trace API")
+
+
 def test_startup_marks_running_recoverable(tmp_path, monkeypatch):
     monkeypatch.setenv("RUN_STORE_PATH", str(tmp_path / "run.sqlite"))
     reset_run_store()

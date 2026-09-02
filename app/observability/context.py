@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.observability.events import new_id
+from app.observability.sequence import RunSequence
 
 _current: ContextVar["ObservabilityContext | None"] = ContextVar(
     "agent_obs_context",
@@ -23,6 +24,7 @@ class ObservabilityContext:
     parent_span_id: str | None = None
     root_span_id: str | None = None
     seq: int = 0
+    sequence: RunSequence = field(default_factory=RunSequence)
     plan_version: int | None = None
     task_id: str | None = None
     attempt: int | None = None
@@ -32,7 +34,7 @@ class ObservabilityContext:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def next_seq(self) -> int:
-        self.seq += 1
+        self.seq = self.sequence.next()
         return self.seq
 
     def child(self, **overrides: Any) -> "ObservabilityContext":
@@ -44,6 +46,7 @@ class ObservabilityContext:
             "parent_span_id": self.parent_span_id,
             "root_span_id": self.root_span_id,
             "seq": self.seq,
+            "sequence": self.sequence,
             "plan_version": self.plan_version,
             "task_id": self.task_id,
             "attempt": self.attempt,
@@ -76,6 +79,7 @@ def bind_run(
         git_sha=git_sha,
         config_hash=config_hash,
         variant=variant,
+        sequence=RunSequence(),
     )
     token = _current.set(ctx)
     return ctx, token
@@ -98,16 +102,18 @@ def bind_worker(
     attempt: int | None = None,
     plan_version: int | None = None,
 ) -> tuple[ObservabilityContext | None, Token | None]:
-    """并行 Worker 各自一份 context，避免抢占父 run 的 span_id。"""
+    """并行 Worker 各自一份 context，共享同一 RunSequence，不抢占父 run 的 span 栈。"""
     parent = current_context()
     if parent is None:
         return None, None
+    parent_span = parent.root_span_id or parent.span_id
     child = parent.child(
         task_id=task_id,
         attempt=attempt if attempt is not None else parent.attempt,
         plan_version=plan_version if plan_version is not None else parent.plan_version,
-        parent_span_id=parent.root_span_id or parent.span_id,
-        span_id=new_id(),
+        parent_span_id=parent_span,
+        span_id=parent_span,
+        sequence=parent.sequence,
     )
     token = set_context(child)
     return parent, token

@@ -33,7 +33,7 @@ class RunJournal:
                 self._by_session.pop(session_id, None)
 
 
-_TREE_OMIT_TYPES = {"llm_usage", "gen_ai.chat"}
+_TREE_OMIT_TYPES = {"llm_usage"}
 
 
 def build_span_tree(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -190,6 +190,7 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
     replans: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
     evals: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
     usage = {
         "prompt_tokens": 0,
         "completion_tokens": 0,
@@ -210,6 +211,17 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
                 "config_hash": attrs.get("config_hash") or event.get("config_hash"),
                 "variant": attrs.get("variant") or event.get("variant"),
             }
+        if attrs.get("failure.stage") or attrs.get("failure.type") or str(event_type).endswith(".failed"):
+            failures.append(
+                {
+                    "stage": attrs.get("failure.stage"),
+                    "type": attrs.get("failure.type"),
+                    "reason": attrs.get("fail_reason") or attrs.get("error") or event.get("status"),
+                    "task_id": event.get("task_id"),
+                    "event": event_type,
+                    "timestamp": event.get("timestamp"),
+                }
+            )
         if event_type.startswith("worker."):
             _coalesce_worker_row(workers_by_key, event, attrs, event_type)
         elif event_type == "progress.evaluated":
@@ -258,11 +270,16 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
                     "accuracy": attrs.get("accuracy"),
                     "citation_score": attrs.get("citation_score") or attrs.get("citation_coverage_rate"),
                     "replan_count": attrs.get("replan_count"),
-                    "latency_ms": attrs.get("latency_ms"),
+                    "latency_ms": attrs.get("latency_ms") or event.get("duration_ms"),
                     "passed": attrs.get("passed"),
                     "severity": attrs.get("severity"),
                     "status": event.get("status"),
                     "type": event_type,
+                    "tool_calls": attrs.get("tool_calls") or attrs.get("tool_calls_count"),
+                    "tokens": attrs.get("total_tokens") or attrs.get("tokens"),
+                    "progress": attrs.get("progress") or attrs.get("verdict"),
+                    "replan": attrs.get("replan"),
+                    "evidence": attrs.get("evidence") or attrs.get("evidence_ids") or [],
                 }
             )
         elif event_type in {"gen_ai.chat", "llm_usage"}:
@@ -271,6 +288,11 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
                 usage[key] += int(attrs.get(key) or event.get(key) or 0)
             usage["cost_usd"] += float(attrs.get("cost_usd") or event.get("cost_usd") or 0.0)
     workers = list(workers_by_key.values())
+    failure_counts: dict[str, int] = {}
+    for row in failures:
+        stage = str(row.get("stage") or "runtime")
+        failure_counts[stage] = failure_counts.get(stage, 0) + 1
+    eval_matrix = _eval_variant_matrix(evals)
     return {
         "identity": identity,
         "workers": workers,
@@ -278,9 +300,37 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
         "replans": replans,
         "evidence": evidence,
         "evals": evals,
+        "eval_matrix": eval_matrix,
+        "failures": failures,
+        "failure_counts": failure_counts,
         "usage": usage,
         "event_count": len(events),
         "worker_count": len(workers),
         "progress_count": len(progress),
         "replan_count": sum(1 for row in replans if row.get("type") == "replan.applied"),
     }
+
+
+def _eval_variant_matrix(evals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Side-by-side eval.scored rows grouped by case_id, keyed by variant."""
+    scored = [row for row in evals if row.get("type") == "eval.scored" and row.get("case_id")]
+    if not scored:
+        return []
+    by_case: dict[str, dict[str, Any]] = {}
+    variants: list[str] = []
+    for row in scored:
+        case_id = str(row.get("case_id"))
+        variant = str(row.get("variant") or "default")
+        if variant not in variants:
+            variants.append(variant)
+        bucket = by_case.setdefault(case_id, {"case_id": case_id, "variants": {}})
+        bucket["variants"][variant] = {
+            "accuracy": row.get("accuracy"),
+            "citation": row.get("citation_score"),
+            "latency_ms": row.get("latency_ms"),
+            "replan_count": row.get("replan_count"),
+            "tool_calls": row.get("tool_calls"),
+            "tokens": row.get("tokens"),
+            "passed": row.get("passed"),
+        }
+    return [{"variants": variants, "cases": list(by_case.values())}]

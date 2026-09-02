@@ -6,6 +6,7 @@ from typing import Any
 
 from app.observability.events import AgentEvent
 from app.observability.exporters.websocket import wire_payload
+from app.observability.journal import build_span_tree, summarize_trace
 from app.observability.paths import traces_log_dir
 from app.observability.recorder import get_recorder
 
@@ -75,3 +76,23 @@ def load_wire_events(
         if payload is not None:
             payloads.append(payload)
     return payloads
+
+
+def load_trace_payload(
+    session_id: str,
+    *,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    events = load_events(session_id, run_id=run_id)
+    records = [event.to_jsonl_record() for event in events]
+    identity_run = run_id or (events[0].run_id if events else None)
+    return {
+        "session_id": session_id,
+        "run_id": identity_run,
+        "events": records,
+        "total": len(records),
+        "source": "agent_event.v1",
+        "tree": build_span_tree(records),
+        "summary": summarize_trace(records),
+        "scope": "run" if run_id else "session",
+    }

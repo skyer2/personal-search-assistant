@@ -126,20 +126,11 @@ class ToolMonitor:
     ) -> None:
         """报告开始执行某个工具。运行中由 Flight Recorder 统一 emit，避免双计。"""
         try:
-            from app.observability import EventType, get_recorder
+            from app.observability import get_recorder
 
             recorder = get_recorder()
             if recorder.is_active:
-                recorder.emit(
-                    EventType.TOOL_STARTED,
-                    phase="execute",
-                    status="start",
-                    attributes={
-                        "tool_name": tool_name,
-                        "tool_call_id": tool_call_id,
-                        "args": args or {},
-                    },
-                )
+                recorder.begin_tool(tool_name, tool_call_id=tool_call_id, args=args or {})
                 return
         except Exception:
             pass
@@ -159,21 +150,16 @@ class ToolMonitor:
         error: str = "",
     ) -> None:
         try:
-            from app.observability import EventType, get_recorder
+            from app.observability import get_recorder
 
             recorder = get_recorder()
-            event_type = EventType.TOOL_COMPLETED if status == "ok" else EventType.TOOL_FAILED
             if recorder.is_active:
-                recorder.emit(
-                    event_type,
-                    phase="execute",
-                    status=status,
+                recorder.finish_tool(
+                    tool_name,
+                    tool_call_id=tool_call_id,
                     duration_ms=duration_ms,
-                    attributes={
-                        "tool_name": tool_name,
-                        "tool_call_id": tool_call_id,
-                        "error": error,
-                    },
+                    status=status,
+                    error=error,
                 )
                 return
         except Exception:
