@@ -23,6 +23,7 @@ Search is only a tool environment used to study:
 补充文档：
 
 - [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) — Agent Flight Recorder（统一 Trace / Replan / Eval）
+- [docs/EVALUATION.md](docs/EVALUATION.md) — 五层 Eval（Component / Scenario / BrowseComp / Ablation）
 - [docs/HARNESS_ARCHITECTURE.md](docs/HARNESS_ARCHITECTURE.md) — StateGraph 运行时
 - [docs/CONTEXT_SYSTEM.md](docs/CONTEXT_SYSTEM.md) — 上下文外置与压缩
 - [docs/BROWSECOMP_PLUS_EVAL.md](docs/BROWSECOMP_PLUS_EVAL.md) — BrowseComp-Plus 评测
@@ -80,4 +81,6 @@ python3 tests/test_intent_and_plan.py
 python3 tests/test_progress_evaluator.py
 python3 tests/test_research_checkpoint.py
 python3 tests/test_hybrid_planning.py
+python3 tests/eval/test_eval_dry_run.py
+python3 tests/eval/run_eval.py --dry-run
 ```

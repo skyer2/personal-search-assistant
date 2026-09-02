@@ -1,0 +1,8 @@
+# V0 Vanilla：单 Agent + tools，无 Brief/Plan/Progress/Replan
+name: vanilla
+mode: direct
+progress_eval: false
+max_replan: 0
+parallel: false
+compression: false
+description: Query → single agent → tools → Answer

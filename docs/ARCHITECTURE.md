@@ -207,6 +207,7 @@ Query → single agent               Brief → Plan →                   关掉
 补充文档（非范围权威）：
 
 - [OBSERVABILITY.md](./OBSERVABILITY.md) — Agent Flight Recorder（统一 Trace / Replan / Eval）
+- [EVALUATION.md](./EVALUATION.md) — 五层 Eval 与 Vanilla / No-Replan / Full ablation
 - [HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md) — StateGraph 运行时细节
 - [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md) — Context / Artifact / Evidence
 - [BROWSECOMP_PLUS_EVAL.md](./BROWSECOMP_PLUS_EVAL.md) — 固定语料评测

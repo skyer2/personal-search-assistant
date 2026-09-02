@@ -171,9 +171,9 @@ harness:
     trajectory_min_similarity: 0.6
     intent_deliverable_min_accuracy: 0.9
     plan_validation_min_rate: 1.0
-    heuristic_judge_enabled: true
+    heuristic_judge_enabled: true  # ReportStructureGrader only; not answer quality
     heuristic_judge_min_score: 0.6
-    llm_judge_enabled: false
+    llm_judge_enabled: false  # QualityJudgeResult; requires meta-eval before trusting
     structured_output_min_rate: 0.8
 
   orchestration:

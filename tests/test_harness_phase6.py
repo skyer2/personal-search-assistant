@@ -125,11 +125,11 @@ def test_phase6_config():
 def test_dry_eval_with_trajectory():
     from tests.eval.run_eval import load_tasks, run_dry_eval
 
-    tasks = load_tasks(ROOT / "tests" / "eval" / "tasks.jsonl")
+    tasks = load_tasks(ROOT / "tests" / "eval" / "datasets" / "harness_scenarios_v1.jsonl")
     results = run_dry_eval(tasks[:3])
     assert len(results) == 3
-    assert results[0].trajectory_similarity == 1.0
-    print("[OK] dry eval trajectory")
+    assert all(item.success for item in results)
+    print("[OK] dry eval scenario subset")
 
 
 if __name__ == "__main__":

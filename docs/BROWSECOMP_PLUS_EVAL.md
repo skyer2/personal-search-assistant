@@ -109,12 +109,20 @@ uv run python scripts_evaluation/evaluate_run.py \
 
 ## 5. 验证 Agent 是否真的有效
 
-至少做四组对照，每组使用同一 `manifest.json`：
+至少做四组对照，每组使用同一 `manifest.json`、同一模型、同一语料：
 
 1. `Retrieval-only`：确认 Recall/nDCG，不把 Retriever 差错归咎于 Agent；
-2. `Agent + fixed corpus`：正式端到端结果；
-3. `Agent no-compression`：关闭 `HARNESS_LLM_COMPRESSION`，比较 Accuracy、token、成本；
-4. `Agent sequential`：关闭并行检索，比较 Accuracy、延迟和调用计数。
+2. `Vanilla Agent`：`direct` 单 Agent + tools，无 Brief/Plan/Progress；
+3. `Harness-NoReplan`：完整控制面但 `max_replan=0`；
+4. `Full Harness`：Progress GAP → Replan。
+
+可选：`Harness-NoCompression`。Parallel/Sequential 优先级低于 Replan ablation。
+
+```bash
+uv run python tests/eval/run_eval.py --live --variant vanilla
+uv run python tests/eval/run_eval.py --live --variant no_replan
+uv run python tests/eval/run_eval.py --live --variant full
+```
 
 每次保存代码 commit、配置快照、manifest、summary 和官方 judge 输出。效果结论应同时看：
 

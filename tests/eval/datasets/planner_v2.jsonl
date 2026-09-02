@@ -1,0 +1,5 @@
+{"case_id": "planner_01", "category": "plan", "query": "比较 Tesla / Figure / Unitree 2026 商业化进度，生成 Markdown 报告", "expected": {"deliverable": "md", "min_independent_research": 3, "has_synthesis": true, "planning_mode": "dynamic", "max_research_tasks": 6, "acyclic": true}}
+{"case_id": "planner_02", "category": "plan", "query": "生成一份关于量子计算的深度研究报告PDF", "expected": {"deliverable": "pdf", "has_convert_pdf": true, "has_synthesis": true, "acyclic": true}}
+{"case_id": "planner_03", "category": "plan", "query": "不要联网，只根据内部附件比较两家公司的交付进度", "requires_upload": true, "expected": {"forbidden_tools": ["internet_search", "fetch_url"], "min_independent_research": 2, "acyclic": true}}
+{"case_id": "planner_04", "category": "plan", "query": "请先读取我上传的白皮书，再结合公开资料整理研究摘要", "requires_upload": true, "expected": {"required_sources": ["file", "web"], "has_synthesis": true, "acyclic": true}}
+{"case_id": "planner_05", "category": "plan", "query": "只搜索公开资料，不要生成文件：人形机器人供应链风险", "expected": {"deliverable": "text", "has_synthesis": true, "forbidden_step_types": ["convert_pdf"], "acyclic": true}}
