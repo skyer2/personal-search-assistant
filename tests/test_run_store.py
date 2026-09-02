@@ -112,6 +112,11 @@ def test_uploads_and_artifacts(tmp_path):
     listed = list_output_files(tmp_path / "output", "s1")
     assert listed[0]["name"] == "report.md"
     assert listed[0]["path"] == "report.md"
+    (output / "working_notes.md").write_text("# notes", encoding="utf-8")
+    (output / "report.pdf").write_bytes(b"%PDF-1.4\n")
+    ordered = [item["name"] for item in list_output_files(tmp_path / "output", "s1")]
+    assert ordered[0] == "report.pdf"
+    assert ordered.index("report.md") < ordered.index("working_notes.md")
     target = resolve_output_file(tmp_path / "output", "s1", "report.md")
     assert target.exists()
     try:

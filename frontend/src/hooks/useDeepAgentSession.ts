@@ -339,6 +339,7 @@ export function useDeepAgentSession() {
             setIsCancelling(false);
             setServerStatus("completed");
             setHitlPending(null);
+            void refreshFiles().catch(() => undefined);
           }
 
           if (payload.event === "task_cancelled") {
@@ -347,6 +348,7 @@ export function useDeepAgentSession() {
             setIsRunning(false);
             setIsCancelling(false);
             setServerStatus("interrupted");
+            void refreshFiles().catch(() => undefined);
           }
 
           if (payload.event === "error") {
@@ -356,6 +358,7 @@ export function useDeepAgentSession() {
             setIsRunning(false);
             setIsCancelling(false);
             setServerStatus("failed");
+            void refreshFiles().catch(() => undefined);
           }
         } catch (error) {
           setLastError(error instanceof Error ? error.message : "WebSocket 消息解析失败");
@@ -391,7 +394,7 @@ export function useDeepAgentSession() {
       clearSocketTimers();
       socketRef.current?.close();
     };
-  }, [clearSocketTimers, ingestEvents, threadId, hydrated]);
+  }, [clearSocketTimers, ingestEvents, refreshFiles, threadId, hydrated]);
 
   useEffect(() => {
     if (!hydrated) {

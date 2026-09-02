@@ -156,6 +156,38 @@ def test_startup_marks_running_recoverable(tmp_path, monkeypatch):
     print("[OK] restart recovery via lifespan")
 
 
+def test_download_pdf_inline_vs_attachment(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.api import session_routes
+    from app.api.server import app
+
+    monkeypatch.setattr(session_routes, "_OUTPUT_DIR", tmp_path)
+    session_id = "sess-pdf"
+    folder = tmp_path / f"session_{session_id}"
+    folder.mkdir()
+    (folder / "report.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    (folder / "notes.md").write_text("# hi\n", encoding="utf-8")
+
+    with TestClient(app) as client:
+        opened = client.get(f"/api/sessions/{session_id}/download", params={"name": "report.pdf"})
+        assert opened.status_code == 200
+        assert opened.content.startswith(b"%PDF")
+        assert "inline" in opened.headers.get("content-disposition", "").lower()
+        saved = client.get(
+            f"/api/sessions/{session_id}/download",
+            params={"name": "report.pdf", "download": "1"},
+        )
+        assert saved.status_code == 200
+        assert "attachment" in saved.headers.get("content-disposition", "").lower()
+        listed = client.get(f"/api/sessions/{session_id}/artifacts")
+        assert listed.status_code == 200
+        names = [item["name"] for item in listed.json()["files"]]
+        assert names[0] == "report.pdf"
+
+    print("[OK] PDF download inline vs attachment")
+
+
 if __name__ == "__main__":
     test_run_completed_requires_full_result()
     test_run_failed_still_maps()

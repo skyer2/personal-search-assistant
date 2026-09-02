@@ -12,6 +12,7 @@ from pathlib import Path
 from app.utils.word_converter import convert_md_to_pdf as convert_md_to_pdf_via_reportlab
 
 _UNSAFE_FILENAME = re.compile(r'[\\/:*?"<>|\n\r\t]+')
+_INTERNAL_STEMS = {"working_notes", "evidence", "checkpoint"}
 _NON_REPORT_PREFIXES = (
     "成功转换",
     "转换完成",
@@ -27,18 +28,28 @@ _NON_REPORT_PREFIXES = (
 )
 
 
-def list_markdown_files(session_dir: Path) -> list[Path]:
+def is_internal_artifact(path: Path) -> bool:
+    return path.stem.lower() in _INTERNAL_STEMS
+
+
+def list_markdown_files(session_dir: Path, *, include_internal: bool = True) -> list[Path]:
     root = Path(session_dir)
     if not root.exists():
         return []
-    return sorted(p for p in root.rglob("*.md") if p.is_file())
+    files = [p for p in root.rglob("*.md") if p.is_file()]
+    if not include_internal:
+        files = [p for p in files if not is_internal_artifact(p)]
+    return sorted(files)
 
 
-def list_pdf_files(session_dir: Path) -> list[Path]:
+def list_pdf_files(session_dir: Path, *, include_internal: bool = True) -> list[Path]:
     root = Path(session_dir)
     if not root.exists():
         return []
-    return sorted(p for p in root.rglob("*.pdf") if p.is_file())
+    files = [p for p in root.rglob("*.pdf") if p.is_file()]
+    if not include_internal:
+        files = [p for p in files if not is_internal_artifact(p)]
+    return sorted(files)
 
 
 def filename_stem_from_query(query: str, default: str = "调研报告") -> str:
@@ -140,6 +151,7 @@ def ensure_requested_deliverables(session_dir: Path, state: object) -> dict[str,
         deliverable=deliverable,
         content=content,
         query=query,
+        overwrite=bool(abort_reason),
     )
 
 
@@ -148,20 +160,25 @@ def persist_markdown_if_missing(
     content: str = "",
     *,
     filename_stem: str = "",
+    overwrite: bool = False,
 ) -> Path | None:
     root = Path(session_dir)
     root.mkdir(parents=True, exist_ok=True)
-    existing = list_markdown_files(root)
-    if existing:
+    stem = filename_stem_from_query(filename_stem) if filename_stem else "调研报告"
+    if is_internal_artifact(Path(stem)):
+        stem = "调研报告"
+    intended = root / f"{stem}.md"
+    if intended.exists() and not overwrite:
+        return intended
+    existing = list_markdown_files(root, include_internal=False)
+    if existing and not overwrite:
         return existing[0]
     text = usable_report_text(content)
     if not text:
-        return None
-    stem = filename_stem_from_query(filename_stem) if filename_stem else "调研报告"
-    path = root / f"{stem}.md"
+        return intended if intended.exists() else None
     body = text if text.lstrip().startswith("#") else f"# {stem}\n\n{text}"
-    path.write_text(body, encoding="utf-8")
-    return path
+    intended.write_text(body, encoding="utf-8")
+    return intended
 
 
 def ensure_pdf_from_markdown(
@@ -169,16 +186,21 @@ def ensure_pdf_from_markdown(
     *,
     content: str = "",
     filename_stem: str = "",
+    overwrite: bool = False,
 ) -> Path | None:
     root = Path(session_dir)
     root.mkdir(parents=True, exist_ok=True)
-    existing = list_pdf_files(root)
-    if existing:
-        return existing[0]
+    stem = filename_stem_from_query(filename_stem) if filename_stem else "调研报告"
+    if is_internal_artifact(Path(stem)):
+        stem = "调研报告"
+    intended = root / f"{stem}.pdf"
+    if intended.exists() and not overwrite:
+        return intended
     md_path = persist_markdown_if_missing(
         root,
         content,
-        filename_stem=filename_stem,
+        filename_stem=stem,
+        overwrite=overwrite,
     )
     if md_path is None:
         return None
@@ -195,6 +217,7 @@ def materialize_requested_files(
     deliverable: str,
     content: str = "",
     query: str = "",
+    overwrite: bool = False,
 ) -> dict[str, Path | None]:
     stem = filename_stem_from_query(query)
     md_path = None
@@ -204,11 +227,13 @@ def materialize_requested_files(
             session_dir,
             content,
             filename_stem=stem,
+            overwrite=overwrite,
         )
     if deliverable == "pdf":
         pdf_path = ensure_pdf_from_markdown(
             session_dir,
             content=content,
             filename_stem=stem,
+            overwrite=overwrite,
         )
     return {"md": md_path, "pdf": pdf_path}

@@ -12,6 +12,7 @@ from app.agent.harness.deliverables import (
     best_report_text,
     content_from_loop_state,
     ensure_pdf_from_markdown,
+    filename_stem_from_query,
     list_markdown_files,
     list_pdf_files,
     persist_markdown_if_missing,
@@ -78,12 +79,16 @@ class ResultValidator:
             if not content.strip():
                 return ValidationOutcome(False, "no_content", "error")
 
+        query = str(getattr(getattr(state, "intent", None), "raw_query", "") or "")
+        filename_stem = filename_stem_from_query(query) if query else ""
+
         if step.step_type == "generate_markdown":
             persist_markdown_if_missing(
                 session_dir,
                 best_report_text(content, content_from_loop_state(state)),
+                filename_stem=filename_stem,
             )
-            md_files = list_markdown_files(session_dir)
+            md_files = list_markdown_files(session_dir, include_internal=False)
             if not md_files:
                 return ValidationOutcome(False, "no_file_generated", "warning")
 
@@ -91,8 +96,9 @@ class ResultValidator:
             ensure_pdf_from_markdown(
                 session_dir,
                 content=best_report_text(content, content_from_loop_state(state)),
+                filename_stem=filename_stem,
             )
-            pdf_files = list_pdf_files(session_dir)
+            pdf_files = list_pdf_files(session_dir, include_internal=False)
             if not pdf_files:
                 return ValidationOutcome(False, "no_file_generated", "error")
 
@@ -126,12 +132,12 @@ class ResultValidator:
                 content=content_from_loop_state(state) or content,
                 query=intent.raw_query,
             )
-            md_files = list_markdown_files(session_dir)
+            md_files = list_markdown_files(session_dir, include_internal=False)
             if not md_files:
                 return ValidationOutcome(False, "no_file_generated", "error")
 
         if intent and intent.deliverable == "pdf":
-            pdf_files = list_pdf_files(session_dir)
+            pdf_files = list_pdf_files(session_dir, include_internal=False)
             if not pdf_files:
                 return ValidationOutcome(False, "no_file_generated", "error")
 

@@ -660,7 +660,7 @@ textarea {
 
 .file-item {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 34px;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
   min-height: 58px;
@@ -1844,15 +1844,31 @@ textarea {
   margin: 18px 0 0;
 }
 
+.deliverable-banner {
+  margin: 14px 0 0;
+  padding: 12px 14px 10px;
+  border: 1px solid rgba(255, 200, 87, 0.32);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 200, 87, 0.12), rgba(12, 18, 28, 0.78));
+}
+
+.deliverable-banner .result-sheet-kicker {
+  color: var(--amber);
+}
+
 .artifact-shelf {
   display: grid;
   gap: 8px;
   padding: 0 12px 12px;
 }
 
+.artifact-shelf--banner {
+  padding: 0;
+}
+
 .artifact-card {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
   min-height: 52px;
@@ -1860,6 +1876,17 @@ textarea {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.04);
   padding: 8px;
+}
+
+.artifact-card--pdf {
+  border-color: rgba(255, 200, 87, 0.42);
+  background: rgba(255, 200, 87, 0.08);
+}
+
+.artifact-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .artifact-icon {
@@ -2181,6 +2208,65 @@ textarea {
   padding: 0 4px 20px;
   display: grid;
   gap: 16px;
+}
+
+.resizable-table .ant-table-thead > tr > th {
+  position: relative;
+  overflow: visible;
+  vertical-align: middle;
+}
+
+.resizable-table .ant-table-tbody > tr > td {
+  white-space: normal;
+  vertical-align: top;
+  overflow: visible;
+}
+
+.resizable-th {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.resizable-th-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  width: 10px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.col-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 20%;
+  right: 3px;
+  width: 2px;
+  height: 60%;
+  border-radius: 1px;
+  background: rgba(113, 247, 255, 0.45);
+}
+
+.table-wrap-cell {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.45;
 }
 
 .trace-span-tree {

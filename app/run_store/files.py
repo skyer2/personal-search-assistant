@@ -5,6 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+_INTERNAL_STEMS = {"working_notes", "evidence", "checkpoint"}
+
+
+def _artifact_sort_key(item: dict[str, Any]) -> tuple:
+    name = str(item.get("name") or "")
+    lower = name.lower()
+    internal = 1 if Path(name).stem.lower() in _INTERNAL_STEMS else 0
+    pdf = 0 if lower.endswith(".pdf") else 1
+    markdown = 0 if lower.endswith(".md") else 1
+    return (internal, pdf, markdown, -float(item.get("mtime") or 0))
+
 
 def session_output_dir(output_root: Path, session_id: str) -> Path:
     return Path(output_root) / f"session_{session_id}"
@@ -33,7 +44,7 @@ def list_output_files(output_root: Path, session_id: str) -> list[dict[str, Any]
                 "mtime": stat.st_mtime,
             }
         )
-    files.sort(key=lambda item: item.get("mtime", 0), reverse=True)
+    files.sort(key=_artifact_sort_key)
     return files
 
 

@@ -4,18 +4,15 @@ import {
   ClockCircleOutlined,
   CloseCircleOutlined,
   CloudServerOutlined,
-  DownloadOutlined,
-  FileMarkdownOutlined,
-  FilePdfOutlined,
   FileSearchOutlined,
   FileTextOutlined,
   PauseCircleOutlined,
   StopOutlined,
   ToolOutlined,
 } from "@ant-design/icons";
-import { Button, Tooltip } from "antd";
+import { Button } from "antd";
 import { useEffect, useRef, useState } from "react";
-import { getDownloadUrl } from "../lib/api";
+import { DeliverableFiles, linkifyArtifactNames } from "./DeliverableFiles";
 import { formatElapsedClock } from "../lib/elapsedClock";
 import { computePhaseProgress } from "../lib/phaseProgress";
 import { type RunStatus } from "../lib/runStatus";
@@ -79,16 +76,6 @@ function formatTime(value: string): string {
   });
 }
 
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
-}
-
 function EventIcon({ event }: { event: string }) {
   if (event === "assistant_call") {
     return <BranchesOutlined aria-hidden />;
@@ -112,16 +99,6 @@ function EventIcon({ event }: { event: string }) {
     return <PauseCircleOutlined aria-hidden />;
   }
   return <ClockCircleOutlined aria-hidden />;
-}
-
-function FileIcon({ name }: { name: string }) {
-  if (name.endsWith(".pdf")) {
-    return <FilePdfOutlined aria-hidden />;
-  }
-  if (name.endsWith(".md")) {
-    return <FileMarkdownOutlined aria-hidden />;
-  }
-  return <FileTextOutlined aria-hidden />;
 }
 
 function ThinkingTimeline({
@@ -194,42 +171,6 @@ function ThinkingTimeline({
         </li>
       ))}
     </ol>
-  );
-}
-
-function ArtifactShelf({ files, sessionId }: { files: OutputFile[]; sessionId?: string }) {
-  if (files.length === 0) {
-    return (
-      <div className="artifact-empty">
-        <FileSearchOutlined aria-hidden />
-        暂无输出文件
-      </div>
-    );
-  }
-
-  return (
-    <div className="artifact-shelf">
-      {files.map((file) => (
-        <div className="artifact-card" key={file.path}>
-          <span className="artifact-icon">
-            <FileIcon name={file.name} />
-          </span>
-          <div className="artifact-copy">
-            <strong title={file.name}>{file.name}</strong>
-            <span>{formatBytes(file.size)}</span>
-          </div>
-          <Tooltip title="下载">
-            <Button
-              aria-label={`下载 ${file.name}`}
-              className="artifact-download"
-              href={getDownloadUrl(file.path, sessionId)}
-              icon={<DownloadOutlined />}
-              shape="circle"
-            />
-          </Tooltip>
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -306,10 +247,17 @@ function AssistantMessage({
           ) : null}
         </details>
 
+        {files.length > 0 ? (
+          <div className="deliverable-banner" aria-label="可下载文件">
+            <div className="result-sheet-kicker">FILES</div>
+            <DeliverableFiles files={files} sessionId={sessionId} variant="banner" />
+          </div>
+        ) : null}
+
         {result ? (
           <div className="assistant-answer result-sheet">
             <div className="result-sheet-kicker">RESULT</div>
-            <MarkdownRenderer content={result} />
+            <MarkdownRenderer content={linkifyArtifactNames(result, files, sessionId)} />
           </div>
         ) : (
           <div
@@ -325,7 +273,7 @@ function AssistantMessage({
           </div>
         )}
 
-        <details className="thinking-block artifact-block">
+        <details className="thinking-block artifact-block" open={files.length > 0}>
           <summary>
             <span>
               <FileSearchOutlined aria-hidden />
@@ -333,7 +281,7 @@ function AssistantMessage({
             </span>
             <strong>{files.length}</strong>
           </summary>
-          <ArtifactShelf files={files} sessionId={sessionId} />
+          <DeliverableFiles files={files} sessionId={sessionId} />
         </details>
       </div>
     </article>

@@ -111,9 +111,13 @@ export async function fetchRunEvents(
   return requestJson<RunEventsResponse>(apiUrl(path));
 }
 
-export function getDownloadUrl(path: string, sessionId?: string): string {
+export function getDownloadUrl(path: string, sessionId?: string, options?: { download?: boolean }): string {
   if (sessionId && path && !path.startsWith("/") && !path.includes(":\\")) {
-    return buildApiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/download`, { name: path }).toString();
+    const params: Record<string, string> = { name: path };
+    if (options?.download) {
+      params.download = "1";
+    }
+    return buildApiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/download`, params).toString();
   }
   return buildApiUrl("/api/download", { path }).toString();
 }

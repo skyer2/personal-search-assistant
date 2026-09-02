@@ -1,5 +1,5 @@
 import { LinkOutlined, ReloadOutlined } from "@ant-design/icons";
-import { Alert, Button, Card, Space, Table, Tabs, Tag, Typography } from "antd";
+import { Alert, Button, Card, Space, Tabs, Tag, Typography } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import {
   fetchCitations,
@@ -8,6 +8,7 @@ import {
   fetchLangfuseTraces
 } from "../lib/api";
 import type { EvidenceSource, JsonlTraceEvent, TraceSpanNode, TraceSummary, TraceTree } from "../types";
+import { ResizableTable } from "./ResizableTable";
 
 interface TraceViewerProps {
   sessionId: string;
@@ -191,33 +192,41 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
                 {workers.length === 0 ? (
                   <Alert message="本 run 尚未写入 worker.started / worker.completed" showIcon type="info" />
                 ) : (
-                  <Table
+                  <ResizableTable
                     dataSource={workers.map((row, index) => ({ ...row, key: `${String(row.task_id || "w")}-${String(row.attempt || index)}` }))}
                     pagination={{ pageSize: 12 }}
                     size="small"
                     columns={[
-                      { title: "Task", dataIndex: "task_id", width: 140 },
+                      { title: "Task", dataIndex: "task_id", width: 180, key: "task_id" },
                       {
                         title: "Status",
                         dataIndex: "status",
                         width: 90,
+                        key: "status",
                         render: (status: unknown) => <Tag color={statusColor(status)}>{asText(status)}</Tag>
                       },
-                      { title: "ms", dataIndex: "duration_ms", width: 90 },
-                      { title: "Attempt", dataIndex: "attempt", width: 80 },
+                      { title: "ms", dataIndex: "duration_ms", width: 100, key: "duration_ms" },
+                      { title: "Attempt", dataIndex: "attempt", width: 90, key: "attempt" },
                       {
                         title: "Plan",
                         dataIndex: "plan_version",
-                        width: 70,
+                        width: 80,
+                        key: "plan_version",
                         render: (version: unknown) => (version == null || version === "" ? "-" : `v${version}`)
                       },
-                      { title: "Objective", dataIndex: "objective", ellipsis: true, render: (value: unknown) => asText(value) },
+                      {
+                        title: "Objective",
+                        dataIndex: "objective",
+                        width: 420,
+                        key: "objective",
+                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
+                      },
                       {
                         title: "Fail",
                         dataIndex: "fail_reason",
-                        width: 120,
-                        ellipsis: true,
-                        render: (value: unknown) => asText(value, "")
+                        width: 180,
+                        key: "fail_reason",
+                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value, "")}</div>
                       }
                     ]}
                   />
@@ -247,7 +256,7 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
                 {progress.length > 0 ? (
                   <>
                     <Typography.Title level={5}>进度评估</Typography.Title>
-                    <Table
+                    <ResizableTable
                       dataSource={progress.map((row, index) => ({ ...row, key: `p-${index}` }))}
                       pagination={false}
                       size="small"
@@ -255,24 +264,35 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
                         {
                           title: "Verdict",
                           dataIndex: "verdict",
-                          width: 100,
+                          width: 110,
+                          key: "verdict",
                           render: (verdict: unknown) => <Tag color={statusColor(verdict)}>{asText(verdict)}</Tag>
                         },
                         {
                           title: "Plan",
                           dataIndex: "plan_version",
-                          width: 70,
+                          width: 80,
+                          key: "plan_version",
                           render: (version: unknown) => (version == null || version === "" ? "-" : `v${version}`)
                         },
-                        { title: "Reason", dataIndex: "reason", ellipsis: true, render: (value: unknown) => asText(value) },
+                        {
+                          title: "Reason",
+                          dataIndex: "reason",
+                          width: 280,
+                          key: "reason",
+                          render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
+                        },
                         {
                           title: "Gaps",
-                          render: (_, row) => asText(row.gaps)
+                          width: 280,
+                          key: "gaps",
+                          render: (_, row) => <div className="table-wrap-cell">{asText(row.gaps)}</div>
                         },
                         {
                           title: "Conflicts",
                           dataIndex: "conflict_count",
-                          width: 90,
+                          width: 100,
+                          key: "conflict_count",
                           render: (value: unknown) => asText(value, "0")
                         }
                       ]}
@@ -283,20 +303,30 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
                 {replans.length === 0 ? (
                   <Typography.Text type="secondary">没有 replan.applied / replan.failed 事件。</Typography.Text>
                 ) : (
-                  <Table
+                  <ResizableTable
                     dataSource={replans.map((row, index) => ({ ...row, key: `r-${index}` }))}
                     pagination={false}
                     size="small"
                     columns={[
-                      { title: "Event", dataIndex: "type", width: 140 },
+                      { title: "Event", dataIndex: "type", width: 150, key: "type" },
                       {
                         title: "Version",
+                        width: 140,
+                        key: "version",
                         render: (_, row) => `${asText(row.from_plan_version)} → ${asText(row.to_plan_version)}`
                       },
-                      { title: "Reason", dataIndex: "reason", ellipsis: true },
+                      {
+                        title: "Reason",
+                        dataIndex: "reason",
+                        width: 280,
+                        key: "reason",
+                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
+                      },
                       {
                         title: "Added",
-                        render: (_, row) => asText(row.added_tasks)
+                        width: 240,
+                        key: "added_tasks",
+                        render: (_, row) => <div className="table-wrap-cell">{asText(row.added_tasks)}</div>
                       }
                     ]}
                   />
@@ -323,29 +353,31 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
                     type="info"
                   />
                 ) : (
-                  <Table
+                  <ResizableTable
                     dataSource={evals.map((row, index) => ({ ...row, key: `e-${index}` }))}
                     pagination={false}
                     size="small"
                     columns={[
-                      { title: "Event", dataIndex: "type", width: 150 },
+                      { title: "Event", dataIndex: "type", width: 150, key: "type" },
                       {
                         title: "Status",
                         dataIndex: "status",
-                        width: 90,
+                        width: 100,
+                        key: "status",
                         render: (status: unknown) => <Tag color={statusColor(status)}>{asText(status)}</Tag>
                       },
-                      { title: "Case", dataIndex: "case_id", render: (value: unknown) => asText(value) },
-                      { title: "Variant", dataIndex: "variant", render: (value: unknown) => asText(value) },
-                      { title: "Accuracy", dataIndex: "accuracy", render: (value: unknown) => asText(value) },
-                      { title: "Citation", dataIndex: "citation_score", render: (value: unknown) => asText(value) },
+                      { title: "Case", dataIndex: "case_id", width: 160, key: "case_id", render: (value: unknown) => asText(value) },
+                      { title: "Variant", dataIndex: "variant", width: 140, key: "variant", render: (value: unknown) => asText(value) },
+                      { title: "Accuracy", dataIndex: "accuracy", width: 110, key: "accuracy", render: (value: unknown) => asText(value) },
+                      { title: "Citation", dataIndex: "citation_score", width: 110, key: "citation_score", render: (value: unknown) => asText(value) },
                       {
                         title: "Passed",
                         dataIndex: "passed",
-                        width: 80,
+                        width: 90,
+                        key: "passed",
                         render: (value: unknown) => (value == null ? "-" : String(value))
                       },
-                      { title: "ms", dataIndex: "latency_ms", render: (value: unknown) => asText(value) }
+                      { title: "ms", dataIndex: "latency_ms", width: 100, key: "latency_ms", render: (value: unknown) => asText(value) }
                     ]}
                   />
                 )}
@@ -358,7 +390,7 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
             children: (
               <Card size="small">
                 {jsonlMessage ? <Alert message={jsonlMessage} showIcon type="info" /> : null}
-                <Table
+                <ResizableTable
                   dataSource={jsonlEvents.map((event, index) => ({ ...event, key: `${event.phase}-${index}` }))}
                   pagination={{ pageSize: 12 }}
                   size="small"
@@ -370,18 +402,27 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
                   columns={[
                     {
                       title: "Event",
+                      key: "event",
                       render: (_, row) => String(row.type || row.event || row.phase || "-"),
-                      width: 160
+                      width: 180
                     },
-                    { title: "Phase", dataIndex: "phase", width: 110 },
-                    { title: "Status", dataIndex: "status", width: 90 },
-                    { title: "Task", dataIndex: "task_id", width: 90 },
+                    { title: "Phase", dataIndex: "phase", width: 120, key: "phase" },
+                    { title: "Status", dataIndex: "status", width: 100, key: "status" },
+                    { title: "Task", dataIndex: "task_id", width: 120, key: "task_id" },
                     {
                       title: "Step",
+                      width: 80,
+                      key: "step",
                       render: (_, row) => (typeof row.step_index === "number" ? row.step_index + 1 : "-")
                     },
-                    { title: "ms", dataIndex: "duration_ms", width: 80 },
-                    { title: "Time", dataIndex: "timestamp", ellipsis: true }
+                    { title: "ms", dataIndex: "duration_ms", width: 90, key: "duration_ms" },
+                    {
+                      title: "Time",
+                      dataIndex: "timestamp",
+                      width: 220,
+                      key: "timestamp",
+                      render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
+                    }
                   ]}
                 />
               </Card>
@@ -393,7 +434,7 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
             children: (
               <Card size="small">
                 {citationsMessage ? <Alert message={citationsMessage} showIcon type="info" /> : null}
-                <Table
+                <ResizableTable
                   dataSource={citations.map((source, index) => ({
                     ...source,
                     key: source.source_id || `cite-${index}`,
@@ -405,35 +446,41 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
                     {
                       title: "引用",
                       dataIndex: "ref_num",
-                      width: 64,
+                      width: 72,
+                      key: "ref_num",
                       render: (num: number) => <Tag color="blue">[{num}]</Tag>
                     },
                     {
                       title: "类型",
                       dataIndex: "source_kind",
-                      width: 80,
+                      width: 90,
+                      key: "source_kind",
                       render: (kind: string) => <Tag>{kind}</Tag>
                     },
                     {
                       title: "Step",
+                      width: 160,
+                      key: "step",
                       render: (_, row) => `${row.step_index + 1} / ${row.step_type}`
                     },
                     {
                       title: "来源",
                       dataIndex: "locator",
-                      ellipsis: true,
+                      width: 360,
+                      key: "locator",
                       render: (locator: string, row) =>
                         row.source_kind === "url" ? (
                           <a href={locator} rel="noreferrer" target="_blank">
                             {locator}
                           </a>
                         ) : (
-                          locator
+                          <div className="table-wrap-cell">{locator}</div>
                         )
                     },
                     {
                       title: "操作",
-                      width: 100,
+                      width: 110,
+                      key: "actions",
                       render: (_, row) => (
                         <Button size="small" type="link" onClick={() => handleCitationClick(row)}>
                           高亮 Step

@@ -46,10 +46,11 @@ function FileIcon({ name }: { name: string }) {
 interface FileDockProps {
   files: OutputFile[];
   onRefresh: () => void;
+  sessionId?: string;
   sessionPath: string;
 }
 
-export function FileDock({ files, onRefresh, sessionPath }: FileDockProps) {
+export function FileDock({ files, onRefresh, sessionId, sessionPath }: FileDockProps) {
   return (
     <section className="console-panel file-panel" aria-labelledby="file-title">
       <div className="panel-heading">
@@ -87,15 +88,29 @@ export function FileDock({ files, onRefresh, sessionPath }: FileDockProps) {
                   {formatBytes(file.size)} · {formatMtime(file.mtime)}
                 </span>
               </div>
-              <Tooltip title="下载">
-                <Button
-                  aria-label={`下载 ${file.name}`}
-                  className="icon-button"
-                  href={getDownloadUrl(file.path)}
-                  icon={<DownloadOutlined />}
-                  shape="circle"
-                />
-              </Tooltip>
+              <div className="artifact-actions">
+                <Tooltip title={file.name.endsWith(".pdf") ? "在浏览器中打开" : "打开"}>
+                  <Button
+                    aria-label={`打开 ${file.name}`}
+                    className="icon-button"
+                    href={getDownloadUrl(file.path, sessionId)}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    打开
+                  </Button>
+                </Tooltip>
+                <Tooltip title="下载到本地">
+                  <Button
+                    aria-label={`下载 ${file.name}`}
+                    className="icon-button"
+                    download={file.name}
+                    href={getDownloadUrl(file.path, sessionId, { download: true })}
+                    icon={<DownloadOutlined />}
+                    shape="circle"
+                  />
+                </Tooltip>
+              </div>
             </li>
           ))}
         </ul>

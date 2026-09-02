@@ -28,8 +28,9 @@ const mockEvents: MonitorMessage[] = [
 ];
 
 const mockFiles: OutputFile[] = [
-  { name: "brief.md", type: "file", path: "/tmp/session/brief.md", size: 2048, mtime: Date.now() },
-  { name: "evidence.json", type: "file", path: "/tmp/session/evidence.json", size: 8192, mtime: Date.now() }
+  { name: "brief.pdf", type: "file", path: "brief.pdf", size: 2048, mtime: Date.now() },
+  { name: "brief.md", type: "file", path: "brief.md", size: 2048, mtime: Date.now() },
+  { name: "working_notes.md", type: "file", path: "working_notes.md", size: 512, mtime: Date.now() }
 ];
 
 export function ConversationLayoutPreview() {
@@ -68,7 +69,13 @@ export function ConversationLayoutPreview() {
           <p>布局与计时自检通过。当前已用时 {formatElapsedClock(elapsedMs)}</p>
         )}
       </div>
-      <ConversationThread onUseExample={() => undefined} processHeight={220} runStatus="running" turns={turns} />
+      <ConversationThread
+        onUseExample={() => undefined}
+        processHeight={220}
+        runStatus="running"
+        sessionId="preview-session"
+        turns={turns}
+      />
     </div>
   );
 }

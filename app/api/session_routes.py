@@ -57,14 +57,20 @@ async def list_session_artifacts(session_id: str):
 
 
 @router.get("/api/sessions/{session_id}/download")
-async def download_session_artifact(session_id: str, name: str):
+async def download_session_artifact(session_id: str, name: str, download: bool = False):
     try:
         target = resolve_output_file(_OUTPUT_DIR, session_id, name)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(target, filename=target.name)
+    is_pdf = target.suffix.lower() == ".pdf"
+    return FileResponse(
+        target,
+        filename=target.name,
+        media_type="application/pdf" if is_pdf else None,
+        content_disposition_type="attachment" if download or not is_pdf else "inline",
+    )
 
 
 @router.get("/api/runs/{run_id}")

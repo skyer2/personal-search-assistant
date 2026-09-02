@@ -90,7 +90,39 @@ def test_abort_still_writes_partial_pdf(tmp_path: Path):
     assert "落地" in markdown
 
 
-def test_abort_without_content_still_writes_stub_pdf(tmp_path: Path):
+def test_abort_does_not_convert_working_notes(tmp_path: Path):
+    (tmp_path / "working_notes.md").write_text("# scratch\n\n内部笔记，不是报告。\n", encoding="utf-8")
+    intent = understand_task(USER_PDF_QUERY)
+    state = LoopState(session_id="pdf-notes")
+    state.intent = intent
+    state.abort_reason = "deadline_exceeded"
+    state.final_content = ""
+    state.step_results = [
+        StepResult(
+            step_type="independent_research",
+            content="# 长程 agent\n\nMETR 时间视野倍增周期已缩短到约 3 个月。",
+        ),
+    ]
+    written = ensure_requested_deliverables(tmp_path, state)
+    assert written["pdf"] is not None and written["pdf"].exists()
+    assert written["pdf"].name != "working_notes.pdf"
+    assert written["md"] is not None
+    assert written["md"].name != "working_notes.md"
+    assert not (tmp_path / "working_notes.pdf").exists()
+    report_pdfs = list_pdf_files(tmp_path, include_internal=False)
+    assert report_pdfs and report_pdfs[0].name != "working_notes.pdf"
+    markdown = written["md"].read_text(encoding="utf-8")
+    assert "deadline_exceeded" in markdown
+    assert "长程 agent" in markdown
+
+
+def test_working_notes_alone_is_not_a_report_pdf(tmp_path: Path):
+    (tmp_path / "working_notes.md").write_text("# notes\n\nscratch\n", encoding="utf-8")
+    pdf = ensure_pdf_from_markdown(tmp_path, content="# 调研正文\n\n公开声明刹车踏板。\n", filename_stem="刹车踏板调研")
+    assert pdf is not None
+    assert pdf.name == "刹车踏板调研.pdf"
+    assert not (tmp_path / "working_notes.pdf").exists()
+    assert (tmp_path / "刹车踏板调研.md").exists()
     intent = understand_task(USER_PDF_QUERY)
     state = LoopState(session_id="pdf-empty-abort")
     state.intent = intent
