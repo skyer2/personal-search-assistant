@@ -6,7 +6,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.agent.harness.deliverables import ensure_pdf_from_markdown, list_pdf_files
+from app.agent.harness.deliverables import (
+    ensure_pdf_from_markdown,
+    ensure_requested_deliverables,
+    list_pdf_files,
+)
 from app.agent.harness.planner import auto_resolve_clarification, build_plan, understand_task
 from app.agent.harness.planner_llm import merge_intent_from_llm
 from app.agent.harness.state import LoopState, PlanStep, StepResult
@@ -61,6 +65,42 @@ def test_ensure_pdf_from_markdown_and_rglob(tmp_path: Path):
     assert list_pdf_files(tmp_path)
 
 
+def test_abort_still_writes_partial_pdf(tmp_path: Path):
+    intent = understand_task(USER_PDF_QUERY)
+    state = LoopState(session_id="pdf-abort")
+    state.intent = intent
+    state.abort_reason = "budget_tool_calls"
+    state.final_content = ""
+    state.step_results = [
+        StepResult(
+            step_type="independent_research",
+            content="# 下一跳\n\n多智能体协作、长期记忆与 MCP 互操作是 2026 年主方向。",
+        ),
+        StepResult(
+            step_type="independent_research",
+            content="# 落地\n\n软件研发与客服已有可量化工时节省和 ROI 案例。",
+        ),
+    ]
+    written = ensure_requested_deliverables(tmp_path, state)
+    assert written["pdf"] is not None and written["pdf"].exists()
+    assert written["pdf"].read_bytes()[:4] == b"%PDF"
+    markdown = (written["md"].read_text(encoding="utf-8") if written["md"] else "")
+    assert "budget_tool_calls" in markdown
+    assert "下一跳" in markdown
+    assert "落地" in markdown
+
+
+def test_abort_without_content_still_writes_stub_pdf(tmp_path: Path):
+    intent = understand_task(USER_PDF_QUERY)
+    state = LoopState(session_id="pdf-empty-abort")
+    state.intent = intent
+    state.abort_reason = "budget_tool_calls"
+    written = ensure_requested_deliverables(tmp_path, state)
+    assert written["pdf"] is not None and written["pdf"].exists()
+    markdown = (written["md"].read_text(encoding="utf-8") if written["md"] else "")
+    assert "没有可用的研究报告正文" in markdown
+
+
 def test_validator_writes_pdf_when_worker_skips_tool(tmp_path: Path):
     intent = understand_task(USER_PDF_QUERY)
     state = LoopState(session_id="pdf-test")
@@ -98,4 +138,8 @@ if __name__ == "__main__":
         test_ensure_pdf_from_markdown_and_rglob(Path(d))
     with tempfile.TemporaryDirectory() as d:
         test_validator_writes_pdf_when_worker_skips_tool(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_abort_still_writes_partial_pdf(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_abort_without_content_still_writes_stub_pdf(Path(d))
     print("[OK] pdf deliverable tests")

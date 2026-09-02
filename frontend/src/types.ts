@@ -197,6 +197,7 @@ export interface TraceTree {
   roots: TraceSpanNode[];
   span_count: number;
   event_count: number;
+  omitted_count?: number;
 }
 
 export interface TraceSummary {

@@ -30,11 +30,22 @@ class RunJournal:
                 self._by_session.pop(session_id, None)
 
 
+_TREE_OMIT_TYPES = {"llm_usage", "gen_ai.chat"}
+
+
 def build_span_tree(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """把扁平 event 列表收成 span 因果树，供 TraceViewer 使用。"""
+    """把扁平 event 列表收成 span 因果树，供 TraceViewer 使用。
+
+    JSONL 仍保留全部事件；因果树省略 llm_usage / gen_ai.chat，避免 400+ 叶子把 understand/plan/worker 淹掉。
+    """
+    omitted = 0
     nodes: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for event in events:
+        event_type = str(event.get("type") or event.get("event") or "")
+        if event_type in _TREE_OMIT_TYPES:
+            omitted += 1
+            continue
         span_id = str(event.get("span_id") or event.get("event_id") or f"anon-{len(nodes)}")
         if span_id not in nodes:
             nodes[span_id] = {
@@ -79,7 +90,7 @@ def build_span_tree(events: list[dict[str, Any]]) -> dict[str, Any]:
             nodes[parent]["children"].append(node)
         else:
             roots.append(node)
-    return {"roots": roots, "span_count": len(nodes), "event_count": len(events)}
+    return {"roots": roots, "span_count": len(nodes), "event_count": len(events), "omitted_count": omitted}
 
 
 _SPAN_NAME_PRIORITY = (
