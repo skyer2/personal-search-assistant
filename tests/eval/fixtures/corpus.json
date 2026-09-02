@@ -1,0 +1,53 @@
+{
+  "documents": [
+    {
+      "doc_id": "tesla-2026",
+      "url": "https://fixture.local/tesla-2026",
+      "title": "Tesla 2026 commercialization notes",
+      "terms": ["tesla", "2026", "收入", "量产", "optimus"],
+      "text": "Tesla 2026 年 Optimus 仍处于小规模客户试点，公开口径未给出独立人形机器人收入。量产节奏被描述为有限交付，重点仍在汽车与储能主业。来源标注：fixture Tesla note。"
+    },
+    {
+      "doc_id": "figure-2026",
+      "url": "https://fixture.local/figure-2026",
+      "title": "Figure 2026 commercialization notes",
+      "terms": ["figure", "2026", "收入", "量产", "bmw"],
+      "text": "Figure 2026 年继续推进与 BMW 等客户的工厂试点。公开材料强调部署数量和工位验证，没有给出经审计的独立年收入。量产仍属受限试点而非大规模出货。"
+    },
+    {
+      "doc_id": "unitree-a",
+      "url": "https://fixture.local/unitree-revenue-a",
+      "title": "Unitree 2026 revenue source A",
+      "terms": ["unitree", "宇树", "收入", "2026"],
+      "text": "来源 A：Unitree 2026 年收入约 10 亿美元。该数字来自一份行业简报，未与公司财报交叉验证。"
+    },
+    {
+      "doc_id": "unitree-b",
+      "url": "https://fixture.local/unitree-revenue-b",
+      "title": "Unitree 2026 revenue source B",
+      "terms": ["unitree", "宇树", "收入", "2026", "订单"],
+      "text": "来源 B：Unitree 2026 年收入约 50 亿美元，订单量显著高于来源 A。两份材料互相冲突，不能直接采信单一数字。"
+    },
+    {
+      "doc_id": "regulation-2026",
+      "url": "https://fixture.local/humanoid-regulation-2026",
+      "title": "2026 humanoid robot regulation digest",
+      "terms": ["监管", "政策", "人形机器人", "2026"],
+      "text": "2026 年人形机器人监管摘要：1) 工厂协作安全标准；2) 数据跨境限制；3) 人身伤害责任保险；4) 公共场所试验备案；5) 训练数据来源披露。每条均要求列出执法或标准机构来源。"
+    },
+    {
+      "doc_id": "supply-chain",
+      "url": "https://fixture.local/humanoid-supply-chain",
+      "title": "Humanoid robot supply-chain risks",
+      "terms": ["供应链", "风险", "减速器", "电池"],
+      "text": "人形机器人供应链风险：高精度减速器产能不足、电池与关节模组交期波动、少数供应商集中。公开资料足以做风险清单，不必生成文件。"
+    },
+    {
+      "doc_id": "quantum",
+      "url": "https://fixture.local/quantum-overview",
+      "title": "Quantum computing research overview",
+      "terms": ["量子计算", "纠错", "超导"],
+      "text": "量子计算 2026 年仍以纠错与逻辑比特扩展为主线。超导、离子阱和中性原子路线并行，距离通用容错仍有工程差距。"
+    }
+  ]
+}

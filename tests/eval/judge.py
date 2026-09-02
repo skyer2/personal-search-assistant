@@ -92,14 +92,10 @@ async def judge_report(
     min_score: float = 0.6,
     expect_citations: bool = True,
 ) -> ReportJudgeResult:
-    """统一 Judge 入口：默认 heuristic；LLM 占位待接 compression_model。"""
-    if not llm_judge_enabled:
-        return heuristic_report_judge(
-            content,
-            min_score=min_score,
-            expect_citations=expect_citations,
-        )
-    # LLM judge 占位：生产可接独立 judge 模型 + rubric prompt
-    base = heuristic_report_judge(content, min_score=min_score, expect_citations=expect_citations)
-    base.judge_source = "heuristic+llm_stub"
-    return base
+    """统一 Judge 入口：报告结构只走启发式，不冒充答案质量。"""
+    _ = llm_judge_enabled
+    return heuristic_report_judge(
+        content,
+        min_score=min_score,
+        expect_citations=expect_citations,
+    )

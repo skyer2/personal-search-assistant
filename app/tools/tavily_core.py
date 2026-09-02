@@ -48,6 +48,11 @@ def search_internet(
     }:
         return _search_browsecomp_plus(query, max_results, include_raw_content)
 
+    from app.tools.eval_fixture import fixture_enabled, search_fixture
+
+    if fixture_enabled():
+        return search_fixture(query, max_results, include_raw_content)
+
     timeout = float(os.getenv("TAVILY_TIMEOUT_SEC", "120"))
     return get_tavily_client().search(
         query=query,

@@ -147,6 +147,9 @@ export interface EvalReport {
   trajectory_score?: number;
   plan_validation_pass_rate?: number;
   replan_recovery_rate?: number;
+  pass_at_1?: number;
+  pass_at_k?: number;
+  pass_hat_k?: number;
   latency_p95_ms?: number;
   tool_selection_accuracy?: number;
   step_success_rate?: number;

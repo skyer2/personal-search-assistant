@@ -4,12 +4,18 @@ Harness Eval 入口。
   # PR CI：L1 component + L2 scenario dry-run（无 LLM）
   python tests/eval/run_eval.py --dry-run --fail-on-regression
 
-  # Live scenario（需 LLM）
-  python tests/eval/run_eval.py --live --variant full --limit 5
+  # Live scenario（需 LLM；--fixture 走固定语料）
+  python tests/eval/run_eval.py --live --variant full --limit 5 --fixture
+
+  # Repeat reliability
+  python tests/eval/run_eval.py --live --variant full --repeat 3 --fixture --limit 5
+
+  # Judge calibration（human gold vs automatic grader）
+  python tests/eval/run_eval.py --calibrate-judge
 
   # 对照实验
-  python tests/eval/run_eval.py --live --variant vanilla
-  python tests/eval/run_eval.py --live --variant no_replan
+  python tests/eval/run_eval.py --live --variant vanilla --fixture
+  python tests/eval/run_eval.py --live --variant no_replan --fixture
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from tests.eval.graders.llm_judge import judge_answer_quality
 from tests.eval.graders.outcome import grade_gates
 from tests.eval.graders.structure import heuristic_report_judge
 from tests.eval.graders.trajectory import grade_constraints
@@ -34,6 +41,7 @@ from tests.eval.metrics import (
     build_report,
     compare_with_baseline,
 )
+from tests.eval.reliability import reliability_report
 from tests.eval.runners.component import load_jsonl, run_component_eval
 from tests.eval.runners.experiment import (
     apply_variant,
@@ -113,137 +121,160 @@ async def run_live_eval(
     min_trajectory_similarity: float = 0.6,
     *,
     variant_name: str = "full",
+    repeat: int = 1,
+    judge_enabled: bool | None = None,
+    fixture: bool = False,
 ) -> list[TaskEvalResult]:
     from app.agent.main_agent import harness
     from app.config.loader import get_harness_config
-    from tests.eval.graders.llm_judge import judge_answer_quality
 
     _ = min_trajectory_similarity
+    if fixture:
+        os.environ["HARNESS_EVAL_FIXTURE"] = "1"
     eval_cfg = get_harness_config()
     variant = load_variant(variant_name)
     previous = apply_variant(eval_cfg, variant)
+    quality_enabled = eval_cfg.eval_llm_judge_enabled if judge_enabled is None else bool(judge_enabled)
+    repeats = max(1, int(repeat or 1))
     results: list[TaskEvalResult] = []
     try:
         for task in tasks:
-            session_id = f"eval_{task.get('case_id') or task.get('id')}_{uuid.uuid4().hex[:8]}"
-            try:
-                harness_result = await harness.run(
-                    task["query"],
-                    session_id,
-                    mode=str(variant.get("mode") or "agent"),
-                )
-                meta = dict(harness_result.metadata or {})
-                events = _events_from_harness(meta, harness_result.trace)
-                constraint = grade_constraints(
-                    events,
-                    task.get("constraints"),
-                    counts={
-                        "replan_count": int(meta.get("replan_count") or 0),
-                        "tool_calls": int(meta.get("tool_calls_count") or 0),
-                    },
-                    attributes={
-                        "progress.verdict": str(
-                            (meta.get("progress_assessment") or {}).get("verdict") or ""
-                        )
-                    },
-                )
-                structure = None
-                if harness_result.content and eval_cfg.eval_heuristic_judge_enabled:
-                    structure = heuristic_report_judge(
-                        harness_result.content,
-                        min_score=eval_cfg.eval_heuristic_judge_min_score,
-                        expect_citations=True,
-                    )
-                quality = await judge_answer_quality(
-                    question=task["query"],
-                    answer=harness_result.content or "",
-                    enabled=eval_cfg.eval_llm_judge_enabled,
-                )
-                gates = grade_gates(
-                    harness_status=harness_result.status,
-                    abort_reason=str(meta.get("abort_reason") or ""),
-                    constraint_ok=True,
-                    plan_ok=True,
-                    requested=list(task.get("gates") or []),
-                    outcome_wrong=bool(quality.critical_error),
-                    unsupported=bool(quality.unsupported_claims) if quality.judge_source != "disabled" else False,
-                )
-                taxonomy = dict(task.get("taxonomy") or {})
-                success = gates["ok"] and harness_result.status in {"success", "partial", ""}
-                ccr = meta.get("citation_coverage_rate")
-                results.append(
-                    TaskEvalResult(
-                        task_id=str(task.get("case_id") or task.get("id")),
-                        query=task["query"],
-                        mode="live",
-                        success=success,
-                        gate_ok=gates["ok"],
-                        outcome_score=quality.correctness,
-                        grounding_score=quality.grounding
-                        if quality.grounding is not None
-                        else (float(ccr) if ccr is not None else None),
-                        trajectory_score=constraint["score"],
-                        status=harness_result.status,
-                        retry_count=harness_result.retry_count,
-                        artifacts=harness_result.artifacts,
-                        tool_calls_count=int(meta.get("tool_calls_count") or 0),
-                        latency_ms=int(meta.get("latency_ms") or 0),
-                        citation_coverage_rate=float(ccr) if ccr is not None else None,
-                        hallucination_rate=meta.get("hallucination_rate"),
-                        report_judge_score=structure.score if structure else None,
-                        report_judge_passed=structure.passed if structure else None,
-                        session_id=session_id,
-                        run_id=str(meta.get("run_id") or session_id),
-                        trace_id=str(meta.get("trace_id") or ""),
-                        variant=str(variant.get("name") or variant_name),
-                        replan_count=int(meta.get("replan_count") or 0),
-                        failure_stage="" if success else str(taxonomy.get("stage") or "runtime"),
-                        failure_type="" if success else ",".join(gates["failures"] or [taxonomy.get("type") or ""]),
-                        metadata={
-                            **meta,
-                            "constraints": constraint,
-                            "gates": gates,
-                            "structure_judge": structure.to_dict() if structure else None,
-                            "quality_judge": quality.to_dict(),
-                            "case_id": task.get("case_id") or task.get("id"),
-                            "variant": variant.get("name"),
-                        },
-                    )
+            for repeat_index in range(repeats):
+                session_id = (
+                    f"eval_{task.get('case_id') or task.get('id')}_{repeat_index}_{uuid.uuid4().hex[:8]}"
                 )
                 try:
-                    from app.observability import EventType, get_recorder
-
-                    get_recorder().emit(
-                        EventType.EVAL_SCORED,
-                        phase="eval",
-                        status="pass" if success else "fail",
-                        session_id=session_id,
-                        run_id=str(meta.get("run_id") or session_id),
-                        trace_id=str(meta.get("trace_id") or ""),
-                        attributes={
-                            "case_id": task.get("case_id") or task.get("id"),
-                            "benchmark": "harness_scenarios_v1",
-                            "variant": variant.get("name"),
-                            "accuracy": 1.0 if success else 0.0,
-                            "citation_score": ccr,
+                    harness_result = await harness.run(
+                        task["query"],
+                        session_id,
+                        mode=str(variant.get("mode") or "agent"),
+                    )
+                    meta = dict(harness_result.metadata or {})
+                    events = _events_from_harness(meta, harness_result.trace)
+                    constraint = grade_constraints(
+                        events,
+                        task.get("constraints"),
+                        counts={
                             "replan_count": int(meta.get("replan_count") or 0),
-                            "latency_ms": int(meta.get("latency_ms") or 0),
+                            "tool_calls": int(meta.get("tool_calls_count") or 0),
+                        },
+                        attributes={
+                            "progress.verdict": str(
+                                (meta.get("progress_assessment") or {}).get("verdict") or ""
+                            )
                         },
                     )
-                except Exception:
-                    pass
-            except Exception as exc:
-                results.append(
-                    TaskEvalResult(
-                        task_id=str(task.get("case_id") or task.get("id")),
-                        query=task["query"],
-                        mode="live",
-                        success=False,
-                        gate_ok=False,
-                        error=str(exc),
-                        variant=str(variant.get("name") or variant_name),
+                    structure = None
+                    if harness_result.content and eval_cfg.eval_heuristic_judge_enabled:
+                        structure = heuristic_report_judge(
+                            harness_result.content,
+                            min_score=eval_cfg.eval_heuristic_judge_min_score,
+                            expect_citations=True,
+                        )
+                    usage = meta.get("usage") if isinstance(meta.get("usage"), dict) else {}
+                    quality = await judge_answer_quality(
+                        question=task["query"],
+                        answer=harness_result.content or "",
+                        evidence=str(meta.get("evidence_digest") or ""),
+                        brief=str(meta.get("brief") or ""),
+                        reference=str(task.get("reference") or task.get("expected_answer") or ""),
+                        must_include=list(task.get("must_include") or []),
+                        enabled=quality_enabled,
                     )
-                )
+                    gates = grade_gates(
+                        harness_status=harness_result.status,
+                        abort_reason=str(meta.get("abort_reason") or ""),
+                        constraint_ok=True,
+                        plan_ok=True,
+                        requested=list(task.get("gates") or []),
+                        outcome_wrong=bool(quality.critical_error),
+                        unsupported=(
+                            bool(quality.unsupported_claims)
+                            if quality.judge_source not in {"disabled", "unavailable"}
+                            else False
+                        ),
+                    )
+                    taxonomy = dict(task.get("taxonomy") or {})
+                    success = gates["ok"] and harness_result.status in {"success", "partial", ""}
+                    ccr = meta.get("citation_coverage_rate")
+                    results.append(
+                        TaskEvalResult(
+                            task_id=str(task.get("case_id") or task.get("id")),
+                            query=task["query"],
+                            mode="live",
+                            success=success,
+                            gate_ok=gates["ok"],
+                            outcome_score=quality.correctness,
+                            grounding_score=quality.grounding
+                            if quality.grounding is not None
+                            else (float(ccr) if ccr is not None else None),
+                            trajectory_score=constraint["score"],
+                            status=harness_result.status,
+                            retry_count=harness_result.retry_count,
+                            artifacts=harness_result.artifacts,
+                            tool_calls_count=int(meta.get("tool_calls_count") or 0),
+                            latency_ms=int(meta.get("latency_ms") or 0),
+                            tokens=int(meta.get("total_tokens") or usage.get("total_tokens") or 0),
+                            citation_coverage_rate=float(ccr) if ccr is not None else None,
+                            hallucination_rate=meta.get("hallucination_rate"),
+                            report_judge_score=structure.score if structure else None,
+                            report_judge_passed=structure.passed if structure else None,
+                            session_id=session_id,
+                            run_id=str(meta.get("run_id") or session_id),
+                            trace_id=str(meta.get("trace_id") or ""),
+                            variant=str(variant.get("name") or variant_name),
+                            replan_count=int(meta.get("replan_count") or 0),
+                            failure_stage="" if success else str(taxonomy.get("stage") or "runtime"),
+                            failure_type="" if success else ",".join(gates["failures"] or [taxonomy.get("type") or ""]),
+                            metadata={
+                                **meta,
+                                "constraints": constraint,
+                                "gates": gates,
+                                "structure_judge": structure.to_dict() if structure else None,
+                                "quality_judge": quality.to_dict(),
+                                "case_id": task.get("case_id") or task.get("id"),
+                                "variant": variant.get("name"),
+                                "repeat_index": repeat_index,
+                            },
+                        )
+                    )
+                    try:
+                        from app.observability import EventType, get_recorder
+
+                        get_recorder().emit(
+                            EventType.EVAL_SCORED,
+                            phase="eval",
+                            status="pass" if success else "fail",
+                            session_id=session_id,
+                            run_id=str(meta.get("run_id") or session_id),
+                            trace_id=str(meta.get("trace_id") or ""),
+                            attributes={
+                                "case_id": task.get("case_id") or task.get("id"),
+                                "benchmark": "harness_scenarios_v1",
+                                "variant": variant.get("name"),
+                                "accuracy": quality.correctness,
+                                "citation_score": ccr,
+                                "replan_count": int(meta.get("replan_count") or 0),
+                                "latency_ms": int(meta.get("latency_ms") or 0),
+                                "repeat_index": repeat_index,
+                                "judge_source": quality.judge_source,
+                            },
+                        )
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    results.append(
+                        TaskEvalResult(
+                            task_id=str(task.get("case_id") or task.get("id")),
+                            query=task["query"],
+                            mode="live",
+                            success=False,
+                            gate_ok=False,
+                            error=str(exc),
+                            variant=str(variant.get("name") or variant_name),
+                            metadata={"repeat_index": repeat_index},
+                        )
+                    )
     finally:
         restore_variant(eval_cfg, previous)
     return results
@@ -351,6 +382,14 @@ def print_summary(report_dict: dict, comparison: dict | None = None) -> None:
         print(f"Outcome: {report_dict['outcome_score']:.3f}")
     if report_dict.get("grounding_score") is not None:
         print(f"Grounding: {report_dict['grounding_score']:.3f}")
+    reliability = report_dict.get("reliability") or {}
+    if reliability.get("repeat", 0) > 1:
+        print(
+            "Reliability: "
+            f"pass@1={reliability.get('pass_at_1')} "
+            f"pass@{reliability.get('repeat')}={reliability.get('pass_at_k')} "
+            f"pass^{reliability.get('repeat')}={reliability.get('pass_hat_k')}"
+        )
     if report_dict.get("failure_distribution"):
         print(f"Failures: {report_dict['failure_distribution']}")
     if comparison and comparison.get("regressions"):
@@ -368,12 +407,36 @@ def main() -> None:
     parser.add_argument("--component", action="store_true", help="Only L1 component datasets")
     parser.add_argument("--variant", default=os.getenv("HARNESS_EVAL_VARIANT") or "full")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--repeat", type=int, default=1, help="Reliability repeats per case")
+    parser.add_argument("--fixture", action="store_true", help="Use deterministic search/fetch corpus")
+    parser.add_argument("--judge", action="store_true", help="Enable QualityJudge for this run")
+    parser.add_argument("--calibrate-judge", action="store_true", help="Compare human gold vs automatic judge")
     parser.add_argument("--output", default=str(ROOT / "tests" / "eval" / "results"))
     parser.add_argument("--baseline", default=str(BASELINE_PATH))
     parser.add_argument("--save-baseline", action="store_true")
     parser.add_argument("--report-md", action="store_true")
     parser.add_argument("--fail-on-regression", action="store_true")
     args = parser.parse_args()
+
+    if args.calibrate_judge:
+        from tests.eval.graders.calibration import calibrate_judge_sync
+
+        payload = calibrate_judge_sync(use_llm=bool(args.judge))
+        out_dir = Path(args.output)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = out_dir / f"judge_calibration_{ts}.json"
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("=== Judge Calibration ===")
+        print(f"n={payload['n']} mode={payload['mode']}")
+        print(
+            f"agreement={payload['agreement']} kappa={payload['kappa']} "
+            f"precision={payload['precision']} recall={payload['recall']} "
+            f"correctness_mae={payload['correctness_mae']}"
+        )
+        print(payload["note"])
+        print(f"Report saved: {out}")
+        return
 
     if args.live:
         path = Path(args.tasks) if args.tasks else SCENARIO_PATH
@@ -384,7 +447,14 @@ def main() -> None:
 
         cfg = get_harness_config()
         results = asyncio.run(
-            run_live_eval(tasks, cfg.eval_trajectory_min_similarity, variant_name=args.variant)
+            run_live_eval(
+                tasks,
+                cfg.eval_trajectory_min_similarity,
+                variant_name=args.variant,
+                repeat=args.repeat,
+                judge_enabled=True if args.judge else None,
+                fixture=bool(args.fixture),
+            )
         )
         mode = f"live:{args.variant}"
         dataset = path.name
@@ -408,13 +478,21 @@ def main() -> None:
     report_dict["generated_at"] = datetime.now().isoformat()
     report_dict["note"] = (
         "Gate pass rate is hard-constraint only. "
-        "ReportStructureGrader is not answer quality."
+        "ReportStructureGrader is not answer quality. "
+        "QualityJudge is disabled unless --judge or eval.llm_judge_enabled. "
+        "BrowseComp official Accuracy is separate from this report."
     )
     if args.live:
         report_dict["manifest"] = experiment_manifest(
             dataset=dataset,
             variant=load_variant(args.variant),
+            repeat=args.repeat,
         )
+        reliability = reliability_report(results, k=args.repeat)
+        report_dict["reliability"] = reliability
+        report_dict["pass_at_1"] = reliability["pass_at_1"]
+        report_dict["pass_at_k"] = reliability["pass_at_k"]
+        report_dict["pass_hat_k"] = reliability["pass_hat_k"]
 
     baseline = load_baseline(Path(args.baseline))
     comparison = compare_with_baseline(report_dict, baseline) if baseline else None

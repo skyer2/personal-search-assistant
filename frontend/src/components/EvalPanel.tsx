@@ -10,7 +10,8 @@ const METRIC_ROWS = [
   { key: "grounding_score", label: "Grounding", suffix: "%", scale: 100 },
   { key: "trajectory_score", label: "Trajectory", suffix: "%", scale: 100 },
   { key: "plan_validation_pass_rate", label: "Invariants", suffix: "%", scale: 100 },
-  { key: "replan_recovery_rate", label: "Replan Recovery", suffix: "%", scale: 100 },
+  { key: "pass_at_1", label: "pass@1", suffix: "%", scale: 100 },
+  { key: "pass_hat_k", label: "pass^k", suffix: "%", scale: 100 },
   { key: "citation_coverage_rate", label: "CCR", suffix: "%", scale: 100 },
   { key: "avg_tool_calls", label: "Tool Calls", suffix: "", scale: 1 },
   { key: "latency_p95_ms", label: "P95", suffix: "ms", scale: 1 }

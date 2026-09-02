@@ -88,8 +88,52 @@ python tests/eval/run_eval.py --live --variant full
 | 模块 | 作用 |
 | --- | --- |
 | `ReportStructureGrader`（原 heuristic judge） | 只评标题/引用标记/参考文献，**不是**答案质量 |
-| `QualityJudgeResult` | correctness / completeness / grounding JSON；默认关闭 |
-| Human meta-eval | 30～50 条人工标签校准 Judge |
+| `QualityJudge` | correctness / completeness / grounding。`--judge` 或 `eval.llm_judge_enabled` 才启用 |
+| Human meta-eval | `tests/eval/datasets/judge_calibration_v1.jsonl`（当前 13 条 seed）。目标仍是 30～50 条专家标签 |
+
+QualityJudge 来源：
+
+```text
+disabled           默认，不算答案质量
+llm                模型 JSON rubric
+reference_grader   有 reference / must_include 时的词面 surrogate，不冒充官方 Accuracy
+unavailable        已启用但没有模型和 reference
+```
+
+不要把 `llm_stub` 当成分数。Judge 校准看的是 human gold vs automatic label 的 agreement / kappa / MAE，而不是假设 Judge 永远正确。
+
+```bash
+python tests/eval/run_eval.py --calibrate-judge
+```
+
+## Reliability
+
+Live 默认仍是 1 case × 1 run。要看稳定性：
+
+```bash
+python tests/eval/run_eval.py --live --variant full --repeat 3 --fixture --limit 5
+```
+
+报告字段：
+
+| 指标 | 含义 |
+| --- | --- |
+| `pass_at_1` | 单次运行成功期望 |
+| `pass_at_k` | k 次里至少成功一次 |
+| `pass_hat_k` | k 次全部成功。生产型 Agent 更应看这个 |
+| latency/token mean/std | 代价波动 |
+
+## Controlled environment
+
+Harness 控制面的 live scenario 用固定语料，避免网页变化污染分数：
+
+```bash
+python tests/eval/run_eval.py --live --variant full --fixture --limit 5
+```
+
+`HARNESS_EVAL_FIXTURE=1` 时 `internet_search` / `fetch_url` 只读 `tests/eval/fixtures/corpus.json`，未知 URL **不会**回落到真实网络。BrowseComp-Plus 仍走自己的固定 corpus，优先级更高。
+
+真实 Web 只留给 online / capability eval。
 
 ## Failure Taxonomy
 
@@ -114,8 +158,10 @@ python tests/eval/run_eval.py --dry-run --fail-on-regression
 # 只跑 component
 python tests/eval/run_eval.py --component
 
-# Live ablation（需 LLM）
-python tests/eval/run_eval.py --live --variant full --limit 5
+# Live ablation（需 LLM；控制面请加 --fixture）
+python tests/eval/run_eval.py --live --variant full --limit 5 --fixture
+python tests/eval/run_eval.py --live --variant full --repeat 3 --fixture --limit 5
+python tests/eval/run_eval.py --calibrate-judge
 ```
 
 旧 `tasks.jsonl`（数据库 / RAGFlow / 电商 PDF）已归档到 `tests/eval/datasets/legacy/tasks_legacy.jsonl`，不再作为回归真源。

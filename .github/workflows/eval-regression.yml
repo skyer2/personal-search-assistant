@@ -36,6 +36,13 @@ jobs:
       - name: Eval hierarchy
         run: uv run python tests/eval/test_eval_hierarchy.py
 
+      - name: Quality judge / reliability / fixture
+        run: |
+          uv run python tests/eval/test_quality_judge.py
+          uv run python tests/eval/test_reliability.py
+          uv run python tests/eval/test_eval_fixture.py
+          uv run python tests/eval/test_judge_calibration.py
+
       - name: Phase 9 observability tests
         run: uv run python tests/test_harness_phase9.py
 

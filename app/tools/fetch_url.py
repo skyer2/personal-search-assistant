@@ -57,8 +57,21 @@ def fetch_url_content(
     if not target.startswith(("http://", "https://")):
         return {"ok": False, "error": "invalid_url", "url": target}
 
+    active_fetcher = fetcher
+    if active_fetcher is None:
+        from app.tools.eval_fixture import fetch_fixture, fixture_enabled
+
+        if fixture_enabled():
+            def _fixture_fetcher(request_url: str, _timeout: float) -> tuple[str, str]:
+                payload = fetch_fixture(request_url, max_chars=max_chars)
+                if not payload.get("ok"):
+                    raise ValueError(str(payload.get("error") or "not_in_fixture_corpus"))
+                return str(payload.get("text") or ""), "text/plain"
+
+            active_fetcher = _fixture_fetcher
+
     try:
-        raw, content_type = (fetcher or _default_fetch)(target, timeout)
+        raw, content_type = (active_fetcher or _default_fetch)(target, timeout)
     except HTTPError as exc:
         return {"ok": False, "error": f"http_{exc.code}", "url": target}
     except (URLError, TimeoutError, OSError, ValueError) as exc:
