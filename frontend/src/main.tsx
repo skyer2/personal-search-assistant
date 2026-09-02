@@ -5,6 +5,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { ConversationLayoutPreview } from "./preview/ConversationLayoutPreview";
 import { RunStatesPreview } from "./preview/RunStatesPreview";
+import { TraceWorkersPreview } from "./preview/TraceWorkersPreview";
 import "./styles.css";
 
 const preview = import.meta.env.DEV
@@ -48,6 +49,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <RunStatesPreview />
         ) : preview === "conversation-layout" ? (
           <ConversationLayoutPreview />
+        ) : preview === "trace-workers" ? (
+          <TraceWorkersPreview />
         ) : (
           <App />
         )}

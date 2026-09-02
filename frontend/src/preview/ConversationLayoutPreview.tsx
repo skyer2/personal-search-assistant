@@ -50,8 +50,9 @@ export function ConversationLayoutPreview() {
       content: "对比 LangGraph 和 Temporal 在 durable agent workflow 上的设计。",
       events: mockEvents,
       files: mockFiles,
-      isRunning: true,
-      result: "",
+      isRunning: false,
+      result:
+        "任务因 deadline_exceeded 提前结束，已根据已有材料生成部分 PDF：brief.pdf",
       timestamp: new Date(now - elapsedMs).toISOString(),
       elapsedMs
     }
@@ -72,7 +73,7 @@ export function ConversationLayoutPreview() {
       <ConversationThread
         onUseExample={() => undefined}
         processHeight={220}
-        runStatus="running"
+        runStatus="completed"
         sessionId="preview-session"
         turns={turns}
       />
