@@ -13,6 +13,30 @@ interface TraceViewerProps {
   sessionId: string;
 }
 
+function statusColor(status: unknown): string {
+  const value = String(status || "").toLowerCase();
+  if (["ok", "pass", "enough", "success", "done"].includes(value)) {
+    return "green";
+  }
+  if (["failed", "error", "fail", "abort", "rejected"].includes(value)) {
+    return "red";
+  }
+  if (["gap", "warning", "start", "run"].includes(value)) {
+    return value === "gap" || value === "warning" ? "orange" : "blue";
+  }
+  return "default";
+}
+
+function asText(value: unknown, fallback = "-"): string {
+  if (value == null || value === "") {
+    return fallback;
+  }
+  if (Array.isArray(value)) {
+    return value.length ? value.map((item) => String(item)).join(", ") : fallback;
+  }
+  return String(value);
+}
+
 function SpanTree({ nodes }: { nodes: TraceSpanNode[] }) {
   if (!nodes.length) {
     return <Typography.Text type="secondary">暂无 span 树，先完成一次 Harness run</Typography.Text>;
@@ -115,6 +139,12 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
       .filter((item) => item.source_id === highlightSourceId)
       .map((item) => item.step_index)
   );
+  const workers = summary.workers || [];
+  const progress = summary.progress || [];
+  const replans = summary.replans || [];
+  const evals = summary.evals || [];
+  const progressCount = summary.progress_count ?? progress.length;
+  const replanCount = summary.replan_count ?? 0;
 
   return (
     <div className="trace-viewer">
@@ -148,53 +178,128 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
           },
           {
             key: "workers",
-            label: `Worker (${summary.worker_count || 0})`,
+            label: `Worker (${summary.worker_count || workers.length})`,
             children: (
               <Card size="small">
-                <Table
-                  dataSource={(summary.workers || []).map((row, index) => ({ ...row, key: `w-${index}` }))}
-                  pagination={{ pageSize: 12 }}
-                  size="small"
-                  columns={[
-                    { title: "Event", dataIndex: "type", width: 160 },
-                    { title: "Task", dataIndex: "task_id", width: 110 },
-                    { title: "Status", dataIndex: "status", width: 90 },
-                    { title: "ms", dataIndex: "duration_ms", width: 80 },
-                    { title: "Attempt", dataIndex: "attempt", width: 80 },
-                    { title: "Objective", dataIndex: "objective", ellipsis: true }
-                  ]}
-                />
+                {workers.length === 0 ? (
+                  <Alert message="本 run 尚未写入 worker.started / worker.completed" showIcon type="info" />
+                ) : (
+                  <Table
+                    dataSource={workers.map((row, index) => ({ ...row, key: `${String(row.task_id || "w")}-${String(row.attempt || index)}` }))}
+                    pagination={{ pageSize: 12 }}
+                    size="small"
+                    columns={[
+                      { title: "Task", dataIndex: "task_id", width: 140 },
+                      {
+                        title: "Status",
+                        dataIndex: "status",
+                        width: 90,
+                        render: (status: unknown) => <Tag color={statusColor(status)}>{asText(status)}</Tag>
+                      },
+                      { title: "ms", dataIndex: "duration_ms", width: 90 },
+                      { title: "Attempt", dataIndex: "attempt", width: 80 },
+                      {
+                        title: "Plan",
+                        dataIndex: "plan_version",
+                        width: 70,
+                        render: (version: unknown) => (version == null || version === "" ? "-" : `v${version}`)
+                      },
+                      { title: "Objective", dataIndex: "objective", ellipsis: true, render: (value: unknown) => asText(value) },
+                      {
+                        title: "Fail",
+                        dataIndex: "fail_reason",
+                        width: 120,
+                        ellipsis: true,
+                        render: (value: unknown) => asText(value, "")
+                      }
+                    ]}
+                  />
+                )}
               </Card>
             )
           },
           {
             key: "replan",
-            label: `Replan (${summary.replan_count || 0})`,
+            label: `进度 (${progressCount}) / Replan (${replanCount})`,
             children: (
               <Card size="small">
-                <Table
-                  dataSource={(summary.replans || []).map((row, index) => ({ ...row, key: `r-${index}` }))}
-                  pagination={false}
-                  size="small"
-                  columns={[
-                    { title: "Event", dataIndex: "type", width: 140 },
-                    {
-                      title: "Version",
-                      render: (_, row) => `${row.from_plan_version ?? "-"} → ${row.to_plan_version ?? "-"}`
-                    },
-                    { title: "Reason", dataIndex: "reason", ellipsis: true },
-                    {
-                      title: "Added",
-                      render: (_, row) => (Array.isArray(row.added_tasks) ? row.added_tasks.join(", ") : "-")
-                    }
-                  ]}
-                />
+                {progress.length === 0 && replans.length === 0 ? (
+                  <Alert
+                    message="尚未写入 progress.evaluated。第二波 Worker 可能只是计划内 READY 任务按 max_parallel 分批执行，不一定经过 PlanPatch。"
+                    showIcon
+                    type="info"
+                  />
+                ) : null}
+                {progress.length > 0 && replanCount === 0 ? (
+                  <Alert
+                    message="进度已评估但未应用 PlanPatch。verdict=enough，或 gap 但被 max_replan / validator 拦住时，后续 Worker 仍是原计划 READY 队列。"
+                    showIcon
+                    type="info"
+                  />
+                ) : null}
+                {progress.length > 0 ? (
+                  <>
+                    <Typography.Title level={5}>进度评估</Typography.Title>
+                    <Table
+                      dataSource={progress.map((row, index) => ({ ...row, key: `p-${index}` }))}
+                      pagination={false}
+                      size="small"
+                      columns={[
+                        {
+                          title: "Verdict",
+                          dataIndex: "verdict",
+                          width: 100,
+                          render: (verdict: unknown) => <Tag color={statusColor(verdict)}>{asText(verdict)}</Tag>
+                        },
+                        {
+                          title: "Plan",
+                          dataIndex: "plan_version",
+                          width: 70,
+                          render: (version: unknown) => (version == null || version === "" ? "-" : `v${version}`)
+                        },
+                        { title: "Reason", dataIndex: "reason", ellipsis: true, render: (value: unknown) => asText(value) },
+                        {
+                          title: "Gaps",
+                          render: (_, row) => asText(row.gaps)
+                        },
+                        {
+                          title: "Conflicts",
+                          dataIndex: "conflict_count",
+                          width: 90,
+                          render: (value: unknown) => asText(value, "0")
+                        }
+                      ]}
+                    />
+                  </>
+                ) : null}
+                <Typography.Title level={5}>Replan</Typography.Title>
+                {replans.length === 0 ? (
+                  <Typography.Text type="secondary">没有 replan.applied / replan.failed 事件。</Typography.Text>
+                ) : (
+                  <Table
+                    dataSource={replans.map((row, index) => ({ ...row, key: `r-${index}` }))}
+                    pagination={false}
+                    size="small"
+                    columns={[
+                      { title: "Event", dataIndex: "type", width: 140 },
+                      {
+                        title: "Version",
+                        render: (_, row) => `${asText(row.from_plan_version)} → ${asText(row.to_plan_version)}`
+                      },
+                      { title: "Reason", dataIndex: "reason", ellipsis: true },
+                      {
+                        title: "Added",
+                        render: (_, row) => asText(row.added_tasks)
+                      }
+                    ]}
+                  />
+                )}
               </Card>
             )
           },
           {
             key: "eval",
-            label: `Eval (${(summary.evals || []).length})`,
+            label: `Eval (${evals.length})`,
             children: (
               <Card size="small">
                 {summary.usage ? (
@@ -204,19 +309,39 @@ export function TraceViewer({ sessionId }: TraceViewerProps) {
                     type="info"
                   />
                 ) : null}
-                <Table
-                  dataSource={(summary.evals || []).map((row, index) => ({ ...row, key: `e-${index}` }))}
-                  pagination={false}
-                  size="small"
-                  columns={[
-                    { title: "Case", dataIndex: "case_id" },
-                    { title: "Variant", dataIndex: "variant" },
-                    { title: "Accuracy", dataIndex: "accuracy" },
-                    { title: "Citation", dataIndex: "citation_score" },
-                    { title: "Replan", dataIndex: "replan_count" },
-                    { title: "ms", dataIndex: "latency_ms" }
-                  ]}
-                />
+                {evals.length === 0 ? (
+                  <Alert
+                    message="交互提问不会产生 eval.scored（那是 tests/eval/run_eval.py --live）。Finalize 后应出现 quality.evaluated；若仍为空，说明质量评估尚未发出或 run 未结束。"
+                    showIcon
+                    type="info"
+                  />
+                ) : (
+                  <Table
+                    dataSource={evals.map((row, index) => ({ ...row, key: `e-${index}` }))}
+                    pagination={false}
+                    size="small"
+                    columns={[
+                      { title: "Event", dataIndex: "type", width: 150 },
+                      {
+                        title: "Status",
+                        dataIndex: "status",
+                        width: 90,
+                        render: (status: unknown) => <Tag color={statusColor(status)}>{asText(status)}</Tag>
+                      },
+                      { title: "Case", dataIndex: "case_id", render: (value: unknown) => asText(value) },
+                      { title: "Variant", dataIndex: "variant", render: (value: unknown) => asText(value) },
+                      { title: "Accuracy", dataIndex: "accuracy", render: (value: unknown) => asText(value) },
+                      { title: "Citation", dataIndex: "citation_score", render: (value: unknown) => asText(value) },
+                      {
+                        title: "Passed",
+                        dataIndex: "passed",
+                        width: 80,
+                        render: (value: unknown) => (value == null ? "-" : String(value))
+                      },
+                      { title: "ms", dataIndex: "latency_ms", render: (value: unknown) => asText(value) }
+                    ]}
+                  />
+                )}
               </Card>
             )
           },

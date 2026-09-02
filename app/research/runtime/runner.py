@@ -593,6 +593,7 @@ class ResearchGraphRunner:
                     EventType.PROGRESS_EVALUATED,
                     phase="validate",
                     status=assessment.verdict,
+                    plan_version=int(getattr(plan, "plan_version", 0) or 0) or None,
                     attributes={
                         "verdict": assessment.verdict,
                         "reason": assessment.reason,
