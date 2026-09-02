@@ -167,8 +167,20 @@ def test_recorder_run_summary_is_scanned():
 def test_summarize_trace_workers_and_replan():
     events = [
         {"type": "run.started", "session_id": "s1", "run_id": "r1", "trace_id": "t1", "attributes": {"git_sha": "abc"}},
-        {"type": "worker.started", "task_id": "t_a", "status": "start", "attempt": 1},
-        {"type": "worker.completed", "task_id": "t_a", "status": "ok", "duration_ms": 12},
+        {
+            "type": "worker.started",
+            "task_id": "t_a",
+            "status": "start",
+            "attempt": 1,
+            "attributes": {"objective": "下一跳预测"},
+        },
+        {"type": "worker.completed", "task_id": "t_a", "status": "ok", "duration_ms": 12, "attempt": 1},
+        {
+            "type": "progress.evaluated",
+            "status": "enough",
+            "plan_version": 1,
+            "attributes": {"verdict": "enough", "reason": "ready_queue_empty", "gaps": []},
+        },
         {
             "type": "replan.applied",
             "attributes": {
@@ -179,15 +191,74 @@ def test_summarize_trace_workers_and_replan():
             },
         },
         {"type": "gen_ai.chat", "attributes": {"total_tokens": 100, "cost_usd": 0.01}},
+        {
+            "type": "quality.evaluated",
+            "status": "pass",
+            "attributes": {"passed": True, "citation_coverage_rate": 0.9, "severity": "info"},
+        },
         {"type": "eval.scored", "attributes": {"case_id": "037", "variant": "full_harness", "accuracy": 1}},
     ]
     summary = summarize_trace(events)
     assert summary["identity"]["run_id"] == "r1"
     assert summary["worker_count"] == 1
+    assert len(summary["workers"]) == 1
+    worker = summary["workers"][0]
+    assert worker["type"] == "worker.completed"
+    assert worker["status"] == "ok"
+    assert worker["duration_ms"] == 12
+    assert worker["objective"] == "下一跳预测"
+    assert summary["progress_count"] == 1
+    assert summary["progress"][0]["verdict"] == "enough"
     assert summary["replan_count"] == 1
     assert summary["usage"]["total_tokens"] == 100
-    assert summary["evals"][0]["case_id"] == "037"
+    assert summary["evals"][0]["type"] == "quality.evaluated"
+    assert summary["evals"][0]["passed"] is True
+    assert summary["evals"][1]["case_id"] == "037"
     print("[OK] summarize_trace")
+
+
+def test_summarize_trace_progress_without_replan():
+    events = [
+        {
+            "type": "worker.started",
+            "task_id": "t_next_hop",
+            "status": "start",
+            "attempt": 1,
+            "attributes": {"objective": "下一跳"},
+        },
+        {"type": "worker.completed", "task_id": "t_next_hop", "status": "ok", "duration_ms": 115797, "attempt": 1},
+        {
+            "type": "worker.started",
+            "task_id": "t_langgraph",
+            "status": "start",
+            "attempt": 1,
+            "attributes": {"objective": "LangGraph"},
+        },
+        {"type": "worker.completed", "task_id": "t_langgraph", "status": "ok", "duration_ms": 230308, "attempt": 1},
+        {
+            "type": "progress.evaluated",
+            "status": "enough",
+            "attributes": {"verdict": "enough", "reason": "coverage_ok"},
+        },
+        {
+            "type": "worker.started",
+            "task_id": "t_running",
+            "status": "start",
+            "attempt": 1,
+            "attributes": {"objective": "进行中"},
+        },
+    ]
+    summary = summarize_trace(events)
+    assert summary["worker_count"] == 3
+    assert [row["task_id"] for row in summary["workers"]] == ["t_next_hop", "t_langgraph", "t_running"]
+    assert summary["workers"][0]["objective"] == "下一跳"
+    assert summary["workers"][0]["duration_ms"] == 115797
+    assert summary["workers"][2]["status"] == "start"
+    assert summary["workers"][2]["objective"] == "进行中"
+    assert summary["replan_count"] == 0
+    assert summary["progress_count"] == 1
+    assert summary["evals"] == []
+    print("[OK] summarize_trace progress without replan")
 
 
 def test_bind_worker_isolates_span_context():
@@ -241,5 +312,6 @@ if __name__ == "__main__":
     test_recorder_run_summary_is_scanned()
     test_eval_score_attaches_to_existing_trace()
     test_summarize_trace_workers_and_replan()
+    test_summarize_trace_progress_without_replan()
     test_bind_worker_isolates_span_context()
     print("\n=== Flight recorder tests passed ===")

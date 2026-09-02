@@ -38,7 +38,7 @@ Langfuse  TraceViewer / Metrics
 |------|------|
 | 实时 UI | 提问后的过程框 / 执行过程（WebSocket `monitor_event`） |
 | 因果树 | Trace 查看器「因果树」页签；`GET /api/traces/tree/{session_id}` |
-| Worker / Replan / Eval | Trace 查看器对应页签；JSONL/tree 响应里的 `summary`（identity、workers、replans、evals、usage） |
+| Worker / 进度 / Replan / Eval | Trace 查看器对应页签；JSONL/tree 响应里的 `summary`（identity、workers 按 `task_id+attempt` 合并 started/completed、progress、replans、evals、usage） |
 | 落盘 journal | `app/logs/traces/{session_id}.jsonl`（运行时根是 `app/`，`schema=agent_event.v1`） |
 | 窗口聚合 | `GET /api/metrics/summary`（同时读 nested `extra` 和顶层 `event=run_summary`） |
 | 进程内 Counter/Histogram | `GET /api/metrics/prometheus` 中 `harness_live_*` |
@@ -52,9 +52,11 @@ Langfuse  TraceViewer / Metrics
 
 `replan.proposed` → `replan.applied` / `replan.rejected` 记录 `from_plan_version` / `to_plan_version` / `reason` / `gaps` / `added_tasks` / `remaining_budget`。窗口聚合给出 `replan_trigger_rate`、`replan_recovery_rate`（触发 replan 后仍 success 的比例）、`avg_replan_count`。进程内 Counter：`harness_live_replan_applied_total`、`harness_live_replan_recovered_total`（replan 后 run 仍成功）、`harness_live_replan_waste_total`（replan 后仍失败）。
 
+Trace 查看器「进度 / Replan」页签同时列出 `progress.evaluated`。`replan_count=0` 并不等于没做进度评估：`max_parallel_workers` 会把原计划 READY 任务分批发完，第二波 Worker 经常不是 PlanPatch。
+
 ## Eval 关联
 
-live eval 把 `trace_id` / `run_id` / `variant` / `case_id` 写入 `TaskEvalResult`，并 emit `eval.scored`。用 `HARNESS_EVAL_VARIANT=full_harness|no_replan|vanilla` 做 ablation。
+live eval 把 `trace_id` / `run_id` / `variant` / `case_id` 写入 `TaskEvalResult`，并 emit `eval.scored`。用 `HARNESS_EVAL_VARIANT=full_harness|no_replan|vanilla` 做 ablation。交互提问只会产生 Finalize 时的 `quality.evaluated`，不会有 `eval.scored`。
 
 ## 依赖
 

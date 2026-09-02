@@ -107,10 +107,72 @@ def _preferred_span_name(node: dict[str, Any], event: dict[str, Any]) -> str:
     return current or incoming or "event"
 
 
+_WORKER_TERMINAL = {"worker.completed", "worker.failed"}
+
+
+def _as_int(value: Any, default: int = 1) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _worker_attempt_key(event: dict[str, Any], attrs: dict[str, Any]) -> tuple[str, int]:
+    task_id = str(event.get("task_id") or attrs.get("task_id") or "")
+    attempt = event.get("attempt")
+    if attempt is None:
+        attempt = attrs.get("attempt")
+    return (task_id, _as_int(attempt, 1))
+
+
+def _coalesce_worker_row(
+    rows: dict[tuple[str, int], dict[str, Any]],
+    event: dict[str, Any],
+    attrs: dict[str, Any],
+    event_type: str,
+) -> None:
+    """同一 task_id+attempt 的 started/completed 合成一行，objective 从 started 继承。"""
+    key = _worker_attempt_key(event, attrs)
+    incoming = {
+        "type": event_type,
+        "task_id": event.get("task_id") or attrs.get("task_id") or None,
+        "status": event.get("status"),
+        "duration_ms": event.get("duration_ms"),
+        "attempt": key[1],
+        "plan_version": event.get("plan_version") if event.get("plan_version") is not None else attrs.get("plan_version"),
+        "objective": attrs.get("objective"),
+        "fail_reason": attrs.get("fail_reason") or event.get("fail_reason"),
+        "evidence_ids": attrs.get("evidence_ids") or [],
+        "step_type": attrs.get("step_type"),
+        "timestamp": event.get("timestamp"),
+    }
+    existing = rows.get(key)
+    if existing is None:
+        rows[key] = incoming
+        return
+    terminal = existing.get("type") in _WORKER_TERMINAL
+    if event_type in _WORKER_TERMINAL or not terminal:
+        existing["type"] = event_type
+    for field in ("status", "duration_ms", "plan_version", "timestamp"):
+        if incoming.get(field) not in (None, ""):
+            existing[field] = incoming[field]
+    if incoming.get("objective"):
+        existing["objective"] = incoming["objective"]
+    elif not existing.get("objective"):
+        existing["objective"] = incoming.get("objective")
+    if incoming.get("fail_reason"):
+        existing["fail_reason"] = incoming["fail_reason"]
+    if incoming.get("evidence_ids"):
+        existing["evidence_ids"] = incoming["evidence_ids"]
+    if incoming.get("step_type"):
+        existing["step_type"] = incoming["step_type"]
+
+
 def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """把 journal 收成 Agent-native 视图：identity / worker / replan / evidence / eval / usage。"""
+    """把 journal 收成 Agent-native 视图：identity / worker / progress / replan / evidence / eval / usage。"""
     identity: dict[str, Any] = {}
-    workers: list[dict[str, Any]] = []
+    workers_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    progress: list[dict[str, Any]] = []
     replans: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
     evals: list[dict[str, Any]] = []
@@ -135,17 +197,18 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
                 "variant": attrs.get("variant") or event.get("variant"),
             }
         if event_type.startswith("worker."):
-            workers.append(
+            _coalesce_worker_row(workers_by_key, event, attrs, event_type)
+        elif event_type == "progress.evaluated":
+            progress.append(
                 {
                     "type": event_type,
-                    "task_id": event.get("task_id") or attrs.get("task_id"),
-                    "status": event.get("status"),
-                    "duration_ms": event.get("duration_ms"),
-                    "attempt": event.get("attempt"),
+                    "verdict": attrs.get("verdict") or event.get("status"),
+                    "reason": attrs.get("reason"),
+                    "gaps": attrs.get("gaps") or [],
+                    "conflict_count": attrs.get("conflict_count"),
+                    "missing_dimensions": attrs.get("missing_dimensions") or [],
                     "plan_version": event.get("plan_version"),
-                    "objective": attrs.get("objective"),
-                    "fail_reason": attrs.get("fail_reason") or event.get("fail_reason"),
-                    "evidence_ids": attrs.get("evidence_ids") or [],
+                    "status": event.get("status"),
                     "timestamp": event.get("timestamp"),
                 }
             )
@@ -182,6 +245,8 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
                     "citation_score": attrs.get("citation_score") or attrs.get("citation_coverage_rate"),
                     "replan_count": attrs.get("replan_count"),
                     "latency_ms": attrs.get("latency_ms"),
+                    "passed": attrs.get("passed"),
+                    "severity": attrs.get("severity"),
                     "status": event.get("status"),
                     "type": event_type,
                 }
@@ -191,14 +256,17 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
             for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cache_read_tokens"):
                 usage[key] += int(attrs.get(key) or event.get(key) or 0)
             usage["cost_usd"] += float(attrs.get("cost_usd") or event.get("cost_usd") or 0.0)
+    workers = list(workers_by_key.values())
     return {
         "identity": identity,
         "workers": workers,
+        "progress": progress,
         "replans": replans,
         "evidence": evidence,
         "evals": evals,
         "usage": usage,
         "event_count": len(events),
-        "worker_count": len({row.get("task_id") for row in workers if row.get("task_id")}),
+        "worker_count": len(workers),
+        "progress_count": len(progress),
         "replan_count": sum(1 for row in replans if row.get("type") == "replan.applied"),
     }

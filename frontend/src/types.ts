@@ -209,6 +209,7 @@ export interface TraceSummary {
     variant?: string;
   };
   workers?: Array<Record<string, unknown>>;
+  progress?: Array<Record<string, unknown>>;
   replans?: Array<Record<string, unknown>>;
   evidence?: Array<Record<string, unknown>>;
   evals?: Array<Record<string, unknown>>;
@@ -222,6 +223,7 @@ export interface TraceSummary {
   };
   event_count?: number;
   worker_count?: number;
+  progress_count?: number;
   replan_count?: number;
 }
 

@@ -202,6 +202,8 @@ class LangChainWorkerRuntime:
                     attempt=attempt,
                     plan_version=int(task.plan_version or 1),
                     attributes={
+                        "objective": task.objective,
+                        "step_type": task.step_type,
                         "evidence_ids": [task.task_id] if ok else [],
                         "fail_reason": "" if ok else "worker_failed",
                     },
@@ -234,7 +236,11 @@ class LangChainWorkerRuntime:
                     task_id=task.task_id,
                     attempt=attempt,
                     plan_version=int(task.plan_version or 1),
-                    attributes={"fail_reason": str(exc)[:500]},
+                    attributes={
+                        "objective": task.objective,
+                        "step_type": task.step_type,
+                        "fail_reason": str(exc)[:500],
+                    },
                 )
                 if span_key:
                     recorder.end_span(span_key, status="error", duration_ms=duration_ms)
