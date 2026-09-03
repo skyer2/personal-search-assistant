@@ -22,12 +22,13 @@ Search is only a tool environment used to study:
 
 补充文档：
 
+- [docs/HARD_CEILING_ADAPTIVE_EFFORT.md](docs/HARD_CEILING_ADAPTIVE_EFFORT.md) — Hard Ceiling + Adaptive Effort（全局确定性控制 / 局部自治）
 - [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) — Agent Flight Recorder（统一 Trace / Replan / Eval）
 - [docs/EVALUATION.md](docs/EVALUATION.md) — 五层 Eval（Component / Scenario / BrowseComp / Ablation）
 - [docs/HARNESS_ARCHITECTURE.md](docs/HARNESS_ARCHITECTURE.md) — StateGraph 运行时
 - [docs/CONTEXT_SYSTEM.md](docs/CONTEXT_SYSTEM.md) — 上下文外置与压缩
 - [docs/BROWSECOMP_PLUS_EVAL.md](docs/BROWSECOMP_PLUS_EVAL.md) — BrowseComp-Plus 评测
-- [docs/OPENEULER_BARE_METAL.md](docs/OPENEULER_BARE_METAL.md) — openEuler 22.03 裸机安装、`.env`、启停与 systemd
+- [docs/OPENEULER_BARE_METAL.md](docs/OPENEULER_BARE_METAL.md) — 裸机安装、`.env`、启停与 systemd
 
 ## 研究什么
 

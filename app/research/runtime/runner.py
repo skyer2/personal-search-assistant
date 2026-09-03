@@ -709,9 +709,35 @@ class ResearchGraphRunner:
         if not can_replan(state, self.harness.harness_config):
             return exhausted
         policy = parse_source_policy(state.intent.raw_query)
+        run_budget = {}
+        if isinstance(getattr(state, "metadata", None), dict):
+            raw = state.metadata.get("run_budget")
+            if isinstance(raw, dict):
+                run_budget = raw
         max_new = int(
-            getattr(self.harness.harness_config, "planner_max_plan_patch_tasks", 2) or 2
+            run_budget.get(
+                "max_plan_patch_tasks",
+                getattr(self.harness.harness_config, "planner_max_plan_patch_tasks", 2) or 2,
+            )
         )
+        grant_retrieval = int(
+            run_budget.get(
+                "reserved_step_tool_calls",
+                run_budget.get(
+                    "max_step_tool_calls",
+                    getattr(self.harness.harness_config, "max_step_tool_calls", 8) or 8,
+                ),
+            )
+        )
+        try:
+            from app.research.planning.effort import grant_on_gap, resolve_effective_budget
+
+            effective = resolve_effective_budget(state.intent, self.harness.harness_config)
+            grant = grant_on_gap(effective, assessment=assessment)
+            max_new = min(max_new, int(grant.get("max_new_tasks", max_new)))
+            grant_retrieval = int(grant.get("max_retrieval_calls", grant_retrieval))
+        except Exception:
+            pass
         patch = build_progress_patch(
             state.plan,
             state.intent,
@@ -719,6 +745,12 @@ class ResearchGraphRunner:
             worker_results=list(gstate.get("worker_results") or []),
             max_new_tasks=max_new,
         )
+        for item in list(patch.get("add_tasks") or []):
+            if isinstance(item, dict):
+                meta = dict(item.get("metadata") or {})
+                meta.setdefault("max_retrieval_calls", grant_retrieval)
+                meta.setdefault("granted_on_gap", True)
+                item["metadata"] = meta
         try:
             from app.observability import EventType, get_recorder
 

@@ -46,24 +46,40 @@ def evaluate_run_guardrails(
     elapsed_sec: float,
     estimated_tokens: int,
 ) -> GuardrailDecision:
-    """每步执行前评估护栏。先命中先返回。"""
-    max_tools = int(config.max_tool_calls)
-    if state.tool_calls_count >= max_tools:
+    """每步执行前评估护栏。先命中先返回。
+
+    若 state.metadata['run_budget'] 存在（Adaptive Effort clamp 后），优先用其作为
+    本 run 的有效顶；该顶仍 ≤ Hard Ceiling，不会抬高全局配置。
+    """
+    run_budget = {}
+    meta = getattr(state, "metadata", None) or {}
+    if isinstance(meta, dict):
+        raw = meta.get("run_budget")
+        if isinstance(raw, dict):
+            run_budget = raw
+
+    def _cap(key: str, attr: str, default: int = 0) -> int:
+        if key in run_budget and run_budget[key] is not None:
+            return int(run_budget[key])
+        return int(getattr(config, attr, default) or default)
+
+    max_tools = _cap("max_tool_calls", "max_tool_calls", 0)
+    if max_tools > 0 and state.tool_calls_count >= max_tools:
         return GuardrailDecision(
             abort=True,
             reason=AbortReason.BUDGET_TOOL_CALLS,
             message=f"工具调用达到上限 {max_tools}",
         )
 
-    max_tokens = int(config.max_total_tokens)
-    if estimated_tokens >= max_tokens:
+    max_tokens = int(getattr(config, "max_total_tokens", 0) or 0)
+    if max_tokens > 0 and estimated_tokens >= max_tokens:
         return GuardrailDecision(
             abort=True,
             reason=AbortReason.BUDGET_TOKENS,
             message=f"估算 token 达到上限 {max_tokens}",
         )
 
-    max_run_sec = int(getattr(config, "max_run_sec", 0) or 0)
+    max_run_sec = _cap("max_run_sec", "max_run_sec", 0)
     if max_run_sec > 0 and elapsed_sec >= max_run_sec:
         return GuardrailDecision(
             abort=True,
@@ -71,7 +87,7 @@ def evaluate_run_guardrails(
             message=f"任务墙钟时限 {max_run_sec}s 已到",
         )
 
-    max_replan = int(getattr(config, "max_replan_count", 0) or 0)
+    max_replan = _cap("max_replan_count", "max_replan_count", 0)
     if max_replan > 0 and state.replan_count >= max_replan:
         return GuardrailDecision(
             abort=True,
@@ -79,7 +95,7 @@ def evaluate_run_guardrails(
             message=f"动态重规划达到上限 {max_replan}",
         )
 
-    max_steps = int(getattr(config, "max_plan_steps", 0) or 0)
+    max_steps = _cap("max_plan_steps", "max_plan_steps", 0)
     plan_len = len(state.plan.steps) if state.plan else 0
     if max_steps > 0 and plan_len > max_steps:
         return GuardrailDecision(
@@ -97,10 +113,18 @@ def can_replan(state: "LoopState", config: "HarnessConfig") -> bool:
         return False
     if state.retry_count >= state.max_retries:
         return False
-    max_replan = int(getattr(config, "max_replan_count", 0) or 0)
+    run_budget = {}
+    meta = getattr(state, "metadata", None) or {}
+    if isinstance(meta, dict) and isinstance(meta.get("run_budget"), dict):
+        run_budget = meta["run_budget"]
+    max_replan = int(
+        run_budget.get("max_replan_count", getattr(config, "max_replan_count", 0) or 0)
+    )
     if max_replan > 0 and state.replan_count >= max_replan:
         return False
-    max_steps = int(getattr(config, "max_plan_steps", 0) or 0)
+    max_steps = int(
+        run_budget.get("max_plan_steps", getattr(config, "max_plan_steps", 0) or 0)
+    )
     plan_len = len(state.plan.steps) if state.plan else 0
     if max_steps > 0 and plan_len >= max_steps:
         return False

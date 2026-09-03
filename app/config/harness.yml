@@ -100,12 +100,20 @@ harness:
     content_mode: "redacted"
 
   budget:
+    # Hard Safety Ceiling（确定性顶；Adaptive Effort 只能 clamp 到其下，不能抬高）
+    # 详见 docs/HARD_CEILING_ADAPTIVE_EFFORT.md
     max_total_tokens: 100000
     max_tool_calls: 40
     max_step_tool_calls: 8
     max_run_sec: 600
     max_replan_count: 2
     max_plan_steps: 8
+
+  # Adaptive Effort：ComplexityEstimator 根据 Research Brief 提出软配额，再与 budget 硬顶 min()
+  # 不在此写死 soft 数字；实现见 app/research/planning/effort.py
+  effort:
+    adaptive_enabled: true
+    note: "static ceiling + adaptive allocation + evidence-driven stop/replan"
 
   experiment:
     default_mode: agent

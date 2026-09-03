@@ -1549,8 +1549,19 @@ class AgentHarness:
                     and getattr(self.harness_config, "planner_dynamic_lead_enabled", True)
                 ),
                 limits=PlanningLimits.from_config(self.harness_config),
+                config=self.harness_config,
             )
             state.plan = plan
+            if plan is not None:
+                from app.research.planning.effort import resolve_effective_budget
+
+                effective = resolve_effective_budget(state.intent, self.harness_config)
+                state.metadata["effort_plan"] = effective.to_dict()
+                state.metadata["run_budget"] = effective.as_run_budget()
+                # 若 compose 已 stamp，以 plan.metadata 为准合并
+                stamped = dict((getattr(plan, "metadata", None) or {}).get("effort_plan") or {})
+                if stamped:
+                    state.metadata["effort_plan"] = stamped
             if issues:
                 state.metadata["plan_validation_issues"] = issues
         duration = int((time.perf_counter() - started) * 1000)
@@ -1984,10 +1995,27 @@ class AgentHarness:
         pending_tools: dict[str, tuple[str, float]] = {}
         step_assistants: list[str] = []
         step_cap = max(0, int(getattr(self.harness_config, "max_step_tool_calls", 8) or 0))
-        session_left = max(
-            0,
-            int(self.harness_config.max_tool_calls) - int(state.tool_calls_count or 0),
+        run_budget = {}
+        if isinstance(getattr(state, "metadata", None), dict):
+            raw_budget = state.metadata.get("run_budget")
+            if isinstance(raw_budget, dict):
+                run_budget = raw_budget
+                step_cap = max(
+                    0,
+                    int(run_budget.get("max_step_tool_calls", step_cap) or step_cap),
+                )
+        step_meta = dict(getattr(step, "metadata", None) or {})
+        if "max_retrieval_calls" in step_meta:
+            try:
+                step_cap = max(0, min(step_cap, int(step_meta["max_retrieval_calls"])))
+            except (TypeError, ValueError):
+                pass
+        session_max = int(
+            run_budget.get("max_tool_calls", self.harness_config.max_tool_calls)
+            if run_budget
+            else self.harness_config.max_tool_calls
         )
+        session_left = max(0, int(session_max) - int(state.tool_calls_count or 0))
         if json_only:
             retrieval_remaining: int | None = 0
         elif step_cap > 0:
@@ -2752,15 +2780,16 @@ class AgentHarness:
         ).abort
 
     def remaining_budget(self, state: LoopState) -> dict[str, int]:
+        run_budget = {}
+        if isinstance(getattr(state, "metadata", None), dict):
+            raw = state.metadata.get("run_budget")
+            if isinstance(raw, dict):
+                run_budget = raw
+        max_tools = int(run_budget.get("max_tool_calls", self.harness_config.max_tool_calls))
+        max_tokens = int(self.harness_config.max_total_tokens)
         return {
-            "tool_calls": max(
-                0,
-                int(self.harness_config.max_tool_calls) - int(state.tool_calls_count or 0),
-            ),
-            "tokens": max(
-                0,
-                int(self.harness_config.max_total_tokens) - self._estimate_run_tokens(state),
-            ),
+            "tool_calls": max(0, max_tools - int(state.tool_calls_count or 0)),
+            "tokens": max(0, max_tokens - self._estimate_run_tokens(state)),
         }
 
     def _report_phase(

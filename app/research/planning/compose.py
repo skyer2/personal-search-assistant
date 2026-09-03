@@ -1,4 +1,4 @@
-"""组装执行计划：policy 分流 +（可选）Lead Planner + 代码校验。"""
+"""组装执行计划：policy 分流 + Effort clamp +（可选）Lead Planner + 代码校验。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,11 @@ from typing import Any
 
 from app.agent.harness.planner import build_plan, finalize_plan
 from app.agent.harness.state import ExecutionPlan, TaskIntent
+from app.research.planning.effort import (
+    EffectiveBudget,
+    resolve_effective_budget,
+    stamp_effort_on_plan,
+)
 from app.research.planning.lead_planner import heuristic_dynamic_plan, lead_plan_with_llm
 from app.research.planning.policy import apply_source_policy, parse_source_policy, select_planning_mode
 from app.research.planning.validator import validate_hybrid_plan
@@ -32,8 +37,26 @@ class PlanningLimits:
             max_plan_steps=int(getattr(config, "max_plan_steps", 12) or 12),
         )
 
+    def with_effective(self, effective: EffectiveBudget) -> "PlanningLimits":
+        return PlanningLimits(
+            hybrid_enabled=self.hybrid_enabled,
+            dynamic_lead_enabled=self.dynamic_lead_enabled,
+            max_research_tasks=min(self.max_research_tasks, effective.research_tasks),
+            max_plan_patch_tasks=min(self.max_plan_patch_tasks, effective.plan_patch_tasks)
+            if effective.plan_patch_tasks >= 0
+            else self.max_plan_patch_tasks,
+            max_plan_steps=min(self.max_plan_steps, effective.max_plan_steps),
+        )
 
-def _stamp(plan: ExecutionPlan, intent: TaskIntent, mode: str, brief: str = "") -> ExecutionPlan:
+
+def _stamp(
+    plan: ExecutionPlan,
+    intent: TaskIntent,
+    mode: str,
+    brief: str = "",
+    *,
+    effective: EffectiveBudget | None = None,
+) -> ExecutionPlan:
     plan.planning_mode = mode
     objective = brief or plan.research_brief
     attached = getattr(intent, "brief", None)
@@ -41,6 +64,8 @@ def _stamp(plan: ExecutionPlan, intent: TaskIntent, mode: str, brief: str = "") 
         objective = objective or attached.objective
     plan.research_brief = objective or intent.summary
     intent.planning_mode = mode
+    if effective is not None:
+        stamp_effort_on_plan(plan, effective)
     return plan
 
 
@@ -48,10 +73,13 @@ def compose_execution_plan_sync(
     intent: TaskIntent,
     *,
     limits: PlanningLimits | None = None,
+    config: Any | None = None,
 ) -> tuple[ExecutionPlan, list[str]]:
     """无 LLM 路径：DYNAMIC 用启发式 objective DAG，否则走原 source template。"""
-    limits = limits or PlanningLimits()
+    limits = limits or PlanningLimits.from_config(config)
     intent = apply_source_policy(intent)
+    effective = resolve_effective_budget(intent, config)
+    limits = limits.with_effective(effective)
     policy = parse_source_policy(intent.raw_query)
     mode = select_planning_mode(intent, hybrid_enabled=limits.hybrid_enabled)
     if mode == "dynamic":
@@ -65,7 +93,7 @@ def compose_execution_plan_sync(
             max_research_tasks=limits.max_research_tasks,
         )
         if issues:
-            plan = finalize_plan(_stamp(build_plan(intent), intent, "template"))
+            plan = finalize_plan(_stamp(build_plan(intent), intent, "template", effective=effective))
             issues = validate_hybrid_plan(
                 intent,
                 plan,
@@ -73,9 +101,9 @@ def compose_execution_plan_sync(
                 max_plan_steps=limits.max_plan_steps,
                 max_research_tasks=limits.max_research_tasks,
             )
-            return _stamp(plan, intent, "template"), issues
-        return _stamp(plan, intent, "dynamic", plan.research_brief), issues
-    plan = finalize_plan(_stamp(build_plan(intent), intent, mode))
+            return _stamp(plan, intent, "template", effective=effective), issues
+        return _stamp(plan, intent, "dynamic", plan.research_brief, effective=effective), issues
+    plan = finalize_plan(_stamp(build_plan(intent), intent, mode, effective=effective))
     issues = validate_hybrid_plan(
         intent,
         plan,
@@ -93,9 +121,12 @@ async def compose_execution_plan(
     session_id: str = "",
     llm_enabled: bool = True,
     limits: PlanningLimits | None = None,
+    config: Any | None = None,
 ) -> tuple[ExecutionPlan, list[str]]:
-    limits = limits or PlanningLimits()
+    limits = limits or PlanningLimits.from_config(config)
     intent = apply_source_policy(intent)
+    effective = resolve_effective_budget(intent, config)
+    limits = limits.with_effective(effective)
     policy = parse_source_policy(intent.raw_query)
     mode = select_planning_mode(intent, hybrid_enabled=limits.hybrid_enabled)
     if mode == "dynamic" and limits.dynamic_lead_enabled and llm_enabled and model is not None:
@@ -105,9 +136,12 @@ async def compose_execution_plan(
             model=model,
             session_id=session_id,
             max_tasks=limits.max_research_tasks,
+            effort=effective,
         )
         if llm_plan is not None:
-            llm_plan = finalize_plan(_stamp(llm_plan, intent, "dynamic", llm_plan.research_brief))
+            llm_plan = finalize_plan(
+                _stamp(llm_plan, intent, "dynamic", llm_plan.research_brief, effective=effective)
+            )
             issues = validate_hybrid_plan(
                 intent,
                 llm_plan,
@@ -117,4 +151,4 @@ async def compose_execution_plan(
             )
             if not issues:
                 return llm_plan, issues
-    return compose_execution_plan_sync(intent, limits=limits)
+    return compose_execution_plan_sync(intent, limits=limits, config=config)

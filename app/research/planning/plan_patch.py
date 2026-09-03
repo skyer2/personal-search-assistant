@@ -53,6 +53,11 @@ def apply_plan_patch(
             depends_on=depends,
             sources=sources,
         )
+        raw_meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        if raw_meta:
+            merged = dict(getattr(step, "metadata", None) or {})
+            merged.update(raw_meta)
+            step.metadata = merged
         new_steps.insert(synth_index + inserted, step)
         existing.add(tid)
         inserted += 1

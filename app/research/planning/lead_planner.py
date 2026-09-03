@@ -15,7 +15,7 @@ from app.research.planning.policy import (
 )
 
 LEAD_PLANNER_PROMPT = """你是 Lead Research Planner，不是运行时。
-你只输出研究目标 DAG，禁止调用工具、禁止调度工人、禁止决定何时停止。
+你只输出研究目标 DAG，禁止调用工具、禁止调度工人、禁止决定何时停止、禁止抬高预算。
 
 硬约束（必须遵守，高于你的判断）：
 {policy_json}
@@ -23,18 +23,19 @@ LEAD_PLANNER_PROMPT = """你是 Lead Research Planner，不是运行时。
 用户问题：
 {query}
 
-Intent / Research Brief：
+完整 Research Brief（含实体/维度/深度/新鲜度/成功标准/effort 软配额摘要）：
 {brief}
 
 规则：
-1. 按「要研究什么问题」拆任务，不要按数据源拆（禁止 task=只搜网页）。
+1. 按「要研究什么问题」拆任务，优先覆盖 Brief.entities 与 Brief.dimensions；不要按数据源拆（禁止 task=只搜网页）。
 2. 每个 task 的 allowed_sources 只能从 policy.allowed_sources 选取。
 3. 禁止把 policy.forbidden_sources 写进任何 task。
 4. 比较类问题按实体或评价维度拆；横向比较任务 depends_on 各实体任务。
 5. 不要生成写报告 / PDF / summarize 任务，系统会追加。
-6. task 数量 2~{max_tasks}。
+6. task 数量 2~{max_tasks}（已是 Hard Ceiling clamp 后的上限）。
 7. allowed_sources 只能是 web 和/或 file。
-8. 只输出一个 JSON 对象。
+8. 可在 task 上标注 effort: low|medium|high 作为提示；禁止输出 exact_search_calls 等假精确次数。
+9. 只输出一个 JSON 对象。
 
 格式：
 {{
@@ -44,7 +45,8 @@ Intent / Research Brief：
       "task_id": "t_tesla",
       "objective": "Tesla 2026 商业化进度：产能、客户、收入线索",
       "depends_on": [],
-      "allowed_sources": ["web"]
+      "allowed_sources": ["web"],
+      "effort": "medium"
     }}
   ]
 }}
@@ -210,7 +212,7 @@ def plan_from_lead_payload(
     if not isinstance(tasks, list) or not tasks:
         return None
     seen: set[str] = set()
-    staged: list[tuple[str, str, list[str], list[str]]] = []
+    staged: list[tuple[str, str, list[str], list[str], str]] = []
     for index, raw in enumerate(tasks[:max_tasks], start=1):
         if not isinstance(raw, dict):
             continue
@@ -222,18 +224,24 @@ def plan_from_lead_payload(
             tid = f"{tid}_{index}"
         seen.add(tid)
         sources = _sanitize_sources(list(raw.get("allowed_sources") or []), policy)
-        staged.append((tid, objective, [str(x) for x in (raw.get("depends_on") or [])], sources))
-    steps: list[PlanStep] = []
-    for tid, objective, raw_deps, sources in staged:
-        depends = [d for d in raw_deps if d in seen and d != tid]
-        steps.append(
-            research_step_from_task(
-                task_id=tid,
-                objective=objective,
-                depends_on=depends,
-                sources=sources,
-            )
+        effort_hint = str(raw.get("effort") or "").strip().lower()
+        staged.append(
+            (tid, objective, [str(x) for x in (raw.get("depends_on") or [])], sources, effort_hint)
         )
+    steps: list[PlanStep] = []
+    for tid, objective, raw_deps, sources, effort_hint in staged:
+        depends = [d for d in raw_deps if d in seen and d != tid]
+        step = research_step_from_task(
+            task_id=tid,
+            objective=objective,
+            depends_on=depends,
+            sources=sources,
+        )
+        if effort_hint in {"low", "medium", "high"}:
+            meta = dict(getattr(step, "metadata", None) or {})
+            meta["effort"] = effort_hint
+            step.metadata = meta
+        steps.append(step)
     if not steps:
         return None
     append_synthesis(intent, steps)
@@ -252,18 +260,17 @@ async def lead_plan_with_llm(
     model: Any,
     session_id: str = "",
     max_tasks: int = 6,
+    effort: Any | None = None,
 ) -> ExecutionPlan | None:
     if model is None:
         return None
+    from app.research.planning.effort import brief_payload_for_lead_planner
+
     prompt = LEAD_PLANNER_PROMPT.format(
         policy_json=json.dumps(policy.to_dict(), ensure_ascii=False),
         query=intent.raw_query,
         brief=json.dumps(
-            {
-                "summary": intent.summary,
-                "deliverable": intent.deliverable,
-                "slots": intent.slots.to_dict() if intent.slots else {},
-            },
+            brief_payload_for_lead_planner(intent, effort=effort),
             ensure_ascii=False,
         ),
         max_tasks=max_tasks,

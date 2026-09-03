@@ -149,9 +149,12 @@ Direct 用来回答：
 | Context Engineering | 长任务核心问题 |
 | Artifact / Evidence | 上下文外置和可追溯 |
 | Checkpoint | durability |
-| Budget / Guardrail | bounded autonomy |
+| Budget / Guardrail | bounded autonomy（Hard Ceiling；其下 Adaptive Effort） |
 | Trace | failure attribution |
 | Eval / Ablation | 证明机制有效 |
+
+补充设计：[HARD_CEILING_ADAPTIVE_EFFORT.md](./HARD_CEILING_ADAPTIVE_EFFORT.md) —  
+**Global deterministic control, local agentic autonomy**；Retry ≠ Replan；Lead Planner 消费完整 Brief。
 
 | 砍掉或降到最低 | |
 |----------------|--|
@@ -224,9 +227,10 @@ turn_id                 = 前端一条用户问题（= run_id）
 
 补充文档（非范围权威）：
 
+- [HARD_CEILING_ADAPTIVE_EFFORT.md](./HARD_CEILING_ADAPTIVE_EFFORT.md) — Hard Ceiling + Adaptive Effort + 面试叙事
 - [OBSERVABILITY.md](./OBSERVABILITY.md) — Agent Flight Recorder（统一 Trace / Replan / Eval）
 - [EVALUATION.md](./EVALUATION.md) — 五层 Eval 与 Vanilla / No-Replan / Full ablation
 - [HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md) — StateGraph 运行时细节
 - [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md) — Context / Artifact / Evidence
 - [BROWSECOMP_PLUS_EVAL.md](./BROWSECOMP_PLUS_EVAL.md) — 固定语料评测
-- [OPENEULER_BARE_METAL.md](./OPENEULER_BARE_METAL.md) — openEuler 裸机部署（非架构范围）
+- [OPENEULER_BARE_METAL.md](./OPENEULER_BARE_METAL.md) — 裸机部署（非架构范围）
