@@ -33,7 +33,7 @@ class RunJournal:
                 self._by_session.pop(session_id, None)
 
 
-_TREE_OMIT_TYPES = {"llm_usage"}
+_TREE_OMIT_TYPES = {"llm_usage", "gen_ai.chat"}
 
 
 def build_span_tree(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -72,8 +72,7 @@ def build_span_tree(events: list[dict[str, Any]]) -> dict[str, Any]:
             node["duration_ms"] = event.get("duration_ms")
         if event.get("status"):
             node["status"] = event.get("status")
-        if event.get("parent_span_id") and not node.get("parent_span_id"):
-            node["parent_span_id"] = event.get("parent_span_id")
+        # parent_span_id is immutable once set at Span creation — do NOT overwrite from later events
         if event.get("task_id") and not node.get("task_id"):
             node["task_id"] = event.get("task_id")
         node["events"].append(
@@ -85,15 +84,49 @@ def build_span_tree(events: list[dict[str, Any]]) -> dict[str, Any]:
             }
         )
 
+    # Detect cycles and orphans before building parent→child links
+    cycle_count = 0
+    orphan_count = 0
     roots: list[dict[str, Any]] = []
     for span_id in order:
         node = nodes[span_id]
         parent = node.get("parent_span_id")
-        if parent and parent in nodes and parent != span_id:
-            nodes[parent]["children"].append(node)
+        if parent == span_id:
+            cycle_count += 1
+            node["parent_span_id"] = None
+            parent = None
+        if parent and parent in nodes:
+            # Walk ancestors to detect cycles
+            visited: set[str] = {span_id}
+            current = parent
+            is_cycle = False
+            while current and current in nodes:
+                if current in visited:
+                    is_cycle = True
+                    break
+                visited.add(current)
+                current = nodes[current].get("parent_span_id")
+            if is_cycle:
+                cycle_count += 1
+                node["parent_span_id"] = None
+                roots.append(node)
+            else:
+                nodes[parent]["children"].append(node)
+        elif parent and parent not in nodes:
+            orphan_count += 1
+            roots.append(node)
         else:
             roots.append(node)
-    return {"roots": roots, "span_count": len(nodes), "event_count": len(events), "omitted_count": omitted}
+    return {
+        "roots": roots,
+        "span_count": len(nodes),
+        "event_count": len(events),
+        "omitted_count": omitted,
+        "root_count": len(roots),
+        "orphan_count": orphan_count,
+        "cycle_count": cycle_count,
+        "valid": len(roots) >= 1 and cycle_count == 0,
+    }
 
 
 _SPAN_NAME_PRIORITY = (
@@ -462,7 +495,23 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
         "replan_count": sum(1 for row in replans if row.get("type") == "replan.applied"),
         "gap_closure_rate": gap_closure.get("gap_closure_rate"),
         "replan_useful": gap_closure.get("replan_useful"),
+        "trace_integrity": _check_integrity(events, identity),
     }
+
+
+def _check_integrity(events: list[dict[str, Any]], identity: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from app.observability.integrity import check_trace_integrity
+
+        run_status = ""
+        for event in reversed(events):
+            event_type = str(event.get("type") or event.get("event") or "")
+            if event_type in {"run.completed", "run.failed"}:
+                run_status = str(event.get("status") or "completed" if event_type == "run.completed" else "failed")
+                break
+        return check_trace_integrity(events, run_status=run_status)
+    except Exception:
+        return {"passed": None, "issues": ["integrity_check_failed"]}
 
 
 def _eval_variant_matrix(evals: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -152,7 +152,8 @@ class CitationManager:
                             ],
                         )
             except Exception:
-                pass
+                import logging as _log
+    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
 
         return registered
 

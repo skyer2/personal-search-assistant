@@ -271,14 +271,15 @@ def test_span_tree_omits_llm_usage():
     ]
     tree = build_span_tree(events)
     assert tree["event_count"] == 5
-    assert tree["omitted_count"] == 1
+    assert tree["omitted_count"] == 2
     names = {node["name"] for node in tree["roots"]}
     assert "llm_usage" not in names
-    assert tree["span_count"] == 4
+    assert "gen_ai.chat" not in names
+    assert tree["span_count"] == 3
     root = next(node for node in tree["roots"] if node["span_id"] == "root")
     child_names = {child["name"] for child in root["children"]}
-    assert "gen_ai.chat" in child_names
-    print("[OK] span tree omits llm_usage but keeps gen_ai.chat")
+    assert "gen_ai.chat" not in child_names
+    print("[OK] span tree omits llm_usage and gen_ai.chat")
 
 
 def test_bind_worker_isolates_span_context():

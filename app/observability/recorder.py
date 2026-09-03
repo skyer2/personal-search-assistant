@@ -218,13 +218,13 @@ class AgentTelemetry:
         key = span_identity(phase or name, task_id=task_id, attempt=attempt, span_id=span_id)
         self._open_span(key, name=name, span_id=span_id, parent_span_id=parent, attributes=attributes)
         if ctx is not None:
-            ctx.parent_span_id = parent
-            ctx.span_id = span_id
-            if task_id:
-                ctx.task_id = task_id
-            if attempt is not None:
-                ctx.attempt = attempt
-            set_context(ctx)
+            child = ctx.child(
+                span_id=span_id,
+                parent_span_id=parent,
+                task_id=task_id or ctx.task_id,
+                attempt=attempt if attempt is not None else ctx.attempt,
+            )
+            set_context(child)
         return key
 
     def end_span(
@@ -247,8 +247,19 @@ class AgentTelemetry:
         otel_end_span(handle.otel_span, status=status, attributes=attributes)
         ctx = current_context()
         if ctx is not None and ctx.span_id == handle.span_id:
-            ctx.span_id = handle.parent_span_id
-            set_context(ctx)
+            # Walk the open span stack to find grandparent
+            grandparent = None
+            if handle.parent_span_id:
+                with self._lock:
+                    for other in self._spans.values():
+                        if other.span_id == handle.parent_span_id:
+                            grandparent = other.parent_span_id
+                            break
+            restored = ctx.child(
+                span_id=handle.parent_span_id,
+                parent_span_id=grandparent,
+            )
+            set_context(restored)
 
     def emit(
         self,
@@ -355,15 +366,16 @@ class AgentTelemetry:
             span_id = new_id()
             unique_key = span_identity(phase, task_id=task_id, attempt=attempt, span_id=span_id)
             self._open_span(unique_key, name=phase, span_id=span_id, parent_span_id=parent, attributes=attributes)
-            # 保存 phase+task+attempt → unique key，便于 end 时找回
             with self._lock:
                 self._spans[key] = self._spans[unique_key]
             if ctx is not None:
-                ctx.parent_span_id = parent
-                ctx.span_id = span_id
-                ctx.task_id = task_id or ctx.task_id
-                ctx.attempt = attempt if attempt is not None else ctx.attempt
-                set_context(ctx)
+                child = ctx.child(
+                    span_id=span_id,
+                    parent_span_id=parent,
+                    task_id=task_id or ctx.task_id,
+                    attempt=attempt if attempt is not None else ctx.attempt,
+                )
+                set_context(child)
             span_id_for_event = span_id
             parent_for_event = parent
         else:

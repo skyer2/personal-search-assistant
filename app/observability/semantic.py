@@ -51,15 +51,54 @@ def materialize_gap_items(
 
 
 def plan_brief_coverage(brief: dict[str, Any] | None, plan: Any) -> dict[str, Any]:
+    """Check which Brief dimensions/entities are covered by the Plan.
+
+    Prefer explicit `covers_dimension_ids` on steps when available;
+    fall back to fuzzy keyword matching (each dimension keyword checked
+    against each step's objective/description individually).
+    """
     dimensions = [str(x) for x in ((brief or {}).get("dimensions") or []) if str(x).strip()]
     entities = [str(x) for x in ((brief or {}).get("entities") or []) if str(x).strip()]
     steps = list(getattr(plan, "steps", None) or [])
-    blob = " ".join(
-        f"{getattr(step, 'objective', '')} {getattr(step, 'description', '')} {getattr(step, 'task_id', '')}"
-        for step in steps
-    ).lower()
-    dim_hits = {dim: (dim.lower() in blob) for dim in dimensions}
-    entity_hits = {ent: (ent.lower() in blob) for ent in entities}
+
+    # Explicit dimension_id binding (if planner provides it)
+    explicit_covers: set[str] = set()
+    for step in steps:
+        meta = getattr(step, "metadata", None) or {}
+        for dim_id in meta.get("covers_dimension_ids") or []:
+            explicit_covers.add(str(dim_id))
+
+    dim_hits: dict[str, bool] = {}
+    for dim in dimensions:
+        if dim in explicit_covers:
+            dim_hits[dim] = True
+            continue
+        dim_lower = dim.lower()
+        matched = False
+        for step in steps:
+            step_text = f"{getattr(step, 'objective', '')} {getattr(step, 'description', '')} {getattr(step, 'task_id', '')}".lower()
+            # CJK: check if significant prefix of dimension appears in step text
+            if len(dim_lower) >= 2 and dim_lower[:4] in step_text:
+                matched = True
+                break
+            # Also try splitting on common delimiters for multi-word dimensions
+            keywords = [tok for tok in dim_lower.replace("与", " ").replace("和", " ").replace("、", " ").split() if len(tok) >= 2]
+            if keywords and all(kw in step_text for kw in keywords[:3]):
+                matched = True
+                break
+        dim_hits[dim] = matched
+
+    entity_hits: dict[str, bool] = {}
+    for ent in entities:
+        ent_lower = ent.lower()
+        for step in steps:
+            step_text = f"{getattr(step, 'objective', '')} {getattr(step, 'description', '')}".lower()
+            if ent_lower in step_text or ent_lower[:4] in step_text:
+                entity_hits[ent] = True
+                break
+        else:
+            entity_hits[ent] = False
+
     missing = [dim for dim, hit in dim_hits.items() if not hit]
     return {
         "dimensions": dim_hits,
@@ -91,6 +130,9 @@ def earliest_failure_origin(events: list[dict[str, Any]]) -> dict[str, Any] | No
         origin = attrs.get("failure.origin_stage") or attrs.get("failure.stage")
         if not origin and str(event.get("type") or "").endswith(".failed"):
             origin = attrs.get("failure.stage") or "runtime"
+        # warning status is not a real failure — skip attribution
+        if str(event.get("status") or "").lower() == "warning":
+            continue
         if not origin:
             # soft quality miss: eval.scored / quality.evaluated failed
             event_type = str(event.get("type") or event.get("event") or "")
@@ -159,38 +201,70 @@ def compute_replan_gap_closure(events: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+_LINEAGE_EVENT_TYPES = frozenset({
+    "brief.compiled",
+    "plan.created",
+    "worker.completed",
+    "evidence.registered",
+    "progress.evaluated",
+    "replan.applied",
+    "synthesis.completed",
+})
+
+
 def build_lineage_edges(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str, str, str]] = set()
     edges: list[dict[str, Any]] = []
+
     for event in events:
+        event_type = str(event.get("type") or event.get("event") or "")
         attrs = event.get("attributes") if isinstance(event.get("attributes"), dict) else {}
         inputs = list(event.get("input_refs") or attrs.get("input_refs") or [])
         outputs = list(event.get("output_refs") or attrs.get("output_refs") or [])
+
         if not inputs and not outputs:
-            # synthesize from common id fields
+            if event_type not in _LINEAGE_EVENT_TYPES:
+                continue
             in_ids = []
             out_ids = []
             for key in ("brief_id", "plan_id", "progress_id"):
                 if attrs.get(key):
                     in_ids.append({"type": key.replace("_id", ""), "id": attrs.get(key)})
-            for key in ("brief_id", "plan_id", "answer_id", "patch_id", "evidence_id", "finding_id"):
-                if attrs.get(key) and key.endswith("_id"):
+            for key in ("answer_id", "patch_id", "evidence_id", "finding_id"):
+                if attrs.get(key):
                     out_ids.append({"type": key.replace("_id", ""), "id": attrs.get(key)})
             inputs = in_ids
             outputs = out_ids
+
         if not outputs:
             continue
         for out_ref in outputs:
             out = out_ref if isinstance(out_ref, dict) else {"id": str(out_ref)}
+            out_type = str(out.get("type") or "")
+            out_id = str(out.get("id") or "")
+            if not out_id:
+                continue
             parents = inputs or [{"type": "event", "id": event.get("event_id")}]
             for in_ref in parents:
                 src = in_ref if isinstance(in_ref, dict) else {"id": str(in_ref)}
+                from_type = str(src.get("type") or "")
+                from_id = str(src.get("id") or "")
+                if not from_id:
+                    continue
+                # Skip self-edges
+                if from_type == out_type and from_id == out_id:
+                    continue
+                key = (from_type, from_id, out_type, out_id, event_type)
+                if key in seen:
+                    continue
+                seen.add(key)
                 edges.append(
                     {
-                        "from_type": src.get("type"),
-                        "from_id": src.get("id"),
-                        "to_type": out.get("type"),
-                        "to_id": out.get("id"),
-                        "via_event": event.get("type") or event.get("event"),
+                        "from_type": from_type,
+                        "from_id": from_id,
+                        "to_type": out_type,
+                        "to_id": out_id,
+                        "via_event": event_type,
                         "span_id": event.get("span_id"),
                     }
                 )

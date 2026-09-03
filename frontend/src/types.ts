@@ -262,6 +262,18 @@ export interface TraceSummary {
   replan_count?: number;
   gap_closure_rate?: number | null;
   replan_useful?: boolean;
+  trace_integrity?: {
+    passed?: boolean | null;
+    issues?: string[];
+    counts?: Record<string, number>;
+    is_agent_mode?: boolean;
+    span_tree?: {
+      span_count?: number;
+      root_count?: number;
+      cycle_count?: number;
+      valid?: boolean;
+    };
+  };
 }
 
 export interface EvidenceSource {

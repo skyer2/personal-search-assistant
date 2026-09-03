@@ -194,6 +194,7 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
   const lineage = summary.lineage || [];
   const brief = summary.brief || null;
   const failureOrigin = summary.failure_origin || null;
+  const integrity = summary.trace_integrity || null;
   const progressCount = summary.progress_count ?? progress.length;
   const replanCount = summary.replan_count ?? 0;
 
@@ -239,6 +240,24 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
             label: "Overview",
             children: (
               <Card size="small">
+                {integrity ? (
+                  <Alert
+                    message={
+                      integrity.passed
+                        ? `Trace Integrity: PASS — ${Object.entries(integrity.counts || {}).map(([k, v]) => `${k}=${v}`).join(" · ")}`
+                        : `Trace Integrity: FAIL — ${(integrity.issues || []).join(", ")}`
+                    }
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    type={integrity.passed ? "success" : "error"}
+                  />
+                ) : null}
+                {integrity?.span_tree ? (
+                  <Typography.Paragraph type="secondary">
+                    Span tree: {integrity.span_tree.span_count} spans / {integrity.span_tree.root_count} roots / {integrity.span_tree.cycle_count} cycles
+                    {integrity.span_tree.valid ? " ✓" : " ✗"}
+                  </Typography.Paragraph>
+                ) : null}
                 {failureOrigin ? (
                   <Alert
                     message={`Earliest failure: ${asText(failureOrigin.origin_stage)} → detected@${asText(failureOrigin.detected_stage)} (${asText(failureOrigin.type)})`}

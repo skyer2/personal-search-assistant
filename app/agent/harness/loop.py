@@ -1364,7 +1364,8 @@ class AgentHarness:
                 },
             )
         except Exception:
-            pass
+            import logging as _log
+    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
 
     def _save_step_checkpoint(
         self,
@@ -1423,7 +1424,8 @@ class AgentHarness:
                     },
                 )
         except Exception:
-            pass
+            import logging as _log
+    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
 
     async def _persist_hitl_waiting(
         self,
@@ -2630,7 +2632,8 @@ class AgentHarness:
                     },
                 )
         except Exception:
-            pass
+            import logging as _log
+    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return result
 
     async def _phase_validate(
@@ -2645,7 +2648,12 @@ class AgentHarness:
         from app.agent.harness.usage_tracker import set_llm_phase
 
         set_llm_phase(Phase.VALIDATE.value)
-        status = "done" if outcome.passed else "failed"
+        if outcome.passed:
+            status = "done"
+        elif getattr(outcome, "severity", "") == "warning":
+            status = "warning"
+        else:
+            status = "failed"
         duration = int((time.perf_counter() - started) * 1000)
         self._report_phase(
             Phase.VALIDATE,
@@ -2706,7 +2714,8 @@ class AgentHarness:
                     },
                 )
         except Exception:
-            pass
+            import logging as _log
+    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         duration = int((time.perf_counter() - started) * 1000)
         self._report_phase(
             Phase.RECOVER,
@@ -2729,7 +2738,8 @@ class AgentHarness:
                     attributes={"decision": decision, "failure_type": reason},
                 )
         except Exception:
-            pass
+            import logging as _log
+    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return state
 
     async def _phase_finalize(
@@ -3014,7 +3024,8 @@ class AgentHarness:
                     },
                 )
         except Exception:
-            pass
+            import logging as _log
+    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return True
 
     def _budget_exceeded(self, state: LoopState) -> bool:

@@ -391,7 +391,8 @@ class ResearchGraphRunner:
                     session.state.metadata["brief_id"] = brief_id
                     session.state.metadata["brief_ref"] = ref.ref
         except Exception:
-            pass
+            import logging as _log
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return {
             "intent": intent_payload,
             "brief": brief,
@@ -713,7 +714,8 @@ class ResearchGraphRunner:
                 )
                 recorder.end_span(span_key, status=assessment.verdict)
         except Exception:
-            pass
+            import logging as _log
+            _log.getLogger("observability").debug("obs emit failed", exc_info=True)
         payload = {
             "progress_assessment": assessment.to_dict(),
             "progress": "progress_eval",
@@ -787,7 +789,8 @@ class ResearchGraphRunner:
                     + [{"type": "evidence", "id": eid} for eid in evidence_ids[:12]],
                 )
         except Exception:
-            pass
+            import logging as _log
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         async with session.lock:
             ok = await self.harness._run_single_step(
                 session.state,
@@ -882,7 +885,8 @@ class ResearchGraphRunner:
                     session.state.metadata["answer_id"] = answer_id
                     session.state.metadata["answer_ref"] = ref.ref
         except Exception:
-            pass
+            import logging as _log
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return {
             "task_status": {tid: "done" if ok else "failed"},
             "status": "synthesized" if ok else "running",
@@ -942,7 +946,8 @@ class ResearchGraphRunner:
             max_new = min(max_new, int(grant.get("max_new_tasks", max_new)))
             grant_retrieval = int(grant.get("max_retrieval_calls", grant_retrieval))
         except Exception:
-            pass
+            import logging as _log
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         patch = build_progress_patch(
             state.plan,
             state.intent,
@@ -981,7 +986,8 @@ class ResearchGraphRunner:
                     },
                 )
         except Exception:
-            pass
+            import logging as _log
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         plan, issues = apply_plan_patch(
             state.plan,
             patch,
@@ -1079,7 +1085,8 @@ class ResearchGraphRunner:
                     ],
                 )
         except Exception:
-            pass
+            import logging as _log
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return {
             "plan": state.plan.to_dict(),
             "plan_version": int(getattr(state.plan, "plan_version", 1) or 1),
@@ -1150,7 +1157,8 @@ class ResearchGraphRunner:
                     },
                 )
         except Exception:
-            pass
+            import logging as _log
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return {
             "quality_passed": passed,
             "final_content": state.final_content,
