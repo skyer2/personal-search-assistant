@@ -37,7 +37,9 @@ PLANNER_LLM_PROMPT = """你是个人搜索助手的意图理解助手。根据�
 5. 「列出 N 条 + 来源」且未要求文件时仍用 text，在对话中附来源
 6. slots 含 topic、item_count、require_citations、output_preference、time_range
 7. confidence 0~1；reason 一句话
-8. 可选 brief：entities、dimensions、depth(shallow|standard|thorough)、freshness、prefer_primary
+8. 可选 brief（Task Understanding IR，不是 Intent/Plan）：objective、entities、dimensions、
+   time_range、depth(shallow|standard|thorough)、freshness、prefer_primary、preferred_domains、
+   constraints、success_criteria、ambiguities；禁止输出 max_tool_calls/retry 等运行时配额
 
 输出格式：
 {{
@@ -47,7 +49,19 @@ PLANNER_LLM_PROMPT = """你是个人搜索助手的意图理解助手。根据�
   "confidence": 0.88,
   "reason": "…",
   "slots": {{ "topic": "…", "require_citations": true, "output_preference": "chat" }},
-  "brief": {{ "entities": [], "dimensions": [], "depth": "standard", "freshness": "any", "prefer_primary": false }}
+  "brief": {{
+    "objective": "",
+    "entities": [],
+    "dimensions": [],
+    "time_range": "",
+    "depth": "standard",
+    "freshness": "any",
+    "prefer_primary": false,
+    "preferred_domains": [],
+    "constraints": [],
+    "success_criteria": [],
+    "ambiguities": []
+  }}
 }}
 """
 
@@ -145,10 +159,32 @@ def merge_intent_from_llm(
             "freshness",
             "prefer_primary",
             "preferred_domains",
+            "constraints",
+            "success_criteria",
+            "ambiguities",
         ):
             value = llm_brief.get(key)
             if value not in (None, "", []):
-                base[key] = value
+                # list 字段：LLM 补全与规则编译合并去重
+                if key in {
+                    "entities",
+                    "dimensions",
+                    "preferred_domains",
+                    "constraints",
+                    "success_criteria",
+                    "ambiguities",
+                } and isinstance(value, list):
+                    existing = [str(x) for x in (base.get(key) or []) if x]
+                    merged_list = list(existing)
+                    seen = {x.lower() for x in existing}
+                    for item in value:
+                        s = str(item).strip()
+                        if s and s.lower() not in seen:
+                            seen.add(s.lower())
+                            merged_list.append(s)
+                    base[key] = merged_list
+                else:
+                    base[key] = value
         merged.brief = ResearchBrief.from_dict(base)
     return merged
 

@@ -140,6 +140,9 @@ class HarnessConfig:
     eval_plan_validation_min_rate: float = 1.0
     usage_tracking_enabled: bool = True
 
+    # Adaptive Effort（软配额）；关闭后软配额贴齐硬顶
+    effort_adaptive_enabled: bool = True
+
     # 【Phase 7】多 Agent 编排
     parallel_retrieval_enabled: bool = True
     max_parallel_workers: int = 3
@@ -529,6 +532,10 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         usage_tracking_enabled=_env_bool(
             "HARNESS_USAGE_TRACKING_ENABLED",
             bool(raw.get("observability", {}).get("usage_tracking_enabled", True)),
+        ),
+        effort_adaptive_enabled=_env_bool(
+            "HARNESS_EFFORT_ADAPTIVE",
+            bool((raw.get("effort") or {}).get("adaptive_enabled", True)),
         ),
         parallel_retrieval_enabled=_env_bool(
             "HARNESS_PARALLEL_RETRIEVAL",

@@ -2,6 +2,12 @@
 
 Planner 提出软资源需求；Harness 用硬顶 clamp。
 永远不能抬高 hard ceiling。
+
+分层：
+  Research Brief (Task Understanding IR)
+    → ComplexityEstimator → EffortPlan (soft)
+    → clamp(HardCeiling) → EffectiveBudget / run_budget
+    → GAP 时 grant_on_gap（消耗 reserve，不抬会话顶）
 """
 
 from __future__ import annotations
@@ -21,6 +27,14 @@ EffortTier = Literal["shallow", "standard", "thorough"]
 _COMPARE = ("比较", "对比", " vs ", " VS ", "versus", "横向")
 _LANDSCAPE = ("竞争格局", "多维度", "综合对比", "全面", "深入")
 _CHAIN = ("执行链", "调用链", "端到端", "从", "到", "内核", "协议", "迁移", "重构")
+_OPEN = ("开放式", "尽可能", "全面调研", "调研一下", "随便看看", "有哪些")
+
+# Lead Planner task.effort → 相对 per_worker 预算倍率（仍 clamp 到 hard step）
+_EFFORT_HINT_SCALE: dict[str, float] = {
+    "low": 0.5,
+    "medium": 1.0,
+    "high": 1.25,
+}
 
 
 @dataclass(frozen=True)
@@ -125,11 +139,21 @@ class EffectiveBudget:
             "max_plan_patch_tasks": self.plan_patch_tasks,
             "max_parallel_workers": self.parallel_workers,
             "reserved_step_tool_calls": self.reserved_step_tool_calls,
+            # Incremental grant：剩余可发放额度（GAP 时消耗，不抬硬顶）
+            "remaining_plan_patch_tasks": self.plan_patch_tasks,
+            "remaining_reserve_step_tool_calls": self.reserved_step_tool_calls,
+            "remaining_replan_count": self.replan_count,
         }
 
 
 def _brief_of(intent: Any) -> Any:
     return getattr(intent, "brief", None)
+
+
+def _adaptive_enabled(config: Any | None) -> bool:
+    if config is None:
+        return True
+    return bool(getattr(config, "effort_adaptive_enabled", True))
 
 
 def estimate_complexity(intent: Any) -> EffortPlan:
@@ -142,6 +166,8 @@ def estimate_complexity(intent: Any) -> EffortPlan:
     if depth not in {"shallow", "standard", "thorough"}:
         depth = "standard"
     criteria = [str(x) for x in (getattr(brief, "success_criteria", None) or []) if x]
+    constraints = [str(x) for x in (getattr(brief, "constraints", None) or []) if x]
+    ambiguities = [str(x) for x in (getattr(brief, "ambiguities", None) or []) if x]
     prefer_primary = bool(getattr(brief, "prefer_primary", False))
     freshness = str(getattr(brief, "freshness", "") or "any")
     deliverable = str(getattr(intent, "deliverable", "") or getattr(brief, "deliverable", "") or "text")
@@ -164,12 +190,29 @@ def estimate_complexity(intent: Any) -> EffortPlan:
     if len(dimensions) >= 2:
         score += 1
         signals.append("multi_dimension")
+    # 实体 × 维度：组合爆炸 → 明确推高 breadth
+    matrix = len(entities) * max(1, len([d for d in dimensions if d != "关键事实"]))
+    if matrix >= 6:
+        score += 2
+        signals.append("entity_dimension_matrix")
+    elif matrix >= 4:
+        score += 1
+        signals.append("entity_dimension_product")
     if len(criteria) >= 2:
         score += 1
         signals.append("multi_success_criteria")
+    if len(constraints) >= 2:
+        score += 1
+        signals.append("multi_constraints")
+    if ambiguities:
+        score += 1
+        signals.append("brief_ambiguities")
     if len(query) >= 80 or any(m in query for m in _CHAIN):
         score += 2
         signals.append("long_or_chain_query")
+    if any(m in query for m in _OPEN) and len(entities) < 2:
+        score += 1
+        signals.append("open_phrasing")
     if prefer_primary or freshness not in {"", "any"}:
         score += 1
         signals.append("primary_or_freshness")
@@ -207,17 +250,20 @@ def estimate_complexity(intent: Any) -> EffortPlan:
             stop_criteria=("coverage_ok", "no_major_conflict"),
             signals=tuple(signals),
         )
-    elif "multi_entity_or_compare" in signals or "breadth_or_landscape" in signals:
+    elif (
+        "multi_entity_or_compare" in signals
+        or "breadth_or_landscape" in signals
+        or "entity_dimension_matrix" in signals
+    ):
         complexity = "breadth_heavy"
         tier = "thorough" if depth == "thorough" else "standard"
-        # 实体任务 + 横向比较任务（启发式 DAG 需要）
         entity_n = len(entities) if len(entities) >= 2 else 3
         suggested_tasks = min(5, max(3, entity_n + 1))
         plan = EffortPlan(
             complexity=complexity,
             tier=tier,
             suggested_research_tasks=suggested_tasks,
-            suggested_workers=3,
+            suggested_workers=min(3, max(2, entity_n)),
             initial_session_tool_budget=28,
             per_worker_tool_budget=6,
             replan_reserve_tasks=2,
@@ -286,8 +332,26 @@ def apply_effort_to_hard_ceiling(effort: EffortPlan, hard: HardCeiling) -> Effec
     )
 
 
+def _full_ceiling_effort(hard: HardCeiling) -> EffortPlan:
+    """adaptive_enabled=false：软配额贴齐硬顶（仍经 clamp，行为与静态一致）。"""
+    return EffortPlan(
+        complexity="open_ended",
+        tier="thorough",
+        suggested_research_tasks=hard.max_research_tasks,
+        suggested_workers=hard.max_parallel_workers,
+        initial_session_tool_budget=hard.max_tool_calls,
+        per_worker_tool_budget=hard.max_step_tool_calls,
+        replan_reserve_tasks=hard.max_plan_patch_tasks,
+        reserve_step_tool_calls=hard.max_step_tool_calls,
+        stop_criteria=("hard_ceiling_only",),
+        signals=("adaptive_disabled",),
+    )
+
+
 def resolve_effective_budget(intent: Any, config: Any | None) -> EffectiveBudget:
     hard = HardCeiling.from_config(config)
+    if not _adaptive_enabled(config):
+        return apply_effort_to_hard_ceiling(_full_ceiling_effort(hard), hard)
     effort = estimate_complexity(intent)
     return apply_effort_to_hard_ceiling(effort, hard)
 
@@ -313,17 +377,128 @@ def brief_payload_for_lead_planner(
     return payload
 
 
+def _gap_severity(assessment: dict[str, Any] | None) -> int:
+    """粗粒度缺口强度：用于增量发放（1=轻，2=中，3=重）。"""
+    data = dict(assessment or {})
+    n = 0
+    for key in (
+        "coverage_gaps",
+        "conflicts",
+        "missing_dimensions",
+        "stale_evidence",
+        "unmet_success_criteria",
+        "unmet_constraints",
+        "gaps",
+        "open_gap_ids",
+    ):
+        val = data.get(key) or []
+        if isinstance(val, list):
+            n += len(val)
+        elif val:
+            n += 1
+    if n <= 1:
+        return 1
+    if n <= 3:
+        return 2
+    return 3
+
+
 def grant_on_gap(
     effective: EffectiveBudget,
     *,
     assessment: dict[str, Any] | None = None,
-) -> dict[str, int]:
-    """GAP 时发放 patch 任务数与新步检索额度；不抬会话硬顶。"""
-    _ = assessment
+    run_budget: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """GAP 时发放 patch 任务数与新步检索额度；消耗 reserve，不抬会话硬顶。"""
+    budget = dict(run_budget or {})
+    remaining_tasks = int(
+        budget.get(
+            "remaining_plan_patch_tasks",
+            budget.get("max_plan_patch_tasks", effective.plan_patch_tasks),
+        )
+        if budget
+        else effective.plan_patch_tasks
+    )
+    remaining_retrieval = int(
+        budget.get(
+            "remaining_reserve_step_tool_calls",
+            budget.get(
+                "reserved_step_tool_calls",
+                effective.reserved_step_tool_calls or effective.step_tool_calls,
+            ),
+        )
+        if budget
+        else (effective.reserved_step_tool_calls or effective.step_tool_calls)
+    )
+    remaining_tasks = max(0, remaining_tasks)
+    remaining_retrieval = max(0, remaining_retrieval)
+
+    severity = _gap_severity(assessment)
+    # 轻缺口少发；重缺口最多发到剩余额度与硬顶
+    want_tasks = min(severity, effective.plan_patch_tasks, remaining_tasks)
+    want_retrieval = min(
+        effective.reserved_step_tool_calls or effective.step_tool_calls,
+        remaining_retrieval,
+        max(1, effective.step_tool_calls) if remaining_retrieval else 0,
+    )
+    if severity == 1 and remaining_tasks > 0:
+        want_tasks = min(1, remaining_tasks)
+        want_retrieval = min(want_retrieval, max(1, effective.step_tool_calls // 2 or 1))
+
     return {
-        "max_new_tasks": int(effective.plan_patch_tasks),
-        "max_retrieval_calls": int(effective.reserved_step_tool_calls or effective.step_tool_calls),
+        "max_new_tasks": int(want_tasks),
+        "max_retrieval_calls": int(want_retrieval),
+        "remaining_plan_patch_tasks": int(remaining_tasks),
+        "remaining_reserve_step_tool_calls": int(remaining_retrieval),
+        "gap_severity": severity,
     }
+
+
+def apply_grant_to_run_budget(
+    run_budget: dict[str, Any] | None,
+    grant: dict[str, Any],
+    *,
+    tasks_granted: int = 0,
+) -> dict[str, int]:
+    """PlanPatch 成功后扣减剩余 reserve。"""
+    budget = dict(run_budget or {})
+    used_tasks = max(0, int(tasks_granted or grant.get("max_new_tasks") or 0))
+    used_retrieval = max(0, int(grant.get("max_retrieval_calls") or 0)) if used_tasks else 0
+    rem_tasks = max(
+        0,
+        int(budget.get("remaining_plan_patch_tasks", budget.get("max_plan_patch_tasks", 0)) or 0)
+        - used_tasks,
+    )
+    rem_retrieval = max(
+        0,
+        int(
+            budget.get(
+                "remaining_reserve_step_tool_calls",
+                budget.get("reserved_step_tool_calls", 0),
+            )
+            or 0
+        )
+        - used_retrieval,
+    )
+    rem_replan = max(
+        0,
+        int(budget.get("remaining_replan_count", budget.get("max_replan_count", 0)) or 0) - 1,
+    )
+    budget["remaining_plan_patch_tasks"] = rem_tasks
+    budget["remaining_reserve_step_tool_calls"] = rem_retrieval
+    budget["remaining_replan_count"] = rem_replan
+    return {k: int(v) if isinstance(v, (int, float)) else v for k, v in budget.items()}
+
+
+def retrieval_budget_for_effort_hint(
+    base: int,
+    hint: str | None,
+    *,
+    hard_step: int,
+) -> int:
+    """task.metadata.effort (low|medium|high) → 步检索额度，仍 ≤ hard step。"""
+    scale = _EFFORT_HINT_SCALE.get(str(hint or "").strip().lower(), 1.0)
+    return max(1, min(int(hard_step), int(round(base * scale))))
 
 
 def stamp_effort_on_plan(plan: Any, effective: EffectiveBudget) -> None:
@@ -333,11 +508,18 @@ def stamp_effort_on_plan(plan: Any, effective: EffectiveBudget) -> None:
     meta = dict(getattr(plan, "metadata", None) or {})
     meta["effort_plan"] = effective.to_dict()
     plan.metadata = meta
+    hard_step = int(effective.hard.max_step_tool_calls)
+    base = int(effective.step_tool_calls)
     for step in list(getattr(plan, "steps", None) or []):
         if str(getattr(step, "step_type", "") or "") not in {"research", "network_search", "file_read"}:
             continue
         step_meta = dict(getattr(step, "metadata", None) or {})
-        step_meta.setdefault("max_retrieval_calls", int(effective.step_tool_calls))
+        hint = str(step_meta.get("effort") or "").strip().lower() or None
+        step_meta["max_retrieval_calls"] = retrieval_budget_for_effort_hint(
+            base, hint, hard_step=hard_step
+        )
         step_meta.setdefault("effort_tier", effective.effort.tier)
         step_meta.setdefault("complexity", effective.effort.complexity)
+        if hint:
+            step_meta.setdefault("effort", hint)
         step.metadata = step_meta

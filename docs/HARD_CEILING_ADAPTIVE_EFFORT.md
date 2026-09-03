@@ -146,10 +146,15 @@ Lead Planner **可以**在 task metadata 里带 `effort: low|medium|high` 提示
 
 Progress → GAP 且 `can_replan`：
 
-1. `PlanPatch` 新增任务数 ≤ `min(hard.max_plan_patch_tasks, effort.replan_reserve_tasks)`  
-2. 新任务的 `metadata.max_retrieval_calls` 可从 `reserve_step_tool_calls` 发放  
-3. **不提高**会话 `max_tool_calls` / `max_run_sec` 硬顶  
-4. 连续无边际收益 / replan 耗尽 → ENOUGH 或 abort（现有路径）
+1. `PlanPatch` 新增任务数 ≤ `min(hard.max_plan_patch_tasks, remaining_plan_patch_tasks, severity)`  
+2. 新任务的 `metadata.max_retrieval_calls` 从 `remaining_reserve_step_tool_calls` 发放  
+3. 成功 patch 后 **扣减** `remaining_*`（`apply_grant_to_run_budget`）  
+4. **不提高**会话 `max_tool_calls` / `max_run_sec` 硬顶  
+5. reserve 耗尽 / 连续无边际收益 / replan 耗尽 → ENOUGH 或 abort（现有路径）
+
+`run_budget.max_parallel_workers` 在 Plan 落盘后刷新 `RunSession.worker_sem` 与 legacy loop fan-out Semaphore。
+
+Task 上的 `effort: low|medium|high` 只缩放该步 `max_retrieval_calls`（仍 ≤ hard step），禁止假精确 `exact_search_calls`。
 
 ---
 
@@ -220,6 +225,23 @@ Lead Planner 仍只输出 **objective DAG**，不调工具、不调度、不定�
 卖点一句：
 
 > **Global deterministic control, local agentic autonomy.**
+
+---
+
+## 8.1 Research Brief = Task Understanding IR
+
+Brief **不是** Intent，也 **不是** Plan：
+
+| 层 | 回答 |
+|----|------|
+| Intent / Routing | 这是哪类任务？ |
+| **Research Brief（IR）** | 用户究竟要什么？什么算完成？ |
+| Planning | 为了完成它，要做哪些步骤？ |
+| Harness Policy | 给多少自治权？ |
+
+Progress 会对照 `success_criteria` / `constraints` 判 GAP（`unmet_*`），与 coverage / conflict / stale 并列。
+
+`effort.adaptive_enabled`（`HarnessConfig.effort_adaptive_enabled`）关闭时，软配额贴齐硬顶，行为退化为静态 ceiling。
 
 ---
 

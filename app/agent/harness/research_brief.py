@@ -1,8 +1,19 @@
 """
-Research Brief — Deep 路径的稳定研究说明书（Intent 合同）。
+Research Brief — Task Understanding 的稳定中间表示（IR），不是 Intent，也不是 Plan。
+
+分层：
+  User Query
+    → Task Understanding（规则硬约束 + LLM 语义补全）
+    → Research Brief / ResearchSpec   ← 本模块
+    → Planner（Objective DAG）
+    → Harness Runtime Policy（budget / retry / concurrency）
+
+Brief 回答：What exactly does success mean?
+Planner 回答：How should the research be decomposed?
+Intent/Routing 只回答：这是哪类任务？（对本系统价值有限）
 
 后续 Plan / Progress / Worker 主要消费 Brief，而不是整段原始对话。
-Quick 路径不编译 Brief。
+Quick / direct 路径可不编译完整 Brief。
 """
 
 from __future__ import annotations
@@ -55,6 +66,8 @@ PRIMARY_SOURCE_HINTS = (
 
 @dataclass
 class ResearchBrief:
+    """Research Spec / Task Understanding IR（语义合同）。"""
+
     objective: str = ""
     entities: list[str] = field(default_factory=list)
     dimensions: list[str] = field(default_factory=list)
@@ -64,6 +77,7 @@ class ResearchBrief:
     citation_policy: str = "claim-evidence"
     constraints: list[str] = field(default_factory=list)
     success_criteria: list[str] = field(default_factory=list)
+    ambiguities: list[str] = field(default_factory=list)
     raw_query: str = ""
     depth: str = "standard"  # shallow | standard | thorough
     freshness: str = "any"  # any | recent | 约束原文
@@ -76,7 +90,7 @@ class ResearchBrief:
     def to_prompt(self) -> str:
         if self.is_empty():
             return ""
-        lines = ["    【Research Brief — 稳定研究说明书】"]
+        lines = ["    【Research Brief — Task Understanding IR】"]
         lines.append(f"    目标: {self.objective or self.raw_query}")
         if self.entities:
             lines.append(f"    实体: {', '.join(self.entities[:12])}")
@@ -101,6 +115,10 @@ class ResearchBrief:
         if self.success_criteria:
             lines.append("    成功标准:")
             for item in self.success_criteria[:6]:
+                lines.append(f"      - {item}")
+        if self.ambiguities:
+            lines.append("    歧义/待澄清:")
+            for item in self.ambiguities[:4]:
                 lines.append(f"      - {item}")
         lines.append("    后续步骤以本 Brief 为准，不要回放完整用户对话。")
         return "\n".join(lines)
@@ -128,6 +146,7 @@ class ResearchBrief:
             citation_policy=str(data.get("citation_policy") or "claim-evidence"),
             constraints=[str(x) for x in (data.get("constraints") or []) if x],
             success_criteria=[str(x) for x in (data.get("success_criteria") or []) if x],
+            ambiguities=[str(x) for x in (data.get("ambiguities") or []) if x],
             raw_query=str(data.get("raw_query") or ""),
             depth=depth,
             freshness=freshness,
@@ -288,6 +307,14 @@ def compile_research_brief(
     if freshness == "recent" or (time_range and time_range[:4].isdigit()):
         success.append("证据年份覆盖用户关心的时间范围")
 
+    ambiguities: list[str] = []
+    if intent is not None:
+        for flag in list(getattr(intent, "ambiguity_flags", None) or [])[:6]:
+            ambiguities.append(str(flag))
+        q = getattr(intent, "clarification_question", "") or ""
+        if q and q not in ambiguities:
+            ambiguities.append(str(q)[:160])
+
     if source_bits:
         source_policy = "+".join(source_bits)
     else:
@@ -311,6 +338,7 @@ def compile_research_brief(
         citation_policy=citation_policy,
         constraints=constraints,
         success_criteria=success,
+        ambiguities=ambiguities[:6],
         raw_query=query[:500],
         depth=depth,
         freshness=freshness,

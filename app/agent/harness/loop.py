@@ -917,7 +917,15 @@ class AgentHarness:
             batch_indices=batch_indices,
             batch_size=len(batch_indices),
         )
-        sem = asyncio.Semaphore(max(1, self.harness_config.max_parallel_workers))
+        hard_parallel = max(1, int(self.harness_config.max_parallel_workers))
+        run_budget_parallel = hard_parallel
+        if isinstance(getattr(state, "metadata", None), dict):
+            raw_budget = state.metadata.get("run_budget")
+            if isinstance(raw_budget, dict) and raw_budget.get("max_parallel_workers") is not None:
+                run_budget_parallel = max(
+                    1, min(hard_parallel, int(raw_budget["max_parallel_workers"]))
+                )
+        sem = asyncio.Semaphore(run_budget_parallel)
         timeout_sec = max(10, int(self.harness_config.step_timeout_sec))
 
         async def _run_one(
@@ -1365,7 +1373,7 @@ class AgentHarness:
             )
         except Exception:
             import logging as _log
-    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
 
     def _save_step_checkpoint(
         self,
@@ -1425,7 +1433,7 @@ class AgentHarness:
                 )
         except Exception:
             import logging as _log
-    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
 
     async def _persist_hitl_waiting(
         self,
@@ -2633,7 +2641,7 @@ class AgentHarness:
                 )
         except Exception:
             import logging as _log
-    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return result
 
     async def _phase_validate(
@@ -2715,7 +2723,7 @@ class AgentHarness:
                 )
         except Exception:
             import logging as _log
-    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         duration = int((time.perf_counter() - started) * 1000)
         self._report_phase(
             Phase.RECOVER,
@@ -2739,7 +2747,7 @@ class AgentHarness:
                 )
         except Exception:
             import logging as _log
-    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return state
 
     async def _phase_finalize(
@@ -3025,7 +3033,7 @@ class AgentHarness:
                 )
         except Exception:
             import logging as _log
-    _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
+            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return True
 
     def _budget_exceeded(self, state: LoopState) -> bool:

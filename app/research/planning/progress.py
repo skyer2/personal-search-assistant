@@ -52,6 +52,8 @@ class ProgressAssessment:
     low_confidence_claims: list[str] = field(default_factory=list)
     stale_evidence: list[str] = field(default_factory=list)
     missing_dimensions: list[str] = field(default_factory=list)
+    unmet_success_criteria: list[str] = field(default_factory=list)
+    unmet_constraints: list[str] = field(default_factory=list)
     reason: str = ""
     gaps: list[dict[str, Any]] = field(default_factory=list)
     open_gap_ids: list[str] = field(default_factory=list)
@@ -76,6 +78,8 @@ class ProgressAssessment:
             low_confidence_claims=[str(x) for x in (data.get("low_confidence_claims") or []) if x],
             stale_evidence=[str(x) for x in (data.get("stale_evidence") or []) if x],
             missing_dimensions=[str(x) for x in (data.get("missing_dimensions") or []) if x],
+            unmet_success_criteria=[str(x) for x in (data.get("unmet_success_criteria") or []) if x],
+            unmet_constraints=[str(x) for x in (data.get("unmet_constraints") or []) if x],
             reason=str(data.get("reason") or ""),
             gaps=gaps,
             open_gap_ids=[str(x) for x in (data.get("open_gap_ids") or []) if x],
@@ -89,7 +93,9 @@ class ProgressAssessment:
 
         if not self.gaps:
             self.gaps = materialize_gap_items(
-                coverage_gaps=self.coverage_gaps,
+                coverage_gaps=self.coverage_gaps
+                + [f"criteria:{c}" for c in self.unmet_success_criteria]
+                + [f"constraint:{c}" for c in self.unmet_constraints],
                 missing_dimensions=self.missing_dimensions,
                 conflicts=self.conflicts,
                 stale_evidence=self.stale_evidence,
@@ -208,12 +214,21 @@ def assess_progress(
             current_year=year,
             intent=resolved_intent,
         )
+        _fill_brief_contract(
+            assessment,
+            plan,
+            rows,
+            intent=resolved_intent,
+            query=query,
+        )
         if mode != "dynamic":
             # DIRECT/TEMPLATE：没有显式失败/gaps/冲突时不因启发式维度再搜。
             if not assessment.coverage_gaps and not assessment.conflicts:
                 assessment.stale_evidence = []
                 assessment.missing_dimensions = []
                 assessment.low_confidence_claims = []
+                assessment.unmet_success_criteria = []
+                assessment.unmet_constraints = []
 
     if not enabled:
         assessment.verdict = "enough" if not failed_research else "gap"
@@ -223,7 +238,11 @@ def assess_progress(
     if assessment.coverage_gaps or assessment.conflicts:
         assessment.verdict = "gap"
     elif mode == "dynamic" and (
-        assessment.missing_dimensions or assessment.stale_evidence or _all_low_confidence(rows)
+        assessment.missing_dimensions
+        or assessment.stale_evidence
+        or assessment.unmet_success_criteria
+        or assessment.unmet_constraints
+        or _all_low_confidence(rows)
     ):
         assessment.verdict = "gap"
     else:
@@ -440,10 +459,86 @@ def _fill_stale_and_dimensions(
 
     if brief.prefer_primary:
         urls: list[str] = []
+        facts_blob: list[str] = []
         for row in rows:
             payload = _payload(row)
             urls.extend(str(x) for x in (payload.get("sources") or []) if x)
             urls.extend(str(x) for x in (row.get("sources") or []) if x)
-        blob = " ".join(urls).lower() + " " + combined.lower()
+            facts_blob.extend(str(x) for x in (payload.get("facts") or []) if x)
+        # 只看来源 URL + facts，避免 objective/summary 里「优先官方」措辞假阳性
+        blob = (" ".join(urls) + " " + " ".join(facts_blob)).lower()
         if urls and not any(hint.lower() in blob for hint in PRIMARY_SOURCE_HINTS):
             assessment.coverage_gaps.append("missing_primary_source")
+
+
+def _fill_brief_contract(
+    assessment: ProgressAssessment,
+    plan: ExecutionPlan,
+    rows: list[dict[str, Any]],
+    *,
+    intent: Any = None,
+    query: str = "",
+) -> None:
+    """对照 Research Brief 的 success_criteria / constraints（语义合同，非 Intent）。"""
+    from app.agent.harness.research_brief import PRIMARY_SOURCE_HINTS, brief_of
+
+    brief = brief_of(
+        intent,
+        query=query or "",
+        plan_brief=str(getattr(plan, "research_brief", "") or ""),
+    )
+    combined = " ".join(_text_of(row) for row in rows)
+    combined_l = combined.lower()
+
+    urls: list[str] = []
+    facts: list[str] = []
+    for row in rows:
+        payload = _payload(row)
+        urls.extend(str(x) for x in (payload.get("sources") or []) if x)
+        facts.extend(str(x) for x in (payload.get("facts") or []) if x)
+    source_blob = (" ".join(urls) + " " + " ".join(facts)).lower()
+
+    for criterion in list(brief.success_criteria or [])[:8]:
+        c = str(criterion)
+        cl = c.lower()
+        # 系统默认成功标准：证据可追溯
+        if "evidence" in cl or "artifact" in cl or "可追溯" in c:
+            if rows and not urls and not facts:
+                assessment.unmet_success_criteria.append(c[:120])
+            continue
+        if "冲突" in c or "并列" in c:
+            # 冲突处理是写作约束，不据此判 GAP
+            continue
+        if "交付" in c or "工作目录" in c:
+            continue
+        if "官方" in c or "一手" in c or "primary" in cl:
+            if urls and not any(h.lower() in source_blob for h in PRIMARY_SOURCE_HINTS):
+                assessment.unmet_success_criteria.append(c[:120])
+            continue
+        if "时间" in c or "年份" in c or "fresh" in cl:
+            # stale_evidence 已覆盖
+            continue
+        # 其余：从标准里抽关键词，证据文本需命中至少一半
+        tokens = [
+            t
+            for t in re.split(r"[\s,，、/：:]+", c)
+            if len(t) >= 2 and t not in {"必须", "尽量", "关键", "结论", "覆盖", "用户", "关心"}
+        ][:6]
+        if len(tokens) >= 2:
+            hits = sum(1 for t in tokens if t.lower() in combined_l)
+            if hits < max(1, len(tokens) // 2) and rows:
+                assessment.unmet_success_criteria.append(c[:120])
+
+    for constraint in list(brief.constraints or [])[:8]:
+        c = str(constraint)
+        if c.startswith("禁止来源:"):
+            forbidden = [x.strip() for x in c.split(":", 1)[-1].split(",") if x.strip()]
+            hit = [f for f in forbidden if f.lower() in source_blob]
+            if hit:
+                assessment.unmet_constraints.append(f"violated_forbid:{','.join(hit[:4])}")
+        elif "优先官方" in c or "一手" in c:
+            if urls and not any(h.lower() in source_blob for h in PRIMARY_SOURCE_HINTS):
+                assessment.unmet_constraints.append(c[:120])
+        elif "引用" in c or "[n]" in c:
+            if rows and not urls and facts:
+                assessment.unmet_constraints.append(c[:120])

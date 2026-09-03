@@ -39,10 +39,24 @@ class RunSession:
         self.session_id: str = ctx.session_id
         self.lock = ctx.lock
         self.result: Any = None
-        max_workers = max(
-            1, int(getattr(harness.harness_config, "max_parallel_workers", 3) or 3)
+        self.worker_sem = asyncio.Semaphore(self._resolve_max_workers())
+
+    def _resolve_max_workers(self) -> int:
+        """优先用 Adaptive Effort clamp 后的 run_budget；否则用 Hard Ceiling。"""
+        hard = max(
+            1, int(getattr(self.harness.harness_config, "max_parallel_workers", 3) or 3)
         )
-        self.worker_sem = asyncio.Semaphore(max_workers)
+        meta = getattr(self.state, "metadata", None) or {}
+        budget = meta.get("run_budget") if isinstance(meta, dict) else None
+        if isinstance(budget, dict) and budget.get("max_parallel_workers") is not None:
+            return max(1, min(hard, int(budget["max_parallel_workers"])))
+        return hard
+
+    def refresh_worker_sem(self) -> int:
+        """Plan 写入 run_budget 后刷新并发闸；返回实际并行度。"""
+        n = self._resolve_max_workers()
+        self.worker_sem = asyncio.Semaphore(n)
+        return n
 
 
 def get_session(run_id: str) -> RunSession | None:
@@ -454,6 +468,8 @@ class ResearchGraphRunner:
             session.state.abort_reason = "empty_plan"
             session.state.abort_message = "Harness plan is empty"
             return {"status": "aborted", "abort_reason": "empty_plan", "plan": None}
+        # Effort clamp 后的并行度写入 run_budget；刷新 Worker 闸门
+        session.refresh_worker_sem()
         needs_review = bool(
             not ctx.restored_full
             and self.harness.harness_config.hitl_enabled
@@ -938,11 +954,16 @@ class ResearchGraphRunner:
                 ),
             )
         )
+        grant: dict[str, Any] = {}
         try:
             from app.research.planning.effort import grant_on_gap, resolve_effective_budget
 
             effective = resolve_effective_budget(state.intent, self.harness.harness_config)
-            grant = grant_on_gap(effective, assessment=assessment)
+            grant = grant_on_gap(
+                effective,
+                assessment=assessment,
+                run_budget=run_budget,
+            )
             max_new = min(max_new, int(grant.get("max_new_tasks", max_new)))
             grant_retrieval = int(grant.get("max_retrieval_calls", grant_retrieval))
         except Exception:
@@ -1026,6 +1047,18 @@ class ResearchGraphRunner:
         ]
         state.plan = plan
         state.replan_count += 1
+        # 消耗 GAP reserve（不抬会话硬顶）
+        if grant and isinstance(getattr(state, "metadata", None), dict):
+            try:
+                from app.research.planning.effort import apply_grant_to_run_budget
+
+                state.metadata["run_budget"] = apply_grant_to_run_budget(
+                    run_budget or state.metadata.get("run_budget"),
+                    grant,
+                    tasks_granted=len([t for t in added if t]),
+                )
+            except Exception:
+                pass
         self.harness._report_phase(
             Phase.REPLAN,
             "done",
