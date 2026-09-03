@@ -13,6 +13,7 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "run.started",
     "run.completed",
     "run.failed",
+    "brief.compiled",
     "plan.created",
     "plan.validated",
     "worker.started",
@@ -22,11 +23,23 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "tool.completed",
     "tool.failed",
     "gen_ai.chat",
+    "retrieval.search",
     "evidence.registered",
     "progress.evaluated",
     "replan.proposed",
     "replan.applied",
     "replan.rejected",
+    "synthesis.started",
+    "synthesis.completed",
+    "synthesis.failed",
+    "recovery.decided",
+    "recovery.completed",
+    "context.built",
+    "context.compressed",
+    "checkpoint.saved",
+    "checkpoint.resumed",
+    "budget.decided",
+    "budget.exhausted",
     "quality.evaluated",
     "eval.scored",
     "phase",
@@ -40,6 +53,7 @@ class EventType:
     RUN_STARTED = "run.started"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
+    BRIEF_COMPILED = "brief.compiled"
     PLAN_CREATED = "plan.created"
     PLAN_VALIDATED = "plan.validated"
     WORKER_STARTED = "worker.started"
@@ -49,11 +63,23 @@ class EventType:
     TOOL_COMPLETED = "tool.completed"
     TOOL_FAILED = "tool.failed"
     GEN_AI_CHAT = "gen_ai.chat"
+    RETRIEVAL_SEARCH = "retrieval.search"
     EVIDENCE_REGISTERED = "evidence.registered"
     PROGRESS_EVALUATED = "progress.evaluated"
     REPLAN_PROPOSED = "replan.proposed"
     REPLAN_APPLIED = "replan.applied"
     REPLAN_REJECTED = "replan.rejected"
+    SYNTHESIS_STARTED = "synthesis.started"
+    SYNTHESIS_COMPLETED = "synthesis.completed"
+    SYNTHESIS_FAILED = "synthesis.failed"
+    RECOVERY_DECIDED = "recovery.decided"
+    RECOVERY_COMPLETED = "recovery.completed"
+    CONTEXT_BUILT = "context.built"
+    CONTEXT_COMPRESSED = "context.compressed"
+    CHECKPOINT_SAVED = "checkpoint.saved"
+    CHECKPOINT_RESUMED = "checkpoint.resumed"
+    BUDGET_DECIDED = "budget.decided"
+    BUDGET_EXHAUSTED = "budget.exhausted"
     QUALITY_EVALUATED = "quality.evaluated"
     EVAL_SCORED = "eval.scored"
     PHASE = "phase"
@@ -101,6 +127,8 @@ class AgentEvent:
     status: str | None = None
     duration_ms: int | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
+    input_refs: list[dict[str, Any]] = field(default_factory=list)
+    output_refs: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -121,6 +149,12 @@ class AgentEvent:
             duration_ms = int(duration) if duration is not None else None
         except (TypeError, ValueError):
             duration_ms = None
+        input_refs = raw.get("input_refs")
+        if not isinstance(input_refs, list):
+            input_refs = attrs.get("input_refs") if isinstance(attrs.get("input_refs"), list) else []
+        output_refs = raw.get("output_refs")
+        if not isinstance(output_refs, list):
+            output_refs = attrs.get("output_refs") if isinstance(attrs.get("output_refs"), list) else []
         return cls(
             event_id=str(raw.get("event_id") or ""),
             trace_id=str(raw.get("trace_id") or ""),
@@ -138,6 +172,8 @@ class AgentEvent:
             status=raw.get("status"),
             duration_ms=duration_ms,
             attributes=dict(attrs),
+            input_refs=[dict(x) for x in input_refs if isinstance(x, dict)],
+            output_refs=[dict(x) for x in output_refs if isinstance(x, dict)],
         )
 
     def to_jsonl_record(self) -> dict[str, Any]:

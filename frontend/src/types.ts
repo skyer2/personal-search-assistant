@@ -227,10 +227,16 @@ export interface TraceSummary {
     config_hash?: string;
     variant?: string;
   };
+  brief?: Record<string, unknown> | null;
+  plans?: Array<Record<string, unknown>>;
   workers?: Array<Record<string, unknown>>;
   progress?: Array<Record<string, unknown>>;
   replans?: Array<Record<string, unknown>>;
   evidence?: Array<Record<string, unknown>>;
+  synthesis?: Array<Record<string, unknown>>;
+  recoveries?: Array<Record<string, unknown>>;
+  quality?: Record<string, unknown>;
+  lineage?: Array<Record<string, unknown>>;
   evals?: Array<Record<string, unknown>>;
   eval_matrix?: Array<{
     variants?: string[];
@@ -241,6 +247,7 @@ export interface TraceSummary {
   }>;
   failures?: Array<Record<string, unknown>>;
   failure_counts?: Record<string, number>;
+  failure_origin?: Record<string, unknown> | null;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
@@ -253,6 +260,8 @@ export interface TraceSummary {
   worker_count?: number;
   progress_count?: number;
   replan_count?: number;
+  gap_closure_rate?: number | null;
+  replan_useful?: boolean;
 }
 
 export interface EvidenceSource {

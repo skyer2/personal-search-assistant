@@ -133,9 +133,30 @@ def build_progress_patch(
         _append(f"补充维度：{item}", "missing_dimension")
 
     if proposals:
-        return {"reason": parsed.reason or "semantic_gap", "add_tasks": proposals}
+        target_gap_ids = [
+            str(item.get("gap_id") or "")
+            for item in (parsed.gaps or [])
+            if isinstance(item, dict) and item.get("gap_id")
+        ]
+        return {
+            "reason": parsed.reason or "semantic_gap",
+            "add_tasks": proposals,
+            "target_gap_ids": target_gap_ids,
+            "triggered_by": parsed.progress_id or "",
+            "patch_id": f"patch_{(parsed.progress_id or 'x')[-8:]}",
+        }
 
     fallback = build_gap_patch(plan, intent, worker_results=worker_results)
+    if isinstance(fallback, dict):
+        fallback.setdefault(
+            "target_gap_ids",
+            [
+                str(item.get("gap_id") or "")
+                for item in (parsed.gaps or [])
+                if isinstance(item, dict) and item.get("gap_id")
+            ],
+        )
+        fallback.setdefault("triggered_by", parsed.progress_id or "")
     return fallback
 
 

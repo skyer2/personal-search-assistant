@@ -2822,24 +2822,101 @@ class AgentHarness:
             if phase == Phase.PLAN and status == "done" and state.plan is not None:
                 issues = list(data.get("plan_validation_issues") or [])
                 plan_version = int(getattr(state.plan, "plan_version", 1) or 1)
+                brief_id = str((state.metadata or {}).get("brief_id") or "")
+                brief_dict = {}
+                if getattr(state, "research_brief_obj", None):
+                    brief_dict = dict(state.research_brief_obj or {})
+                elif state.intent is not None and getattr(state.intent, "brief", None) is not None:
+                    try:
+                        brief_dict = state.intent.brief.to_dict()
+                    except Exception:
+                        brief_dict = {}
+                if not brief_id and brief_dict.get("brief_id"):
+                    brief_id = str(brief_dict.get("brief_id"))
+                task_ids = [
+                    step.resolved_task_id(i) for i, step in enumerate(state.plan.steps)
+                ]
+                plan_id = f"plan_v{plan_version}"
+                coverage = {}
+                plan_ref = ""
+                plan_hash = ""
+                try:
+                    from app.observability.payload_store import get_payload_store
+                    from app.observability.semantic import plan_brief_coverage
+
+                    coverage = plan_brief_coverage(brief_dict, state.plan)
+                    store = get_payload_store()
+                    ref = store.put(
+                        run_id=str(
+                            getattr(state, "run_id", None)
+                            or (state.metadata or {}).get("run_id")
+                            or "unknown"
+                        ),
+                        artifact_type="research_plan",
+                        artifact_id=plan_id,
+                        payload={
+                            "plan_version": plan_version,
+                            "task_ids": task_ids,
+                            "steps": [
+                                {
+                                    "task_id": step.resolved_task_id(i),
+                                    "objective": step.objective or step.description,
+                                    "step_type": step.step_type,
+                                    "depends_on": list(step.depends_on or []),
+                                }
+                                for i, step in enumerate(state.plan.steps)
+                            ],
+                            "brief_coverage": coverage,
+                        },
+                        version=plan_version,
+                    )
+                    plan_ref = ref.ref
+                    plan_hash = ref.sha256
+                except Exception:
+                    pass
+                parallel_groups = 1
+                try:
+                    from app.research.runtime.scheduler import ready_research_steps
+
+                    parallel_groups = max(
+                        1,
+                        len(
+                            ready_research_steps(
+                                state.plan,
+                                {step.resolved_task_id(i): "pending" for i, step in enumerate(state.plan.steps)},
+                            )
+                        ),
+                    )
+                except Exception:
+                    parallel_groups = 1
                 recorder.emit(
                     EventType.PLAN_CREATED,
                     phase="plan",
                     status="ok",
                     plan_version=plan_version,
                     attributes={
+                        "plan_id": plan_id,
+                        "plan_version": plan_version,
+                        "brief_id": brief_id,
                         "task_count": len(state.plan.steps),
+                        "task_ids": task_ids,
                         "planning_mode": str(
-                            getattr(state.intent, "planning_mode", "") or ""
+                            getattr(state.intent, "planning_mode", "") or state.plan.planning_mode or ""
                         ),
+                        "parallel_groups": parallel_groups,
+                        "brief_coverage": coverage,
+                        "plan_ref": plan_ref,
+                        "plan_hash": plan_hash,
                     },
+                    input_refs=[{"type": "research_brief", "id": brief_id}] if brief_id else [],
+                    output_refs=[{"type": "research_plan", "id": plan_id, "ref": plan_ref, "sha256": plan_hash}],
                 )
                 recorder.emit(
                     EventType.PLAN_VALIDATED,
                     phase="plan",
                     status="ok" if not issues else "issues",
                     plan_version=plan_version,
-                    attributes={"issue_count": len(issues)},
+                    attributes={"issue_count": len(issues), "plan_id": plan_id, "brief_id": brief_id},
                 )
             return
 

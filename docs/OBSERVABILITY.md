@@ -30,7 +30,12 @@ Langfuse  TraceViewer / Metrics
 
 ## 事件词表
 
-`run.started/completed/failed` · `plan.created/validated` · `worker.*` · `tool.*` · `gen_ai.chat` · `evidence.registered` · `progress.evaluated` · `replan.proposed/applied/rejected` · `quality.evaluated` · `eval.scored`
+`run.*` · `brief.compiled` · `plan.created/validated` · `worker.*` · `tool.*` · `retrieval.search` · `gen_ai.chat` · `evidence.registered` · `progress.evaluated` · `replan.*` · `synthesis.*` · `recovery.*` · `context.*` · `checkpoint.*` · `budget.*` · `quality.evaluated` · `eval.scored`
+
+每个重要事件可带：
+
+- `input_refs` / `output_refs`：语义产物血缘（Brief → Plan → Finding → Evidence → Answer）
+- `*_ref` / `*_hash`：完整 payload 落在 `logs/traces/payloads/{run_id}/`，事件本身只保留引用
 
 ## 看哪里
 
@@ -39,7 +44,9 @@ Langfuse  TraceViewer / Metrics
 | 实时 UI | 提问后的过程框 / 执行过程（WebSocket `monitor_event`）。刷新后走 `GET /api/sessions/{id}/bootstrap`，WS `subscribe.after_seq` replay，按 `(run_id, seq)` 去重 |
 | Run 投影 | `RunStore` SQLite：query / status / result / HITL / timestamps / 文件 metadata。不要从 Trace 重建业务状态 |
 | 因果树 | 阶段与 Worker 的父子 span。默认不展示 `llm_usage` / `gen_ai.chat`（仍在 JSONL）。`GET /api/traces/tree/{session_id}` |
-| Worker / 进度 / Replan / Eval | Trace 查看器对应页签；JSONL/tree 响应里的 `summary`（identity、workers 按 `task_id+attempt` 合并 started/completed、progress、replans、evals、usage） |
+| Understanding / Plan / Synthesis | Trace 查看器页签；`summary.brief` / `summary.plans` / `summary.synthesis` / `summary.lineage` |
+| Worker / 进度 / Replan / Eval | Trace 查看器对应页签；JSONL/tree 响应里的 `summary` |
+| Semantic payload | `GET /api/traces/payloads/{run_id}/{name}` |
 | JSONL | 该 session 全部事件时间线，含每次 LLM 调用。用来对耗时、重试、abort |
 | 证据链 | `evidence.json` 引用源，不是 JSONL |
 | 落盘 journal | `app/logs/traces/{session_id}.jsonl`（运行时根是 `app/`，`schema=agent_event.v1`） |
@@ -56,18 +63,21 @@ Langfuse  TraceViewer / Metrics
 
 ## 隐私
 
-默认 `OBS_CONTENT_MODE=redacted`：只保留 tool name、token、id、verdict。完整 prompt / 网页 / 工具输出需显式 `OBS_CONTENT_MODE=full`。
+默认 `OBS_CONTENT_MODE=reference`：事件只保留 metadata + `*_ref` / `*_hash` / ids；完整结构化 payload 在本地 payload store。`redacted` 更激进地去掉正文；`full` 才把截断后的原文放进事件（opt-in）。
 
 ## Replan 指标
 
-`replan.proposed` → `replan.applied` / `replan.rejected` 记录 `from_plan_version` / `to_plan_version` / `reason` / `gaps` / `added_tasks` / `remaining_budget`。窗口聚合给出 `replan_trigger_rate`、`replan_recovery_rate`（触发 replan 后仍 success 的比例）、`avg_replan_count`。进程内 Counter：`harness_live_replan_applied_total`、`harness_live_replan_recovered_total`（replan 后 run 仍成功）、`harness_live_replan_waste_total`（replan 后仍失败）。
+`replan.proposed` → `replan.applied` / `replan.rejected` 记录 `target_gap_ids` / `triggered_by` / `from_plan_version` / `to_plan_version` / `reason` / `added_tasks`。
 
-Trace 查看器「进度 / Replan」页签同时列出 `progress.evaluated`。`replan_count=0` 并不等于没做进度评估：`max_parallel_workers` 会把原计划 READY 任务分批发完，第二波 Worker 经常不是 PlanPatch。
+**Gap closure（语义口径）**：`target_gap_ids` 在后续 `progress.evaluated.resolved_gap_ids` 中出现才算 recovered。`harness_live_replan_recovered_total` 不再等于「有 replan + run success」。
+
+Trace summary 提供 `gap_closure_rate` / `replan_useful` / `failure_origin`（earliest evaluated failing stage）。
 
 ## Eval 关联
 
-live eval 把 `trace_id` / `run_id` / `variant` / `case_id` 写入 `TaskEvalResult`，并 emit `eval.scored`。用 `HARNESS_EVAL_VARIANT=full_harness|no_replan|vanilla` 做 ablation。交互提问只会产生 Finalize 时的 `quality.evaluated`，不会有 `eval.scored`。
+live eval 把 `trace_id` / `run_id` / `variant` / `case_id` 写入 `TaskEvalResult`，并 emit `eval.scored`（含 `target_span_id` / `target_artifact_id` / `grader`）。用 `HARNESS_EVAL_VARIANT=full_harness|no_replan|vanilla` 做 ablation。交互提问只会产生 Finalize 时的 `quality.evaluated`，不会有 `eval.scored`。
 
 ## 依赖
 
 OTel SDK 为可选 extra：`pip install -e ".[otel]"`。未安装时本地 journal + WebSocket 仍工作。
+`gen_ai.agent.name=research-agent-harness`；`agent.run_id` 单独承载 invocation id。Search 映射为 `gen_ai.operation.name=retrieval`。

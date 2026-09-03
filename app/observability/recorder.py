@@ -167,10 +167,28 @@ class AgentTelemetry:
         )
         replan_count = int((metadata or {}).get("replan_count") or 0)
         if replan_count > 0:
-            if event_type == EventType.RUN_COMPLETED:
-                self.metrics.inc("harness.replan.recovered")
-            else:
-                self.metrics.inc("harness.replan.waste")
+            try:
+                from app.observability.semantic import compute_replan_gap_closure
+
+                run_events = []
+                if ctx is not None:
+                    run_events = [
+                        event.to_dict()
+                        for event in self.journal.events_for_run(ctx.session_id, ctx.run_id)
+                    ]
+                closure = compute_replan_gap_closure(run_events)
+                if closure.get("replan_useful"):
+                    self.metrics.inc("harness.replan.recovered")
+                elif event_type != EventType.RUN_COMPLETED:
+                    self.metrics.inc("harness.replan.waste")
+                if closure.get("gap_closure_rate") is not None:
+                    self.metrics.observe(
+                        "harness.replan.gap_closure_rate",
+                        float(closure["gap_closure_rate"]),
+                    )
+            except Exception:
+                if event_type != EventType.RUN_COMPLETED:
+                    self.metrics.inc("harness.replan.waste")
         if ctx and ctx.root_span_id:
             self.end_span(
                 span_identity("research.run", span_id=ctx.root_span_id),
@@ -245,6 +263,8 @@ class AgentTelemetry:
         attributes: dict[str, Any] | None = None,
         span_id: str | None = None,
         parent_span_id: str | None = None,
+        input_refs: list[dict[str, Any]] | None = None,
+        output_refs: list[dict[str, Any]] | None = None,
         to_ws: bool = True,
         session_id: str | None = None,
         run_id: str | None = None,
@@ -269,6 +289,8 @@ class AgentTelemetry:
         trace_id = trace_id or (ctx.trace_id if ctx else str((attributes or {}).get("trace_id") or new_id(32)))
         seq = ctx.next_seq() if ctx else 0
         attrs = dict(attributes or {})
+        refs_in = list(input_refs or attrs.pop("input_refs", None) or [])
+        refs_out = list(output_refs or attrs.pop("output_refs", None) or [])
         if (
             event_type.endswith(".failed")
             or status in {"failed", "error", "fail"}
@@ -298,6 +320,8 @@ class AgentTelemetry:
             status=status,
             duration_ms=duration_ms,
             attributes=sanitize_attributes(attributes),
+            input_refs=[dict(x) for x in refs_in if isinstance(x, dict)],
+            output_refs=[dict(x) for x in refs_out if isinstance(x, dict)],
         )
         self.journal.append(event)
         self._record_metrics(event)
@@ -442,6 +466,11 @@ class AgentTelemetry:
         duration_ms: int | None = None,
         status: str = "ok",
         error: str = "",
+        result_ref: str = "",
+        result_count: int = 0,
+        result_bytes: int = 0,
+        artifact_ids: list[str] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         call_id = tool_call_id or ""
         with self._lock:
@@ -450,6 +479,38 @@ class AgentTelemetry:
                 call_id, key = self._tool_spans.popitem()
         handle = self._handle(key) if key else None
         event_type = EventType.TOOL_COMPLETED if status == "ok" else EventType.TOOL_FAILED
+        attrs = {
+            "tool_name": tool_name,
+            "tool_call_id": call_id,
+            "error": error,
+            "fail_reason": error if status != "ok" else "",
+            "result_ref": result_ref,
+            "result_count": int(result_count or 0),
+            "result_bytes": int(result_bytes or 0),
+            "artifact_ids": list(artifact_ids or []),
+            **(extra or {}),
+        }
+        is_search = str(tool_name or "").lower() in {
+            "internet_search",
+            "web_search",
+            "tavily_search",
+            "search",
+        }
+        if is_search and status == "ok":
+            self.emit(
+                EventType.RETRIEVAL_SEARCH,
+                phase="execute",
+                status=status,
+                duration_ms=duration_ms,
+                span_id=handle.span_id if handle else None,
+                parent_span_id=handle.parent_span_id if handle else None,
+                attributes={
+                    **attrs,
+                    "document_ids": list((extra or {}).get("document_ids") or []),
+                    "domains": list((extra or {}).get("domains") or []),
+                    "top_k": (extra or {}).get("top_k"),
+                },
+            )
         self.emit(
             event_type,
             phase="execute",
@@ -457,12 +518,7 @@ class AgentTelemetry:
             duration_ms=duration_ms,
             span_id=handle.span_id if handle else None,
             parent_span_id=handle.parent_span_id if handle else None,
-            attributes={
-                "tool_name": tool_name,
-                "tool_call_id": call_id,
-                "error": error,
-                "fail_reason": error if status != "ok" else "",
-            },
+            attributes=attrs,
         )
         if key:
             self.end_span(key, status=status, duration_ms=duration_ms)

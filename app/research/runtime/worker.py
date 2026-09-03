@@ -165,8 +165,9 @@ class LangChainWorkerRuntime:
                             "parallel": True,
                         }
                     )
+                    evidence_ids: list[str] = []
                     if result is not None and session.ctx.citation_manager is not None:
-                        session.ctx.citation_manager.register_from_step(
+                        registered = session.ctx.citation_manager.register_from_step(
                             step_index,
                             step.step_type,
                             result.content,
@@ -180,6 +181,11 @@ class LangChainWorkerRuntime:
                                 list(payload.get("facts") or []),
                                 list(payload.get("sources") or []),
                             )
+                        evidence_ids = [
+                            str(getattr(src, "source_id", "") or "")
+                            for src in list(registered or [])
+                            if getattr(src, "source_id", None)
+                        ]
                     self.harness._refresh_working_memory(
                         session.state,
                         session.ctx.citation_manager,
@@ -192,6 +198,12 @@ class LangChainWorkerRuntime:
             findings = findings_from_worker_row(row)
             payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
             duration_ms = int((time.perf_counter() - worker_started) * 1000)
+            finding_ids = []
+            for idx, finding in enumerate(findings):
+                fid = str(finding.get("finding_id") or f"f_{task.task_id}_{idx + 1}")
+                finding_ids.append(fid)
+            brief_id = str((session.state.metadata or {}).get("brief_id") or "")
+            plan_id = f"plan_v{int(task.plan_version or 1)}"
             if recorder.is_active:
                 recorder.emit(
                     EventType.WORKER_COMPLETED if ok else EventType.WORKER_FAILED,
@@ -204,9 +216,31 @@ class LangChainWorkerRuntime:
                     attributes={
                         "objective": task.objective,
                         "step_type": task.step_type,
-                        "evidence_ids": [task.task_id] if ok else [],
+                        "brief_id": brief_id,
+                        "plan_id": plan_id,
+                        "finding_ids": finding_ids,
+                        "evidence_ids": evidence_ids if ok else [],
+                        "gaps": list((payload or {}).get("gaps") or [])[:8],
+                        "conflicts": list((payload or {}).get("conflicts") or [])[:8],
+                        "confidence": (payload or {}).get("confidence"),
+                        "tool_calls": int((payload or {}).get("tool_calls") or 0),
+                        "search_calls": int((payload or {}).get("search_calls") or 0),
+                        "tokens": int((payload or {}).get("tokens") or 0),
                         "fail_reason": "" if ok else "worker_failed",
                     },
+                    input_refs=[
+                        item
+                        for item in [
+                            {"type": "research_brief", "id": brief_id} if brief_id else None,
+                            {"type": "research_plan", "id": plan_id},
+                            {"type": "task", "id": task.task_id},
+                        ]
+                        if item
+                    ],
+                    output_refs=[
+                        *[{"type": "finding", "id": fid} for fid in finding_ids],
+                        *[{"type": "evidence", "id": eid} for eid in (evidence_ids if ok else [])],
+                    ],
                 )
                 if span_key:
                     recorder.end_span(
@@ -219,7 +253,7 @@ class LangChainWorkerRuntime:
                 task_id=task.task_id,
                 summary=str(row.get("summary") or ""),
                 findings=findings,
-                evidence_refs=[task.task_id] if ok else [],
+                evidence_refs=evidence_ids if ok else [],
                 facts=list((payload or {}).get("facts") or []),
                 sources=list((payload or {}).get("sources") or []),
                 raw=outcome,

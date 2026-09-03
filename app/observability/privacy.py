@@ -1,4 +1,4 @@
-"""Trace content policy: default redacted; full payloads are opt-in."""
+"""Trace content policy: redacted | reference (default) | full."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ _REDACT_KEYS = {
     "input",
     "tool_output",
     "page",
+    "answer",
+    "final_content",
 }
 
 _KEEP_KEYS = {
@@ -36,6 +38,14 @@ _KEEP_KEYS = {
     "artifact_id",
     "evidence_id",
     "source_id",
+    "finding_id",
+    "claim_id",
+    "brief_id",
+    "plan_id",
+    "answer_id",
+    "patch_id",
+    "gap_id",
+    "progress_id",
     "verdict",
     "reason",
     "gaps",
@@ -59,21 +69,90 @@ _KEEP_KEYS = {
     "finish_reason",
     "failure.stage",
     "failure.type",
+    "failure.origin_stage",
+    "failure.detected_stage",
+    "failure.cause_event_id",
+    "failure.cause_artifact_id",
     "fail_reason",
+    "objective",
+    "entities",
+    "dimensions",
+    "depth",
+    "freshness",
+    "deliverable",
+    "prefer_primary",
+    "planner_source",
+    "intent_confidence",
+    "brief_ref",
+    "brief_hash",
+    "plan_ref",
+    "plan_hash",
+    "answer_ref",
+    "answer_hash",
+    "prompt_ref",
+    "output_ref",
+    "prompt_template_id",
+    "prompt_template_version",
+    "input_hash",
+    "output_hash",
+    "temperature",
+    "response_format",
+    "task_ids",
+    "task_count",
+    "planning_mode",
+    "parallel_groups",
+    "brief_coverage",
+    "finding_ids",
+    "evidence_ids",
+    "claim_ids",
+    "citation_ids",
+    "conflicts",
+    "confidence",
+    "tool_calls",
+    "search_calls",
+    "tokens",
+    "latency",
+    "result_ref",
+    "result_count",
+    "result_bytes",
+    "target_gap_ids",
+    "resolved_gap_ids",
+    "open_gap_ids",
+    "triggered_by",
+    "target_span_id",
+    "target_artifact_id",
+    "target_type",
+    "grader",
+    "grader_version",
+    "metric",
+    "score",
+    "label",
+    "passed",
+    "word_count",
+    "support_type",
+    "source_quality",
+    "source_kind",
+    "locator",
+    "input_refs",
+    "output_refs",
+    "missing_dimensions",
+    "conflict_count",
+    "metadata",
+    "issues",
 }
 
 
 def content_mode() -> str:
     raw = (os.getenv("OBS_CONTENT_MODE") or os.getenv("HARNESS_OBS_CONTENT_MODE") or "").strip().lower()
-    if raw in {"full", "redacted"}:
+    if raw in {"full", "redacted", "reference"}:
         return raw
     try:
         from app.config.loader import get_harness_config
 
-        mode = str(getattr(get_harness_config(), "obs_content_mode", "redacted") or "redacted")
-        return mode if mode in {"full", "redacted"} else "redacted"
+        mode = str(getattr(get_harness_config(), "obs_content_mode", "reference") or "reference")
+        return mode if mode in {"full", "redacted", "reference"} else "reference"
     except Exception:
-        return "redacted"
+        return "reference"
 
 
 def _truncate(value: Any, limit: int = 400) -> Any:
@@ -95,7 +174,22 @@ def sanitize_attributes(attributes: dict[str, Any] | None, *, mode: str | None =
     cleaned: dict[str, Any] = {}
     for key, value in payload.items():
         lowered = str(key).lower()
-        if lowered in _KEEP_KEYS or lowered.endswith("_id") or lowered.endswith("_count"):
+        if lowered in {"input_refs", "output_refs"} and isinstance(value, list):
+            cleaned[key] = [
+                {str(sk): _truncate(sv, 120) for sk, sv in item.items()}
+                for item in value
+                if isinstance(item, dict)
+            ][:24]
+            continue
+        if (
+            lowered in _KEEP_KEYS
+            or lowered.endswith("_id")
+            or lowered.endswith("_ids")
+            or lowered.endswith("_count")
+            or lowered.endswith("_ref")
+            or lowered.endswith("_hash")
+            or lowered.endswith("_rate")
+        ):
             cleaned[key] = _truncate(value, 500)
             continue
         if lowered in _REDACT_KEYS or any(part in lowered for part in ("prompt", "html", "content", "body")):
@@ -103,6 +197,13 @@ def sanitize_attributes(attributes: dict[str, Any] | None, *, mode: str | None =
                 cleaned[f"{key}_bytes"] = len(str(value))
             else:
                 cleaned[key] = value
+            continue
+        if chosen == "reference":
+            # Prefer metadata + refs; drop bulky free-form blobs.
+            if isinstance(value, (dict, list)) and lowered not in {"gaps", "brief_coverage", "remaining_budget", "dimensions", "entities"}:
+                cleaned[f"{key}_count"] = len(value)
+                continue
+            cleaned[key] = _truncate(value, 240)
             continue
         cleaned[key] = _truncate(value, 240)
     return cleaned

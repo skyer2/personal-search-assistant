@@ -97,7 +97,7 @@ harness:
     metrics_window_hours: 168
     prometheus_enabled: true
     usage_tracking_enabled: true
-    content_mode: "redacted"
+    content_mode: "reference"
 
   budget:
     # Hard Safety Ceiling（确定性顶；Adaptive Effort 只能 clamp 到其下，不能抬高）

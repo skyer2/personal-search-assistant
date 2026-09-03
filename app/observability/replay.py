@@ -1,4 +1,4 @@
-"""Replay AgentEvents from the in-memory journal, falling back to durable JSONL."""
+"""Replay AgentEvents from the in-memory journal merged with durable JSONL."""
 
 from __future__ import annotations
 
@@ -28,6 +28,22 @@ def events_from_jsonl(session_id: str) -> list[AgentEvent]:
     return events
 
 
+def merge_events(*groups: list[AgentEvent]) -> list[AgentEvent]:
+    """Dedupe by event_id (prefer first seen), then sort by (run_id, seq, timestamp)."""
+    merged: list[AgentEvent] = []
+    seen: set[str] = set()
+    for group in groups:
+        for event in group:
+            key = str(event.event_id or "").strip()
+            if key:
+                if key in seen:
+                    continue
+                seen.add(key)
+            merged.append(event)
+    merged.sort(key=lambda event: (str(event.run_id or ""), int(event.seq or 0), event.timestamp or ""))
+    return merged
+
+
 def load_events(
     session_id: str,
     *,
@@ -37,22 +53,42 @@ def load_events(
     limit: int | None = None,
 ) -> list[AgentEvent]:
     recorder = get_recorder()
-    events = recorder.journal.replay(session_id)
-    if not events:
-        events = events_from_jsonl(session_id)
+    memory_events = recorder.journal.replay(session_id)
+    durable_events = events_from_jsonl(session_id)
+    # Durable first so in-memory updates with same event_id win? Prefer memory for live.
+    # Spec: merge durable + memory, dedupe by event_id. Memory usually has fresher copy —
+    # put durable first then memory so memory overwrites when we change to last-wins.
+    # Current merge keeps first; put memory after durable would drop memory duplicates.
+    # Better: last wins for same event_id.
+    events = _merge_last_wins(durable_events, memory_events)
     if run_id:
         events = [event for event in events if event.run_id == run_id]
     if after_seq:
         events = [event for event in events if int(event.seq or 0) > after_seq]
     if before_seq is not None:
         events = [event for event in events if int(event.seq or 0) < before_seq]
-    events.sort(key=lambda event: (int(event.seq or 0), event.timestamp or ""))
+    events.sort(key=lambda event: (str(event.run_id or ""), int(event.seq or 0), event.timestamp or ""))
     if limit is not None and limit >= 0:
         if before_seq is not None or not after_seq:
             events = events[-limit:]
         else:
             events = events[:limit]
     return events
+
+
+def _merge_last_wins(*groups: list[AgentEvent]) -> list[AgentEvent]:
+    by_id: dict[str, AgentEvent] = {}
+    anonymous: list[AgentEvent] = []
+    for group in groups:
+        for event in group:
+            key = str(event.event_id or "").strip()
+            if not key:
+                anonymous.append(event)
+                continue
+            by_id[key] = event
+    merged = list(by_id.values()) + anonymous
+    merged.sort(key=lambda event: (str(event.run_id or ""), int(event.seq or 0), event.timestamp or ""))
+    return merged
 
 
 def load_wire_events(

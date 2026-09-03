@@ -118,18 +118,38 @@ class CitationManager:
                 recorder = get_recorder()
                 if recorder.is_active:
                     for src in registered:
+                        claim_id = f"c_{src.source_id}"
+                        finding_id = f"f_step_{src.step_index}"
                         recorder.emit(
                             EventType.EVIDENCE_REGISTERED,
                             phase="execute",
                             status="ok",
                             attributes={
+                                "finding_id": finding_id,
+                                "claim_id": claim_id,
                                 "evidence_id": src.source_id,
                                 "source_id": src.source_id,
                                 "artifact_id": src.artifact_id,
                                 "source_kind": src.source_kind,
+                                "support_type": "direct",
+                                "source_quality": "primary" if src.source_kind == "url" else "secondary",
+                                "freshness": "",
                                 "step_index": src.step_index,
                                 "step_type": src.step_type,
+                                "locator": src.locator,
                             },
+                            input_refs=[
+                                {"type": "finding", "id": finding_id},
+                                {"type": "claim", "id": claim_id},
+                            ],
+                            output_refs=[
+                                item
+                                for item in [
+                                    {"type": "evidence", "id": src.source_id},
+                                    {"type": "artifact", "id": src.artifact_id} if src.artifact_id else None,
+                                ]
+                                if item
+                            ],
                         )
             except Exception:
                 pass

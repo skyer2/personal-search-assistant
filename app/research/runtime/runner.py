@@ -330,9 +330,71 @@ class ResearchGraphRunner:
                 state.intent = auto_resolve_clarification(state.intent)
                 needs = False
         intent_payload = state.intent.to_dict() if state.intent is not None else None
+        brief = brief_from_intent(intent_payload)
+        try:
+            from app.observability import EventType, get_recorder
+            from app.observability.events import new_id
+            from app.observability.payload_store import get_payload_store
+
+            recorder = get_recorder()
+            if recorder.is_active and brief:
+                brief_id = str(brief.get("brief_id") or f"brief_{new_id(8)}")
+                brief = {**brief, "brief_id": brief_id}
+                span_key = recorder.start_span(
+                    "task.understand",
+                    phase="understand",
+                    attributes={"brief_id": brief_id},
+                )
+                store = get_payload_store()
+                run_id = str(gstate.get("run_id") or session.session_id)
+                ref = store.put(
+                    run_id=run_id,
+                    artifact_type="research_brief",
+                    artifact_id=brief_id,
+                    payload={
+                        "objective": brief.get("objective"),
+                        "entities": list(brief.get("entities") or []),
+                        "dimensions": list(brief.get("dimensions") or []),
+                        "depth": brief.get("depth"),
+                        "freshness": brief.get("freshness"),
+                        "deliverable": brief.get("deliverable"),
+                        "prefer_primary": brief.get("prefer_primary"),
+                        "constraints": brief.get("constraints"),
+                        "success_criteria": brief.get("success_criteria"),
+                    },
+                )
+                intent_obj = state.intent
+                recorder.emit(
+                    EventType.BRIEF_COMPILED,
+                    phase="understand",
+                    status="ok",
+                    attributes={
+                        "brief_id": brief_id,
+                        "brief_version": 1,
+                        "objective": str(brief.get("objective") or "")[:240],
+                        "entities": list(brief.get("entities") or [])[:12],
+                        "dimensions": list(brief.get("dimensions") or [])[:12],
+                        "depth": brief.get("depth"),
+                        "freshness": brief.get("freshness"),
+                        "deliverable": brief.get("deliverable"),
+                        "prefer_primary": brief.get("prefer_primary"),
+                        "planner_source": getattr(intent_obj, "planner_source", None) if intent_obj else None,
+                        "intent_confidence": getattr(intent_obj, "intent_confidence", None) if intent_obj else None,
+                        "brief_ref": ref.ref,
+                        "brief_hash": ref.sha256,
+                    },
+                    input_refs=[{"type": "user_query", "id": "query"}],
+                    output_refs=[ref.to_dict()],
+                )
+                recorder.end_span(span_key, status="ok")
+                if isinstance(session.state.metadata, dict):
+                    session.state.metadata["brief_id"] = brief_id
+                    session.state.metadata["brief_ref"] = ref.ref
+        except Exception:
+            pass
         return {
             "intent": intent_payload,
-            "brief": brief_from_intent(intent_payload),
+            "brief": brief,
             "needs_clarification": needs,
             "search_mode": "agent",
             "progress": "intent",
@@ -585,27 +647,71 @@ class ResearchGraphRunner:
             ),
             enabled=enabled,
             intent=session.state.intent if session is not None else gstate.get("intent"),
+            previous_gap_ids=list(
+                (
+                    (session.state.metadata.get("progress_assessment") or {})
+                    if session is not None and isinstance(session.state.metadata, dict)
+                    else {}
+                ).get("open_gap_ids")
+                or []
+            ),
         )
         if session is not None:
             session.state.metadata["progress_assessment"] = assessment.to_dict()
         try:
             from app.observability import EventType, get_recorder
+            from app.observability.payload_store import get_payload_store
 
             recorder = get_recorder()
             if recorder.is_active:
+                span_key = recorder.start_span(
+                    "progress.evaluate",
+                    phase="validate",
+                    attributes={"progress_id": assessment.progress_id},
+                )
+                store = get_payload_store()
+                run_id = str(gstate.get("run_id") or (session.session_id if session else "unknown"))
+                ref = store.put(
+                    run_id=run_id,
+                    artifact_type="progress",
+                    artifact_id=assessment.progress_id or "progress",
+                    payload=assessment.to_dict(),
+                )
+                brief_id = ""
+                if session is not None and isinstance(session.state.metadata, dict):
+                    brief_id = str(session.state.metadata.get("brief_id") or "")
                 recorder.emit(
                     EventType.PROGRESS_EVALUATED,
                     phase="validate",
                     status=assessment.verdict,
                     plan_version=int(getattr(plan, "plan_version", 0) or 0) or None,
                     attributes={
+                        "progress_id": assessment.progress_id,
                         "verdict": assessment.verdict,
                         "reason": assessment.reason,
-                        "gaps": list(assessment.coverage_gaps or []) + list(assessment.missing_dimensions or []),
+                        "gaps": list(assessment.gaps or []),
+                        "open_gap_ids": list(assessment.open_gap_ids or []),
+                        "resolved_gap_ids": list(assessment.resolved_gap_ids or []),
                         "conflict_count": len(assessment.conflicts or []),
                         "missing_dimensions": list(assessment.missing_dimensions or []),
+                        "brief_id": brief_id,
+                        "progress_ref": ref.ref,
+                        "progress_hash": ref.sha256,
                     },
+                    input_refs=[
+                        item
+                        for item in [
+                            {"type": "research_brief", "id": brief_id} if brief_id else None,
+                            {
+                                "type": "research_plan",
+                                "id": f"plan_v{int(getattr(plan, 'plan_version', 1) or 1)}",
+                            },
+                        ]
+                        if item
+                    ],
+                    output_refs=[ref.to_dict()],
                 )
+                recorder.end_span(span_key, status=assessment.verdict)
         except Exception:
             pass
         payload = {
@@ -633,12 +739,53 @@ class ResearchGraphRunner:
         index, step = nxt
         session.state.step_index = index
         step.metadata["status"] = StepStatus.RUNNING.value
+        tid = step.resolved_task_id(index)
+        synth_span = ""
         try:
-            from app.observability import get_recorder
+            from app.observability import EventType, get_recorder
 
             recorder = get_recorder()
             if recorder.is_active:
-                recorder.emit_phase("synthesis", "start", task_id=step.resolved_task_id(index))
+                brief_id = str((session.state.metadata or {}).get("brief_id") or "")
+                plan_id = f"plan_v{int(getattr(plan, 'plan_version', 1) or 1)}"
+                evidence_ids = []
+                if session.ctx.citation_manager is not None:
+                    evidence_ids = [
+                        str(getattr(src, "source_id", "") or "")
+                        for src in list(getattr(session.ctx.citation_manager, "sources", []) or [])
+                        if getattr(src, "source_id", None)
+                    ][:40]
+                synth_span = recorder.start_span(
+                    "synthesis.generate",
+                    phase="synthesis",
+                    task_id=tid,
+                    attributes={"brief_id": brief_id, "plan_id": plan_id},
+                )
+                recorder.emit(
+                    EventType.SYNTHESIS_STARTED,
+                    phase="synthesis",
+                    status="start",
+                    task_id=tid,
+                    attributes={
+                        "brief_id": brief_id,
+                        "plan_id": plan_id,
+                        "evidence_ids": evidence_ids,
+                        "finding_ids": [
+                            str(item.get("task_id") or item.get("finding_id") or "")
+                            for item in list(gstate.get("findings") or [])[:24]
+                            if isinstance(item, dict)
+                        ],
+                    },
+                    input_refs=[
+                        item
+                        for item in [
+                            {"type": "research_brief", "id": brief_id} if brief_id else None,
+                            {"type": "research_plan", "id": plan_id},
+                        ]
+                        if item
+                    ]
+                    + [{"type": "evidence", "id": eid} for eid in evidence_ids[:12]],
+                )
         except Exception:
             pass
         async with session.lock:
@@ -665,17 +812,75 @@ class ResearchGraphRunner:
             step.metadata["status"] = (
                 StepStatus.DONE.value if ok else StepStatus.FAILED.value
             )
-        tid = step.resolved_task_id(index)
         try:
-            from app.observability import get_recorder
+            from app.observability import EventType, get_recorder
+            from app.observability.events import new_id
+            from app.observability.payload_store import get_payload_store
 
             recorder = get_recorder()
             if recorder.is_active:
-                recorder.emit_phase(
-                    "synthesis",
-                    "done" if ok else "failed",
-                    task_id=tid,
+                answer = str(session.state.final_content or "")
+                answer_id = f"answer_{new_id(8)}"
+                store = get_payload_store()
+                ref = store.put(
+                    run_id=str(gstate.get("run_id") or session.session_id),
+                    artifact_type="synthesis",
+                    artifact_id=answer_id,
+                    payload={
+                        "answer_preview": answer[:1200],
+                        "word_count": len(answer.split()),
+                        "task_id": tid,
+                    },
                 )
+                brief_id = str((session.state.metadata or {}).get("brief_id") or "")
+                plan_id = f"plan_v{int(getattr(plan, 'plan_version', 1) or 1)}"
+                evidence_ids = []
+                claim_ids = []
+                if session.ctx.citation_manager is not None:
+                    evidence_ids = [
+                        str(getattr(src, "source_id", "") or "")
+                        for src in list(getattr(session.ctx.citation_manager, "sources", []) or [])
+                        if getattr(src, "source_id", None)
+                    ][:40]
+                    claim_ids = [
+                        f"c{i + 1}"
+                        for i, _ in enumerate(
+                            list(getattr(session.ctx.citation_manager, "fact_bindings", []) or [])[:24]
+                        )
+                    ]
+                event_type = EventType.SYNTHESIS_COMPLETED if ok else EventType.SYNTHESIS_FAILED
+                recorder.emit(
+                    event_type,
+                    phase="synthesis",
+                    status="ok" if ok else "failed",
+                    task_id=tid,
+                    attributes={
+                        "answer_id": answer_id,
+                        "brief_id": brief_id,
+                        "plan_id": plan_id,
+                        "evidence_ids": evidence_ids,
+                        "claim_ids": claim_ids,
+                        "citation_ids": list(evidence_ids),
+                        "answer_ref": ref.ref,
+                        "answer_hash": ref.sha256,
+                        "word_count": len(answer.split()),
+                        "fail_reason": "" if ok else "synthesis_failed",
+                    },
+                    input_refs=[
+                        item
+                        for item in [
+                            {"type": "research_brief", "id": brief_id} if brief_id else None,
+                            {"type": "research_plan", "id": plan_id},
+                        ]
+                        if item
+                    ],
+                    output_refs=[ref.to_dict()],
+                )
+                if synth_span:
+                    recorder.end_span(synth_span, status="ok" if ok else "failed")
+                if isinstance(session.state.metadata, dict):
+                    session.state.metadata["answer_id"] = answer_id
+                    session.state.metadata["answer_ref"] = ref.ref
         except Exception:
             pass
         return {
@@ -756,14 +961,18 @@ class ResearchGraphRunner:
 
             recorder = get_recorder()
             if recorder.is_active:
+                target_gap_ids = list(patch.get("target_gap_ids") or assessment.get("open_gap_ids") or [])
                 recorder.emit(
                     EventType.REPLAN_PROPOSED,
                     phase="recover",
                     status="proposed",
                     plan_version=int(getattr(state.plan, "plan_version", 1) or 1),
                     attributes={
+                        "patch_id": str(patch.get("patch_id") or ""),
+                        "triggered_by": str(patch.get("triggered_by") or assessment.get("progress_id") or ""),
+                        "target_gap_ids": [str(x) for x in target_gap_ids if x],
                         "reason": str(patch.get("reason") or assessment.get("reason") or "semantic_gap"),
-                        "gaps": list(assessment.get("missing_dimensions") or assessment.get("coverage_gaps") or []),
+                        "gaps": list(assessment.get("gaps") or assessment.get("missing_dimensions") or assessment.get("coverage_gaps") or []),
                         "added_tasks": [
                             str(item.get("task_id") or "")
                             for item in list(patch.get("add_tasks") or [])
@@ -797,6 +1006,7 @@ class ResearchGraphRunner:
                         attributes={
                             "reason": str(assessment.get("reason") or "unchanged"),
                             "issues": issues,
+                            "target_gap_ids": list(patch.get("target_gap_ids") or []),
                         },
                     )
             except Exception:
@@ -819,6 +1029,7 @@ class ResearchGraphRunner:
         )
         try:
             from app.observability import EventType, get_recorder
+            from app.observability.payload_store import get_payload_store
 
             recorder = get_recorder()
             if recorder.is_active:
@@ -827,20 +1038,45 @@ class ResearchGraphRunner:
                     budget = self.harness.remaining_budget(state)
                 except Exception:
                     budget = {}
+                patch_id = str(patch.get("patch_id") or f"patch_{from_version}_{state.plan.plan_version}")
+                store = get_payload_store()
+                ref = store.put(
+                    run_id=str(gstate.get("run_id") or session.session_id),
+                    artifact_type="plan_patch",
+                    artifact_id=patch_id,
+                    payload=dict(patch),
+                )
+                target_gap_ids = [str(x) for x in (patch.get("target_gap_ids") or []) if x]
                 recorder.emit(
                     EventType.REPLAN_APPLIED,
                     phase="recover",
                     status="applied",
                     plan_version=int(getattr(state.plan, "plan_version", 1) or 1),
                     attributes={
+                        "patch_id": patch_id,
+                        "triggered_by": str(patch.get("triggered_by") or assessment.get("progress_id") or ""),
+                        "target_gap_ids": target_gap_ids,
                         "from_plan_version": from_version,
                         "to_plan_version": int(getattr(state.plan, "plan_version", 1) or 1),
                         "reason": str(patch.get("reason") or assessment.get("reason") or "semantic_gap"),
-                        "gaps": list(assessment.get("missing_dimensions") or assessment.get("coverage_gaps") or []),
+                        "gaps": list(assessment.get("gaps") or assessment.get("missing_dimensions") or assessment.get("coverage_gaps") or []),
                         "added_tasks": [tid for tid in added if tid],
                         "removed_tasks": [],
                         "remaining_budget": budget,
+                        "patch_ref": ref.ref,
+                        "patch_hash": ref.sha256,
                     },
+                    input_refs=[
+                        {"type": "progress", "id": str(assessment.get("progress_id") or "")},
+                        *[{"type": "gap", "id": gid} for gid in target_gap_ids],
+                    ],
+                    output_refs=[
+                        ref.to_dict(),
+                        {
+                            "type": "research_plan",
+                            "id": f"plan_v{int(getattr(state.plan, 'plan_version', 1) or 1)}",
+                        },
+                    ],
                 )
         except Exception:
             pass
@@ -901,6 +1137,16 @@ class ResearchGraphRunner:
                         "citation_coverage_rate": getattr(state, "citation_coverage_rate", None),
                         "hallucination_rate": getattr(state, "hallucination_rate", None),
                         "unsupported_claim_rate": getattr(state, "hallucination_rate", None),
+                        "target_type": "synthesis",
+                        "target_artifact_id": str((state.metadata or {}).get("answer_id") or ""),
+                        "target_span_id": "",
+                        "grader": "finalize_validator",
+                        "grader_version": "v1",
+                        "metric": "quality_gate",
+                        "score": 1.0 if passed else 0.0,
+                        "failure.origin_stage": "synthesis" if not passed else "",
+                        "failure.detected_stage": "quality" if not passed else "",
+                        "failure.cause_artifact_id": str((state.metadata or {}).get("answer_id") or ""),
                     },
                 )
         except Exception:

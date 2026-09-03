@@ -98,16 +98,25 @@ def build_span_tree(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 _SPAN_NAME_PRIORITY = (
     "research.run",
+    "task.understand",
+    "plan.create",
     "worker.execute",
     "worker.started",
     "worker.completed",
+    "brief.compiled",
     "plan.created",
+    "synthesis.generate",
+    "synthesis.completed",
     "replan.applied",
     "progress.evaluated",
+    "retrieval.search",
     "tool.started",
     "gen_ai.chat",
     "quality.evaluated",
     "eval.scored",
+    "recovery.decided",
+    "context.built",
+    "checkpoint.saved",
 )
 
 
@@ -157,6 +166,13 @@ def _coalesce_worker_row(
         "objective": attrs.get("objective"),
         "fail_reason": attrs.get("fail_reason") or event.get("fail_reason"),
         "evidence_ids": attrs.get("evidence_ids") or [],
+        "finding_ids": attrs.get("finding_ids") or [],
+        "gaps": attrs.get("gaps") or [],
+        "conflicts": attrs.get("conflicts") or [],
+        "confidence": attrs.get("confidence"),
+        "tool_calls": attrs.get("tool_calls"),
+        "brief_id": attrs.get("brief_id"),
+        "plan_id": attrs.get("plan_id"),
         "step_type": attrs.get("step_type"),
         "timestamp": event.get("timestamp"),
     }
@@ -167,7 +183,7 @@ def _coalesce_worker_row(
     terminal = existing.get("type") in _WORKER_TERMINAL
     if event_type in _WORKER_TERMINAL or not terminal:
         existing["type"] = event_type
-    for field in ("status", "duration_ms", "plan_version", "timestamp"):
+    for field in ("status", "duration_ms", "plan_version", "timestamp", "confidence", "tool_calls", "brief_id", "plan_id"):
         if incoming.get(field) not in (None, ""):
             existing[field] = incoming[field]
     if incoming.get("objective"):
@@ -176,19 +192,30 @@ def _coalesce_worker_row(
         existing["objective"] = incoming.get("objective")
     if incoming.get("fail_reason"):
         existing["fail_reason"] = incoming["fail_reason"]
-    if incoming.get("evidence_ids"):
-        existing["evidence_ids"] = incoming["evidence_ids"]
+    for list_field in ("evidence_ids", "finding_ids", "gaps", "conflicts"):
+        if incoming.get(list_field):
+            existing[list_field] = incoming[list_field]
     if incoming.get("step_type"):
         existing["step_type"] = incoming["step_type"]
 
 
 def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """把 journal 收成 Agent-native 视图：identity / worker / progress / replan / evidence / eval / usage。"""
+    """把 journal 收成 Agent-native 视图：identity / brief / plan / worker / lineage / eval。"""
+    from app.observability.semantic import (
+        build_lineage_edges,
+        compute_replan_gap_closure,
+        earliest_failure_origin,
+    )
+
     identity: dict[str, Any] = {}
+    brief: dict[str, Any] | None = None
+    plans: list[dict[str, Any]] = []
     workers_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     progress: list[dict[str, Any]] = []
     replans: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
+    synthesis: list[dict[str, Any]] = []
+    recoveries: list[dict[str, Any]] = []
     evals: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     usage = {
@@ -215,22 +242,63 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
             failures.append(
                 {
                     "stage": attrs.get("failure.stage"),
+                    "origin_stage": attrs.get("failure.origin_stage") or attrs.get("failure.stage"),
+                    "detected_stage": attrs.get("failure.detected_stage"),
                     "type": attrs.get("failure.type"),
                     "reason": attrs.get("fail_reason") or attrs.get("error") or event.get("status"),
+                    "cause_artifact_id": attrs.get("failure.cause_artifact_id"),
                     "task_id": event.get("task_id"),
                     "event": event_type,
                     "timestamp": event.get("timestamp"),
                 }
             )
-        if event_type.startswith("worker."):
+        if event_type == "brief.compiled":
+            brief = {
+                "brief_id": attrs.get("brief_id"),
+                "brief_version": attrs.get("brief_version") or 1,
+                "objective": attrs.get("objective"),
+                "entities": attrs.get("entities") or [],
+                "dimensions": attrs.get("dimensions") or [],
+                "depth": attrs.get("depth"),
+                "freshness": attrs.get("freshness"),
+                "deliverable": attrs.get("deliverable"),
+                "prefer_primary": attrs.get("prefer_primary"),
+                "planner_source": attrs.get("planner_source"),
+                "intent_confidence": attrs.get("intent_confidence"),
+                "brief_ref": attrs.get("brief_ref"),
+                "brief_hash": attrs.get("brief_hash"),
+                "span_id": event.get("span_id"),
+                "timestamp": event.get("timestamp"),
+            }
+        elif event_type.startswith("worker."):
             _coalesce_worker_row(workers_by_key, event, attrs, event_type)
+        elif event_type == "plan.created":
+            plans.append(
+                {
+                    "plan_id": attrs.get("plan_id"),
+                    "plan_version": event.get("plan_version") or attrs.get("plan_version"),
+                    "brief_id": attrs.get("brief_id"),
+                    "task_count": attrs.get("task_count"),
+                    "task_ids": attrs.get("task_ids") or [],
+                    "planning_mode": attrs.get("planning_mode"),
+                    "parallel_groups": attrs.get("parallel_groups"),
+                    "brief_coverage": attrs.get("brief_coverage") or {},
+                    "plan_ref": attrs.get("plan_ref"),
+                    "plan_hash": attrs.get("plan_hash"),
+                    "span_id": event.get("span_id"),
+                    "timestamp": event.get("timestamp"),
+                }
+            )
         elif event_type == "progress.evaluated":
             progress.append(
                 {
                     "type": event_type,
+                    "progress_id": attrs.get("progress_id"),
                     "verdict": attrs.get("verdict") or event.get("status"),
                     "reason": attrs.get("reason"),
                     "gaps": attrs.get("gaps") or [],
+                    "open_gap_ids": attrs.get("open_gap_ids") or [],
+                    "resolved_gap_ids": attrs.get("resolved_gap_ids") or [],
                     "conflict_count": attrs.get("conflict_count"),
                     "missing_dimensions": attrs.get("missing_dimensions") or [],
                     "plan_version": event.get("plan_version"),
@@ -242,6 +310,9 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
             replans.append(
                 {
                     "type": event_type,
+                    "patch_id": attrs.get("patch_id"),
+                    "triggered_by": attrs.get("triggered_by"),
+                    "target_gap_ids": attrs.get("target_gap_ids") or [],
                     "from_plan_version": attrs.get("from_plan_version"),
                     "to_plan_version": attrs.get("to_plan_version") or event.get("plan_version"),
                     "reason": attrs.get("reason"),
@@ -257,8 +328,45 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
                 {
                     "evidence_id": attrs.get("evidence_id") or attrs.get("source_id"),
                     "artifact_id": attrs.get("artifact_id"),
+                    "finding_id": attrs.get("finding_id"),
+                    "claim_id": attrs.get("claim_id"),
+                    "source_id": attrs.get("source_id"),
+                    "source_kind": attrs.get("source_kind"),
+                    "support_type": attrs.get("support_type"),
+                    "source_quality": attrs.get("source_quality"),
+                    "freshness": attrs.get("freshness"),
                     "task_id": event.get("task_id"),
                     "locator": attrs.get("locator"),
+                    "timestamp": event.get("timestamp"),
+                }
+            )
+        elif event_type.startswith("synthesis."):
+            synthesis.append(
+                {
+                    "type": event_type,
+                    "answer_id": attrs.get("answer_id"),
+                    "brief_id": attrs.get("brief_id"),
+                    "plan_id": attrs.get("plan_id"),
+                    "evidence_ids": attrs.get("evidence_ids") or [],
+                    "claim_ids": attrs.get("claim_ids") or [],
+                    "citation_ids": attrs.get("citation_ids") or [],
+                    "answer_ref": attrs.get("answer_ref"),
+                    "answer_hash": attrs.get("answer_hash"),
+                    "word_count": attrs.get("word_count"),
+                    "status": event.get("status"),
+                    "span_id": event.get("span_id"),
+                    "timestamp": event.get("timestamp"),
+                }
+            )
+        elif event_type.startswith("recovery."):
+            recoveries.append(
+                {
+                    "type": event_type,
+                    "decision": attrs.get("decision") or attrs.get("action"),
+                    "failure_type": attrs.get("failure_type") or attrs.get("failure.type"),
+                    "attempt": event.get("attempt") or attrs.get("attempt"),
+                    "remaining_budget": attrs.get("remaining_budget") or {},
+                    "status": event.get("status"),
                     "timestamp": event.get("timestamp"),
                 }
             )
@@ -280,6 +388,14 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
                     "progress": attrs.get("progress") or attrs.get("verdict"),
                     "replan": attrs.get("replan"),
                     "evidence": attrs.get("evidence") or attrs.get("evidence_ids") or [],
+                    "target_span_id": attrs.get("target_span_id"),
+                    "target_artifact_id": attrs.get("target_artifact_id"),
+                    "target_type": attrs.get("target_type"),
+                    "grader": attrs.get("grader"),
+                    "grader_version": attrs.get("grader_version"),
+                    "metric": attrs.get("metric"),
+                    "score": attrs.get("score"),
+                    "label": attrs.get("label"),
                 }
             )
         elif event_type in {"gen_ai.chat", "llm_usage"}:
@@ -287,27 +403,65 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
             for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cache_read_tokens"):
                 usage[key] += int(attrs.get(key) or event.get(key) or 0)
             usage["cost_usd"] += float(attrs.get("cost_usd") or event.get("cost_usd") or 0.0)
+
+        # enrich worker rows with lineage fields from completed attrs
+        if event_type in _WORKER_TERMINAL:
+            key = _worker_attempt_key(event, attrs)
+            row = workers_by_key.get(key)
+            if row is not None:
+                for field in (
+                    "finding_ids",
+                    "evidence_ids",
+                    "gaps",
+                    "conflicts",
+                    "confidence",
+                    "tool_calls",
+                    "search_calls",
+                    "tokens",
+                    "brief_id",
+                    "plan_id",
+                ):
+                    if attrs.get(field) not in (None, "", []):
+                        row[field] = attrs.get(field)
+
     workers = list(workers_by_key.values())
     failure_counts: dict[str, int] = {}
     for row in failures:
-        stage = str(row.get("stage") or "runtime")
+        stage = str(row.get("origin_stage") or row.get("stage") or "runtime")
         failure_counts[stage] = failure_counts.get(stage, 0) + 1
     eval_matrix = _eval_variant_matrix(evals)
+    gap_closure = compute_replan_gap_closure(events)
+    failure_origin = earliest_failure_origin(events)
+    lineage = build_lineage_edges(events)
+    quality = {
+        "gap_closure": gap_closure,
+        "failure_origin": failure_origin,
+        "brief_coverage": (plans[-1].get("brief_coverage") if plans else None),
+    }
     return {
         "identity": identity,
+        "brief": brief,
+        "plans": plans,
         "workers": workers,
         "progress": progress,
         "replans": replans,
         "evidence": evidence,
+        "synthesis": synthesis,
+        "recoveries": recoveries,
+        "quality": quality,
+        "lineage": lineage,
         "evals": evals,
         "eval_matrix": eval_matrix,
         "failures": failures,
         "failure_counts": failure_counts,
+        "failure_origin": failure_origin,
         "usage": usage,
         "event_count": len(events),
         "worker_count": len(workers),
         "progress_count": len(progress),
         "replan_count": sum(1 for row in replans if row.get("type") == "replan.applied"),
+        "gap_closure_rate": gap_closure.get("gap_closure_rate"),
+        "replan_useful": gap_closure.get("replan_useful"),
     }
 
 

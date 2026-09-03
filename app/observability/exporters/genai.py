@@ -47,7 +47,8 @@ def map_genai_attributes(
     }
     if ctx is not None:
         mapped["gen_ai.conversation.id"] = ctx.session_id
-        mapped["gen_ai.agent.id"] = ctx.run_id
+        # run_id is invocation id — keep it off gen_ai.agent.id
+        mapped["gen_ai.agent.version"] = ctx.git_sha or ctx.config_hash or "dev"
         mapped["agent.run_id"] = ctx.run_id
         mapped["agent.session_id"] = ctx.session_id
         mapped["agent.trace_id"] = ctx.trace_id
@@ -65,6 +66,12 @@ def map_genai_attributes(
     lowered = name.lower()
     is_tool = lowered.startswith("tool.") or raw.get("tool_name")
     is_gen = lowered.startswith("gen_ai") or lowered in {"chat", "generation"}
+    is_retrieval = lowered.startswith("retrieval.") or str(raw.get("tool_name") or "").lower() in {
+        "internet_search",
+        "web_search",
+        "tavily_search",
+        "search",
+    }
 
     if is_gen:
         mapped["gen_ai.operation.name"] = "chat"
@@ -82,7 +89,13 @@ def map_genai_attributes(
         if raw.get("finish_reason"):
             mapped["gen_ai.response.finish_reasons"] = str(raw.get("finish_reason"))
 
-    if is_tool:
+    if is_retrieval:
+        mapped["gen_ai.operation.name"] = "retrieval"
+        tool_name = str(raw.get("tool_name") or name.split(".", 1)[-1])
+        mapped["gen_ai.tool.name"] = tool_name
+        if raw.get("tool_call_id"):
+            mapped["gen_ai.tool.call.id"] = str(raw.get("tool_call_id"))
+    elif is_tool:
         mapped["gen_ai.operation.name"] = "execute_tool"
         tool_name = str(raw.get("tool_name") or name.split(".", 1)[-1])
         mapped["gen_ai.tool.name"] = tool_name

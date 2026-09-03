@@ -53,6 +53,10 @@ class ProgressAssessment:
     stale_evidence: list[str] = field(default_factory=list)
     missing_dimensions: list[str] = field(default_factory=list)
     reason: str = ""
+    gaps: list[dict[str, Any]] = field(default_factory=list)
+    open_gap_ids: list[str] = field(default_factory=list)
+    resolved_gap_ids: list[str] = field(default_factory=list)
+    progress_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -63,6 +67,8 @@ class ProgressAssessment:
         verdict = str(data.get("verdict") or "enough")
         if verdict not in {"enough", "gap", "abort", "run"}:
             verdict = "enough"
+        gaps_raw = data.get("gaps") or []
+        gaps = [dict(x) for x in gaps_raw if isinstance(x, dict)]
         return cls(
             verdict=verdict,  # type: ignore[arg-type]
             coverage_gaps=[str(x) for x in (data.get("coverage_gaps") or []) if x],
@@ -71,7 +77,30 @@ class ProgressAssessment:
             stale_evidence=[str(x) for x in (data.get("stale_evidence") or []) if x],
             missing_dimensions=[str(x) for x in (data.get("missing_dimensions") or []) if x],
             reason=str(data.get("reason") or ""),
+            gaps=gaps,
+            open_gap_ids=[str(x) for x in (data.get("open_gap_ids") or []) if x],
+            resolved_gap_ids=[str(x) for x in (data.get("resolved_gap_ids") or []) if x],
+            progress_id=str(data.get("progress_id") or ""),
         )
+
+    def materialize_gaps(self, *, previous_gap_ids: list[str] | None = None) -> "ProgressAssessment":
+        from app.observability.events import new_id
+        from app.observability.semantic import materialize_gap_items
+
+        if not self.gaps:
+            self.gaps = materialize_gap_items(
+                coverage_gaps=self.coverage_gaps,
+                missing_dimensions=self.missing_dimensions,
+                conflicts=self.conflicts,
+                stale_evidence=self.stale_evidence,
+            )
+        self.open_gap_ids = [str(item.get("gap_id") or "") for item in self.gaps if item.get("gap_id")]
+        prev = {str(x) for x in (previous_gap_ids or []) if x}
+        curr = set(self.open_gap_ids)
+        self.resolved_gap_ids = sorted(prev - curr)
+        if not self.progress_id:
+            self.progress_id = f"progress_{new_id(8)}"
+        return self
 
 
 def latest_worker_results(rows: list[Any] | None) -> list[dict[str, Any]]:
@@ -98,11 +127,15 @@ def assess_progress(
     current_year: int | None = None,
     enabled: bool = True,
     intent: Any = None,
+    previous_gap_ids: list[str] | None = None,
 ) -> ProgressAssessment:
+    def _finalize(assessment: ProgressAssessment) -> ProgressAssessment:
+        return assessment.materialize_gaps(previous_gap_ids=previous_gap_ids)
+
     if aborted or (state is not None and state.abort_reason):
-        return ProgressAssessment(verdict="abort", reason="aborted")
+        return _finalize(ProgressAssessment(verdict="abort", reason="aborted"))
     if plan is None or not plan.steps:
-        return ProgressAssessment(verdict="abort", reason="empty_plan")
+        return _finalize(ProgressAssessment(verdict="abort", reason="empty_plan"))
 
     status = dict(task_status or {})
     if state is not None:
@@ -112,9 +145,11 @@ def assess_progress(
 
     ready = ready_research_steps(plan, status)
     if ready:
-        return ProgressAssessment(
-            verdict="run",
-            reason=f"ready_research:{len(ready)}",
+        return _finalize(
+            ProgressAssessment(
+                verdict="run",
+                reason=f"ready_research:{len(ready)}",
+            )
         )
 
     pending_research = [
@@ -125,13 +160,15 @@ def assess_progress(
     ]
     if pending_research:
         # 无 READY 仍 pending：通常是上游失败挡住依赖，按缺口处理以免 dispatch 空转。
-        return ProgressAssessment(
-            verdict="gap",
-            coverage_gaps=[
-                f"blocked:{step.task_id}:{step.objective or step.description}"
-                for step in pending_research
-            ][:8],
-            reason="blocked_pending_research",
+        return _finalize(
+            ProgressAssessment(
+                verdict="gap",
+                coverage_gaps=[
+                    f"blocked:{step.task_id}:{step.objective or step.description}"
+                    for step in pending_research
+                ][:8],
+                reason="blocked_pending_research",
+            )
         )
 
     failed_research = [
@@ -181,7 +218,7 @@ def assess_progress(
     if not enabled:
         assessment.verdict = "enough" if not failed_research else "gap"
         assessment.reason = "progress_eval_disabled"
-        return assessment
+        return _finalize(assessment)
 
     if assessment.coverage_gaps or assessment.conflicts:
         assessment.verdict = "gap"
@@ -202,7 +239,7 @@ def assess_progress(
         assessment.reason = "ready_for_synthesis"
     elif assessment.verdict == "gap":
         assessment.reason = assessment.reason if assessment.reason != "coverage_ok" else "semantic_gap"
-    return assessment
+    return _finalize(assessment)
 
 
 def evaluate_progress(

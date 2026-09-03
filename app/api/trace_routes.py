@@ -119,6 +119,21 @@ def get_langfuse_traces(session_id: str) -> dict[str, Any]:
     }
 
 
+@router.get("/payloads/{run_id}/{name}")
+def get_semantic_payload(run_id: str, name: str) -> dict[str, Any]:
+    """Load a sanitized semantic artifact from the payload store by run + filename."""
+    from app.observability.payload_store import get_payload_store
+
+    store = get_payload_store()
+    ref = f"payloads/{run_id}/{name}"
+    data = store.get(ref)
+    if data is None:
+        data = store.get(name)
+    if data is None:
+        return {"run_id": run_id, "name": name, "found": False, "message": "payload not found"}
+    return {"run_id": run_id, "name": name, "found": True, "payload": data}
+
+
 @router.get("/citations/{session_id}")
 def get_citations(session_id: str) -> dict[str, Any]:
     """【Phase 6】读取 session 证据链 evidence.json。"""

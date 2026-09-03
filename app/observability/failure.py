@@ -1,4 +1,7 @@
-"""Normalize free-form fail_reason into aggregatable failure.stage / failure.type."""
+"""Normalize free-form fail_reason into aggregatable failure.stage / failure.type.
+
+Also supports semantic quality attribution via origin_stage / detected_stage.
+"""
 
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ _TYPE_ALIASES: dict[str, str] = {
     "missing_evidence": "missing_evidence",
     "no_file_generated": "missing_evidence",
     "false_enough": "false_enough",
+    "missing_dimension": "missing_dimension",
     "unauthorized_tool": "unauthorized_tool",
     "unauthorized_tools": "unauthorized_tool",
     "tool_gateway_denied": "unauthorized_tool",
@@ -50,9 +54,11 @@ _STAGE_BY_PHASE: dict[str, str] = {
     "validate": "evidence",
     "recover": "replan",
     "finalize": "synthesis",
+    "synthesis": "synthesis",
     "abort": "runtime",
     "run": "runtime",
     "eval": "runtime",
+    "quality": "synthesis",
 }
 
 _STAGE_BY_TYPE: dict[str, str] = {
@@ -61,6 +67,7 @@ _STAGE_BY_TYPE: dict[str, str] = {
     "invalid_output": "worker",
     "missing_evidence": "evidence",
     "false_enough": "progress",
+    "missing_dimension": "understand",
     "unauthorized_tool": "tool",
     "dependency_failed": "worker",
     "worker_failed": "worker",
@@ -73,6 +80,8 @@ def classify_failure(
     *,
     phase: str | None = None,
     event_type: str | None = None,
+    origin_stage: str | None = None,
+    detected_stage: str | None = None,
 ) -> dict[str, str]:
     raw = str(reason or "").strip()
     lowered = raw.lower()
@@ -91,7 +100,19 @@ def classify_failure(
         stage = "replan"
     elif (event_type or "") == "progress.evaluated":
         stage = "progress"
-    payload = {"failure.stage": stage, "failure.type": failure_type}
+    elif (event_type or "").startswith("synthesis."):
+        stage = "synthesis"
+    elif (event_type or "") == "brief.compiled":
+        stage = "understand"
+
+    origin = str(origin_stage or stage)
+    detected = str(detected_stage or stage)
+    payload = {
+        "failure.stage": stage,
+        "failure.type": failure_type,
+        "failure.origin_stage": origin,
+        "failure.detected_stage": detected,
+    }
     if raw:
         payload["fail_reason"] = raw[:500]
     return payload
@@ -109,6 +130,8 @@ def enrich_failure_attributes(
         reason or str(attrs.get("fail_reason") or attrs.get("error") or ""),
         phase=phase,
         event_type=event_type,
+        origin_stage=str(attrs.get("failure.origin_stage") or "") or None,
+        detected_stage=str(attrs.get("failure.detected_stage") or "") or None,
     )
     for key, value in classified.items():
         attrs.setdefault(key, value)

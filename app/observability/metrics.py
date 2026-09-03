@@ -81,7 +81,7 @@ class InProcessMetrics:
             ("harness.runs.failed", "harness_live_runs_failed_total", "Process-lifetime failed runs"),
             ("harness.replan.applied", "harness_live_replan_applied_total", "Applied plan patches"),
             ("harness.replan.rejected", "harness_live_replan_rejected_total", "Rejected plan patches"),
-            ("harness.replan.recovered", "harness_live_replan_recovered_total", "Runs that replanned and still succeeded"),
+            ("harness.replan.recovered", "harness_live_replan_recovered_total", "Replans that later closed target_gap_ids"),
             ("harness.replan.waste", "harness_live_replan_waste_total", "Runs that replanned and still failed"),
             ("harness.progress.gap", "harness_live_progress_gap_total", "Progress evaluator GAP verdicts"),
             ("harness.worker.failed", "harness_live_worker_failed_total", "Failed worker executions"),

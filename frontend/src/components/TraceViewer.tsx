@@ -162,6 +162,11 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
   const progress = summary.progress || [];
   const replans = summary.replans || [];
   const evals = summary.evals || [];
+  const plans = summary.plans || [];
+  const synthesis = summary.synthesis || [];
+  const lineage = summary.lineage || [];
+  const brief = summary.brief || null;
+  const failureOrigin = summary.failure_origin || null;
   const progressCount = summary.progress_count ?? progress.length;
   const replanCount = summary.replan_count ?? 0;
 
@@ -202,6 +207,104 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
 
       <Tabs
         items={[
+          {
+            key: "overview",
+            label: "Overview",
+            children: (
+              <Card size="small">
+                {failureOrigin ? (
+                  <Alert
+                    message={`Earliest failure: ${asText(failureOrigin.origin_stage)} → detected@${asText(failureOrigin.detected_stage)} (${asText(failureOrigin.type)})`}
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    type="warning"
+                  />
+                ) : (
+                  <Alert message="本 run 暂无语义 failure origin" showIcon style={{ marginBottom: 12 }} type="success" />
+                )}
+                <Typography.Paragraph>
+                  Gap closure: {summary.gap_closure_rate == null ? "-" : Number(summary.gap_closure_rate).toFixed(2)}
+                  {" · "}
+                  Replan useful: {summary.replan_useful ? "yes" : "no"}
+                  {" · "}
+                  Lineage edges: {lineage.length}
+                </Typography.Paragraph>
+                {brief ? (
+                  <Typography.Paragraph>
+                    Brief {asText(brief.brief_id)} · dims={(brief.dimensions as string[] | undefined)?.join(", ") || "-"}
+                  </Typography.Paragraph>
+                ) : (
+                  <Alert message="尚未写入 brief.compiled" showIcon type="info" />
+                )}
+              </Card>
+            )
+          },
+          {
+            key: "understand",
+            label: "Understanding",
+            children: (
+              <Card size="small">
+                {!brief ? (
+                  <Alert message="尚未写入 ResearchBrief 投影（brief.compiled）" showIcon type="info" />
+                ) : (
+                  <ResizableTable
+                    dataSource={[
+                      { key: "objective", field: "objective", value: asText(brief.objective) },
+                      { key: "entities", field: "entities", value: asText((brief.entities as string[] | undefined)?.join(", ")) },
+                      { key: "dimensions", field: "dimensions", value: asText((brief.dimensions as string[] | undefined)?.join(", ")) },
+                      { key: "depth", field: "depth", value: asText(brief.depth) },
+                      { key: "freshness", field: "freshness", value: asText(brief.freshness) },
+                      { key: "deliverable", field: "deliverable", value: asText(brief.deliverable) },
+                      { key: "brief_ref", field: "brief_ref", value: asText(brief.brief_ref) }
+                    ]}
+                    pagination={false}
+                    size="small"
+                    columns={[
+                      { title: "Field", dataIndex: "field", width: 160, key: "field" },
+                      { title: "Value", dataIndex: "value", key: "value", render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div> }
+                    ]}
+                  />
+                )}
+              </Card>
+            )
+          },
+          {
+            key: "plans",
+            label: `Plan (${plans.length})`,
+            children: (
+              <Card size="small">
+                {plans.length === 0 ? (
+                  <Alert message="尚未写入 plan.created 语义字段" showIcon type="info" />
+                ) : (
+                  <ResizableTable
+                    dataSource={plans.map((row, index) => ({ ...row, key: `${String(row.plan_id || "p")}-${index}` }))}
+                    pagination={{ pageSize: 8 }}
+                    size="small"
+                    columns={[
+                      { title: "Plan", dataIndex: "plan_id", width: 140, key: "plan_id" },
+                      { title: "Brief", dataIndex: "brief_id", width: 140, key: "brief_id" },
+                      { title: "Tasks", dataIndex: "task_count", width: 80, key: "task_count" },
+                      {
+                        title: "Task IDs",
+                        dataIndex: "task_ids",
+                        key: "task_ids",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
+                      },
+                      {
+                        title: "Coverage missing",
+                        dataIndex: "brief_coverage",
+                        key: "brief_coverage",
+                        render: (value: unknown) => {
+                          const missing = (value as { missing_dimensions?: string[] } | undefined)?.missing_dimensions || [];
+                          return <div className="table-wrap-cell">{missing.join(", ") || "—"}</div>;
+                        }
+                      }
+                    ]}
+                  />
+                )}
+              </Card>
+            )
+          },
           {
             key: "tree",
             label: `因果树 (${traceTree.span_count})`,
@@ -249,6 +352,13 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
                         render: (version: unknown) => (version == null || version === "" ? "-" : `v${version}`)
                       },
                       {
+                        title: "Evidence",
+                        dataIndex: "evidence_ids",
+                        width: 160,
+                        key: "evidence_ids",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
+                      },
+                      {
                         title: "Objective",
                         dataIndex: "objective",
                         width: 420,
@@ -262,6 +372,36 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
                         key: "fail_reason",
                         render: (value: unknown) => <div className="table-wrap-cell">{asText(value, "")}</div>
                       }
+                    ]}
+                  />
+                )}
+              </Card>
+            )
+          },
+          {
+            key: "synthesis",
+            label: `Synthesis (${synthesis.length})`,
+            children: (
+              <Card size="small">
+                {synthesis.length === 0 ? (
+                  <Alert message="尚未写入 synthesis.completed" showIcon type="info" />
+                ) : (
+                  <ResizableTable
+                    dataSource={synthesis.map((row, index) => ({ ...row, key: `s-${index}` }))}
+                    pagination={{ pageSize: 8 }}
+                    size="small"
+                    columns={[
+                      { title: "Type", dataIndex: "type", width: 160, key: "type" },
+                      { title: "Answer", dataIndex: "answer_id", width: 140, key: "answer_id" },
+                      { title: "Brief", dataIndex: "brief_id", width: 140, key: "brief_id" },
+                      {
+                        title: "Evidence",
+                        dataIndex: "evidence_ids",
+                        key: "evidence_ids",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
+                      },
+                      { title: "Words", dataIndex: "word_count", width: 90, key: "word_count" },
+                      { title: "Ref", dataIndex: "answer_ref", key: "answer_ref" }
                     ]}
                   />
                 )}
