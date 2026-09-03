@@ -1,4 +1,8 @@
-"""WebSocket exporter — maps AgentEvent onto the existing monitor_event envelope."""
+"""WebSocket exporter — maps AgentEvent onto the existing monitor_event envelope.
+
+Also publishes onto the optional multi-process EventBus so API workers can fan out
+live events when OBS_EVENT_BUS=redis.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +24,8 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
         "task_id": event.task_id,
         "attempt": event.attempt,
         "duration_ms": event.duration_ms,
+        "input_refs": list(event.input_refs or []),
+        "output_refs": list(event.output_refs or []),
         **{k: v for k, v in attrs.items() if k not in {"metadata", "args"}},
     }
     mapping = {
@@ -125,11 +131,56 @@ def wire_payload(event: AgentEvent, *, replay: bool = False) -> dict[str, Any] |
     }
 
 
+_BUS_HOOKED = False
+
+
+def _ensure_bus_bridge() -> None:
+    global _BUS_HOOKED
+    if _BUS_HOOKED:
+        return
+    try:
+        from app.observability.event_bus import get_event_bus
+
+        bus = get_event_bus()
+
+        def _on_remote(payload: dict[str, Any]) -> None:
+            if payload.get("_local_delivery"):
+                return
+            try:
+                from app.api.monitor import monitor
+
+                monitor.forward_canonical_event(
+                    str(payload.get("monitor_event") or ""),
+                    str(payload.get("message") or ""),
+                    dict(payload.get("data") or {}),
+                )
+            except Exception as exc:
+                print(f"[Observability] bus→ws bridge failed: {exc}")
+
+        bus.subscribe("agent_events", _on_remote)
+        _BUS_HOOKED = True
+    except Exception as exc:
+        print(f"[Observability] event bus bridge skipped: {exc}")
+
+
 class WebSocketExporter:
     def export(self, event: AgentEvent) -> None:
         payload = monitor_payload(event)
         if payload is None:
             return
+        _ensure_bus_bridge()
+        try:
+            from app.observability.event_bus import get_event_bus
+
+            bus_payload = {
+                "monitor_event": payload["monitor_event"],
+                "message": payload["message"],
+                "data": payload["data"],
+                "_local_delivery": True,
+            }
+            get_event_bus().publish("agent_events", bus_payload)
+        except Exception:
+            pass
         try:
             from app.api.monitor import monitor
 

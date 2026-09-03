@@ -40,6 +40,30 @@ def get_llm_session() -> str:
     return _current_session.get()
 
 
+_PHASE_PROMPT_TEMPLATES: dict[str, tuple[str, str]] = {
+    "understand": ("understand_prompt", "v3"),
+    "plan": ("planner_prompt", "v5"),
+    "planning": ("planner_prompt", "v5"),
+    "execute": ("worker_research", "v7"),
+    "compress": ("compress_prompt", "v2"),
+    "recover": ("recovery_prompt", "v1"),
+    "validate": ("progress_prompt", "v2"),
+    "finalize": ("finalize_prompt", "v1"),
+    "synthesis": ("synthesis_prompt", "v1"),
+}
+
+
+def prompt_template_for_phase(phase: str) -> tuple[str, str]:
+    return _PHASE_PROMPT_TEMPLATES.get(str(phase or "").lower(), ("unknown_prompt", "v0"))
+
+
+def _hash_text(value: Any) -> str:
+    import hashlib
+
+    raw = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    return hashlib.sha256(str(raw).encode("utf-8")).hexdigest()[:16]
+
+
 # 默认定价（USD / 1M tokens），可被 env 覆盖
 DEFAULT_PRICING = {
     "qwen-max": {"input": 1.6, "output": 6.4},
@@ -260,10 +284,16 @@ class UsageTrackingCallback(BaseCallbackHandler):
         self.session_id = session_id
         self.phase = phase
         self._starts: dict[str, float] = {}
+        self._prompt_meta: dict[str, dict[str, Any]] = {}
 
     def on_llm_start(self, serialized: Any, prompts: Any, **kwargs: Any) -> None:
         run_id = str(kwargs.get("run_id") or "default")
         self._starts[run_id] = time.perf_counter()
+        prompt_blob = prompts if prompts is not None else kwargs.get("messages")
+        self._prompt_meta[run_id] = {
+            "input_hash": _hash_text(prompt_blob) if prompt_blob is not None else "",
+            "prompt_bytes": len(str(prompt_blob or "")),
+        }
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         try:
@@ -297,11 +327,14 @@ class UsageTrackingCallback(BaseCallbackHandler):
                 cache_read_tokens = _extract_cached_tokens(token_usage)
 
         # OpenAI 兼容层有时把 usage 放在 generations[0].message.usage_metadata
+        output_text = ""
         if total_tokens == 0:
             generations = getattr(response, "generations", None) or []
             for gen_list in generations:
                 for gen in gen_list or []:
                     msg = getattr(gen, "message", None)
+                    if msg is not None and not output_text:
+                        output_text = str(getattr(msg, "content", "") or "")
                     usage = getattr(msg, "usage_metadata", None) if msg else None
                     if isinstance(usage, dict):
                         prompt_tokens = int(usage.get("input_tokens") or 0)
@@ -310,6 +343,16 @@ class UsageTrackingCallback(BaseCallbackHandler):
                         model_name = getattr(msg, "response_metadata", {}).get("model_name") or model_name
                         break
                 if total_tokens:
+                    break
+        else:
+            generations = getattr(response, "generations", None) or []
+            for gen_list in generations:
+                for gen in gen_list or []:
+                    msg = getattr(gen, "message", None)
+                    if msg is not None:
+                        output_text = str(getattr(msg, "content", "") or "")
+                        break
+                if output_text:
                     break
 
         if total_tokens <= 0 and (prompt_tokens > 0 or completion_tokens > 0):
@@ -325,11 +368,54 @@ class UsageTrackingCallback(BaseCallbackHandler):
         phase = self.phase or get_llm_phase()
         session_id = self.session_id or get_llm_session()
         cost = estimate_cost_usd(model_name, prompt_tokens, completion_tokens)
-        started = self._starts.pop(str(kwargs.get("run_id") or "default"), None)
+        run_key = str(kwargs.get("run_id") or "default")
+        started = self._starts.pop(run_key, None)
+        prompt_meta = self._prompt_meta.pop(run_key, {})
         duration_ms = int((time.perf_counter() - started) * 1000) if started is not None else None
         finish_reason = ""
+        temperature = None
+        response_format = ""
         if isinstance(llm_output, dict):
             finish_reason = str(llm_output.get("finish_reason") or "")
+            temperature = llm_output.get("temperature")
+            response_format = str(llm_output.get("response_format") or "")
+        template_id, template_version = prompt_template_for_phase(phase)
+        prompt_ref = ""
+        output_ref = ""
+        try:
+            from app.observability.payload_store import get_payload_store
+
+            store = get_payload_store()
+            run_id = session_id
+            if prompt_meta.get("input_hash"):
+                pref = store.put(
+                    run_id=run_id,
+                    artifact_type="llm_prompt_meta",
+                    artifact_id=f"prompt_{prompt_meta['input_hash']}",
+                    payload={
+                        "phase": phase,
+                        "template_id": template_id,
+                        "template_version": template_version,
+                        "input_hash": prompt_meta.get("input_hash"),
+                        "prompt_bytes": prompt_meta.get("prompt_bytes"),
+                    },
+                )
+                prompt_ref = pref.ref
+            if output_text:
+                oref = store.put(
+                    run_id=run_id,
+                    artifact_type="llm_output_meta",
+                    artifact_id=f"output_{_hash_text(output_text)}",
+                    payload={
+                        "phase": phase,
+                        "output_hash": _hash_text(output_text),
+                        "output_preview": output_text[:400],
+                        "output_bytes": len(output_text),
+                    },
+                )
+                output_ref = oref.ref
+        except Exception:
+            pass
         rec = LLMCallRecord(
             session_id=session_id,
             phase=phase,
@@ -344,6 +430,14 @@ class UsageTrackingCallback(BaseCallbackHandler):
                 "usage_missing": usage_missing,
                 "duration_ms": duration_ms,
                 "finish_reason": finish_reason,
+                "prompt_template_id": template_id,
+                "prompt_template_version": template_version,
+                "prompt_ref": prompt_ref,
+                "output_ref": output_ref,
+                "input_hash": prompt_meta.get("input_hash") or "",
+                "output_hash": _hash_text(output_text) if output_text else "",
+                "temperature": temperature,
+                "response_format": response_format,
             },
         )
         get_usage_tracker().record(rec)

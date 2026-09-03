@@ -65,6 +65,32 @@ Langfuse  TraceViewer / Metrics
 
 默认 `OBS_CONTENT_MODE=reference`：事件只保留 metadata + `*_ref` / `*_hash` / ids；完整结构化 payload 在本地 payload store。`redacted` 更激进地去掉正文；`full` 才把截断后的原文放进事件（opt-in）。
 
+LLM generation 额外记录：`prompt_template_id/version`、`prompt_ref`/`output_ref`、`input_hash`/`output_hash`（不默认上报全文）。
+
+## JSONL 布局（run-centric）
+
+```text
+logs/traces/
+  {session_id}/
+    {run_id}.jsonl
+    index.jsonl
+  {session_id}.jsonl          # legacy 仍可读
+  payloads/{run_id}/*.json
+```
+
+采样：`OBS_TRACE_SAMPLE_RATE`（语义事件始终保留）。保留：`OBS_TRACE_RETENTION_DAYS`（默认 14）。
+
+## 实时 fanout
+
+默认单进程 WebSocket。多 API worker 时设：
+
+```text
+OBS_EVENT_BUS=redis
+REDIS_URL=redis://...
+```
+
+JSONL/OTel 仍是 durable；EventBus 只负责跨进程 live delivery。
+
 ## Replan 指标
 
 `replan.proposed` → `replan.applied` / `replan.rejected` 记录 `target_gap_ids` / `triggered_by` / `from_plan_version` / `to_plan_version` / `reason` / `added_tasks`。

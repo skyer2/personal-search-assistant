@@ -148,6 +148,11 @@ class ToolMonitor:
         duration_ms: int | None = None,
         status: str = "ok",
         error: str = "",
+        result_ref: str = "",
+        result_count: int = 0,
+        result_bytes: int = 0,
+        artifact_ids: list[str] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         try:
             from app.observability import get_recorder
@@ -160,6 +165,11 @@ class ToolMonitor:
                     duration_ms=duration_ms,
                     status=status,
                     error=error,
+                    result_ref=result_ref,
+                    result_count=result_count,
+                    result_bytes=result_bytes,
+                    artifact_ids=artifact_ids,
+                    extra=extra,
                 )
                 return
         except Exception:
@@ -174,6 +184,9 @@ class ToolMonitor:
                 "duration_ms": duration_ms,
                 "status": status,
                 "error": error,
+                "result_count": result_count,
+                "result_bytes": result_bytes,
+                "artifact_ids": artifact_ids or [],
             },
         )
 

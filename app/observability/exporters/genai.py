@@ -118,6 +118,16 @@ def map_genai_attributes(
         "fail_reason",
         "usage_missing",
         "phase",
+        "prompt_template_id",
+        "prompt_template_version",
+        "prompt_ref",
+        "output_ref",
+        "input_hash",
+        "output_hash",
+        "temperature",
+        "response_format",
+        "result_count",
+        "result_bytes",
     ):
         value = _str(raw.get(key))
         if value is not None:

@@ -113,7 +113,9 @@ def collect_run_summaries(
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, window_hours))
     summaries: list[dict[str, Any]] = []
 
-    for path in sorted(log_dir.glob("*.jsonl")):
+    for path in sorted(list(log_dir.glob("*.jsonl")) + list(log_dir.glob("*/*.jsonl"))):
+        if path.name == "index.jsonl":
+            continue
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
@@ -153,7 +155,9 @@ def aggregate_metrics(
     """【Phase 9】聚合 JSONL run_summary → 在线指标。"""
     summaries = collect_run_summaries(log_dir, window_hours=window_hours)
     agg = AggregatedMetrics(window_hours=window_hours)
-    agg.source_files_scanned = len(list(log_dir.glob("*.jsonl"))) if log_dir.exists() else 0
+    agg.source_files_scanned = (
+        len(list(log_dir.glob("*.jsonl")) + list(log_dir.glob("*/*.jsonl"))) if log_dir.exists() else 0
+    )
 
     if not summaries:
         return agg
@@ -287,7 +291,7 @@ def render_prometheus_text(metrics: AggregatedMetrics) -> str:
         "# HELP harness_replan_trigger_rate Share of runs that replanned",
         "# TYPE harness_replan_trigger_rate gauge",
         f"harness_replan_trigger_rate {metrics.replan_trigger_rate if metrics.replan_trigger_rate is not None else 0}",
-        "# HELP harness_replan_recovery_rate Share of replanned runs that still succeeded",
+        "# HELP harness_replan_recovery_rate DEPRECATED operational proxy; prefer gap_closure_rate from Trace summary (quality store)",
         "# TYPE harness_replan_recovery_rate gauge",
         f"harness_replan_recovery_rate {metrics.replan_recovery_rate if metrics.replan_recovery_rate is not None else 0}",
         "# HELP harness_structured_output_compliance_rate Worker JSON compliance",
@@ -297,6 +301,8 @@ def render_prometheus_text(metrics: AggregatedMetrics) -> str:
     lines.append(
         f"harness_structured_output_compliance_rate {jcr if jcr is not None else 0}"
     )
+    # Quality scores (accuracy / grounding) intentionally stay in Eval Store / Trace summary,
+    # not Prometheus counters — see docs/OBSERVABILITY.md.
     lines.extend(
         [
             "# HELP harness_estimated_tokens_saved_avg Avg tokens saved by compression",

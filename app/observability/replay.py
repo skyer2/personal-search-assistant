@@ -11,12 +11,12 @@ from app.observability.paths import traces_log_dir
 from app.observability.recorder import get_recorder
 
 
-def events_from_jsonl(session_id: str) -> list[AgentEvent]:
+def events_from_jsonl(session_id: str, run_id: str | None = None) -> list[AgentEvent]:
     try:
         from app.observability.exporters.jsonl import JsonlExporter
 
         exporter = JsonlExporter(log_dir=traces_log_dir(), enabled=True)
-        records = exporter.read(session_id)
+        records = exporter.read(session_id, run_id=run_id)
     except Exception:
         return []
     events: list[AgentEvent] = []
@@ -54,7 +54,7 @@ def load_events(
 ) -> list[AgentEvent]:
     recorder = get_recorder()
     memory_events = recorder.journal.replay(session_id)
-    durable_events = events_from_jsonl(session_id)
+    durable_events = events_from_jsonl(session_id, run_id=run_id)
     # Durable first so in-memory updates with same event_id win? Prefer memory for live.
     # Spec: merge durable + memory, dedupe by event_id. Memory usually has fresher copy —
     # put durable first then memory so memory overwrites when we change to last-wins.

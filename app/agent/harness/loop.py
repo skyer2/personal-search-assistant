@@ -21,6 +21,7 @@ Agent Harness 主循环
 
 import asyncio
 import copy
+import json
 import logging
 import shutil
 import time
@@ -1294,6 +1295,7 @@ class AgentHarness:
             )
             for idx in range(min(next_index, len(state.plan.steps) if state.plan else 0)):
                 state.plan.steps[idx].metadata["status"] = StepStatus.DONE.value
+            self._emit_checkpoint_resumed(state, data, next_index, authority="loop_state")
             self._report_phase(
                 Phase.BUILD_CONTEXT,
                 "checkpoint_resumed",
@@ -1312,6 +1314,7 @@ class AgentHarness:
         next_index = int(data.get("next_step_index") or 0)
         for idx in range(min(next_index, len(state.plan.steps) if state.plan else 0)):
             state.plan.steps[idx].metadata["status"] = StepStatus.DONE.value
+        self._emit_checkpoint_resumed(state, data, next_index, authority="legacy")
         self._report_phase(
             Phase.BUILD_CONTEXT,
             "checkpoint_resumed",
@@ -1321,6 +1324,47 @@ class AgentHarness:
             authority="legacy",
         )
         return state, next_index, False
+
+    def _emit_checkpoint_resumed(
+        self,
+        state: LoopState,
+        data: dict[str, Any],
+        next_index: int,
+        *,
+        authority: str,
+    ) -> None:
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if not recorder.is_active:
+                return
+            completed = list(data.get("completed_step_keys") or state.completed_step_keys or [])
+            pending = []
+            if state.plan is not None:
+                for i, step in enumerate(state.plan.steps):
+                    tid = step.resolved_task_id(i)
+                    if i >= next_index:
+                        pending.append(tid)
+            recorder.emit(
+                EventType.CHECKPOINT_RESUMED,
+                phase="build_context",
+                status="ok",
+                attributes={
+                    "checkpoint_id": str(data.get("checkpoint_id") or data.get("task_fingerprint") or ""),
+                    "resume_from_checkpoint_id": str(data.get("checkpoint_id") or ""),
+                    "plan_version": int(getattr(state.plan, "plan_version", 1) or 1) if state.plan else None,
+                    "completed_task_ids": completed[:40],
+                    "pending_task_ids": pending[:40],
+                    "last_seq": data.get("last_seq"),
+                    "state_hash": str(data.get("state_hash") or data.get("task_fingerprint") or "")[:64],
+                    "replayed_actions": int(data.get("replayed_actions") or len(state.step_results) or 0),
+                    "skipped_idempotent_actions": int(data.get("skipped_idempotent_actions") or 0),
+                    "authority": authority,
+                },
+            )
+        except Exception:
+            pass
 
     def _save_step_checkpoint(
         self,
@@ -1352,6 +1396,34 @@ class AgentHarness:
             loop_state=loop_payload,
             citation_snapshot=citation_snapshot,
         )
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                pending = []
+                completed = list(state.completed_step_keys or [])
+                if state.plan is not None:
+                    for i, step in enumerate(state.plan.steps):
+                        tid = step.resolved_task_id(i)
+                        if i >= next_step_index:
+                            pending.append(tid)
+                recorder.emit(
+                    EventType.CHECKPOINT_SAVED,
+                    phase="execute",
+                    status="ok",
+                    attributes={
+                        "checkpoint_id": str(state.task_fingerprint or session_id),
+                        "plan_version": int(getattr(state.plan, "plan_version", 1) or 1) if state.plan else None,
+                        "completed_task_ids": completed[:40],
+                        "pending_task_ids": pending[:40],
+                        "last_seq": None,
+                        "state_hash": str(state.task_fingerprint or "")[:64],
+                        "next_step_index": next_step_index,
+                    },
+                )
+        except Exception:
+            pass
 
     async def _persist_hitl_waiting(
         self,
@@ -1968,6 +2040,35 @@ class AgentHarness:
                 state.obs_evidence_retrieved_count,
                 int(getattr(step_ctx_metrics, "evidence_retrieved_count", 0) or 0),
             )
+            try:
+                from app.observability import EventType, get_recorder
+
+                recorder = get_recorder()
+                if recorder.is_active:
+                    metrics = step_ctx_metrics.to_dict() if hasattr(step_ctx_metrics, "to_dict") else {}
+                    brief_id = str((state.metadata or {}).get("brief_id") or "")
+                    recorder.emit(
+                        EventType.CONTEXT_BUILT,
+                        phase="execute",
+                        status="ok",
+                        task_id=step.resolved_task_id(step_index) if hasattr(step, "resolved_task_id") else None,
+                        attributes={
+                            "before_tokens": metrics.get("before_tokens") or metrics.get("raw_tokens"),
+                            "after_tokens": metrics.get("total_tokens") or metrics.get("after_tokens"),
+                            "selected_brief": brief_id,
+                            "selected_evidence_count": int(
+                                getattr(step_ctx_metrics, "evidence_retrieved_count", 0) or metrics.get("evidence_count") or 0
+                            ),
+                            "selected_memory_count": int(metrics.get("memory_count") or 0),
+                            "dropped_messages": metrics.get("dropped_messages") or metrics.get("evictions") or [],
+                            "dropped_tool_results": metrics.get("tool_results_cleared") or 0,
+                            "compression_ratio": metrics.get("compression_ratio"),
+                            "retention_check": metrics.get("retention_check") or metrics.get("layers"),
+                        },
+                        input_refs=[{"type": "research_brief", "id": brief_id}] if brief_id else [],
+                    )
+            except Exception:
+                pass
             self._report_phase(
                 Phase.EXECUTE,
                 "context_built",
@@ -2059,12 +2160,55 @@ class AgentHarness:
                         duration_ms = int((time.perf_counter() - started_at) * 1000)
                         tool_status = str(getattr(last_msg, "status", "success") or "success")
                         failed = tool_status in {"error", "failed"}
+                        content_text = message_text(last_msg)
+                        result_bytes = len(content_text.encode("utf-8")) if content_text else 0
+                        result_count = 0
+                        document_ids: list[str] = []
+                        domains: list[str] = []
+                        artifact_ids: list[str] = []
+                        try:
+                            parsed = json.loads(content_text) if content_text.strip().startswith(("{", "[")) else None
+                            if isinstance(parsed, list):
+                                result_count = len(parsed)
+                                for item in parsed[:20]:
+                                    if isinstance(item, dict):
+                                        if item.get("url"):
+                                            document_ids.append(str(item.get("url")))
+                                        if item.get("id"):
+                                            document_ids.append(str(item.get("id")))
+                            elif isinstance(parsed, dict):
+                                results = parsed.get("results") or parsed.get("documents") or []
+                                if isinstance(results, list):
+                                    result_count = len(results)
+                                    for item in results[:20]:
+                                        if isinstance(item, dict) and item.get("url"):
+                                            document_ids.append(str(item.get("url")))
+                                artifact_ids = [str(x) for x in (parsed.get("artifact_ids") or []) if x]
+                        except Exception:
+                            result_count = 1 if content_text.strip() else 0
+                        for url in document_ids:
+                            try:
+                                from urllib.parse import urlparse
+
+                                host = urlparse(url).netloc
+                                if host and host not in domains:
+                                    domains.append(host)
+                            except Exception:
+                                pass
                         monitor.report_tool_end(
                             tool_name,
                             tool_call_id=tool_call_id,
                             duration_ms=duration_ms,
                             status="error" if failed else "ok",
-                            error=message_text(last_msg)[:240] if failed else "",
+                            error=content_text[:240] if failed else "",
+                            result_count=result_count,
+                            result_bytes=result_bytes,
+                            artifact_ids=artifact_ids,
+                            extra={
+                                "document_ids": document_ids[:20],
+                                "domains": domains[:12],
+                                "top_k": result_count or None,
+                            },
                         )
                     elif is_assistant_message(last_msg):
                         text = message_text(last_msg)
@@ -2403,6 +2547,26 @@ class AgentHarness:
                 compression_ratio=result.metadata.get("compression_ratio"),
                 evidence_sources=result.metadata.get("evidence_sources"),
             )
+            try:
+                from app.observability import EventType, get_recorder
+
+                recorder = get_recorder()
+                if recorder.is_active:
+                    recorder.emit(
+                        EventType.CONTEXT_COMPRESSED,
+                        phase="compress",
+                        status="ok",
+                        duration_ms=duration,
+                        attributes={
+                            "before_tokens": result.metadata.get("original_chars"),
+                            "after_tokens": result.metadata.get("compressed_chars"),
+                            "compression_ratio": result.metadata.get("compression_ratio"),
+                            "method": "worker_summary",
+                            "selected_evidence_count": len(source_meta.get("source_ids") or []),
+                        },
+                    )
+            except Exception:
+                pass
             return result
 
         compressed, meta = await self.compressor.compress(
@@ -2445,6 +2609,28 @@ class AgentHarness:
             compression_ratio=ratio,
             evidence_sources=result.metadata.get("evidence_sources"),
         )
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.CONTEXT_COMPRESSED,
+                    phase="compress",
+                    status="ok",
+                    duration_ms=duration,
+                    attributes={
+                        "before_tokens": meta.get("original_chars"),
+                        "after_tokens": meta.get("compressed_chars"),
+                        "compression_ratio": ratio,
+                        "method": meta.get("method"),
+                        "selected_evidence_count": len(source_meta.get("source_ids") or []),
+                        "retention_check": meta.get("entity_retention"),
+                        "dropped_tool_results": meta.get("tool_results_cleared") or 0,
+                    },
+                )
+        except Exception:
+            pass
         return result
 
     async def _phase_validate(
@@ -2493,6 +2679,34 @@ class AgentHarness:
         set_llm_phase(Phase.RECOVER.value)
         hint = self.recovery.build_recovery_hint(reason, state)
         state.recovery_hints.append(hint)
+        decision = "retry"
+        lowered = str(reason or "").lower()
+        if "budget" in lowered or "deadline" in lowered:
+            decision = "abort"
+        elif "replan" in lowered or "gap" in lowered:
+            decision = "replan"
+        elif "checkpoint" in lowered or "resume" in lowered:
+            decision = "resume"
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.RECOVERY_DECIDED,
+                    phase="recover",
+                    status="decided",
+                    attributes={
+                        "decision": decision,
+                        "failure_type": reason,
+                        "attempt": int(getattr(state, "retry_count", 0) or 0) + 1,
+                        "previous_action": "validate_failed",
+                        "remaining_budget": self.remaining_budget(state),
+                        "hint": str(hint)[:240],
+                    },
+                )
+        except Exception:
+            pass
         duration = int((time.perf_counter() - started) * 1000)
         self._report_phase(
             Phase.RECOVER,
@@ -2502,6 +2716,20 @@ class AgentHarness:
             step_index=step_index,
             hint=hint[:200],
         )
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.RECOVERY_COMPLETED,
+                    phase="recover",
+                    status="ok",
+                    duration_ms=duration,
+                    attributes={"decision": decision, "failure_type": reason},
+                )
+        except Exception:
+            pass
         return state
 
     async def _phase_finalize(
@@ -2768,6 +2996,25 @@ class AgentHarness:
             return False
         state.abort_reason = decision.reason
         state.abort_message = decision.message
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.BUDGET_EXHAUSTED,
+                    phase="run",
+                    status=str(decision.reason or "budget_exhausted"),
+                    attributes={
+                        "fail_reason": str(decision.reason or "budget_exhausted"),
+                        "message": str(decision.message or "")[:240],
+                        "remaining_budget": self.remaining_budget(state),
+                        "failure.origin_stage": "runtime",
+                        "failure.detected_stage": "runtime",
+                    },
+                )
+        except Exception:
+            pass
         return True
 
     def _budget_exceeded(self, state: LoopState) -> bool:
@@ -2957,20 +3204,22 @@ class AgentHarness:
         }:
             log_status = status
 
-        self.trace_logger.log_event(
-            trace_id=self._current_trace_id,
-            session_id=state.session_id,
-            phase=phase.value,
-            status=log_status,
-            step_index=data.get("step_index"),
-            step_type=data.get("step_type"),
-            duration_ms=data.get("duration_ms"),
-            tool_calls=data.get("tool_calls"),
-            tokens_used=data.get("tokens_used"),
-            extra={k: v for k, v in data.items() if k not in {
-                "step_index", "step_type", "duration_ms", "tool_calls", "tokens_used"
-            }},
-        )
+        # Legacy JsonlTraceLogger only when Flight Recorder is inactive (avoid dual-write).
+        if not recorder.is_active:
+            self.trace_logger.log_event(
+                trace_id=self._current_trace_id,
+                session_id=state.session_id,
+                phase=phase.value,
+                status=log_status,
+                step_index=data.get("step_index"),
+                step_type=data.get("step_type"),
+                duration_ms=data.get("duration_ms"),
+                tool_calls=data.get("tool_calls"),
+                tokens_used=data.get("tokens_used"),
+                extra={k: v for k, v in data.items() if k not in {
+                    "step_index", "step_type", "duration_ms", "tool_calls", "tokens_used"
+                }},
+            )
 
 
 def _project_run_running(ctx: HarnessRunContext) -> None:
