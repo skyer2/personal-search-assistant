@@ -6,6 +6,8 @@ DeepSeek Harness 将来作为第二个 adapter，不改 StateGraph。
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -127,42 +129,128 @@ class LangChainWorkerRuntime:
             )
 
         try:
+            queue_started = time.perf_counter()
             async with session.worker_sem:
+                queue_ms = int((time.perf_counter() - queue_started) * 1000)
+                exec_started = time.perf_counter()
                 async with session.lock:
                     child = snapshot_worker_loop_state(session.state)
                     child.step_index = step_index
                     session.state.plan.steps[step_index].metadata["status"] = StepStatus.RUNNING.value
                 child_step = child.plan.steps[step_index] if child.plan is not None else step
-                ok = await self.harness._run_single_step(
-                    child,
-                    child_step,
-                    step_index,
-                    session.ctx.task_query,
-                    session.ctx.relative_session_dir,
-                    session.ctx.uploaded_prompt,
-                    session.session_id,
-                    session.ctx.session_dir,
-                    None,
-                    session.ctx.idempotency,
-                    None,
-                )
+                # 外层墙钟：含 retries；与剩余 run deadline 取 min
+                try:
+                    from app.agent.harness.run_budget import get_or_create_run_budget
+
+                    mgr = get_or_create_run_budget(session.state, self.harness.harness_config)
+                    mgr.sync_from_usage(
+                        session_id=session.session_id,
+                        tool_calls=session.state.tool_calls_count,
+                    )
+                    allowed, why = mgr.research_allowed()
+                    remaining = mgr.remaining_run_sec()
+                except Exception:
+                    allowed, why = True, ""
+                    remaining = float(self.harness.harness_config.step_timeout_sec)
+                if not allowed:
+                    async with session.lock:
+                        session.state.plan.steps[step_index].metadata["status"] = StepStatus.FAILED.value
+                        session.state.metadata["force_synthesis"] = True
+                    return {
+                        "task_status": {task.task_id: "failed"},
+                        "worker_results": [
+                            {
+                                "task_id": task.task_id,
+                                "ok": False,
+                                "summary": f"budget_blocked:{why}",
+                                "step_type": task.step_type,
+                                "fail_reason": why or "budget_blocked",
+                                "queue_ms": queue_ms,
+                                "execution_ms": 0,
+                            }
+                        ],
+                        "replan_exhausted": True,
+                        "progress_assessment": {
+                            "verdict": "enough",
+                            "reason": "force_synthesis_budget",
+                        },
+                    }
+                step_timeout = max(10, int(self.harness.harness_config.step_timeout_sec))
+                max_retries = max(0, int(getattr(self.harness.harness_config, "max_retries", 2) or 2))
+                worker_timeout = min(step_timeout * (max_retries + 1), max(5.0, remaining))
+                try:
+                    ok = await asyncio.wait_for(
+                        self.harness._run_single_step(
+                            child,
+                            child_step,
+                            step_index,
+                            session.ctx.task_query,
+                            session.ctx.relative_session_dir,
+                            session.ctx.uploaded_prompt,
+                            session.session_id,
+                            session.ctx.session_dir,
+                            None,
+                            session.ctx.idempotency,
+                            None,
+                        ),
+                        timeout=worker_timeout,
+                    )
+                    fail_reason = "" if ok else "worker_failed"
+                except asyncio.TimeoutError:
+                    ok = False
+                    fail_reason = "step_timeout"
+                    result = None
+                    outcome = IsolatedWorkerOutcome(
+                        step_index=step_index,
+                        task_id=task.task_id,
+                        ok=False,
+                        result=None,
+                        child_state=child,
+                        fail_reason=fail_reason,
+                    )
+                    async with session.lock:
+                        apply_isolated_outcome(session.state, outcome)
+                        session.state.plan.steps[step_index].metadata["status"] = StepStatus.FAILED.value
+                        session.state.plan.steps[step_index].metadata["queue_ms"] = queue_ms
+                        session.state.plan.steps[step_index].metadata["execution_ms"] = int(
+                            (time.perf_counter() - exec_started) * 1000
+                        )
+                    return {
+                        "task_status": {task.task_id: "failed"},
+                        "worker_results": [
+                            {
+                                "task_id": task.task_id,
+                                "ok": False,
+                                "summary": "step_timeout",
+                                "step_type": task.step_type,
+                                "fail_reason": fail_reason,
+                                "queue_ms": queue_ms,
+                                "execution_ms": int((time.perf_counter() - exec_started) * 1000),
+                            }
+                        ],
+                    }
                 result = child.step_results[-1] if child.step_results else None
+                exec_ms = int((time.perf_counter() - exec_started) * 1000)
                 outcome = IsolatedWorkerOutcome(
                     step_index=step_index,
                     task_id=task.task_id,
                     ok=bool(ok),
                     result=result,
                     child_state=child,
-                    fail_reason="" if ok else "worker_failed",
+                    fail_reason=fail_reason,
                 )
                 async with session.lock:
                     apply_isolated_outcome(session.state, outcome)
+                    session.state.plan.steps[step_index].metadata["queue_ms"] = queue_ms
+                    session.state.plan.steps[step_index].metadata["execution_ms"] = exec_ms
                     session.state.step_validation_results.append(
                         {
                             "step_index": step_index,
                             "step_type": step.step_type,
                             "passed": bool(ok),
                             "parallel": True,
+                            "queue_ms": queue_ms,
+                            "execution_ms": exec_ms,
                         }
                     )
                     evidence_ids: list[str] = []

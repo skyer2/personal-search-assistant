@@ -49,6 +49,8 @@ class ProgressAssessment:
     verdict: Progress = "enough"
     coverage_gaps: list[str] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
+    unresolved_conflicts: list[str] = field(default_factory=list)
+    expected_disagreements: list[str] = field(default_factory=list)
     low_confidence_claims: list[str] = field(default_factory=list)
     stale_evidence: list[str] = field(default_factory=list)
     missing_dimensions: list[str] = field(default_factory=list)
@@ -71,10 +73,18 @@ class ProgressAssessment:
             verdict = "enough"
         gaps_raw = data.get("gaps") or []
         gaps = [dict(x) for x in gaps_raw if isinstance(x, dict)]
+        unresolved = [str(x) for x in (data.get("unresolved_conflicts") or []) if x]
+        expected = [str(x) for x in (data.get("expected_disagreements") or []) if x]
+        # 兼容旧 payload：conflicts 未拆分时全部当 unresolved（保守）
+        conflicts = [str(x) for x in (data.get("conflicts") or []) if x]
+        if conflicts and not unresolved and not expected:
+            unresolved = list(conflicts)
         return cls(
             verdict=verdict,  # type: ignore[arg-type]
             coverage_gaps=[str(x) for x in (data.get("coverage_gaps") or []) if x],
-            conflicts=[str(x) for x in (data.get("conflicts") or []) if x],
+            conflicts=conflicts or (unresolved + expected),
+            unresolved_conflicts=unresolved,
+            expected_disagreements=expected,
             low_confidence_claims=[str(x) for x in (data.get("low_confidence_claims") or []) if x],
             stale_evidence=[str(x) for x in (data.get("stale_evidence") or []) if x],
             missing_dimensions=[str(x) for x in (data.get("missing_dimensions") or []) if x],
@@ -97,10 +107,27 @@ class ProgressAssessment:
                 + [f"criteria:{c}" for c in self.unmet_success_criteria]
                 + [f"constraint:{c}" for c in self.unmet_constraints],
                 missing_dimensions=self.missing_dimensions,
-                conflicts=self.conflicts,
+                conflicts=self.unresolved_conflicts,
+                expected_disagreements=self.expected_disagreements,
                 stale_evidence=self.stale_evidence,
             )
-        self.open_gap_ids = [str(item.get("gap_id") or "") for item in self.gaps if item.get("gap_id")]
+        # 仅可行动缺口进入 open_gap_ids（触发 Replan）；expected_disagreement 不进
+        actionable_types = {
+            "coverage",
+            "missing_dimension",
+            "unresolved_conflict",
+            "conflict",
+            "stale",
+            "criteria",
+            "constraint",
+        }
+        self.open_gap_ids = [
+            str(item.get("gap_id") or "")
+            for item in self.gaps
+            if item.get("gap_id")
+            and str(item.get("type") or "") in actionable_types
+            and str(item.get("type") or "") != "expected_disagreement"
+        ]
         prev = {str(x) for x in (previous_gap_ids or []) if x}
         curr = set(self.open_gap_ids)
         self.resolved_gap_ids = sorted(prev - curr)
@@ -223,19 +250,20 @@ def assess_progress(
         )
         if mode != "dynamic":
             # DIRECT/TEMPLATE：没有显式失败/gaps/冲突时不因启发式维度再搜。
-            if not assessment.coverage_gaps and not assessment.conflicts:
+            if not assessment.coverage_gaps and not assessment.unresolved_conflicts:
                 assessment.stale_evidence = []
                 assessment.missing_dimensions = []
                 assessment.low_confidence_claims = []
                 assessment.unmet_success_criteria = []
                 assessment.unmet_constraints = []
+                # expected_disagreements 保留，供 Synthesis 解释；不因它们清掉 conflicts 列表
 
     if not enabled:
         assessment.verdict = "enough" if not failed_research else "gap"
         assessment.reason = "progress_eval_disabled"
         return _finalize(assessment)
 
-    if assessment.coverage_gaps or assessment.conflicts:
+    if assessment.coverage_gaps or assessment.unresolved_conflicts:
         assessment.verdict = "gap"
     elif mode == "dynamic" and (
         assessment.missing_dimensions
@@ -247,6 +275,8 @@ def assess_progress(
         assessment.verdict = "gap"
     else:
         assessment.verdict = "enough"
+        if assessment.expected_disagreements and assessment.reason == "coverage_ok":
+            assessment.reason = "enough_with_expected_disagreement"
 
     pending_synth = [
         step
@@ -323,6 +353,41 @@ def _text_of(row: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+_BENCHMARK_HINT = re.compile(
+    r"benchmark|swe-?bench|arena|terminal.?bench|pass@|accuracy|score|得分|准确率|脚手架|scaffold|划分|口径|版本",
+    re.I,
+)
+_SCOPE_HINT = re.compile(
+    r"\b(20\d{2}|q[1-4]|verified|pro|lite|full|v\d)\b|不同|分别|对照|对比基准",
+    re.I,
+)
+
+
+def _classify_conflict(
+    text: str,
+    *,
+    sources: list[str],
+    confidence: float,
+    facts: list[str],
+) -> str:
+    """返回 expected_disagreement | unresolved_conflict。
+
+    不同 benchmark / 时间 / 方法口径 → expected（交 Synthesis 解释，不 Replan）。
+    同 scope 不可解释且证据薄 → unresolved（可 Replan）。
+    """
+    blob = str(text or "")
+    if _BENCHMARK_HINT.search(blob) or _SCOPE_HINT.search(blob):
+        return "expected_disagreement"
+    if len(sources) >= 2 and confidence >= 0.55 and facts:
+        return "expected_disagreement"
+    if "并列" in blob or "口径" in blob or "方法" in blob:
+        return "expected_disagreement"
+    if confidence < 0.5 or not sources or not facts:
+        return "unresolved_conflict"
+    # 默认：多数字差异视为预期分歧，避免搜得越多 conflict 越多的死循环
+    return "expected_disagreement"
+
+
 def _fill_worker_signals(
     assessment: ProgressAssessment,
     plan: ExecutionPlan,
@@ -330,6 +395,7 @@ def _fill_worker_signals(
     *,
     query: str,
 ) -> None:
+    _ = query
     by_id = {str(row.get("task_id") or ""): row for row in rows}
     for index, step in enumerate(plan.steps):
         if step.step_type not in RESEARCH_TYPES:
@@ -346,12 +412,23 @@ def _fill_worker_signals(
             assessment.coverage_gaps.append(f"empty:{tid}:{step.objective or step.description}")
         for gap in payload.get("gaps") or []:
             assessment.coverage_gaps.append(f"reported:{tid}:{gap}")
-        for conflict in payload.get("conflicts") or []:
-            assessment.conflicts.append(str(conflict))
         try:
             confidence = float(payload.get("confidence") if payload.get("confidence") is not None else 1.0)
         except (TypeError, ValueError):
             confidence = 1.0
+        for conflict in payload.get("conflicts") or []:
+            label = f"{tid}:{conflict}"
+            assessment.conflicts.append(label)
+            kind = _classify_conflict(
+                str(conflict),
+                sources=sources,
+                confidence=confidence,
+                facts=facts,
+            )
+            if kind == "unresolved_conflict":
+                assessment.unresolved_conflicts.append(label)
+            else:
+                assessment.expected_disagreements.append(label)
         text = _text_of(row)
         if confidence < 0.5 or (_HEDGE.search(text) and not facts):
             assessment.low_confidence_claims.append(f"{tid}:{summary[:80] or 'low_confidence'}")
@@ -362,6 +439,13 @@ def _fill_worker_signals(
 
     for row in rows:
         tid = str(row.get("task_id") or "")
+        payload = _payload(row)
+        facts = [str(x) for x in (payload.get("facts") or []) if str(x).strip()]
+        sources = [str(x) for x in (payload.get("sources") or []) if str(x).strip()]
+        try:
+            confidence = float(payload.get("confidence") if payload.get("confidence") is not None else 1.0)
+        except (TypeError, ValueError):
+            confidence = 1.0
         blob = _text_of(row)
         grouped: dict[str, list[float]] = {}
         for match in _METRIC.finditer(blob):
@@ -371,7 +455,6 @@ def _fill_worker_signals(
             except (TypeError, ValueError):
                 continue
             if value >= 1900 and value <= 2100 and label not in {"revenue", "arr", "gmv"}:
-                # 年份误匹配，跳过
                 continue
             unit = str(match.group("unit") or "").lower()
             grouped.setdefault(f"{label}:{unit}", []).append(value)
@@ -381,7 +464,19 @@ def _fill_worker_signals(
             base = max(abs(values[0]), 1e-6)
             if max(values) - min(values) > max(0.15 * base, 0.01):
                 shown = ", ".join(f"{val:g}" for val in values)
-                assessment.conflicts.append(f"{tid}:{key}: {shown}")
+                label = f"{tid}:{key}: {shown}"
+                assessment.conflicts.append(label)
+                # 同文档内多数字：默认视为不同口径/时间序列，不触发 Replan
+                kind = _classify_conflict(
+                    f"{key} {blob[:200]}",
+                    sources=sources,
+                    confidence=confidence,
+                    facts=facts,
+                )
+                if kind == "unresolved_conflict":
+                    assessment.unresolved_conflicts.append(label)
+                else:
+                    assessment.expected_disagreements.append(label)
 
 
 def _all_low_confidence(rows: list[dict[str, Any]]) -> bool:

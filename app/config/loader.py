@@ -142,6 +142,8 @@ class HarnessConfig:
 
     # Adaptive Effort（软配额）；关闭后软配额贴齐硬顶
     effort_adaptive_enabled: bool = True
+    max_llm_calls_per_run: int = 30
+    max_llm_calls_per_worker: int = 8
 
     # 【Phase 7】多 Agent 编排
     parallel_retrieval_enabled: bool = True
@@ -536,6 +538,18 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         effort_adaptive_enabled=_env_bool(
             "HARNESS_EFFORT_ADAPTIVE",
             bool((raw.get("effort") or {}).get("adaptive_enabled", True)),
+        ),
+        max_llm_calls_per_run=int(
+            os.getenv(
+                "HARNESS_MAX_LLM_CALLS",
+                (raw.get("budget") or {}).get("max_llm_calls_per_run", 30),
+            )
+        ),
+        max_llm_calls_per_worker=int(
+            os.getenv(
+                "HARNESS_MAX_LLM_CALLS_PER_WORKER",
+                (raw.get("budget") or {}).get("max_llm_calls_per_worker", 8),
+            )
         ),
         parallel_retrieval_enabled=_env_bool(
             "HARNESS_PARALLEL_RETRIEVAL",

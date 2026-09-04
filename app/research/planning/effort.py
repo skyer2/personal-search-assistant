@@ -139,6 +139,7 @@ class EffectiveBudget:
             "max_plan_patch_tasks": self.plan_patch_tasks,
             "max_parallel_workers": self.parallel_workers,
             "reserved_step_tool_calls": self.reserved_step_tool_calls,
+            "max_total_tokens": self.hard.max_total_tokens,
             # Incremental grant：剩余可发放额度（GAP 时消耗，不抬硬顶）
             "remaining_plan_patch_tasks": self.plan_patch_tasks,
             "remaining_reserve_step_tool_calls": self.reserved_step_tool_calls,

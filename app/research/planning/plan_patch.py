@@ -96,22 +96,54 @@ def build_progress_patch(
     worker_results: list[Any] | None = None,
     max_new_tasks: int = 2,
 ) -> dict[str, Any]:
-    """把 ProgressAssessment 收成受约束的 PlanPatch proposal（仍须 apply_plan_patch）。"""
+    """把 ProgressAssessment 收成受约束的 PlanPatch proposal（仍须 apply_plan_patch）。
+
+    每个新任务绑定 resolves_gap_ids；target_gap_ids 仅为实际被选中的 gap。
+    expected_disagreement 不进入补丁。
+    """
     from app.research.planning.progress import ProgressAssessment
 
     parsed = ProgressAssessment.from_dict(assessment or {})
     policy = parse_source_policy(intent.raw_query)
     default_sources = [s for s in ("web", "file") if s in policy.allowed_sources]
     if not default_sources:
-        return {"add_tasks": [], "reason": "no_allowed_source"}
+        return {"add_tasks": [], "reason": "no_allowed_source", "target_gap_ids": []}
+
+    # gap_id → description 映射（仅 actionable）
+    gap_by_desc: dict[str, str] = {}
+    for item in parsed.gaps or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("actionable") is False or str(item.get("type") or "") == "expected_disagreement":
+            continue
+        gid = str(item.get("gap_id") or "")
+        desc = str(item.get("description") or "")
+        if gid and desc:
+            gap_by_desc[desc] = gid
 
     proposals: list[dict[str, Any]] = []
 
-    def _append(objective: str, reason: str) -> None:
+    def _resolve_gap_id(signal: str, reason: str) -> str:
+        text = str(signal or "")
+        if text in gap_by_desc:
+            return gap_by_desc[text]
+        # 模糊：description 包含 signal
+        for desc, gid in gap_by_desc.items():
+            if text and (text in desc or desc in text):
+                return gid
+        from app.observability.semantic import stable_gap_id
+
+        return stable_gap_id(reason, text or reason)
+
+    def _append(objective: str, reason: str, signal: str) -> None:
         if len(proposals) >= max(0, max_new_tasks):
             return
         text = str(objective or "").strip()
         if not text:
+            return
+        gap_id = _resolve_gap_id(signal, reason)
+        # 避免同一 gap 被多个 task 重复绑定
+        if any(gap_id in (p.get("metadata") or {}).get("resolves_gap_ids", []) for p in proposals):
             return
         proposals.append(
             {
@@ -120,24 +152,29 @@ def build_progress_patch(
                 "depends_on": [],
                 "allowed_sources": list(default_sources),
                 "reason": reason,
+                "metadata": {
+                    "resolves_gap_ids": [gap_id],
+                    "patch_reason": reason,
+                },
             }
         )
 
+    # 只对 actionable 信号建任务；conflicts 用 unresolved 列表
     for item in parsed.coverage_gaps:
-        _append(_objective_from_gap(item, plan), "coverage")
-    for item in parsed.conflicts:
-        _append(f"交叉验证冲突：{item}", "conflict")
+        _append(_objective_from_gap(item, plan), "coverage", item)
+    for item in parsed.unresolved_conflicts:
+        _append(f"交叉验证冲突：{item}", "unresolved_conflict", item)
     for item in parsed.stale_evidence:
-        _append(f"补充最新年份证据：{item}", "stale")
+        _append(f"补充最新年份证据：{item}", "stale", item)
     for item in parsed.missing_dimensions:
-        _append(f"补充维度：{item}", "missing_dimension")
+        _append(f"补充维度：{item}", "missing_dimension", item)
 
     if proposals:
-        target_gap_ids = [
-            str(item.get("gap_id") or "")
-            for item in (parsed.gaps or [])
-            if isinstance(item, dict) and item.get("gap_id")
-        ]
+        target_gap_ids = []
+        for prop in proposals:
+            for gid in (prop.get("metadata") or {}).get("resolves_gap_ids") or []:
+                if gid and gid not in target_gap_ids:
+                    target_gap_ids.append(str(gid))
         return {
             "reason": parsed.reason or "semantic_gap",
             "add_tasks": proposals,
@@ -148,14 +185,21 @@ def build_progress_patch(
 
     fallback = build_gap_patch(plan, intent, worker_results=worker_results)
     if isinstance(fallback, dict):
-        fallback.setdefault(
-            "target_gap_ids",
-            [
-                str(item.get("gap_id") or "")
-                for item in (parsed.gaps or [])
-                if isinstance(item, dict) and item.get("gap_id")
-            ],
-        )
+        # fallback 也只绑定实际 add_tasks 对应的 gap
+        ids: list[str] = []
+        for raw in list(fallback.get("add_tasks") or []):
+            if not isinstance(raw, dict):
+                continue
+            meta = dict(raw.get("metadata") or {})
+            if not meta.get("resolves_gap_ids") and parsed.open_gap_ids:
+                gid = parsed.open_gap_ids[len(ids)] if len(ids) < len(parsed.open_gap_ids) else ""
+                if gid:
+                    meta["resolves_gap_ids"] = [gid]
+                    raw["metadata"] = meta
+            for gid in meta.get("resolves_gap_ids") or []:
+                if gid and gid not in ids:
+                    ids.append(str(gid))
+        fallback["target_gap_ids"] = ids
         fallback.setdefault("triggered_by", parsed.progress_id or "")
     return fallback
 

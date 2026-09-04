@@ -37,6 +37,7 @@ _SPAN_END_STATUSES = frozenset(
         "cancelled",
         "rejected",
         "budget_exceeded",
+        "warning",
         "budget_tool_calls",
         "budget_tokens",
         "deadline_exceeded",
@@ -306,7 +307,7 @@ class AgentTelemetry:
             event_type.endswith(".failed")
             or status in {"failed", "error", "fail"}
             or attrs.get("fail_reason")
-        ):
+        ) and str(status or "").lower() != "warning":
             attrs = enrich_failure_attributes(
                 attrs,
                 reason=str(attrs.get("fail_reason") or attrs.get("error") or status or ""),

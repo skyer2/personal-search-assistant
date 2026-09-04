@@ -16,6 +16,7 @@ def materialize_gap_items(
     coverage_gaps: list[str] | None = None,
     missing_dimensions: list[str] | None = None,
     conflicts: list[str] | None = None,
+    expected_disagreements: list[str] | None = None,
     stale_evidence: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
@@ -36,6 +37,7 @@ def materialize_gap_items(
                 "dimension": dimension or text,
                 "severity": severity,
                 "description": text[:240],
+                "actionable": gap_type != "expected_disagreement",
             }
         )
 
@@ -44,7 +46,9 @@ def materialize_gap_items(
     for item in missing_dimensions or []:
         _add("missing_dimension", str(item), dimension=str(item), severity="high")
     for item in conflicts or []:
-        _add("conflict", str(item), severity="high")
+        _add("unresolved_conflict", str(item), severity="high")
+    for item in expected_disagreements or []:
+        _add("expected_disagreement", str(item), severity="low")
     for item in stale_evidence or []:
         _add("stale", str(item), severity="medium")
     return items
@@ -53,47 +57,74 @@ def materialize_gap_items(
 def plan_brief_coverage(brief: dict[str, Any] | None, plan: Any) -> dict[str, Any]:
     """Check which Brief dimensions/entities are covered by the Plan.
 
-    Prefer explicit `covers_dimension_ids` on steps when available;
-    fall back to fuzzy keyword matching (each dimension keyword checked
-    against each step's objective/description individually).
+    Prefer explicit `covers_dimension_ids` / `covers_dimensions` on steps;
+    fall back to alias-aware keyword matching (not fragile dim[:4] alone).
     """
+    from app.research.planning.progress import _DIM_ALIASES
+
     dimensions = [str(x) for x in ((brief or {}).get("dimensions") or []) if str(x).strip()]
+    # support [{id,name}] form
+    dim_specs: list[tuple[str, str]] = []
+    for raw in (brief or {}).get("dimensions") or []:
+        if isinstance(raw, dict):
+            did = str(raw.get("id") or raw.get("name") or "").strip()
+            name = str(raw.get("name") or raw.get("id") or "").strip()
+            if name:
+                dim_specs.append((did or name, name))
+        else:
+            name = str(raw).strip()
+            if name:
+                dim_specs.append((name, name))
+    if not dim_specs and dimensions:
+        dim_specs = [(d, d) for d in dimensions]
+
     entities = [str(x) for x in ((brief or {}).get("entities") or []) if str(x).strip()]
     steps = list(getattr(plan, "steps", None) or [])
 
-    # Explicit dimension_id binding (if planner provides it)
     explicit_covers: set[str] = set()
     for step in steps:
         meta = getattr(step, "metadata", None) or {}
-        for dim_id in meta.get("covers_dimension_ids") or []:
+        for dim_id in list(meta.get("covers_dimension_ids") or []) + list(meta.get("covers_dimensions") or []):
             explicit_covers.add(str(dim_id))
 
     dim_hits: dict[str, bool] = {}
-    for dim in dimensions:
-        if dim in explicit_covers:
-            dim_hits[dim] = True
+    for dim_id, dim_name in dim_specs:
+        if dim_id in explicit_covers or dim_name in explicit_covers:
+            dim_hits[dim_name] = True
             continue
-        dim_lower = dim.lower()
+        aliases = list(_DIM_ALIASES.get(dim_name, ())) + [
+            tok
+            for tok in dim_name.replace("与", " ").replace("和", " ").replace("、", " ").split()
+            if len(tok) >= 2
+        ]
+        if dim_name not in aliases:
+            aliases.insert(0, dim_name)
+        # 局限与未来趋势 → 局限 / 未来 / 趋势 / 预测 / 失效
+        if "局限" in dim_name:
+            aliases.extend(["局限", "瓶颈", "失效", "风险"])
+        if "趋势" in dim_name or "未来" in dim_name:
+            aliases.extend(["趋势", "未来", "预测", "forecast", "outlook"])
         matched = False
         for step in steps:
-            step_text = f"{getattr(step, 'objective', '')} {getattr(step, 'description', '')} {getattr(step, 'task_id', '')}".lower()
-            # CJK: check if significant prefix of dimension appears in step text
-            if len(dim_lower) >= 2 and dim_lower[:4] in step_text:
+            step_text = (
+                f"{getattr(step, 'objective', '')} {getattr(step, 'description', '')} "
+                f"{getattr(step, 'task_id', '')}"
+            ).lower()
+            hits = sum(1 for a in aliases if a.lower() in step_text)
+            if hits >= 1 and (len(aliases) <= 2 or hits >= min(2, len(aliases))):
                 matched = True
                 break
-            # Also try splitting on common delimiters for multi-word dimensions
-            keywords = [tok for tok in dim_lower.replace("与", " ").replace("和", " ").replace("、", " ").split() if len(tok) >= 2]
-            if keywords and all(kw in step_text for kw in keywords[:3]):
+            if dim_name.lower() in step_text:
                 matched = True
                 break
-        dim_hits[dim] = matched
+        dim_hits[dim_name] = matched
 
     entity_hits: dict[str, bool] = {}
     for ent in entities:
         ent_lower = ent.lower()
         for step in steps:
             step_text = f"{getattr(step, 'objective', '')} {getattr(step, 'description', '')}".lower()
-            if ent_lower in step_text or ent_lower[:4] in step_text:
+            if ent_lower in step_text or (len(ent_lower) >= 4 and ent_lower[:4] in step_text):
                 entity_hits[ent] = True
                 break
         else:

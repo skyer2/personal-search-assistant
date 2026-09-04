@@ -1,0 +1,14 @@
+{
+  "id": "ai_coding_open_ended",
+  "query": "你觉得ai coding 能AI彻底解决吗？为什么？给出你的见解并将结果输出为pdf",
+  "checks": {
+    "progress_expected_disagreement_does_not_replan": true,
+    "synthesis_reserve_protected": true,
+    "max_total_tokens_hard_ceiling": 100000,
+    "max_llm_calls_per_run": 30,
+    "partial_report_on_synthesis_fail": true,
+    "plan_patch_target_gap_ids_equals_selected_tasks": true,
+    "coverage_limits_forecast_matches_局限与未来趋势": true
+  },
+  "notes": "Regression for false-gap / budget steal / raw worker dump failure mode."
+}

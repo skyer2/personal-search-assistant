@@ -2995,15 +2995,37 @@ class AgentHarness:
         return result
 
     def _estimate_run_tokens(self, state: LoopState) -> int:
-        estimated_tokens = sum(
+        content_est = sum(
             self.compressor.estimate_tokens(result.content)
             for result in state.step_results
         )
-        estimated_tokens += self.compressor.estimate_tokens(state.final_content)
-        return estimated_tokens
+        content_est += self.compressor.estimate_tokens(state.final_content)
+        usage_tokens = 0
+        try:
+            from app.agent.harness.usage_tracker import get_usage_tracker
+
+            summary = get_usage_tracker().session_summary(state.session_id or "")
+            usage_tokens = int((summary.get("total") or {}).get("total_tokens") or 0)
+            if isinstance(state.metadata, dict):
+                state.metadata["llm_calls_used"] = int((summary.get("total") or {}).get("calls") or 0)
+        except Exception:
+            pass
+        return max(content_est, usage_tokens)
 
     def _apply_run_guardrails(self, state: LoopState, run_started: float) -> bool:
         """【Phase 13】每步前评估护栏；命中则写入 abort_reason 并返回 True。"""
+        from app.agent.harness.run_budget import get_or_create_run_budget
+
+        mgr = get_or_create_run_budget(state, self.harness_config)
+        mgr.sync_from_usage(session_id=state.session_id or "", tool_calls=state.tool_calls_count)
+        snap = mgr.snapshot()
+        if isinstance(state.metadata, dict):
+            state.metadata["budget_snapshot"] = snap.to_dict()
+            state.metadata["llm_calls_used"] = snap.llm_calls
+            # Research 触顶：不直接 abort，标记强制进入 synthesis
+            if snap.force_synthesis and not state.abort_reason:
+                state.metadata["force_synthesis"] = True
+
         decision = evaluate_run_guardrails(
             state,
             self.harness_config,
@@ -3027,6 +3049,7 @@ class AgentHarness:
                         "fail_reason": str(decision.reason or "budget_exhausted"),
                         "message": str(decision.message or "")[:240],
                         "remaining_budget": self.remaining_budget(state),
+                        "budget_snapshot": snap.to_dict(),
                         "failure.origin_stage": "runtime",
                         "failure.detected_stage": "runtime",
                     },

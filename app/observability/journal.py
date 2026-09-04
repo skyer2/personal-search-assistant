@@ -272,19 +272,25 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
                 "variant": attrs.get("variant") or event.get("variant"),
             }
         if attrs.get("failure.stage") or attrs.get("failure.type") or str(event_type).endswith(".failed"):
-            failures.append(
-                {
-                    "stage": attrs.get("failure.stage"),
-                    "origin_stage": attrs.get("failure.origin_stage") or attrs.get("failure.stage"),
-                    "detected_stage": attrs.get("failure.detected_stage"),
-                    "type": attrs.get("failure.type"),
-                    "reason": attrs.get("fail_reason") or attrs.get("error") or event.get("status"),
-                    "cause_artifact_id": attrs.get("failure.cause_artifact_id"),
-                    "task_id": event.get("task_id"),
-                    "event": event_type,
-                    "timestamp": event.get("timestamp"),
-                }
-            )
+            # warning / soft miss 不计入 failure attribution
+            if str(event.get("status") or "").lower() == "warning":
+                pass
+            elif str(attrs.get("severity") or "").lower() == "warning":
+                pass
+            else:
+                failures.append(
+                    {
+                        "stage": attrs.get("failure.stage"),
+                        "origin_stage": attrs.get("failure.origin_stage") or attrs.get("failure.stage"),
+                        "detected_stage": attrs.get("failure.detected_stage"),
+                        "type": attrs.get("failure.type"),
+                        "reason": attrs.get("fail_reason") or attrs.get("error") or event.get("status"),
+                        "cause_artifact_id": attrs.get("failure.cause_artifact_id"),
+                        "task_id": event.get("task_id"),
+                        "event": event_type,
+                        "timestamp": event.get("timestamp"),
+                    }
+                )
         if event_type == "brief.compiled":
             brief = {
                 "brief_id": attrs.get("brief_id"),

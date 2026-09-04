@@ -542,10 +542,31 @@ class ResearchGraphRunner:
         if session.state.plan is None:
             return {"progress": "dispatch"}
         if self.harness._apply_run_guardrails(session.state, session.ctx.run_started):
+            # 若仍可合成，优先走 synthesis 而不是直接 abort dump
+            if isinstance(session.state.metadata, dict) and session.state.metadata.get("force_synthesis"):
+                return {
+                    "replan_exhausted": True,
+                    "progress": "enough",
+                    "progress_assessment": {
+                        "verdict": "enough",
+                        "reason": "force_synthesis_budget",
+                    },
+                    "status": "running",
+                }
             return {
                 "status": "aborted",
                 "abort_reason": session.state.abort_reason or "guardrail",
                 "progress": "abort",
+            }
+        # Research 触顶但未超 hard：阻止再开 research，推进 synthesis
+        if isinstance(session.state.metadata, dict) and session.state.metadata.get("force_synthesis"):
+            return {
+                "replan_exhausted": True,
+                "progress": "enough",
+                "progress_assessment": {
+                    "verdict": "enough",
+                    "reason": "force_synthesis_budget",
+                },
             }
         return {
             "replan_count": int(gstate.get("replan_count") or session.state.replan_count),
@@ -808,19 +829,41 @@ class ResearchGraphRunner:
             import logging as _log
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         async with session.lock:
-            ok = await self.harness._run_single_step(
-                session.state,
-                step,
-                index,
-                session.ctx.task_query,
-                session.ctx.relative_session_dir,
-                session.ctx.uploaded_prompt,
-                session.session_id,
-                session.ctx.session_dir,
-                session.ctx.citation_manager,
-                session.ctx.idempotency,
-                session.ctx.checkpoint_store,
-            )
+            try:
+                from app.agent.harness.run_budget import get_or_create_run_budget
+
+                mgr = get_or_create_run_budget(session.state, self.harness.harness_config)
+                mgr.sync_from_usage(
+                    session_id=session.session_id,
+                    tool_calls=session.state.tool_calls_count,
+                )
+                timeout_sec = min(
+                    max(10, int(self.harness.harness_config.step_timeout_sec)),
+                    max(5.0, mgr.remaining_run_sec()),
+                )
+            except Exception:
+                timeout_sec = max(10, int(self.harness.harness_config.step_timeout_sec))
+            try:
+                ok = await asyncio.wait_for(
+                    self.harness._run_single_step(
+                        session.state,
+                        step,
+                        index,
+                        session.ctx.task_query,
+                        session.ctx.relative_session_dir,
+                        session.ctx.uploaded_prompt,
+                        session.session_id,
+                        session.ctx.session_dir,
+                        session.ctx.citation_manager,
+                        session.ctx.idempotency,
+                        session.ctx.checkpoint_store,
+                    ),
+                    timeout=timeout_sec,
+                )
+            except asyncio.TimeoutError:
+                ok = False
+                session.state.abort_reason = session.state.abort_reason or "deadline_exceeded"
+                session.state.abort_message = session.state.abort_message or "synthesis step timeout"
             session.state.step_validation_results.append(
                 {
                     "step_index": index,
@@ -831,6 +874,20 @@ class ResearchGraphRunner:
             step.metadata["status"] = (
                 StepStatus.DONE.value if ok else StepStatus.FAILED.value
             )
+        if not ok:
+            from app.agent.harness.partial_report import render_partial_report
+
+            assessment = dict(gstate.get("progress_assessment") or {})
+            partial = render_partial_report(
+                state=session.state,
+                abort_reason=str(session.state.abort_reason or "synthesis_failed"),
+                synthesis_failed=True,
+                assessment=assessment,
+            )
+            session.state.final_content = partial
+            if isinstance(session.state.metadata, dict):
+                session.state.metadata["partial_delivered"] = True
+                session.state.metadata["synthesis_failed"] = True
         try:
             from app.observability import EventType, get_recorder
             from app.observability.events import new_id
@@ -884,6 +941,10 @@ class ResearchGraphRunner:
                         "answer_hash": ref.sha256,
                         "word_count": len(answer.split()),
                         "fail_reason": "" if ok else "synthesis_failed",
+                        "partial_delivered": bool(
+                            isinstance(session.state.metadata, dict)
+                            and session.state.metadata.get("partial_delivered")
+                        ),
                     },
                     input_refs=[
                         item
@@ -905,8 +966,9 @@ class ResearchGraphRunner:
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return {
             "task_status": {tid: "done" if ok else "failed"},
-            "status": "synthesized" if ok else "running",
+            "status": "synthesized" if ok else "partial",
             "progress": "synthesized",
+            "replan_exhausted": True if not ok else gstate.get("replan_exhausted"),
         }
 
     async def node_replan(self, gstate: dict[str, Any]) -> dict[str, Any]:
@@ -1203,7 +1265,29 @@ class ResearchGraphRunner:
 
         session = _require_session(gstate)
         apply_graph_to_loop(session.state, gstate)
-        success = bool(gstate.get("quality_passed", True)) and not session.state.abort_reason
+        if not str(session.state.final_content or "").strip() or (
+            isinstance(session.state.metadata, dict)
+            and session.state.metadata.get("synthesis_failed")
+            and not session.state.metadata.get("partial_delivered")
+        ):
+            from app.agent.harness.partial_report import render_partial_report
+
+            session.state.final_content = render_partial_report(
+                state=session.state,
+                abort_reason=str(session.state.abort_reason or gstate.get("status") or "incomplete"),
+                synthesis_failed=bool(
+                    isinstance(session.state.metadata, dict)
+                    and session.state.metadata.get("synthesis_failed")
+                ),
+                assessment=dict(gstate.get("progress_assessment") or {}),
+            )
+            if isinstance(session.state.metadata, dict):
+                session.state.metadata["partial_delivered"] = True
+        success = (
+            bool(gstate.get("quality_passed", True))
+            and not session.state.abort_reason
+            and gstate.get("status") != "partial"
+        )
         result = await self.harness._phase_finalize(
             session.state,
             session.ctx.session_dir,
@@ -1226,6 +1310,15 @@ class ResearchGraphRunner:
                 "abort_reason": str(gstate.get("abort_reason") or "aborted"),
                 "progress": "abort",
             }
+        from app.agent.harness.partial_report import render_partial_report
+
+        session.state.final_content = render_partial_report(
+            state=session.state,
+            abort_reason=str(session.state.abort_reason or "aborted"),
+            assessment=dict(gstate.get("progress_assessment") or {}),
+        )
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata["partial_delivered"] = True
         self.harness._report_phase(
             Phase.ABORT,
             session.state.abort_reason or "guardrail",
@@ -1245,6 +1338,7 @@ class ResearchGraphRunner:
             "status": "aborted",
             "abort_reason": session.state.abort_reason or "aborted",
             "artifacts": list(result.artifacts),
+            "final_content": session.state.final_content,
             "progress": "abort",
         }
 

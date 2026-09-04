@@ -71,12 +71,23 @@ def evaluate_run_guardrails(
             message=f"工具调用达到上限 {max_tools}",
         )
 
-    max_tokens = int(getattr(config, "max_total_tokens", 0) or 0)
+    max_tokens = _cap("max_total_tokens", "max_total_tokens", 0)
     if max_tokens > 0 and estimated_tokens >= max_tokens:
         return GuardrailDecision(
             abort=True,
             reason=AbortReason.BUDGET_TOKENS,
-            message=f"估算 token 达到上限 {max_tokens}",
+            message=f"token 达到上限 {max_tokens}（含真实 LLM usage）",
+        )
+
+    max_llm = int(run_budget.get("max_llm_calls") or getattr(config, "max_llm_calls_per_run", 0) or 0)
+    llm_used = 0
+    if isinstance(meta, dict):
+        llm_used = int(meta.get("llm_calls_used") or 0)
+    if max_llm > 0 and llm_used >= max_llm:
+        return GuardrailDecision(
+            abort=True,
+            reason=AbortReason.BUDGET_TOKENS,
+            message=f"LLM 调用达到上限 {max_llm}",
         )
 
     max_run_sec = _cap("max_run_sec", "max_run_sec", 0)
@@ -113,8 +124,10 @@ def can_replan(state: "LoopState", config: "HarnessConfig") -> bool:
         return False
     if state.retry_count >= state.max_retries:
         return False
-    run_budget = {}
     meta = getattr(state, "metadata", None) or {}
+    if isinstance(meta, dict) and meta.get("force_synthesis"):
+        return False
+    run_budget = {}
     if isinstance(meta, dict) and isinstance(meta.get("run_budget"), dict):
         run_budget = meta["run_budget"]
     max_replan = int(

@@ -158,19 +158,29 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
 def route_progress(state: ResearchState) -> str:
     if state.get("status") == "aborted" or state.get("abort_reason"):
         return "abort"
+    if state.get("status") == "partial":
+        return "quality_gate"
     assessment = dict(state.get("progress_assessment") or {})
     verdict = str(assessment.get("verdict") or "enough")
     plan = _plan_from_state(state)
     status = dict(state.get("task_status") or {})
     replan_count = int(state.get("replan_count") or 0)
     exhausted = bool(state.get("replan_exhausted"))
+    force_synth = str(assessment.get("reason") or "") == "force_synthesis_budget"
     if verdict == "abort":
         return "abort"
+    if force_synth or exhausted:
+        if plan is not None:
+            nxt = next_synthesis_step(plan, status, allow_failed_deps=True)
+            if nxt is not None:
+                return "synthesize"
+        return "quality_gate"
     if verdict == "run" and plan is not None and ready_research_steps(plan, status):
         return "dispatch"
     can_replan = (
         verdict == "gap"
         and not exhausted
+        and not force_synth
         and replan_count < _max_replan(state)
     )
     if can_replan:

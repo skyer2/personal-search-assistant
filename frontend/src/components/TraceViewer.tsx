@@ -36,7 +36,42 @@ function asText(value: unknown, fallback = "-"): string {
     return fallback;
   }
   if (Array.isArray(value)) {
-    return value.length ? value.map((item) => String(item)).join(", ") : fallback;
+    if (!value.length) {
+      return fallback;
+    }
+    return value
+      .map((item) => {
+        if (item == null) {
+          return "";
+        }
+        if (typeof item === "object") {
+          const row = item as Record<string, unknown>;
+          const desc = row.description ?? row.gap_id ?? row.type ?? row.reason;
+          if (desc != null && desc !== "") {
+            const prefix = row.type ? `${String(row.type)}: ` : "";
+            return `${prefix}${String(desc)}`;
+          }
+          try {
+            return JSON.stringify(item);
+          } catch {
+            return "[object]";
+          }
+        }
+        return String(item);
+      })
+      .filter(Boolean)
+      .join(", ");
+  }
+  if (typeof value === "object") {
+    const row = value as Record<string, unknown>;
+    if (row.description != null) {
+      return String(row.description);
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return fallback;
+    }
   }
   return String(value);
 }

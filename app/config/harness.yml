@@ -108,6 +108,9 @@ harness:
     max_run_sec: 600
     max_replan_count: 2
     max_plan_steps: 8
+    # Invocation-level caps（Research 不可吃掉 Synthesis reserve）
+    max_llm_calls_per_run: 30
+    max_llm_calls_per_worker: 8
 
   # Adaptive Effort：ComplexityEstimator 根据 Research Brief 提出软配额，再与 budget 硬顶 min()
   # 不在此写死 soft 数字；实现见 app/research/planning/effort.py
