@@ -105,13 +105,25 @@ def _max_replan(state: ResearchState) -> int:
 def route_dispatch(state: ResearchState) -> list[Any] | str:
     from langgraph.types import Send
 
+    from app.research.runtime.scheduler import skip_optional_pending
+
     if state.get("status") == "aborted" or state.get("abort_reason"):
         return "abort"
     plan = _plan_from_state(state)
     if plan is None:
         return "finalize"
     status = dict(state.get("task_status") or {})
-    ready = ready_research_steps(plan, status)
+    assessment = dict(state.get("progress_assessment") or {})
+    early_stop = (
+        str(assessment.get("verdict") or "") == "enough"
+        or str(assessment.get("reason") or "") == "force_synthesis_budget"
+        or bool(state.get("replan_exhausted"))
+    )
+    if early_stop:
+        status = skip_optional_pending(plan, status, reason="early_stop_enough")
+        ready = ready_research_steps(plan, status, include_optional=False)
+    else:
+        ready = ready_research_steps(plan, status, include_optional=True)
     if ready:
         sends: list[Any] = []
         for index, step in ready:
@@ -168,6 +180,8 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
 
 
 def route_progress(state: ResearchState) -> str:
+    from app.research.runtime.scheduler import skip_optional_pending
+
     if state.get("status") == "aborted" or state.get("abort_reason"):
         return "abort"
     if state.get("status") == "partial":
@@ -181,8 +195,9 @@ def route_progress(state: ResearchState) -> str:
     force_synth = str(assessment.get("reason") or "") == "force_synthesis_budget"
     if verdict == "abort":
         return "abort"
-    if force_synth or exhausted:
+    if force_synth or exhausted or verdict == "enough":
         if plan is not None:
+            status = skip_optional_pending(plan, status, reason="early_stop_enough")
             nxt = next_synthesis_step(plan, status, allow_failed_deps=True)
             if nxt is not None:
                 return "synthesize"
@@ -198,6 +213,7 @@ def route_progress(state: ResearchState) -> str:
     if can_replan:
         return "replan"
     if plan is not None:
+        status = skip_optional_pending(plan, status, reason="early_stop_synthesize")
         nxt = next_synthesis_step(plan, status, allow_failed_deps=True)
         if nxt is not None:
             return "synthesize"

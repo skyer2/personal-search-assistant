@@ -534,6 +534,12 @@ class ResearchGraphRunner:
 
     async def node_dispatch(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.project import apply_graph_to_loop
+        from app.research.runtime.scheduler import (
+            ready_research_steps,
+            skip_optional_pending,
+            task_status_map,
+        )
+        from app.research.runtime.latency import note_dispatch_wave
 
         session = get_session(str(gstate.get("run_id") or ""))
         if session is None:
@@ -544,6 +550,11 @@ class ResearchGraphRunner:
         if self.harness._apply_run_guardrails(session.state, session.ctx.run_started):
             # 若仍可合成，优先走 synthesis 而不是直接 abort dump
             if isinstance(session.state.metadata, dict) and session.state.metadata.get("force_synthesis"):
+                status = skip_optional_pending(
+                    session.state.plan,
+                    task_status_map(session.state.plan),
+                    reason="force_synthesis_budget",
+                )
                 return {
                     "replan_exhausted": True,
                     "progress": "enough",
@@ -551,6 +562,7 @@ class ResearchGraphRunner:
                         "verdict": "enough",
                         "reason": "force_synthesis_budget",
                     },
+                    "task_status": status,
                     "status": "running",
                 }
             return {
@@ -560,6 +572,11 @@ class ResearchGraphRunner:
             }
         # Research 触顶但未超 hard：阻止再开 research，推进 synthesis
         if isinstance(session.state.metadata, dict) and session.state.metadata.get("force_synthesis"):
+            status = skip_optional_pending(
+                session.state.plan,
+                task_status_map(session.state.plan),
+                reason="force_synthesis_budget",
+            )
             return {
                 "replan_exhausted": True,
                 "progress": "enough",
@@ -567,7 +584,17 @@ class ResearchGraphRunner:
                     "verdict": "enough",
                     "reason": "force_synthesis_budget",
                 },
+                "task_status": status,
             }
+        ready = ready_research_steps(session.state.plan)
+        if ready:
+            note_dispatch_wave(
+                session.state,
+                task_ids=[s.resolved_task_id(i) for i, s in ready],
+                include_optional=any(
+                    bool((s.metadata or {}).get("optional")) for _, s in ready
+                ),
+            )
         return {
             "replan_count": int(gstate.get("replan_count") or session.state.replan_count),
             "progress": "dispatch",
@@ -707,6 +734,19 @@ class ResearchGraphRunner:
         )
         if session is not None:
             session.state.metadata["progress_assessment"] = assessment.to_dict()
+            if assessment.verdict == "enough":
+                try:
+                    from app.research.runtime.latency import note_enough_evidence
+                    from app.research.runtime.scheduler import skip_optional_pending, task_status_map
+
+                    note_enough_evidence(session.state, reason=assessment.reason or "enough")
+                    skip_optional_pending(
+                        session.state.plan,
+                        task_status_map(session.state.plan),
+                        reason="early_stop_enough",
+                    )
+                except Exception:
+                    pass
         try:
             from app.observability import EventType, get_recorder
             from app.observability.payload_store import get_payload_store
@@ -1280,9 +1320,16 @@ class ResearchGraphRunner:
 
     async def node_finalize(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.project import apply_graph_to_loop
+        from app.research.runtime.latency import critical_path_summary, note_final_answer
 
         session = _require_session(gstate)
         apply_graph_to_loop(session.state, gstate)
+        try:
+            note_final_answer(session.state)
+            if isinstance(session.state.metadata, dict):
+                session.state.metadata["critical_path"] = critical_path_summary(session.state.metadata)
+        except Exception:
+            pass
         if not str(session.state.final_content or "").strip() or (
             isinstance(session.state.metadata, dict)
             and session.state.metadata.get("synthesis_failed")

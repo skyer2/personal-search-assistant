@@ -112,8 +112,11 @@ class HarnessConfig:
     max_tool_calls: int = 20
     max_step_tool_calls: int = 8
     max_run_sec: int = 600
+    synthesis_reserve_sec: float = 75.0
     max_replan_count: int = 3
     max_plan_steps: int = 12
+    max_llm_calls_per_run: int = 30
+    max_llm_calls_per_worker: int = 8
 
     personal_search: dict[str, Any] = field(default_factory=dict)
 
@@ -142,8 +145,6 @@ class HarnessConfig:
 
     # Adaptive Effort（软配额）；关闭后软配额贴齐硬顶
     effort_adaptive_enabled: bool = True
-    max_llm_calls_per_run: int = 30
-    max_llm_calls_per_worker: int = 8
 
     # 【Phase 7】多 Agent 编排
     parallel_retrieval_enabled: bool = True
@@ -473,6 +474,12 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         max_step_tool_calls=int(budget.get("max_step_tool_calls", 8)),
         max_run_sec=int(
             os.getenv("HARNESS_MAX_RUN_SEC", budget.get("max_run_sec", 600))
+        ),
+        synthesis_reserve_sec=float(
+            os.getenv(
+                "HARNESS_SYNTHESIS_RESERVE_SEC",
+                budget.get("synthesis_reserve_sec", 75),
+            )
         ),
         max_replan_count=int(budget.get("max_replan_count", 3)),
         max_plan_steps=int(budget.get("max_plan_steps", 12)),

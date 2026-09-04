@@ -106,6 +106,8 @@ harness:
     max_tool_calls: 40
     max_step_tool_calls: 8
     max_run_sec: 600
+    # 留给 Synthesis 的墙钟储备（秒）；Research 不得吃掉
+    synthesis_reserve_sec: 75
     max_replan_count: 2
     max_plan_steps: 8
     # Invocation-level caps（Research 不可吃掉 Synthesis reserve）
@@ -190,7 +192,7 @@ harness:
   orchestration:
     parallel_retrieval_enabled: true
     max_parallel_workers: 3
-    step_timeout_sec: 120
+    step_timeout_sec: 90
     enforce_subagent_binding: true
     step_checkpoint_enabled: true
     resume_checkpoint: true

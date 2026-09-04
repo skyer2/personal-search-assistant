@@ -318,6 +318,27 @@ class AgentHarness:
         state = LoopState(session_id=session_id, max_retries=self.max_retries)
         state.metadata["strict_validation"] = self.harness_config.validation_strict_mode
         run_started = time.perf_counter()
+        state.metadata["run_started_monotonic"] = float(run_started)
+        # Absolute deadline clock — create RunBudgetManager at run start (no origin drift)
+        try:
+            from app.agent.harness.run_budget import get_or_create_run_budget
+
+            get_or_create_run_budget(
+                state,
+                self.harness_config,
+                run_started=run_started,
+            )
+        except Exception:
+            pass
+        state.metadata.setdefault(
+            "latency",
+            {
+                "first_evidence_ms": None,
+                "enough_evidence_ms": None,
+                "final_answer_ms": None,
+                "waves": [],
+            },
+        )
         self._current_trace_id = self.trace_logger.new_trace_id()
         from app.observability import get_recorder
         from app.observability.events import new_id
@@ -3016,7 +3037,11 @@ class AgentHarness:
         """【Phase 13】每步前评估护栏；命中则写入 abort_reason 并返回 True。"""
         from app.agent.harness.run_budget import get_or_create_run_budget
 
-        mgr = get_or_create_run_budget(state, self.harness_config)
+        mgr = get_or_create_run_budget(
+            state,
+            self.harness_config,
+            run_started=run_started,
+        )
         mgr.sync_from_usage(session_id=state.session_id or "", tool_calls=state.tool_calls_count)
         snap = mgr.snapshot()
         if isinstance(state.metadata, dict):

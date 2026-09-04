@@ -53,14 +53,33 @@ def search_internet(
     if fixture_enabled():
         return search_fixture(query, max_results, include_raw_content)
 
-    timeout = float(os.getenv("TAVILY_TIMEOUT_SEC", "120"))
-    return get_tavily_client().search(
-        query=query,
-        topic=topic,
-        max_results=max_results,
-        include_raw_content=include_raw_content,
-        timeout=timeout,
-    )
+    # Soft online timeout：宁可 miss 一个源，也不要把整个 Worker 拖成 straggler
+    timeout = float(os.getenv("TAVILY_TIMEOUT_SEC", "20"))
+    try:
+        from app.tools.retrieval_cache import cached_call, search_cache_key
+
+        def _call() -> dict[str, Any]:
+            return get_tavily_client().search(
+                query=query,
+                topic=topic,
+                max_results=max_results,
+                include_raw_content=include_raw_content,
+                timeout=timeout,
+            )
+
+        return cached_call(
+            kind="search",
+            cache_key=search_cache_key(str(query or ""), str(topic), int(max_results or 5)),
+            producer=_call,
+        )
+    except Exception:
+        return get_tavily_client().search(
+            query=query,
+            topic=topic,
+            max_results=max_results,
+            include_raw_content=include_raw_content,
+            timeout=timeout,
+        )
 
 
 def _search_browsecomp_plus(

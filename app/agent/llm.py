@@ -26,6 +26,27 @@ model = init_chat_model(
     api_key=_openai_api_key,
 )
 
+# Research Worker 可用更快模型（Planner/Synthesis 仍用主模型）
+_worker_model_name = (
+    os.getenv("LLM_WORKER_MODEL")
+    or os.getenv("LLM_QWEN_PLUS")
+    or os.getenv("LLM_QWEN_MAX")
+)
+worker_model = model
+if _worker_model_name and _worker_model_name != os.getenv("LLM_QWEN_MAX"):
+    try:
+        worker_model = init_chat_model(
+            model=_worker_model_name,
+            model_provider="openai",
+            timeout=min(_llm_timeout, float(os.getenv("LLM_WORKER_TIMEOUT_SEC", "60"))),
+            temperature=_supervisor_temperature,
+            base_url=_openai_base_url,
+            api_key=_openai_api_key,
+        )
+    except Exception as exc:
+        print(f"[LLM] worker_model init failed, fallback to main model: {exc}")
+        worker_model = model
+
 _compression_model_name = os.getenv("LLM_COMPRESSION_MODEL", "qwen-turbo")
 _compression_enabled = os.getenv("HARNESS_LLM_COMPRESSION", "true").lower() != "false"
 

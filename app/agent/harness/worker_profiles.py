@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-WEB_TOOLS = ("internet_search", "fetch_url")
+WEB_TOOLS = ("internet_search", "fetch_url", "batch_search", "batch_fetch")
 FILE_READ_TOOLS = ("read_file_content",)
 CONTEXT_TOOLS = ("read_artifact", "read_evidence")
 SYNTHESIS_EXTRA = ("generate_markdown",)

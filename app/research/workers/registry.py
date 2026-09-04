@@ -54,7 +54,13 @@ def worker_tools_for_step(step_type: str) -> list[str]:
     profile = resolve_worker_profile(step_type)
     tools = tools_for_profile(profile)
     extras = {
-        "network_search": ["internet_search", "fetch_url", *CONTEXT_TOOLS],
+        "network_search": [
+            "internet_search",
+            "fetch_url",
+            "batch_search",
+            "batch_fetch",
+            *CONTEXT_TOOLS,
+        ],
         "file_read": ["read_file_content", *CONTEXT_TOOLS],
         "research": tools,
         "generate_markdown": ["generate_markdown", "read_file_content", *CONTEXT_TOOLS],
@@ -102,6 +108,7 @@ def build_worker_registry(
     checkpointer: Any = None,
     interrupt_on: Mapping[str, bool] | None = None,
     kinds: Mapping[str, str] | None = None,
+    worker_model: Any = None,
 ) -> WorkerRegistry:
     from app.agent.subagents.network_search_agent import build_network_search_agent
     from app.research.workers.factory import create_research_worker, create_synthesis_worker
@@ -116,11 +123,13 @@ def build_worker_registry(
     from app.tools.artifact_tools import read_artifact, read_evidence
     from app.tools.tavily_tool import internet_search
     from app.tools.fetch_url import fetch_url
+    from app.tools.batch_retrieval import batch_search, batch_fetch
 
     kind_map = dict(STEP_KINDS)
     if kinds:
         kind_map.update(kinds)
 
+    research_model = worker_model if worker_model is not None else model
     net = build_network_search_agent()
     files = _local_file_tools()
     synthesis_prompt = SYNTHESIS_SYSTEM_PROMPT
@@ -134,13 +143,15 @@ def build_worker_registry(
         prompt: str,
         *,
         hitl_flags: Mapping[str, bool] | None = None,
+        llm: Any = None,
     ) -> Any:
+        active_model = llm if llm is not None else model
         kind = kind_map.get(step_type, "create_agent")
         if kind == "create_deep_agent":
             from deepagents import create_deep_agent
 
             return create_deep_agent(
-                model=model,
+                model=active_model,
                 system_prompt=prompt,
                 tools=tools,
                 subagents=[],
@@ -149,20 +160,20 @@ def build_worker_registry(
             )
         if hitl_flags:
             return create_synthesis_worker(
-                model=model,
+                model=active_model,
                 tools=tools,
                 system_prompt=prompt,
                 checkpointer=checkpointer,
                 interrupt_on=hitl_flags,
             )
         return create_research_worker(
-            model=model,
+            model=active_model,
             tools=tools,
             system_prompt=prompt,
             checkpointer=checkpointer,
         )
 
-    net_tools = [internet_search, fetch_url]
+    net_tools = [internet_search, fetch_url, batch_search, batch_fetch]
     context_tools = [read_artifact, read_evidence]
 
     def _contract(tools: list[Any], step_type: str) -> list[Any]:
@@ -171,7 +182,7 @@ def build_worker_registry(
             if tool is None:
                 continue
             name = getattr(tool, "name", "")
-            if name in {"read_artifact", "read_evidence", "fetch_url"}:
+            if name in {"read_artifact", "read_evidence", "fetch_url", "batch_fetch"}:
                 wrapped.append(tool)
             else:
                 wrapped.append(wrap_tool_with_contract(tool, tool_name=name, step_type=step_type))
@@ -181,11 +192,21 @@ def build_worker_registry(
 
     registry.register(
         "network_search",
-        _maybe_deep("network_search", net_tools, str(net.get("system_prompt") or "")),
+        _maybe_deep(
+            "network_search",
+            net_tools,
+            str(net.get("system_prompt") or ""),
+            llm=research_model,
+        ),
     )
     registry.register(
         PROFILE_WEB,
-        _maybe_deep("network_search", net_tools, str(net.get("system_prompt") or "")),
+        _maybe_deep(
+            "network_search",
+            net_tools,
+            str(net.get("system_prompt") or ""),
+            llm=research_model,
+        ),
     )
 
     read_tool = files.get("read_file_content")
@@ -198,11 +219,11 @@ def build_worker_registry(
     mixed_tools = filter_tools_for_profile(net_tools + read_tools, PROFILE_MIXED) or net_tools
     registry.register(
         "research",
-        _maybe_deep("research", mixed_tools, RESEARCH_TASK_SYSTEM_PROMPT),
+        _maybe_deep("research", mixed_tools, RESEARCH_TASK_SYSTEM_PROMPT, llm=research_model),
     )
     registry.register(
         PROFILE_MIXED,
-        _maybe_deep("research", mixed_tools, RESEARCH_TASK_SYSTEM_PROMPT),
+        _maybe_deep("research", mixed_tools, RESEARCH_TASK_SYSTEM_PROMPT, llm=research_model),
     )
 
     registry.register(

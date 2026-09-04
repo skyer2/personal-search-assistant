@@ -13,7 +13,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from app.agent.harness.context_builder import ContextBuilder
 from app.agent.harness.loop import AgentHarness
 from app.agent.harness.compressor import ContextCompressor
-from app.agent.llm import compression_model, model
+from app.agent.llm import compression_model, model, worker_model
 from app.agent.memory.extractor import MemoryExtractor
 from app.agent.memory.store import MemoryStore
 from app.config.loader import get_harness_config
@@ -31,6 +31,7 @@ _interrupt_on = (
 
 worker_registry = build_worker_registry(
     model=model,
+    worker_model=worker_model,
     checkpointer=agent_checkpointer,
     interrupt_on=_interrupt_on,
 )

@@ -16,11 +16,13 @@ _retrieval_remaining: ContextVar[int | None] = ContextVar(
     default=None,
 )
 
-RETRIEVAL_TOOLS = frozenset({"internet_search", "fetch_url"})
+RETRIEVAL_TOOLS = frozenset(
+    {"internet_search", "fetch_url", "batch_search", "batch_fetch"}
+)
 
 STOP_JSON_MESSAGE = (
     "本步检索次数已达上限，或本轮禁止再联网。"
-    "不要调用 internet_search / fetch_url。"
+    "不要调用 internet_search / fetch_url / batch_search / batch_fetch。"
     "请立刻只输出结构化 JSON（ok、summary、facts、sources）。"
     "已抓取原文请用 read_artifact / read_evidence 回读。"
 )
@@ -41,11 +43,17 @@ def remaining_retrieval_calls() -> int | None:
 
 def consume_retrieval_or_block(tool_name: str = "") -> str | None:
     """若应拦截本次联网，返回给模型的停止说明；否则扣一次额度。"""
+    return consume_n_retrieval_or_block(1, tool_name=tool_name)
+
+
+def consume_n_retrieval_or_block(n: int, tool_name: str = "") -> str | None:
+    """一次扣 n 次检索额度（batch_search / batch_fetch）。额度不足则整批拒绝。"""
     _ = tool_name
+    count = max(1, int(n or 1))
     remaining = _retrieval_remaining.get()
     if remaining is None:
         return None
-    if remaining <= 0:
+    if remaining <= 0 or remaining < count:
         return STOP_JSON_MESSAGE
-    _retrieval_remaining.set(remaining - 1)
+    _retrieval_remaining.set(remaining - count)
     return None

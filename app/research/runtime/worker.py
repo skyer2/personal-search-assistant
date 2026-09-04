@@ -148,7 +148,8 @@ class LangChainWorkerRuntime:
                         tool_calls=session.state.tool_calls_count,
                     )
                     allowed, why = mgr.research_allowed()
-                    remaining = mgr.remaining_run_sec()
+                    # Research 不得侵占 synthesis 时间储备
+                    remaining = mgr.remaining_for_research_sec()
                 except Exception:
                     allowed, why = True, ""
                     remaining = float(self.harness.harness_config.step_timeout_sec)
@@ -177,7 +178,31 @@ class LangChainWorkerRuntime:
                     }
                 step_timeout = max(10, int(self.harness.harness_config.step_timeout_sec))
                 max_retries = max(0, int(getattr(self.harness.harness_config, "max_retries", 2) or 2))
-                worker_timeout = min(step_timeout * (max_retries + 1), max(5.0, remaining))
+                # 外层墙钟：不再 * (retries+1)；retry 共享同一 deadline，避免 6min straggler
+                retry_slack = 1.0 + min(0.5, 0.25 * max_retries)
+                worker_timeout = min(float(step_timeout) * retry_slack, max(5.0, remaining))
+                # 可选任务：若已 force_synthesis / enough，直接跳过
+                if bool(step.metadata.get("optional")) and (
+                    (isinstance(session.state.metadata, dict) and session.state.metadata.get("force_synthesis"))
+                    or str((session.state.metadata or {}).get("progress_assessment", {}).get("verdict") or "")
+                    == "enough"
+                ):
+                    async with session.lock:
+                        session.state.plan.steps[step_index].metadata["status"] = "skipped"
+                    return {
+                        "task_status": {task.task_id: "skipped"},
+                        "worker_results": [
+                            {
+                                "task_id": task.task_id,
+                                "ok": True,
+                                "summary": "skipped_optional_early_stop",
+                                "step_type": task.step_type,
+                                "fail_reason": "",
+                                "queue_ms": queue_ms,
+                                "execution_ms": 0,
+                            }
+                        ],
+                    }
                 try:
                     ok = await asyncio.wait_for(
                         self.harness._run_single_step(
@@ -285,6 +310,17 @@ class LangChainWorkerRuntime:
             row = worker_row(task.task_id, step, bool(ok), result)
             findings = findings_from_worker_row(row)
             payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            if ok:
+                try:
+                    from app.research.runtime.latency import note_first_evidence
+
+                    note_first_evidence(
+                        session.state,
+                        evidence_count=len(findings)
+                        or len(list(payload.get("facts") or []) if isinstance(payload, dict) else []),
+                    )
+                except Exception:
+                    pass
             duration_ms = int((time.perf_counter() - worker_started) * 1000)
             finding_ids = []
             for idx, finding in enumerate(findings):
