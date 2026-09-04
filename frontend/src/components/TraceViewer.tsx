@@ -233,6 +233,9 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
 
       {error ? <Alert message={error} showIcon type="error" /> : null}
 
+      {/* 语义流水线 → 产物证据 → 运行时/调试：
+          Overview → Understanding → Plan → Worker → 进度/Replan → Synthesis →
+          证据链 → Lineage → 因果树 → Eval → JSONL → Langfuse */}
       <Tabs
         items={[
           {
@@ -352,112 +355,6 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
             )
           },
           {
-            key: "tree",
-            label: `因果树 (${traceTree.span_count})`,
-            children: (
-              <div style={{ display: "grid", gridTemplateColumns: selectedSpan ? "1.2fr 0.8fr" : "1fr", gap: 12 }}>
-                <Card size="small">
-                  {typeof traceTree.omitted_count === "number" && traceTree.omitted_count > 0 ? (
-                    <Alert
-                      message={`已从因果树省略 ${traceTree.omitted_count} 条 llm_usage / gen_ai.chat，完整序列见 JSONL 页签。`}
-                      showIcon
-                      type="info"
-                    />
-                  ) : null}
-                  <SpanTree
-                    nodes={traceTree.roots || []}
-                    onSelect={(node) => setSelectedSpan(node)}
-                    selectedSpanId={selectedSpan?.span_id}
-                  />
-                </Card>
-                {selectedSpan ? (
-                  <Card
-                    extra={
-                      <Button onClick={() => setSelectedSpan(null)} size="small" type="link">
-                        关闭
-                      </Button>
-                    }
-                    size="small"
-                    title="Span Detail"
-                  >
-                    <Typography.Paragraph>
-                      <strong>{selectedSpan.name}</strong>
-                      {selectedSpan.task_id ? ` · ${selectedSpan.task_id}` : ""}
-                    </Typography.Paragraph>
-                    <Typography.Paragraph type="secondary">
-                      status={asText(selectedSpan.status)} · ms={asText(selectedSpan.duration_ms)} · plan=
-                      {asText(selectedSpan.plan_version)}
-                    </Typography.Paragraph>
-                    <Typography.Text strong>Related events</Typography.Text>
-                    <ResizableTable
-                      dataSource={jsonlEvents
-                        .filter((event) => String(event.span_id || "") === String(selectedSpan.span_id || ""))
-                        .slice(0, 40)
-                        .map((event, index) => ({
-                          key: `${event.event_id || index}`,
-                          type: event.type || event.event,
-                          status: event.status,
-                          refs: [
-                            ...((event.input_refs as Array<Record<string, unknown>> | undefined) || []).map(
-                              (ref) => `in:${String(ref.type || "")}:${String(ref.id || "")}`
-                            ),
-                            ...((event.output_refs as Array<Record<string, unknown>> | undefined) || []).map(
-                              (ref) => `out:${String(ref.type || "")}:${String(ref.id || "")}`
-                            )
-                          ].join(" | ")
-                        }))}
-                      pagination={false}
-                      size="small"
-                      columns={[
-                        { title: "Type", dataIndex: "type", key: "type", width: 160 },
-                        { title: "Status", dataIndex: "status", key: "status", width: 90 },
-                        {
-                          title: "Refs",
-                          dataIndex: "refs",
-                          key: "refs",
-                          render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
-                        }
-                      ]}
-                    />
-                  </Card>
-                ) : null}
-              </div>
-            )
-          },
-          {
-            key: "lineage",
-            label: `Lineage (${lineage.length})`,
-            children: (
-              <Card size="small">
-                {lineage.length === 0 ? (
-                  <Alert message="尚无 semantic lineage edges（需要 brief/plan/worker/evidence/synthesis refs）" showIcon type="info" />
-                ) : (
-                  <ResizableTable
-                    dataSource={lineage.map((row, index) => ({ ...row, key: `l-${index}` }))}
-                    pagination={{ pageSize: 20 }}
-                    size="small"
-                    columns={[
-                      {
-                        title: "From",
-                        key: "from",
-                        render: (_: unknown, row: Record<string, unknown>) =>
-                          `${asText(row.from_type)}:${asText(row.from_id)}`
-                      },
-                      {
-                        title: "To",
-                        key: "to",
-                        render: (_: unknown, row: Record<string, unknown>) =>
-                          `${asText(row.to_type)}:${asText(row.to_id)}`
-                      },
-                      { title: "Via", dataIndex: "via_event", key: "via_event", width: 180 },
-                      { title: "Span", dataIndex: "span_id", key: "span_id", width: 140 }
-                    ]}
-                  />
-                )}
-              </Card>
-            )
-          },
-          {
             key: "workers",
             label: `Worker (${summary.worker_count || workers.length})`,
             children: (
@@ -508,36 +405,6 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
                         key: "fail_reason",
                         render: (value: unknown) => <div className="table-wrap-cell">{asText(value, "")}</div>
                       }
-                    ]}
-                  />
-                )}
-              </Card>
-            )
-          },
-          {
-            key: "synthesis",
-            label: `Synthesis (${synthesis.length})`,
-            children: (
-              <Card size="small">
-                {synthesis.length === 0 ? (
-                  <Alert message="尚未写入 synthesis.completed" showIcon type="info" />
-                ) : (
-                  <ResizableTable
-                    dataSource={synthesis.map((row, index) => ({ ...row, key: `s-${index}` }))}
-                    pagination={{ pageSize: 8 }}
-                    size="small"
-                    columns={[
-                      { title: "Type", dataIndex: "type", width: 160, key: "type" },
-                      { title: "Answer", dataIndex: "answer_id", width: 140, key: "answer_id" },
-                      { title: "Brief", dataIndex: "brief_id", width: 140, key: "brief_id" },
-                      {
-                        title: "Evidence",
-                        dataIndex: "evidence_ids",
-                        key: "evidence_ids",
-                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
-                      },
-                      { title: "Words", dataIndex: "word_count", width: 90, key: "word_count" },
-                      { title: "Ref", dataIndex: "answer_ref", key: "answer_ref" }
                     ]}
                   />
                 )}
@@ -642,6 +509,214 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
                   />
                 )}
               </Card>
+            )
+          },
+          {
+            key: "synthesis",
+            label: `Synthesis (${synthesis.length})`,
+            children: (
+              <Card size="small">
+                {synthesis.length === 0 ? (
+                  <Alert message="尚未写入 synthesis.completed" showIcon type="info" />
+                ) : (
+                  <ResizableTable
+                    dataSource={synthesis.map((row, index) => ({ ...row, key: `s-${index}` }))}
+                    pagination={{ pageSize: 8 }}
+                    size="small"
+                    columns={[
+                      { title: "Type", dataIndex: "type", width: 160, key: "type" },
+                      { title: "Answer", dataIndex: "answer_id", width: 140, key: "answer_id" },
+                      { title: "Brief", dataIndex: "brief_id", width: 140, key: "brief_id" },
+                      {
+                        title: "Evidence",
+                        dataIndex: "evidence_ids",
+                        key: "evidence_ids",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
+                      },
+                      { title: "Words", dataIndex: "word_count", width: 90, key: "word_count" },
+                      { title: "Ref", dataIndex: "answer_ref", key: "answer_ref" }
+                    ]}
+                  />
+                )}
+              </Card>
+            )
+          },
+          {
+            key: "citations",
+            label: `证据链 (${citations.length})`,
+            children: (
+              <Card size="small">
+                {citationsMessage ? <Alert message={citationsMessage} showIcon type="info" /> : null}
+                <ResizableTable
+                  dataSource={citations.map((source, index) => ({
+                    ...source,
+                    key: source.source_id || `cite-${index}`,
+                    ref_num: index + 1
+                  }))}
+                  pagination={{ pageSize: 10 }}
+                  size="small"
+                  columns={[
+                    {
+                      title: "引用",
+                      dataIndex: "ref_num",
+                      width: 72,
+                      key: "ref_num",
+                      render: (num: number) => <Tag color="blue">[{num}]</Tag>
+                    },
+                    {
+                      title: "类型",
+                      dataIndex: "source_kind",
+                      width: 90,
+                      key: "source_kind",
+                      render: (kind: string) => <Tag>{kind}</Tag>
+                    },
+                    {
+                      title: "Step",
+                      width: 160,
+                      key: "step",
+                      render: (_, row) => `${row.step_index + 1} / ${row.step_type}`
+                    },
+                    {
+                      title: "来源",
+                      dataIndex: "locator",
+                      width: 360,
+                      key: "locator",
+                      render: (locator: string, row) =>
+                        row.source_kind === "url" ? (
+                          <a href={locator} rel="noreferrer" target="_blank">
+                            {locator}
+                          </a>
+                        ) : (
+                          <div className="table-wrap-cell">{locator}</div>
+                        )
+                    },
+                    {
+                      title: "操作",
+                      width: 110,
+                      key: "actions",
+                      render: (_, row) => (
+                        <Button size="small" type="link" onClick={() => handleCitationClick(row)}>
+                          高亮 Step
+                        </Button>
+                      )
+                    }
+                  ]}
+                />
+                {highlightSourceId ? (
+                  <Alert
+                    className="trace-citation-hint"
+                    message={`已高亮 source_id=${highlightSourceId} 对应 execute 步骤，请查看 JSONL 页签`}
+                    showIcon
+                    type="success"
+                  />
+                ) : null}
+              </Card>
+            )
+          },
+          {
+            key: "lineage",
+            label: `Lineage (${lineage.length})`,
+            children: (
+              <Card size="small">
+                {lineage.length === 0 ? (
+                  <Alert message="尚无 semantic lineage edges（需要 brief/plan/worker/evidence/synthesis refs）" showIcon type="info" />
+                ) : (
+                  <ResizableTable
+                    dataSource={lineage.map((row, index) => ({ ...row, key: `l-${index}` }))}
+                    pagination={{ pageSize: 20 }}
+                    size="small"
+                    columns={[
+                      {
+                        title: "From",
+                        key: "from",
+                        render: (_: unknown, row: Record<string, unknown>) =>
+                          `${asText(row.from_type)}:${asText(row.from_id)}`
+                      },
+                      {
+                        title: "To",
+                        key: "to",
+                        render: (_: unknown, row: Record<string, unknown>) =>
+                          `${asText(row.to_type)}:${asText(row.to_id)}`
+                      },
+                      { title: "Via", dataIndex: "via_event", key: "via_event", width: 180 },
+                      { title: "Span", dataIndex: "span_id", key: "span_id", width: 140 }
+                    ]}
+                  />
+                )}
+              </Card>
+            )
+          },
+          {
+            key: "tree",
+            label: `因果树 (${traceTree.span_count})`,
+            children: (
+              <div style={{ display: "grid", gridTemplateColumns: selectedSpan ? "1.2fr 0.8fr" : "1fr", gap: 12 }}>
+                <Card size="small">
+                  {typeof traceTree.omitted_count === "number" && traceTree.omitted_count > 0 ? (
+                    <Alert
+                      message={`已从因果树省略 ${traceTree.omitted_count} 条 llm_usage / gen_ai.chat，完整序列见 JSONL 页签。`}
+                      showIcon
+                      type="info"
+                    />
+                  ) : null}
+                  <SpanTree
+                    nodes={traceTree.roots || []}
+                    onSelect={(node) => setSelectedSpan(node)}
+                    selectedSpanId={selectedSpan?.span_id}
+                  />
+                </Card>
+                {selectedSpan ? (
+                  <Card
+                    extra={
+                      <Button onClick={() => setSelectedSpan(null)} size="small" type="link">
+                        关闭
+                      </Button>
+                    }
+                    size="small"
+                    title="Span Detail"
+                  >
+                    <Typography.Paragraph>
+                      <strong>{selectedSpan.name}</strong>
+                      {selectedSpan.task_id ? ` · ${selectedSpan.task_id}` : ""}
+                    </Typography.Paragraph>
+                    <Typography.Paragraph type="secondary">
+                      status={asText(selectedSpan.status)} · ms={asText(selectedSpan.duration_ms)} · plan=
+                      {asText(selectedSpan.plan_version)}
+                    </Typography.Paragraph>
+                    <Typography.Text strong>Related events</Typography.Text>
+                    <ResizableTable
+                      dataSource={jsonlEvents
+                        .filter((event) => String(event.span_id || "") === String(selectedSpan.span_id || ""))
+                        .slice(0, 40)
+                        .map((event, index) => ({
+                          key: `${event.event_id || index}`,
+                          type: event.type || event.event,
+                          status: event.status,
+                          refs: [
+                            ...((event.input_refs as Array<Record<string, unknown>> | undefined) || []).map(
+                              (ref) => `in:${String(ref.type || "")}:${String(ref.id || "")}`
+                            ),
+                            ...((event.output_refs as Array<Record<string, unknown>> | undefined) || []).map(
+                              (ref) => `out:${String(ref.type || "")}:${String(ref.id || "")}`
+                            )
+                          ].join(" | ")
+                        }))}
+                      pagination={false}
+                      size="small"
+                      columns={[
+                        { title: "Type", dataIndex: "type", key: "type", width: 160 },
+                        { title: "Status", dataIndex: "status", key: "status", width: 90 },
+                        {
+                          title: "Refs",
+                          dataIndex: "refs",
+                          key: "refs",
+                          render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
+                        }
+                      ]}
+                    />
+                  </Card>
+                ) : null}
+              </div>
             )
           },
           {
@@ -770,78 +845,6 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
                     }
                   ]}
                 />
-              </Card>
-            )
-          },
-          {
-            key: "citations",
-            label: `证据链 (${citations.length})`,
-            children: (
-              <Card size="small">
-                {citationsMessage ? <Alert message={citationsMessage} showIcon type="info" /> : null}
-                <ResizableTable
-                  dataSource={citations.map((source, index) => ({
-                    ...source,
-                    key: source.source_id || `cite-${index}`,
-                    ref_num: index + 1
-                  }))}
-                  pagination={{ pageSize: 10 }}
-                  size="small"
-                  columns={[
-                    {
-                      title: "引用",
-                      dataIndex: "ref_num",
-                      width: 72,
-                      key: "ref_num",
-                      render: (num: number) => <Tag color="blue">[{num}]</Tag>
-                    },
-                    {
-                      title: "类型",
-                      dataIndex: "source_kind",
-                      width: 90,
-                      key: "source_kind",
-                      render: (kind: string) => <Tag>{kind}</Tag>
-                    },
-                    {
-                      title: "Step",
-                      width: 160,
-                      key: "step",
-                      render: (_, row) => `${row.step_index + 1} / ${row.step_type}`
-                    },
-                    {
-                      title: "来源",
-                      dataIndex: "locator",
-                      width: 360,
-                      key: "locator",
-                      render: (locator: string, row) =>
-                        row.source_kind === "url" ? (
-                          <a href={locator} rel="noreferrer" target="_blank">
-                            {locator}
-                          </a>
-                        ) : (
-                          <div className="table-wrap-cell">{locator}</div>
-                        )
-                    },
-                    {
-                      title: "操作",
-                      width: 110,
-                      key: "actions",
-                      render: (_, row) => (
-                        <Button size="small" type="link" onClick={() => handleCitationClick(row)}>
-                          高亮 Step
-                        </Button>
-                      )
-                    }
-                  ]}
-                />
-                {highlightSourceId ? (
-                  <Alert
-                    className="trace-citation-hint"
-                    message={`已高亮 source_id=${highlightSourceId} 对应 execute 步骤，请查看 JSONL 页签`}
-                    showIcon
-                    type="success"
-                  />
-                ) : null}
               </Card>
             )
           },
