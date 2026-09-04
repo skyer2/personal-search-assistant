@@ -32,6 +32,20 @@ def render_partial_report(
     if isinstance(assessment, dict):
         expected = [str(x) for x in (assessment.get("expected_disagreements") or []) if x][:8]
         unresolved = [str(x) for x in (assessment.get("unresolved_conflicts") or []) if x][:8]
+    # 补全 Claim Reconciliation 结果（跨 Worker 全局对账）
+    meta = getattr(state, "metadata", None) or {}
+    if isinstance(meta, dict):
+        recon = meta.get("claim_reconciliation") if isinstance(meta.get("claim_reconciliation"), dict) else {}
+        for item in recon.get("disclosed_labels") or []:
+            text = str(item)
+            if text and text not in expected:
+                expected.append(text)
+        for item in recon.get("unresolved_labels") or []:
+            text = str(item)
+            if text and text not in unresolved:
+                unresolved.append(text)
+        expected = expected[:8]
+        unresolved = unresolved[:8]
 
     reason = abort_reason or ("synthesis_failed" if synthesis_failed else "incomplete")
     lines = [

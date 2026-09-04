@@ -673,11 +673,21 @@ class ResearchGraphRunner:
                 getattr(session.harness.harness_config, "progress_eval_enabled", True)
             )
             query = session.ctx.task_query or query
+        worker_rows = list(gstate.get("worker_results") or [])
+        reconciliation = None
+        try:
+            from app.research.claims import reconcile_worker_results
+
+            reconciliation = reconcile_worker_results(worker_rows)
+            if session is not None and isinstance(session.state.metadata, dict):
+                session.state.metadata["claim_reconciliation"] = reconciliation.to_dict()
+        except Exception:
+            reconciliation = None
         assessment = assess_progress(
             plan,
             task_status=dict(gstate.get("task_status") or {}),
             state=session.state if session is not None else None,
-            worker_results=list(gstate.get("worker_results") or []),
+            worker_results=worker_rows,
             query=query,
             aborted=bool(
                 (session is not None and session.state.abort_reason)
@@ -693,6 +703,7 @@ class ResearchGraphRunner:
                 ).get("open_gap_ids")
                 or []
             ),
+            reconciliation=reconciliation,
         )
         if session is not None:
             session.state.metadata["progress_assessment"] = assessment.to_dict()
@@ -1239,6 +1250,13 @@ class ResearchGraphRunner:
                         "citation_coverage_rate": getattr(state, "citation_coverage_rate", None),
                         "hallucination_rate": getattr(state, "hallucination_rate", None),
                         "unsupported_claim_rate": getattr(state, "hallucination_rate", None),
+                        "conflict_disclosure_passed": (
+                            True
+                            if getattr(outcome, "reason", "")
+                            not in {"conflict_not_disclosed", "unsupported_reconciled_value"}
+                            else False
+                        ),
+                        "conflict_disclosure_reason": str(getattr(outcome, "reason", "") or ""),
                         "target_type": "synthesis",
                         "target_artifact_id": str((state.metadata or {}).get("answer_id") or ""),
                         "target_span_id": "",

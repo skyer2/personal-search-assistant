@@ -149,6 +149,53 @@ def latest_worker_results(rows: list[Any] | None) -> list[dict[str, Any]]:
     return list(latest.values())
 
 
+def _merge_claim_reconciliation(
+    assessment: ProgressAssessment,
+    reconciliation: Any | None,
+    *,
+    rows: list[dict[str, Any]] | None = None,
+) -> None:
+    """把跨 Worker Claim Reconciliation 结果并入 Progress。
+
+    Global claim-level 冲突优先于单 Worker heuristic。
+    """
+    result = reconciliation
+    if result is None and rows is not None:
+        try:
+            from app.research.claims import reconcile_worker_results
+
+            result = reconcile_worker_results(rows)
+        except Exception:
+            return
+    if result is None:
+        return
+    if hasattr(result, "to_dict"):
+        data = result.to_dict()
+    elif isinstance(result, dict):
+        data = result
+    else:
+        return
+
+    for label in data.get("unresolved_labels") or []:
+        text = str(label)
+        if text and text not in assessment.unresolved_conflicts:
+            assessment.unresolved_conflicts.append(text)
+        if text and text not in assessment.conflicts:
+            assessment.conflicts.append(text)
+    for label in data.get("disclosed_labels") or []:
+        text = str(label)
+        if text and text not in assessment.expected_disagreements:
+            assessment.expected_disagreements.append(text)
+        if text and text not in assessment.conflicts:
+            assessment.conflicts.append(text)
+    # 权威消解成功的冲突：从 unresolved 中剔除同文案（若先前 heuristic 误判）
+    resolved_set = {str(x) for x in (data.get("resolved_labels") or []) if x}
+    if resolved_set:
+        assessment.unresolved_conflicts = [
+            x for x in assessment.unresolved_conflicts if x not in resolved_set
+        ]
+
+
 def assess_progress(
     plan: ExecutionPlan | None,
     *,
@@ -161,6 +208,7 @@ def assess_progress(
     enabled: bool = True,
     intent: Any = None,
     previous_gap_ids: list[str] | None = None,
+    reconciliation: Any | None = None,
 ) -> ProgressAssessment:
     def _finalize(assessment: ProgressAssessment) -> ProgressAssessment:
         return assessment.materialize_gaps(previous_gap_ids=previous_gap_ids)
@@ -221,6 +269,7 @@ def assess_progress(
         rows = _rows_from_loop_state(state)
 
     _fill_worker_signals(assessment, plan, rows, query=query or getattr(plan, "research_brief", "") or "")
+    _merge_claim_reconciliation(assessment, reconciliation, rows=rows)
 
     resolved_intent = intent
     if resolved_intent is None and state is not None:

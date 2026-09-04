@@ -119,10 +119,12 @@ def evaluate_run_guardrails(
 
 
 def can_replan(state: "LoopState", config: "HarnessConfig") -> bool:
-    """是否允许再插入动态重规划步。"""
+    """是否允许再插入动态重规划步。
+
+    Retry（format/transient）与 Replan（semantic）预算独立：
+    不再用 state.retry_count 消耗 semantic replan 权力。
+    """
     if not getattr(config, "hitl_allow_replan", True):
-        return False
-    if state.retry_count >= state.max_retries:
         return False
     meta = getattr(state, "metadata", None) or {}
     if isinstance(meta, dict) and meta.get("force_synthesis"):

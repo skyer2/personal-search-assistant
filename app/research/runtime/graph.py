@@ -139,20 +139,32 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
     from app.research.planning.progress import assess_progress
 
     plan = _plan_from_state(state)
+    worker_rows = list(state.get("worker_results") or [])
+    reconciliation = None
+    try:
+        from app.research.claims import reconcile_worker_results
+
+        reconciliation = reconcile_worker_results(worker_rows)
+    except Exception:
+        reconciliation = None
     assessment = assess_progress(
         plan,
         task_status=dict(state.get("task_status") or {}),
-        worker_results=list(state.get("worker_results") or []),
+        worker_results=worker_rows,
         query=str(state.get("resolved_query") or state.get("task_query") or ""),
         aborted=bool(state.get("status") == "aborted" or state.get("abort_reason")),
         intent=state.get("intent"),
+        reconciliation=reconciliation,
     )
-    return {
+    payload = {
         "progress_assessment": assessment.to_dict(),
         "progress": "progress_eval",
         "abort_reason": state.get("abort_reason")
         or (assessment.reason if assessment.verdict == "abort" else ""),
     }
+    if reconciliation is not None:
+        payload["claim_reconciliation"] = reconciliation.to_dict()
+    return payload
 
 
 def route_progress(state: ResearchState) -> str:

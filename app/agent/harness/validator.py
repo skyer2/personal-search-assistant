@@ -155,6 +155,73 @@ class ResultValidator:
             if not ok:
                 return ValidationOutcome(False, reason, "warning")
 
+        disclosure = self.validate_conflict_disclosure(state)
+        if not disclosure.passed:
+            return disclosure
+
+        return ValidationOutcome(True)
+
+    def validate_conflict_disclosure(self, state: LoopState) -> ValidationOutcome:
+        """Conflict Disclosure Gate：仅对 unresolved conflict 硬拦截。
+
+        规则：
+        - 终稿须显式表达 uncertainty / disagreement
+        - 禁止用「约为/平均」等静默调和出一个无证据支撑的单一数值
+        expected_disagreement 由 Synthesis 解释即可，不在此硬失败。
+        """
+        meta = getattr(state, "metadata", None) or {}
+        if not isinstance(meta, dict):
+            return ValidationOutcome(True)
+        recon = meta.get("claim_reconciliation") if isinstance(meta.get("claim_reconciliation"), dict) else {}
+        progress = meta.get("progress_assessment") if isinstance(meta.get("progress_assessment"), dict) else {}
+        unresolved = [
+            str(x)
+            for x in (
+                list(recon.get("unresolved_labels") or [])
+                + list(progress.get("unresolved_conflicts") or [])
+            )
+            if x
+        ]
+        # 去重保序
+        seen: set[str] = set()
+        labels: list[str] = []
+        for item in unresolved:
+            if item not in seen:
+                seen.add(item)
+                labels.append(item)
+        if not labels:
+            return ValidationOutcome(True)
+
+        content = (state.final_content or "").lower()
+        markers = (
+            "冲突",
+            "不一致",
+            "分歧",
+            "差异",
+            "不确定",
+            "未能确认",
+            "无法可靠",
+            "无法判断",
+            "并列",
+            "口径",
+            "conflict",
+            "disagreement",
+            "uncertainty",
+            "vs",
+            " versus ",
+        )
+        has_marker = any(m in content for m in markers)
+        reconciled_toks = ("约为", "平均为", "综合为", "取平均", "综合约")
+        has_reconciled = any(tok in content for tok in reconciled_toks)
+        uncertainty_ok = any(
+            m in content
+            for m in ("未能确认", "无法可靠", "无法判断", "cannot determine", "uncertain")
+        )
+        # 先拦静默调和：即使带了冲突词，也不允许编造单一调和值（除非同时声明无法判断）
+        if has_reconciled and not uncertainty_ok:
+            return ValidationOutcome(False, "unsupported_reconciled_value", "warning")
+        if not has_marker:
+            return ValidationOutcome(False, "conflict_not_disclosed", "warning")
         return ValidationOutcome(True)
 
     def validate_plan_coverage(
