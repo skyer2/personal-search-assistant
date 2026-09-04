@@ -122,18 +122,40 @@ class ResearchGraphRunner:
             max_replan_count=int(budget_cfg["max_replan_count"]),
             search_mode=profile,
         )
+        payload["budget"]["max_parallel_workers"] = session._resolve_max_workers()
         try:
             graph = self.compile(
                 checkpointer=checkpointer or await _default_checkpointer(),
                 profile=profile,
             )
-            result = await _ainvoke_resilient(
-                graph, await _initial_or_resume_payload(graph, payload, config, ctx), config
+            from app.agent.harness.run_budget import get_or_create_run_budget
+
+            mgr = get_or_create_run_budget(
+                session.state,
+                self.harness.harness_config,
+                run_started=ctx.run_started,
             )
-            while _has_interrupt(result):
-                resume_value = await self._bridge_interrupts(result, session)
-                result = await _ainvoke_resilient(
-                    graph, Command(resume=resume_value), config
+            initial = await _initial_or_resume_payload(graph, payload, config, ctx)
+            research_sec = mgr.remaining_for_research_sec()
+            if research_sec <= 1.0:
+                return await self._force_synthesis_then_finalize(
+                    session, reason="synthesis_time_reserve"
+                )
+            try:
+                result = await asyncio.wait_for(
+                    _ainvoke_resilient(graph, initial, config),
+                    timeout=research_sec,
+                )
+                while _has_interrupt(result):
+                    remaining = max(1.0, mgr.remaining_for_research_sec())
+                    resume_value = await self._bridge_interrupts(result, session)
+                    result = await asyncio.wait_for(
+                        _ainvoke_resilient(graph, Command(resume=resume_value), config),
+                        timeout=remaining,
+                    )
+            except asyncio.TimeoutError:
+                return await self._force_synthesis_then_finalize(
+                    session, reason="synthesis_time_reserve"
                 )
             if session.result is not None:
                 return session.result
@@ -186,6 +208,58 @@ class ResearchGraphRunner:
             return {"_timeout": True, "kind": item.get("kind")}
         await self.harness._clear_hitl_waiting(session.state)
         return decisions
+
+    async def _force_synthesis_then_finalize(
+        self, session: RunSession, *, reason: str
+    ) -> Any:
+        """Hard deadline hit mid-graph: skip remaining research and try synthesis."""
+        from app.research.runtime.scheduler import (
+            skip_pending_research,
+            task_status_map,
+        )
+
+        state = session.state
+        if isinstance(state.metadata, dict):
+            state.metadata["force_synthesis"] = True
+        if not state.abort_reason:
+            state.abort_reason = reason
+            state.abort_message = state.abort_message or f"{reason}: hard wall-clock"
+        if state.plan is not None:
+            skip_pending_research(
+                state.plan,
+                task_status_map(state.plan),
+                reason=reason,
+                include_required=True,
+            )
+        # 尝试用剩余时间写终稿，而不是直接 partial dump
+        gstate = {
+            "run_id": session.run_id,
+            "progress_assessment": dict(
+                (state.metadata or {}).get("progress_assessment") or {}
+            ),
+            "findings": [],
+        }
+        try:
+            await self.node_synthesize(gstate)
+        except Exception:
+            pass
+        try:
+            await self.node_quality_gate(gstate)
+        except Exception:
+            pass
+        try:
+            gstate["status"] = "partial"
+            return await self.node_finalize(gstate)
+        except Exception:
+            from app.agent.harness.partial_report import render_partial_report
+
+            if not str(state.final_content or "").strip():
+                state.final_content = render_partial_report(
+                    state=state,
+                    abort_reason=reason,
+                    assessment=dict(gstate.get("progress_assessment") or {}),
+                )
+            return await self._finalize_run(session, success=False)
 
     async def _complete_from_graph(self, session: RunSession, graph_result: dict[str, Any]) -> Any:
         ctx = session.ctx
@@ -462,7 +536,9 @@ class ResearchGraphRunner:
         else:
             session.state = await self.harness._phase_plan(session.state)
             if session.state.plan is not None:
-                session.state.plan = annotate_plan_tasks(session.state.plan)
+            session.state.plan = annotate_plan_tasks(
+                session.state.plan, intent=session.state.intent
+            )
             plan = session.state.plan
         if plan is None or not plan.steps:
             session.state.abort_reason = "empty_plan"
@@ -535,7 +611,7 @@ class ResearchGraphRunner:
     async def node_dispatch(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.project import apply_graph_to_loop
         from app.research.runtime.scheduler import (
-            ready_research_steps,
+            select_dispatch_wave,
             skip_optional_pending,
             task_status_map,
         )
@@ -586,14 +662,16 @@ class ResearchGraphRunner:
                 },
                 "task_status": status,
             }
-        ready = ready_research_steps(session.state.plan)
+        ready = select_dispatch_wave(
+            session.state.plan,
+            include_optional=False,
+            max_parallel=session._resolve_max_workers(),
+        )
         if ready:
             note_dispatch_wave(
                 session.state,
                 task_ids=[s.resolved_task_id(i) for i, s in ready],
-                include_optional=any(
-                    bool((s.metadata or {}).get("optional")) for _, s in ready
-                ),
+                include_optional=False,
             )
         return {
             "replan_count": int(gstate.get("replan_count") or session.state.replan_count),
@@ -823,7 +901,11 @@ class ResearchGraphRunner:
         if plan is None:
             return {"status": "synthesized", "progress": "synthesized"}
         status = task_status_map(plan)
-        nxt = next_synthesis_step(plan, status)
+        force = bool(
+            (isinstance(session.state.metadata, dict) and session.state.metadata.get("force_synthesis"))
+            or session.state.abort_reason
+        )
+        nxt = next_synthesis_step(plan, status, allow_failed_deps=force)
         if nxt is None:
             return {"status": "synthesized", "progress": "synthesized", "task_status": status}
         index, step = nxt

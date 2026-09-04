@@ -102,10 +102,19 @@ def _max_replan(state: ResearchState) -> int:
     return int(budget.get("max_replan_count") or 3)
 
 
+def _wave_parallel(state: ResearchState) -> int:
+    budget = state.get("budget") or {}
+    try:
+        n = int(budget.get("max_parallel_workers") or 3)
+    except (TypeError, ValueError):
+        n = 3
+    return max(1, n)
+
+
 def route_dispatch(state: ResearchState) -> list[Any] | str:
     from langgraph.types import Send
 
-    from app.research.runtime.scheduler import skip_optional_pending
+    from app.research.runtime.scheduler import select_dispatch_wave, skip_optional_pending
 
     if state.get("status") == "aborted" or state.get("abort_reason"):
         return "abort"
@@ -121,9 +130,13 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
     )
     if early_stop:
         status = skip_optional_pending(plan, status, reason="early_stop_enough")
-        ready = ready_research_steps(plan, status, include_optional=False)
-    else:
-        ready = ready_research_steps(plan, status, include_optional=True)
+    # Required-first: 永远不要在第一波把 optional 和 P0 一起 Send
+    ready = select_dispatch_wave(
+        plan,
+        status,
+        include_optional=False,
+        max_parallel=_wave_parallel(state),
+    )
     if ready:
         sends: list[Any] = []
         for index, step in ready:
@@ -202,7 +215,9 @@ def route_progress(state: ResearchState) -> str:
             if nxt is not None:
                 return "synthesize"
         return "quality_gate"
-    if verdict == "run" and plan is not None and ready_research_steps(plan, status):
+    if verdict == "run" and plan is not None and ready_research_steps(
+        plan, status, include_optional=False
+    ):
         return "dispatch"
     can_replan = (
         verdict == "gap"
@@ -372,7 +387,8 @@ def compile_research_graph(
         route_dispatch,
         ["research_worker", "progress", "abort", "finalize"],
     )
-    builder.add_edge("research_worker", "dispatch")
+    # 每一波 Worker 结束后必须 Progress，禁止 Worker → greedy Dispatch drain
+    builder.add_edge("research_worker", "progress")
     builder.add_conditional_edges(
         "progress",
         route_progress,

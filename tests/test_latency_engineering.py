@@ -119,34 +119,42 @@ def test_get_or_create_run_budget_binds_run_started():
 def test_optional_tasks_and_early_skip():
     plan = ExecutionPlan(
         steps=[
-            PlanStep(step_type="research", description="r1", task_id="t1", objective="A"),
-            PlanStep(step_type="research", description="r2", task_id="t2", objective="B"),
-            PlanStep(step_type="research", description="r3", task_id="t3", objective="C"),
-            PlanStep(step_type="research", description="r4", task_id="t4", objective="D"),
+            PlanStep(step_type="research", description="r1", task_id="t1", objective="技术能力现状与边界"),
+            PlanStep(step_type="research", description="r2", task_id="t2", objective="根本性挑战与局限"),
+            PlanStep(step_type="research", description="r3", task_id="t3", objective="发展趋势与未来展望"),
+            PlanStep(
+                step_type="research",
+                description="r4",
+                task_id="t4",
+                objective="自动化历史辅助",
+                metadata={
+                    "coverage_keys": ["supporting_context"],
+                    "required": False,
+                    "optional": True,
+                    "priority": 1,
+                },
+            ),
             PlanStep(step_type="summarize", description="s", task_id="ts", objective="synth"),
         ]
     )
     annotate_plan_tasks(plan)
     required = required_retrieval_ids(plan)
-    assert len(required) >= 2
+    assert "t4" not in required
     optional = [
         s for s in plan.steps if s.step_type == "research" and s.metadata.get("optional")
     ]
-    assert optional, "expected optional research tasks"
+    assert [s.task_id for s in optional] == ["t4"]
 
     synth = next(s for s in plan.steps if s.step_type == "summarize")
-    # Synthesis should depend on required only — not optional stragglers
     for oid in [s.task_id for s in optional]:
         assert oid not in (synth.depends_on or [])
 
-    # Mark required done, skip optional
     for s in plan.steps:
         if s.step_type == "research" and s.metadata.get("required"):
             s.metadata["status"] = "done"
     status = skip_optional_pending(plan, reason="early_stop_enough")
     for s in optional:
         assert status[s.task_id] == "skipped"
-    # After skip, no optional ready
     ready = ready_research_steps(plan, status, include_optional=True)
     assert ready == []
     print("[OK] optional early skip + synth deps")

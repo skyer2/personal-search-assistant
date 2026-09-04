@@ -17,6 +17,7 @@ class BudgetState(TypedDict):
     max_tool_calls: int
     replan_count: int
     max_replan_count: int
+    max_parallel_workers: NotRequired[int]
 
 
 class ResearchState(TypedDict):
@@ -116,6 +117,7 @@ def empty_research_state(
             "max_tool_calls": max_tool_calls,
             "replan_count": 0,
             "max_replan_count": max_replan_count,
+            "max_parallel_workers": 3,
         },
         "replan_count": 0,
         "draft_ref": None,

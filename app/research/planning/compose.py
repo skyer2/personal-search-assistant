@@ -66,6 +66,9 @@ def _stamp(
     intent.planning_mode = mode
     if effective is not None:
         stamp_effort_on_plan(plan, effective)
+    from app.research.planning.priority import stamp_semantic_priority
+
+    stamp_semantic_priority(plan, intent=intent)
     return plan
 
 

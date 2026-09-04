@@ -16,35 +16,14 @@ from typing import Any, Iterable
 
 from app.agent.harness.orchestration import RETRIEVAL_STEP_TYPES, SYNTHESIS_STEP_TYPES
 from app.agent.harness.state import ExecutionPlan, PlanStep
+from app.research.planning.priority import stamp_semantic_priority
 
 TERMINAL_STATUS = frozenset({"done", "failed", "skipped"})
 
 
-def _stamp_research_priority(plan: ExecutionPlan) -> None:
-    """前半 required(P0)，后半 optional(P1+)；已有 metadata 不覆盖。"""
-    retrieval: list[PlanStep] = [
-        step for step in plan.steps if step.step_type in RETRIEVAL_STEP_TYPES
-    ]
-    if not retrieval:
-        return
-    required_n = max(1, (len(retrieval) + 1) // 2)
-    # 至少保证前 2 个 required（若有 ≥2）
-    required_n = min(len(retrieval), max(required_n, min(2, len(retrieval))))
-    for idx, step in enumerate(retrieval):
-        meta = step.metadata if isinstance(step.metadata, dict) else {}
-        if "priority" not in meta and "required" not in meta and "optional" not in meta:
-            required = idx < required_n
-            meta["priority"] = 0 if required else 1
-            meta["required"] = required
-            meta["optional"] = not required
-            step.metadata = meta
-        else:
-            required = bool(meta.get("required", not meta.get("optional", False)))
-            if meta.get("priority") is None:
-                meta["priority"] = 0 if required else 1
-            meta["required"] = required
-            meta["optional"] = not required
-            step.metadata = meta
+def _stamp_research_priority(plan: ExecutionPlan, intent: Any | None = None) -> None:
+    """Planner/Brief 语义优先级；禁止按列表位置把后半任务打成 optional。"""
+    stamp_semantic_priority(plan, intent=intent)
 
 
 def required_retrieval_ids(plan: ExecutionPlan) -> list[str]:
@@ -66,9 +45,9 @@ def required_retrieval_ids(plan: ExecutionPlan) -> list[str]:
     return ids
 
 
-def annotate_plan_tasks(plan: ExecutionPlan) -> ExecutionPlan:
+def annotate_plan_tasks(plan: ExecutionPlan, intent: Any | None = None) -> ExecutionPlan:
     """为每步补 task_id / depends_on。检索步默认无依赖；合成步依赖 required 检索。"""
-    _stamp_research_priority(plan)
+    _stamp_research_priority(plan, intent=intent)
     retrieval_ids: list[str] = []
     markdown_id = ""
     for index, step in enumerate(plan.steps):
@@ -218,6 +197,44 @@ def skip_optional_pending(
     return status
 
 
+def skip_pending_research(
+    plan: ExecutionPlan,
+    status: dict[str, str] | None = None,
+    *,
+    reason: str = "force_synthesis",
+    include_required: bool = False,
+) -> dict[str, str]:
+    """Skip pending optional (and optionally remaining required) so synthesis can start."""
+    status = skip_optional_pending(plan, status, reason=reason)
+    if not include_required:
+        return status
+    for index, step in enumerate(plan.steps):
+        if step.step_type not in RETRIEVAL_STEP_TYPES:
+            continue
+        tid = step.resolved_task_id(index)
+        if status.get(tid, "pending") != "pending":
+            continue
+        meta = step.metadata if isinstance(step.metadata, dict) else {}
+        status[tid] = "skipped"
+        meta["status"] = "skipped"
+        meta["skip_reason"] = reason
+        step.metadata = meta
+    return status
+
+
+def select_dispatch_wave(
+    plan: ExecutionPlan,
+    status: dict[str, str] | None = None,
+    *,
+    include_optional: bool = False,
+    max_parallel: int = 3,
+) -> list[tuple[int, PlanStep]]:
+    """Required-first staged dispatch: one Pregel wave ≤ max_parallel, never dump all tasks."""
+    ready = ready_research_steps(plan, status, include_optional=include_optional)
+    cap = max(1, int(max_parallel or 1))
+    return ready[:cap]
+
+
 def next_synthesis_step(
     plan: ExecutionPlan,
     status: dict[str, str] | None = None,
@@ -233,10 +250,18 @@ def next_synthesis_step(
     return ready[0] if ready else None
 
 
-def dispatch_sends(plan: ExecutionPlan, status: dict[str, str] | None = None) -> list[dict[str, Any]]:
-    """纯数据描述的 fan-out 清单；graph.py 再转成 Send。"""
+def dispatch_sends(
+    plan: ExecutionPlan,
+    status: dict[str, str] | None = None,
+    *,
+    include_optional: bool = False,
+    max_parallel: int = 3,
+) -> list[dict[str, Any]]:
+    """纯数据描述的 fan-out 清单；graph.py 再转成 Send。默认只要 P0。"""
     payloads: list[dict[str, Any]] = []
-    for index, step in ready_research_steps(plan, status):
+    for index, step in select_dispatch_wave(
+        plan, status, include_optional=include_optional, max_parallel=max_parallel
+    ):
         payloads.append(
             {
                 "task_id": step.resolved_task_id(index),

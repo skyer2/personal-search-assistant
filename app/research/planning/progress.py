@@ -224,7 +224,7 @@ def assess_progress(
             tid = step.resolved_task_id(index)
             status.setdefault(tid, str(step.metadata.get("status") or "pending"))
 
-    ready = ready_research_steps(plan, status)
+    ready = ready_research_steps(plan, status, include_optional=False)
     if ready:
         return _finalize(
             ProgressAssessment(
@@ -237,6 +237,7 @@ def assess_progress(
         step
         for index, step in enumerate(plan.steps)
         if step.step_type in RESEARCH_TYPES
+        and not (step.metadata or {}).get("optional")
         and status.get(step.resolved_task_id(index), "pending") in {"pending", "running"}
     ]
     if pending_research:
@@ -256,6 +257,7 @@ def assess_progress(
         step
         for index, step in enumerate(plan.steps)
         if step.step_type in RESEARCH_TYPES
+        and not (step.metadata or {}).get("optional")
         and status.get(step.resolved_task_id(index), "pending") == "failed"
     ]
     assessment = ProgressAssessment(verdict="enough", reason="coverage_ok")

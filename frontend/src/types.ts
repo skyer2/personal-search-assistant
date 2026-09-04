@@ -261,7 +261,9 @@ export interface TraceSummary {
   progress_count?: number;
   replan_count?: number;
   gap_closure_rate?: number | null;
-  replan_useful?: boolean;
+  replan_useful?: boolean | null;
+  replan_attempted?: boolean;
+  progress_attempted?: boolean;
   trace_integrity?: {
     passed?: boolean | null;
     issues?: string[];

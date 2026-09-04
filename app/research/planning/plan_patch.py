@@ -155,6 +155,10 @@ def build_progress_patch(
                 "metadata": {
                     "resolves_gap_ids": [gap_id],
                     "patch_reason": reason,
+                    "required": True,
+                    "optional": False,
+                    "priority": 0,
+                    "coverage_keys": [signal] if signal else [],
                 },
             }
         )
@@ -264,6 +268,12 @@ def build_gap_patch(
                 "objective": f"补充证据：{target.objective or target.description}",
                 "depends_on": [],
                 "allowed_sources": sources,
+                "metadata": {
+                    "required": True,
+                    "optional": False,
+                    "priority": 0,
+                    "resolves_gap_ids": [f"gap:{target.task_id}"],
+                },
             }
         ],
     }

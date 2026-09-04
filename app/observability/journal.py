@@ -501,6 +501,8 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
         "replan_count": sum(1 for row in replans if row.get("type") == "replan.applied"),
         "gap_closure_rate": gap_closure.get("gap_closure_rate"),
         "replan_useful": gap_closure.get("replan_useful"),
+        "replan_attempted": bool(gap_closure.get("replan_attempted")),
+        "progress_attempted": bool(gap_closure.get("progress_attempted")),
         "trace_integrity": _check_integrity(events, identity),
     }
 

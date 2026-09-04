@@ -30,6 +30,7 @@ RESEARCH_TASK_SYSTEM_PROMPT = """
 - 只使用本步允许的工具；禁止调用未列出的工具。
 - 优先两级并行：先 batch_search(queries=[...]) 一次发 3~5 个查询，再 batch_fetch(urls=[...]) 并行拉正文。
 - 不要串行 internet_search → fetch_url → internet_search 循环；单次查询/抓取仅作补缺。
+- 证据够用就停：每个维度默认 2～3 个高质量独立来源 + 必要反方即可，不要堆到 12+ sources。
 - 工具返回的是 snippet + artifact_id；需要原文时 read_artifact / read_evidence。
 - 禁止联网若允许工具里没有 internet_search / batch_search。
 - 完成后只输出结构化 JSON（summary/facts/sources/findings/evidence_ids），不要生成 todo-list。

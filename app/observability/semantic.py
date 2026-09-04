@@ -200,10 +200,14 @@ def earliest_failure_origin(events: list[dict[str, Any]]) -> dict[str, Any] | No
 
 
 def compute_replan_gap_closure(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Replan useful iff targeted gaps later appear in resolved_gap_ids."""
+    """Replan useful iff targeted gaps later appear in resolved_gap_ids.
+
+    未执行 Progress / Replan 时返回 None，避免 UI 显示成 “no”。
+    """
     targeted: list[str] = []
     resolved: set[str] = set()
     applied = 0
+    progress_n = 0
     for event in events:
         event_type = str(event.get("type") or event.get("event") or "")
         attrs = event.get("attributes") if isinstance(event.get("attributes"), dict) else {}
@@ -213,6 +217,7 @@ def compute_replan_gap_closure(events: list[dict[str, Any]]) -> dict[str, Any]:
                 if gap_id:
                     targeted.append(str(gap_id))
         if event_type == "progress.evaluated":
+            progress_n += 1
             for gap_id in attrs.get("resolved_gap_ids") or []:
                 if gap_id:
                     resolved.add(str(gap_id))
@@ -220,15 +225,22 @@ def compute_replan_gap_closure(events: list[dict[str, Any]]) -> dict[str, Any]:
     closed = [gap_id for gap_id in unique_targets if gap_id in resolved]
     waste = [gap_id for gap_id in unique_targets if gap_id not in resolved]
     closure_rate = (len(closed) / len(unique_targets)) if unique_targets else None
+    if applied == 0:
+        replan_useful: bool | None = None
+    else:
+        replan_useful = bool(closed) if unique_targets else False
     return {
         "replan_applied": applied,
+        "progress_evaluated": progress_n,
         "target_gap_ids": unique_targets,
         "resolved_gap_ids": sorted(resolved),
         "closed_gap_ids": closed,
         "waste_gap_ids": waste,
         "gap_closure_rate": closure_rate,
-        "replan_useful": bool(closed) if unique_targets else False,
+        "replan_useful": replan_useful,
         "needless_replan": bool(applied and not unique_targets),
+        "replan_attempted": applied > 0,
+        "progress_attempted": progress_n > 0,
     }
 
 

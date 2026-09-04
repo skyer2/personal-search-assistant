@@ -307,9 +307,19 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
                   <Alert message="本 run 暂无语义 failure origin" showIcon style={{ marginBottom: 12 }} type="success" />
                 )}
                 <Typography.Paragraph>
-                  Gap closure: {summary.gap_closure_rate == null ? "-" : Number(summary.gap_closure_rate).toFixed(2)}
+                  Gap closure:{" "}
+                  {progressCount < 1
+                    ? "N/A — progress not evaluated"
+                    : summary.gap_closure_rate == null
+                      ? "N/A"
+                      : Number(summary.gap_closure_rate).toFixed(2)}
                   {" · "}
-                  Replan useful: {summary.replan_useful ? "yes" : "no"}
+                  Replan useful:{" "}
+                  {summary.replan_attempted === false || (summary.replan_count ?? 0) === 0
+                    ? "N/A — replan not attempted"
+                    : summary.replan_useful
+                      ? "yes"
+                      : "no"}
                   {" · "}
                   Lineage edges: {lineage.length}
                 </Typography.Paragraph>
