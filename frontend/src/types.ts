@@ -310,7 +310,7 @@ export interface LangfuseTraceItem {
 export interface JsonlTraceResponse {
   session_id: string;
   run_id?: string;
-  events: JsonlTraceEvent[];
+  events?: JsonlTraceEvent[];
   total: number;
   message?: string;
   tree?: TraceTree;

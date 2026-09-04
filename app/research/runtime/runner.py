@@ -230,6 +230,7 @@ class ResearchGraphRunner:
                 task_status_map(state.plan),
                 reason=reason,
                 include_required=True,
+                include_running=True,
             )
         # 尝试用剩余时间写终稿，而不是直接 partial dump
         gstate = {
@@ -536,9 +537,9 @@ class ResearchGraphRunner:
         else:
             session.state = await self.harness._phase_plan(session.state)
             if session.state.plan is not None:
-            session.state.plan = annotate_plan_tasks(
-                session.state.plan, intent=session.state.intent
-            )
+                session.state.plan = annotate_plan_tasks(
+                    session.state.plan, intent=session.state.intent
+                )
             plan = session.state.plan
         if plan is None or not plan.steps:
             session.state.abort_reason = "empty_plan"
@@ -906,6 +907,15 @@ class ResearchGraphRunner:
             or session.state.abort_reason
         )
         nxt = next_synthesis_step(plan, status, allow_failed_deps=force)
+        if nxt is None and force:
+            # Emergency synthesis deliberately bypasses the normal research DAG.
+            # A cancelled LangGraph superstep may leave stale dependency metadata.
+            nxt = next(
+                ((index, step) for index, step in enumerate(plan.steps)
+                 if step.step_type in {"generate_markdown", "summarize"}
+                 and status.get(step.resolved_task_id(index), "pending") not in {"done", "failed"}),
+                None,
+            )
         if nxt is None:
             return {"status": "synthesized", "progress": "synthesized", "task_status": status}
         index, step = nxt
@@ -1128,6 +1138,33 @@ class ResearchGraphRunner:
             return exhausted
         if not can_replan(state, self.harness.harness_config):
             return exhausted
+        # Do not start a wave that cannot finish before the synthesis reserve.
+        # Use the slowest observed worker as a conservative online p95 estimate.
+        try:
+            from app.agent.harness.run_budget import get_or_create_run_budget
+
+            mgr = get_or_create_run_budget(state, self.harness.harness_config)
+            durations = sorted(
+                int(row.get("execution_ms") or row.get("duration_ms") or 0) / 1000.0
+                for row in list(gstate.get("worker_results") or [])
+                if isinstance(row, dict) and int(row.get("execution_ms") or row.get("duration_ms") or 0) > 0
+            )
+            estimated_wave = durations[-1] if durations else float(self.harness.harness_config.step_timeout_sec)
+            progress_overhead = min(30.0, max(5.0, estimated_wave * 0.1))
+            if mgr.remaining_for_research_sec() < estimated_wave + progress_overhead:
+                if isinstance(state.metadata, dict):
+                    state.metadata["force_synthesis"] = True
+                    state.metadata["replan_skipped_reason"] = "insufficient_research_time"
+                return {
+                    **exhausted,
+                    "progress_assessment": {
+                        **assessment,
+                        "verdict": "enough",
+                        "reason": "replan_unaffordable_force_synthesis",
+                    },
+                }
+        except Exception:
+            pass
         policy = parse_source_policy(state.intent.raw_query)
         run_budget = {}
         if isinstance(getattr(state, "metadata", None), dict):

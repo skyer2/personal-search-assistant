@@ -15,7 +15,7 @@ from app.agent.harness.state import LoopState, PlanStep, ExecutionPlan, StepResu
 from app.observability.semantic import plan_brief_coverage
 from app.research.planning.compose import compose_execution_plan_sync
 from app.research.planning.plan_patch import build_progress_patch
-from app.research.planning.progress import assess_progress, _classify_conflict
+from app.research.planning.progress import ProgressAssessment, assess_progress, _classify_conflict
 from app.config.loader import get_harness_config
 
 
@@ -113,6 +113,34 @@ def test_plan_patch_binds_only_selected_gaps():
     for task in patch.get("add_tasks") or []:
         assert (task.get("metadata") or {}).get("resolves_gap_ids")
     print("[OK] patch targets only selected gaps", targets)
+
+
+def test_gap_taxonomy_only_opens_blocking_or_important_gaps():
+    assessment = ProgressAssessment(gaps=[
+        {"type": "advisory", "description": "Cursor MAU 未公开", "severity": "advisory", "blocking": False},
+        {"type": "expected_uncertainty", "description": "未来没有权威答案", "severity": "low", "blocking": False},
+        {"type": "coverage", "description": "核心技术能力无证据", "severity": "blocking", "blocking": True},
+    ]).materialize_gaps()
+    assert len(assessment.open_gap_ids) == 1
+    assert assessment.gaps[0]["gap_id"]
+
+
+def test_replan_clusters_and_preserves_specific_gap_objective():
+    intent = understand_task("核验 AI coding 基准与生产率")
+    plan, _ = compose_execution_plan_sync(intent, config=get_harness_config())
+    assessment = ProgressAssessment(
+        verdict="gap",
+        gaps=[
+            {"type": "coverage", "description": "SWE-bench 官方来源不足", "severity": "high", "blocking": True},
+            {"type": "coverage", "description": "LiveCodeBench 基准口径不同", "severity": "high", "blocking": True},
+            {"type": "coverage", "description": "METR RCT 数据不足", "severity": "important", "blocking": True},
+        ],
+    ).materialize_gaps()
+    patch = build_progress_patch(plan, intent, assessment=assessment.to_dict(), max_new_tasks=2)
+    tasks = patch["add_tasks"]
+    assert len(tasks) == 2
+    assert "SWE-bench 官方来源不足" in tasks[0]["objective"]
+    assert "METR RCT 数据不足" in tasks[1]["objective"]
 
 
 def test_run_budget_protects_synthesis_reserve():

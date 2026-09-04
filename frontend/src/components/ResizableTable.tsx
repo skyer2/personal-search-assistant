@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from "react";
+import { memo, useMemo, useRef, useState, type ReactNode } from "react";
 import { Table } from "antd";
 import type { ColumnsType, TableProps } from "antd/es/table";
 
@@ -12,6 +12,7 @@ interface ResizableTableProps {
   pagination?: TableProps<TableRow>["pagination"];
   rowClassName?: TableProps<TableRow>["rowClassName"];
   size?: TableProps<TableRow>["size"];
+  rowKey?: TableProps<TableRow>["rowKey"];
 }
 
 interface ResizeState {
@@ -25,12 +26,13 @@ function columnKey(column: ColumnsType<TableRow>[number], index: number): string
   return String(record.key || record.dataIndex || index);
 }
 
-export function ResizableTable({
+function ResizableTableImpl({
   columns,
   dataSource,
   pagination,
   rowClassName,
-  size = "small"
+  size = "small",
+  rowKey
 }: ResizableTableProps) {
   const [widths, setWidths] = useState<Record<string, number>>(() => {
     const next: Record<string, number> = {};
@@ -42,7 +44,7 @@ export function ResizableTable({
   });
   const dragRef = useRef<ResizeState | null>(null);
 
-  const sizedColumns = columns.map((column, index) => {
+  const sizedColumns = useMemo(() => columns.map((column, index) => {
     const key = columnKey(column, index);
     const width = widths[key] ?? (typeof column.width === "number" ? column.width : 220);
     const title = column.title;
@@ -82,7 +84,7 @@ export function ResizableTable({
         </div>
       )
     };
-  });
+  }), [columns, widths]);
 
   const scrollX = sizedColumns.reduce((sum, column) => sum + Number(column.width || 0), 0);
 
@@ -93,9 +95,12 @@ export function ResizableTable({
       dataSource={dataSource}
       pagination={pagination}
       rowClassName={rowClassName}
+      rowKey={rowKey}
       scroll={{ x: Math.max(scrollX, 960) }}
       size={size}
       tableLayout="fixed"
     />
   );
 }
+
+export const ResizableTable = memo(ResizableTableImpl);

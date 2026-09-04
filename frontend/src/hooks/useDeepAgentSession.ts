@@ -98,6 +98,7 @@ export function useDeepAgentSession() {
     if (incoming.length === 0) {
       return;
     }
+    const delta = { tool: 0, assistant: 0, errors: 0 };
     incoming.forEach((message) => {
       const seq = messageSeq(message);
       if (seq > lastEventSeqRef.current) {
@@ -106,18 +107,25 @@ export function useDeepAgentSession() {
       const replayed = Boolean(message.replay || message.data?.replay);
       if (!replayed) {
         if (message.event === "tool_start") {
-          setLiveStats((previous) => ({ ...previous, tool: previous.tool + 1 }));
+          delta.tool += 1;
         }
         if (message.event === "assistant_call" || message.event === "worker") {
           if (message.event === "assistant_call" || /\[worker\] start/.test(message.message)) {
-            setLiveStats((previous) => ({ ...previous, assistant: previous.assistant + 1 }));
+            delta.assistant += 1;
           }
         }
         if (message.event === "error" || message.event === "tool_error") {
-          setLiveStats((previous) => ({ ...previous, errors: previous.errors + 1 }));
+          delta.errors += 1;
         }
       }
     });
+    if (delta.tool || delta.assistant || delta.errors) {
+      setLiveStats((previous) => ({
+        tool: previous.tool + delta.tool,
+        assistant: previous.assistant + delta.assistant,
+        errors: previous.errors + delta.errors
+      }));
+    }
     setEvents((previous) => mergeMonitorEvents(previous, incoming, seenEventKeysRef.current, VIEW_EVENT_WINDOW));
   }, []);
 
@@ -616,7 +624,7 @@ export function useDeepAgentSession() {
     }
     const timer = window.setInterval(() => {
       setElapsedNow(Date.now());
-    }, 250);
+    }, 1000);
     return () => window.clearInterval(timer);
   }, [elapsedClock]);
 

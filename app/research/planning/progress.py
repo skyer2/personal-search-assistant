@@ -99,7 +99,7 @@ class ProgressAssessment:
 
     def materialize_gaps(self, *, previous_gap_ids: list[str] | None = None) -> "ProgressAssessment":
         from app.observability.events import new_id
-        from app.observability.semantic import materialize_gap_items
+        from app.observability.semantic import materialize_gap_items, stable_gap_id
 
         if not self.gaps:
             self.gaps = materialize_gap_items(
@@ -111,7 +111,14 @@ class ProgressAssessment:
                 expected_disagreements=self.expected_disagreements,
                 stale_evidence=self.stale_evidence,
             )
-        # 仅可行动缺口进入 open_gap_ids（触发 Replan）；expected_disagreement 不进
+        for item in self.gaps:
+            if not item.get("gap_id"):
+                item["gap_id"] = stable_gap_id(
+                    str(item.get("type") or "coverage"),
+                    str(item.get("description") or item.get("dimension") or "gap"),
+                )
+        # Advisory limitations and expected uncertainty are disclosed by synthesis;
+        # only blocking/important gaps may trigger another research wave.
         actionable_types = {
             "coverage",
             "missing_dimension",
@@ -126,7 +133,8 @@ class ProgressAssessment:
             for item in self.gaps
             if item.get("gap_id")
             and str(item.get("type") or "") in actionable_types
-            and str(item.get("type") or "") != "expected_disagreement"
+            and item.get("blocking", item.get("actionable", True)) is not False
+            and str(item.get("severity") or "high") in {"high", "medium", "blocking", "important"}
         ]
         prev = {str(x) for x in (previous_gap_ids or []) if x}
         curr = set(self.open_gap_ids)
@@ -462,7 +470,33 @@ def _fill_worker_signals(
         if not row.get("ok", True) or not summary:
             assessment.coverage_gaps.append(f"empty:{tid}:{step.objective or step.description}")
         for gap in payload.get("gaps") or []:
-            assessment.coverage_gaps.append(f"reported:{tid}:{gap}")
+            # Legacy string gaps are limitations, not proof that a core brief
+            # dimension is unanswered. Workers must explicitly promote blockers.
+            if isinstance(gap, dict):
+                description = str(gap.get("description") or gap.get("claim") or "").strip()
+                severity = str(gap.get("severity") or "advisory").lower()
+                blocking = bool(gap.get("blocking")) or severity in {"blocking", "important", "high", "medium"}
+                if description:
+                    assessment.gaps.append({
+                        **gap,
+                        "type": str(gap.get("type") or "evidence_gap"),
+                        "dimension": str(gap.get("dimension") or step.objective or step.description),
+                        "description": description,
+                        "severity": severity,
+                        "blocking": blocking,
+                        "actionable": blocking,
+                    })
+                    if blocking:
+                        assessment.coverage_gaps.append(f"reported:{tid}:{description}")
+            elif str(gap).strip():
+                assessment.gaps.append({
+                    "type": "advisory",
+                    "dimension": str(step.objective or step.description),
+                    "description": str(gap).strip(),
+                    "severity": "advisory",
+                    "blocking": False,
+                    "actionable": False,
+                })
         try:
             confidence = float(payload.get("confidence") if payload.get("confidence") is not None else 1.0)
         except (TypeError, ValueError):

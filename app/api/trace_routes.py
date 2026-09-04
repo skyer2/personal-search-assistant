@@ -100,20 +100,18 @@ def get_trace_tree(session_id: str) -> dict[str, Any]:
 
 @router.get("/langfuse/{session_id}")
 def get_langfuse_traces(session_id: str) -> dict[str, Any]:
-    """未配置 Langfuse 时只返回本地因果树，不访问外部 API。"""
+    """Return integration metadata only; local tree has its own lazy endpoint."""
     host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com").rstrip("/")
     enabled = is_langfuse_enabled() and get_harness_config().langfuse_enabled
-    tree = get_trace_tree(session_id)
     return {
         "session_id": session_id,
         "enabled": enabled,
         "export": "otlp" if enabled else "disabled",
         "traces": [],
-        "tree": tree.get("tree"),
         "message": (
             "Langfuse 通过 OpenTelemetry OTLP 导出（不再使用 /api/public/traces）。"
             if enabled
-            else "Langfuse 未配置，已跳过；下方是本地 Agent span tree。"
+            else "Langfuse 未配置，已跳过。"
         ),
         "ui_url": f"{host}/" if enabled else None,
     }

@@ -107,6 +107,46 @@ async def get_run_trace(run_id: str):
     return payload
 
 
+@router.get("/api/runs/{run_id}/summary")
+async def get_run_trace_summary(run_id: str):
+    """Lightweight first paint: no raw events, tree, or lineage edge payload."""
+    run = get_run_store().get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run_not_found")
+    payload = load_trace_payload(run.session_id, run_id=run_id)
+    summary = dict(payload.get("summary") or {})
+    lineage = list(summary.pop("lineage", []) or [])
+    summary["counts"] = {
+        "events": int(payload.get("total") or 0),
+        "lineage": len(lineage),
+        "evidence": int(summary.get("evidence_count") or 0),
+    }
+    return {"run_id": run_id, "session_id": run.session_id, "summary": summary, "total": payload.get("total", 0)}
+
+
+@router.get("/api/runs/{run_id}/lineage")
+async def get_run_lineage(
+    run_id: str,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    run = get_run_store().get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run_not_found")
+    payload = load_trace_payload(run.session_id, run_id=run_id)
+    rows = list((payload.get("summary") or {}).get("lineage") or [])
+    return {"run_id": run_id, "items": rows[offset: offset + limit], "offset": offset, "limit": limit, "total": len(rows)}
+
+
+@router.get("/api/runs/{run_id}/tree")
+async def get_run_tree(run_id: str):
+    run = get_run_store().get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run_not_found")
+    payload = load_trace_payload(run.session_id, run_id=run_id)
+    return {"run_id": run_id, "tree": payload.get("tree") or {}, "total": payload.get("total", 0)}
+
+
 @router.get("/api/runs/{run_id}")
 async def get_run(run_id: str):
     run = get_run_store().get_run(run_id)

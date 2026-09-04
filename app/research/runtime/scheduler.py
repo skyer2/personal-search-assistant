@@ -203,6 +203,7 @@ def skip_pending_research(
     *,
     reason: str = "force_synthesis",
     include_required: bool = False,
+    include_running: bool = False,
 ) -> dict[str, str]:
     """Skip pending optional (and optionally remaining required) so synthesis can start."""
     status = skip_optional_pending(plan, status, reason=reason)
@@ -212,12 +213,15 @@ def skip_pending_research(
         if step.step_type not in RETRIEVAL_STEP_TYPES:
             continue
         tid = step.resolved_task_id(index)
-        if status.get(tid, "pending") != "pending":
+        current = status.get(tid, "pending")
+        if current != "pending" and not (include_running and current == "running"):
             continue
         meta = step.metadata if isinstance(step.metadata, dict) else {}
         status[tid] = "skipped"
         meta["status"] = "skipped"
         meta["skip_reason"] = reason
+        if current == "running":
+            meta["cancelled_by_deadline"] = True
         step.metadata = meta
     return status
 
