@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.agent.harness.planner import finalize_plan
 from app.agent.harness.state import ExecutionPlan, PlanStep, TaskIntent
 from app.research.planning.lead_planner import research_step_from_task
 from app.research.planning.policy import SourcePolicy, parse_source_policy
+from app.research.planning.priority import stamp_semantic_priority
 from app.research.planning.validator import RESEARCH_TYPES, validate_hybrid_plan
 
 
@@ -64,11 +66,6 @@ def apply_plan_patch(
         synth_index += 1
     if inserted == 0:
         return plan, ["empty_patch"]
-    for step in new_steps:
-        if step.step_type in {"generate_markdown", "summarize"}:
-            step.depends_on = [
-                s.task_id for s in new_steps if s.task_id and s.step_type in RESEARCH_TYPES
-            ]
     candidate = ExecutionPlan(
         steps=new_steps,
         summary=" → ".join(s.description for s in new_steps),
@@ -77,6 +74,17 @@ def apply_plan_patch(
         research_brief=plan.research_brief,
     )
     candidate = finalize_plan(candidate)
+    candidate = stamp_semantic_priority(candidate, intent=intent)
+    required_ids = [
+        step.task_id
+        for step in candidate.steps
+        if step.task_id
+        and step.step_type in RESEARCH_TYPES
+        and not bool((step.metadata or {}).get("optional"))
+    ]
+    for step in candidate.steps:
+        if step.step_type in {"generate_markdown", "summarize"}:
+            step.depends_on = list(required_ids)
     issues = validate_hybrid_plan(
         intent,
         candidate,
@@ -114,7 +122,7 @@ def build_progress_patch(
     for item in parsed.gaps or []:
         if not isinstance(item, dict):
             continue
-        if item.get("actionable") is False or str(item.get("type") or "") == "expected_disagreement":
+        if item.get("blocking", item.get("actionable", True)) is False:
             continue
         gid = str(item.get("gap_id") or "")
         desc = str(item.get("description") or "")
@@ -164,8 +172,22 @@ def build_progress_patch(
         )
 
     # 只对 actionable 信号建任务；conflicts 用 unresolved 列表
-    for item in parsed.coverage_gaps:
-        _append(_objective_from_gap(item, plan), "coverage", item)
+    candidates: list[tuple[str, str, str]] = []
+    for gap in parsed.gaps:
+        if not isinstance(gap, dict) or gap.get("blocking", gap.get("actionable", True)) is False:
+            continue
+        desc = str(gap.get("description") or "").strip()
+        if desc:
+            candidates.append((_objective_from_gap(desc, plan), "coverage", desc))
+    if not candidates:
+        candidates.extend((_objective_from_gap(item, plan), "coverage", item) for item in parsed.coverage_gaps)
+    seen_clusters: set[str] = set()
+    for objective, reason, signal in candidates:
+        cluster = _gap_cluster(signal)
+        if cluster in seen_clusters:
+            continue
+        seen_clusters.add(cluster)
+        _append(objective, reason, signal)
     for item in parsed.unresolved_conflicts:
         _append(f"交叉验证冲突：{item}", "unresolved_conflict", item)
     for item in parsed.stale_evidence:
@@ -215,9 +237,23 @@ def _objective_from_gap(item: str, plan: ExecutionPlan) -> str:
         tid, rest = parts[1], parts[2]
         for step in plan.steps:
             if step.task_id == tid or str(step.resolved_task_id(0)) == tid:
-                return f"补充证据：{step.objective or step.description or rest}"
-        return f"补充证据：{rest}"
-    return f"补充证据：{text}" if text else ""
+                return f"针对性核验：{rest}（仅补此缺口；参考原任务：{step.objective or step.description}）"
+        return f"针对性核验：{rest}"
+    return f"针对性核验：{text}" if text else ""
+
+
+def _gap_cluster(text: str) -> str:
+    value = str(text or "").lower()
+    groups = {
+        "benchmark_authority": ("benchmark", "swe-bench", "livecode", "基准", "脚手架", "官方来源"),
+        "adoption": ("mau", "采用", "用户", "usage", "cursor", "claude code"),
+        "productivity": ("metr", "dora", "productivity", "生产率", "效率", "相关系数"),
+        "security": ("security", "安全", "漏洞", "audit", "审计"),
+    }
+    for name, tokens in groups.items():
+        if any(token in value for token in tokens):
+            return name
+    return re.sub(r"\s+", " ", value)[:100]
 
 
 def build_gap_patch(

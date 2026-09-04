@@ -22,7 +22,7 @@ def materialize_gap_items(
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def _add(gap_type: str, key: str, *, dimension: str = "", severity: str = "high") -> None:
+    def _add(gap_type: str, key: str, *, dimension: str = "", severity: str = "high", blocking: bool | None = None) -> None:
         text = str(key or "").strip()
         if not text:
             return
@@ -37,7 +37,8 @@ def materialize_gap_items(
                 "dimension": dimension or text,
                 "severity": severity,
                 "description": text[:240],
-                "actionable": gap_type != "expected_disagreement",
+                "blocking": (severity == "high") if blocking is None else blocking,
+                "actionable": (severity in {"high", "medium"}) if blocking is None else blocking,
             }
         )
 
@@ -48,7 +49,7 @@ def materialize_gap_items(
     for item in conflicts or []:
         _add("unresolved_conflict", str(item), severity="high")
     for item in expected_disagreements or []:
-        _add("expected_disagreement", str(item), severity="low")
+        _add("expected_uncertainty", str(item), severity="low", blocking=False)
     for item in stale_evidence or []:
         _add("stale", str(item), severity="medium")
     return items

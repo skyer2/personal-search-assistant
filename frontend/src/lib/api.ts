@@ -159,6 +159,18 @@ export async function fetchRunTrace(runId: string): Promise<JsonlTraceResponse> 
   return requestJson<JsonlTraceResponse>(apiUrl(`/api/runs/${encodeURIComponent(runId)}/trace`));
 }
 
+export async function fetchRunTraceSummary(runId: string): Promise<JsonlTraceResponse> {
+  return requestJson<JsonlTraceResponse>(apiUrl(`/api/runs/${encodeURIComponent(runId)}/summary`));
+}
+
+export async function fetchRunLineage(runId: string, offset = 0, limit = 100): Promise<{ items: Array<Record<string, unknown>>; total: number }> {
+  return requestJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/lineage?offset=${offset}&limit=${limit}`));
+}
+
+export async function fetchRunTree(runId: string): Promise<{ tree: TraceTree; total: number }> {
+  return requestJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/tree`));
+}
+
 export async function fetchSessionTraces(sessionId: string): Promise<SessionTracesResponse> {
   return requestJson<SessionTracesResponse>(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/traces`));
 }

@@ -1,12 +1,13 @@
 import { LinkOutlined, ReloadOutlined } from "@ant-design/icons";
 import { Alert, Button, Card, Space, Tabs, Tag, Typography } from "antd";
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
   fetchCitations,
-  fetchJsonlTrace,
   fetchLangfuseConfig,
-  fetchLangfuseTraces,
-  fetchRunTrace,
+  fetchRunEvents,
+  fetchRunLineage,
+  fetchRunTraceSummary,
+  fetchRunTree,
   fetchSessionTraces
 } from "../lib/api";
 import type { EvidenceSource, JsonlTraceEvent, SessionTraceItem, TraceSpanNode, TraceSummary, TraceTree } from "../types";
@@ -85,6 +86,7 @@ function SpanTree({
   selectedSpanId?: string | null;
   onSelect?: (node: TraceSpanNode) => void;
 }) {
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   if (!nodes.length) {
     return <Typography.Text type="secondary">暂无 span 树，先完成一次 Harness run</Typography.Text>;
   }
@@ -94,7 +96,17 @@ function SpanTree({
         <li key={node.span_id}>
           <button
             className={`trace-span-node ${selectedSpanId === node.span_id ? "trace-span-node--selected" : ""}`}
-            onClick={() => onSelect?.(node)}
+            onClick={() => {
+              onSelect?.(node);
+              if (node.children?.length) {
+                setExpanded((previous) => {
+                  const next = new Set(previous);
+                  if (next.has(node.span_id)) next.delete(node.span_id);
+                  else next.add(node.span_id);
+                  return next;
+                });
+              }
+            }}
             style={{
               display: "flex",
               gap: 8,
@@ -109,13 +121,13 @@ function SpanTree({
             }}
             type="button"
           >
-            <strong>{node.name}</strong>
+            <strong>{node.children?.length ? `${expanded.has(node.span_id) ? "▾" : "▸"} ${node.name}` : node.name}</strong>
             {node.task_id ? <Tag>{node.task_id}</Tag> : null}
             {node.status ? <Tag color={node.status === "failed" || node.status === "error" ? "red" : "blue"}>{node.status}</Tag> : null}
             {typeof node.duration_ms === "number" ? <span>{node.duration_ms}ms</span> : null}
             {typeof node.plan_version === "number" ? <span>plan v{node.plan_version}</span> : null}
           </button>
-          {node.children?.length ? (
+          {node.children?.length && expanded.has(node.span_id) ? (
             <SpanTree nodes={node.children} onSelect={onSelect} selectedSpanId={selectedSpanId} />
           ) : null}
         </li>
@@ -124,7 +136,7 @@ function SpanTree({
   );
 }
 
-export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
+function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
   const [jsonlEvents, setJsonlEvents] = useState<JsonlTraceEvent[]>([]);
   const [traceTree, setTraceTree] = useState<TraceTree>({ roots: [], span_count: 0, event_count: 0 });
   const [summary, setSummary] = useState<TraceSummary>({});
@@ -140,6 +152,8 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
   const [traces, setTraces] = useState<SessionTraceItem[]>([]);
   const [selectedRunId, setSelectedRunId] = useState(runId || "");
   const [selectedSpan, setSelectedSpan] = useState<TraceSpanNode | null>(null);
+  const [activeTab, setActiveTab] = useState("overview");
+  const [loadedTabs, setLoadedTabs] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     if (runId) {
@@ -161,45 +175,19 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
       if (activeRun && activeRun !== selectedRunId) {
         setSelectedRunId(activeRun);
       }
-      const [jsonl, citationsResp, lfConfig] = await Promise.all([
-        (activeRun ? fetchRunTrace(activeRun) : fetchJsonlTrace(sessionId)).catch((err: unknown) => ({
-          events: [],
-          message: err instanceof Error ? err.message : "JSONL 加载失败",
-          tree: undefined
-        })),
-        fetchCitations(sessionId).catch((err: unknown) => ({
-          sources: [],
-          message: err instanceof Error ? err.message : "证据链加载失败"
-        })),
+      const [jsonl, lfConfig] = await Promise.all([
+        activeRun ? fetchRunTraceSummary(activeRun) : Promise.resolve({ summary: {}, total: 0, session_id: sessionId }),
         fetchLangfuseConfig().catch(() => ({
           enabled: false,
           host: "",
           ui_url: null
         }))
       ]);
-      const lfTraces = lfConfig.enabled
-        ? await fetchLangfuseTraces(sessionId).catch(() => ({
-            enabled: false,
-            traces: [],
-            message: "Langfuse 请求失败，已回退本地因果树"
-          }))
-        : {
-            enabled: false,
-            traces: [],
-            message: "Langfuse 未配置，已跳过"
-          };
-      setJsonlEvents(jsonl.events || []);
-      setJsonlMessage(jsonl.message || "");
-      setTraceTree(
-        jsonl.tree ||
-          (lfTraces as { tree?: TraceTree }).tree || { roots: [], span_count: 0, event_count: 0 }
-      );
       setSummary("summary" in jsonl && jsonl.summary ? jsonl.summary : {});
-      setCitations(citationsResp.sources || []);
-      setCitationsMessage(citationsResp.message || "");
       setLangfuseEnabled(Boolean(lfConfig.enabled));
       setLangfuseUrl(lfConfig.enabled ? lfConfig.ui_url || lfConfig.host || null : null);
-      setLangfuseMessage(lfTraces.message || "");
+      setLangfuseMessage(lfConfig.enabled ? "" : "Langfuse 未配置，已跳过");
+      setLoadedTabs(new Set());
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载 Trace 失败");
     } finally {
@@ -211,15 +199,34 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
     void load();
   }, [load]);
 
+  const loadTab = useCallback(async (key: string) => {
+    if (!selectedRunId || loadedTabs.has(key)) return;
+    if (key === "jsonl") {
+      const response = await fetchRunEvents(selectedRunId, { limit: 100 });
+      setJsonlEvents((response.events || []) as unknown as JsonlTraceEvent[]);
+    } else if (key === "lineage") {
+      const response = await fetchRunLineage(selectedRunId, 0, 100);
+      setSummary((previous) => ({ ...previous, lineage: response.items }));
+    } else if (key === "tree" || key === "langfuse") {
+      const response = await fetchRunTree(selectedRunId);
+      setTraceTree(response.tree);
+    } else if (key === "citations") {
+      const response = await fetchCitations(sessionId);
+      setCitations(response.sources || []);
+      setCitationsMessage(response.message || "");
+    }
+    setLoadedTabs((previous) => new Set(previous).add(key));
+  }, [loadedTabs, selectedRunId, sessionId]);
+
   function handleCitationClick(source: EvidenceSource) {
     setHighlightSourceId(source.source_id);
   }
 
-  const highlightedSteps = new Set(
+  const highlightedSteps = useMemo(() => new Set(
     citations
       .filter((item) => item.source_id === highlightSourceId)
       .map((item) => item.step_index)
-  );
+  ), [citations, highlightSourceId]);
   const workers = summary.workers || [];
   const progress = summary.progress || [];
   const replans = summary.replans || [];
@@ -272,6 +279,12 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
           Overview → Understanding → Plan → Worker → 进度/Replan → Synthesis →
           证据链 → Lineage → 因果树 → Eval → JSONL → Langfuse */}
       <Tabs
+        activeKey={activeTab}
+        destroyInactiveTabPane
+        onChange={(key) => {
+          setActiveTab(key);
+          void loadTab(key);
+        }}
         items={[
           {
             key: "overview",
@@ -667,7 +680,8 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
                   <Alert message="尚无 semantic lineage edges（需要 brief/plan/worker/evidence/synthesis refs）" showIcon type="info" />
                 ) : (
                   <ResizableTable
-                    dataSource={lineage.map((row, index) => ({ ...row, key: `l-${index}` }))}
+                    dataSource={lineage}
+                    rowKey={(row) => `${String(row.from_id || row.from || "")}-${String(row.to_id || row.to || "")}-${String(row.span_id || "")}`}
                     pagination={{ pageSize: 20 }}
                     size="small"
                     columns={[
@@ -921,3 +935,5 @@ export function TraceViewer({ sessionId, runId }: TraceViewerProps) {
     </div>
   );
 }
+
+export const TraceViewer = memo(TraceViewerImpl);
