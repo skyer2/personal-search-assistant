@@ -67,6 +67,9 @@ def worker_row(task_id: str, step: PlanStep, ok: bool, result: StepResult | None
         "ok": bool(ok),
         "summary": summary,
         "step_type": step.step_type,
+        "queue_ms": int(step.metadata.get("queue_ms") or 0),
+        "execution_ms": int(step.metadata.get("execution_ms") or 0),
+        "duration_ms": int(step.metadata.get("duration_ms") or step.metadata.get("execution_ms") or 0),
         "payload": {
             "summary": summary,
             "facts": list(payload.get("facts") or [])[:20],

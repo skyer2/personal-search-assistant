@@ -179,6 +179,10 @@ export async function fetchCitations(sessionId: string): Promise<CitationsRespon
   return requestJson<CitationsResponse>(apiUrl(`/api/traces/citations/${encodeURIComponent(sessionId)}`));
 }
 
+export async function fetchRunCitations(runId: string, offset = 0, limit = 100): Promise<CitationsResponse> {
+  return requestJson<CitationsResponse>(apiUrl(`/api/runs/${encodeURIComponent(runId)}/evidence?offset=${offset}&limit=${limit}`));
+}
+
 export async function fetchLangfuseConfig(): Promise<LangfuseConfigResponse> {
   return requestJson<LangfuseConfigResponse>(apiUrl("/api/traces/langfuse/config"));
 }

@@ -9,6 +9,7 @@ def check_trace_integrity(
     events: list[dict[str, Any]],
     *,
     run_status: str = "",
+    include_tree: bool = True,
 ) -> dict[str, Any]:
     """Post-run check: are Brief/Plan/Progress/Synthesis/Quality present as expected?
 
@@ -38,6 +39,7 @@ def check_trace_integrity(
     plan_count = counts.get("plan.created", 0)
     worker_started = counts.get("worker.started", 0)
     worker_done = counts.get("worker.completed", 0) + counts.get("worker.failed", 0)
+    evidence_count = counts.get("evidence.registered", 0)
     progress_count = counts.get("progress.evaluated", 0)
     synthesis_count = counts.get("synthesis.completed", 0) + counts.get("synthesis.failed", 0)
     quality_count = counts.get("quality.evaluated", 0)
@@ -60,6 +62,14 @@ def check_trace_integrity(
 
     if worker_started > 0 and worker_done < worker_started:
         issues.append(f"worker_mismatch:started={worker_started},done={worker_done}")
+    if is_agent_mode and evidence_count > 0 and worker_done == 0:
+        issues.append("evidence_without_worker_terminal")
+    if run_status == "partial":
+        terminal = next((e for e in reversed(events) if str(e.get("type") or e.get("event")) in {"run.completed", "run.failed", "run_summary"}), {})
+        attrs = terminal.get("attributes") if isinstance(terminal.get("attributes"), dict) else {}
+        metadata = attrs.get("metadata") if isinstance(attrs.get("metadata"), dict) else terminal.get("metadata") or {}
+        if not (metadata.get("termination") or metadata.get("abort_reason")):
+            issues.append("partial_without_termination_reason")
 
     # Seq uniqueness
     if seq_values:
@@ -75,7 +85,7 @@ def check_trace_integrity(
     # Span tree health (summarized from build_span_tree output)
     from app.observability.journal import build_span_tree
 
-    tree = build_span_tree(events)
+    tree = build_span_tree(events) if include_tree else {"span_count": 0, "root_count": 0, "cycle_count": 0, "valid": None}
     if tree.get("span_count", 0) > 0:
         if tree.get("root_count", 0) == 0:
             issues.append("span_tree_no_root")

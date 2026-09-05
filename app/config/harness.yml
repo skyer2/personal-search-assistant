@@ -107,7 +107,7 @@ harness:
     max_step_tool_calls: 8
     max_run_sec: 600
     # 留给 Synthesis 的墙钟储备（秒）；Research 不得吃掉
-    synthesis_reserve_sec: 75
+    synthesis_reserve_sec: 210
     max_replan_count: 2
     max_plan_steps: 8
     # Invocation-level caps（Research 不可吃掉 Synthesis reserve）

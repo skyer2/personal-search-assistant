@@ -112,7 +112,7 @@ class HarnessConfig:
     max_tool_calls: int = 20
     max_step_tool_calls: int = 8
     max_run_sec: int = 600
-    synthesis_reserve_sec: float = 75.0
+    synthesis_reserve_sec: float = 210.0
     max_replan_count: int = 3
     max_plan_steps: int = 12
     max_llm_calls_per_run: int = 30
@@ -478,7 +478,7 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         synthesis_reserve_sec=float(
             os.getenv(
                 "HARNESS_SYNTHESIS_RESERVE_SEC",
-                budget.get("synthesis_reserve_sec", 75),
+                budget.get("synthesis_reserve_sec", 210),
             )
         ),
         max_replan_count=int(budget.get("max_replan_count", 3)),

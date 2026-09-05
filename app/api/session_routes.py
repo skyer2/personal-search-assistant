@@ -10,7 +10,14 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
-from app.observability.replay import load_trace_payload, load_wire_events
+from app.observability.replay import (
+    load_events,
+    load_lineage_projection,
+    load_summary_projection,
+    load_trace_payload,
+    load_tree_projection,
+    load_wire_events,
+)
 from app.run_store import get_run_store
 from app.run_store.files import list_output_files, resolve_output_file
 
@@ -113,15 +120,33 @@ async def get_run_trace_summary(run_id: str):
     run = get_run_store().get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run_not_found")
-    payload = load_trace_payload(run.session_id, run_id=run_id)
+    payload = load_summary_projection(run.session_id, run_id=run_id)
     summary = dict(payload.get("summary") or {})
-    lineage = list(summary.pop("lineage", []) or [])
+    records = [
+        event.to_jsonl_record() for event in load_events(run.session_id, run_id=run_id)
+    ]
+    span_count = len(
+        {str(row.get("span_id") or row.get("event_id")) for row in records}
+    )
+    lineage_count = sum(
+        len(row.get("input_refs") or []) * len(row.get("output_refs") or [])
+        for row in records
+    )
     summary["counts"] = {
         "events": int(payload.get("total") or 0),
-        "lineage": len(lineage),
-        "evidence": int(summary.get("evidence_count") or 0),
+        "lineage": lineage_count,
+        "evidence": len(summary.get("evidence") or []),
+        "spans": span_count,
     }
-    return {"run_id": run_id, "session_id": run.session_id, "summary": summary, "total": payload.get("total", 0)}
+    summary["status"] = run.status
+    summary["started_at"] = run.started_at
+    summary["ended_at"] = run.ended_at
+    return {
+        "run_id": run_id,
+        "session_id": run.session_id,
+        "summary": summary,
+        "total": payload.get("total", 0),
+    }
 
 
 @router.get("/api/runs/{run_id}/lineage")
@@ -133,9 +158,14 @@ async def get_run_lineage(
     run = get_run_store().get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run_not_found")
-    payload = load_trace_payload(run.session_id, run_id=run_id)
-    rows = list((payload.get("summary") or {}).get("lineage") or [])
-    return {"run_id": run_id, "items": rows[offset: offset + limit], "offset": offset, "limit": limit, "total": len(rows)}
+    rows = load_lineage_projection(run.session_id, run_id=run_id)
+    return {
+        "run_id": run_id,
+        "items": rows[offset : offset + limit],
+        "offset": offset,
+        "limit": limit,
+        "total": len(rows),
+    }
 
 
 @router.get("/api/runs/{run_id}/tree")
@@ -143,8 +173,42 @@ async def get_run_tree(run_id: str):
     run = get_run_store().get_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run_not_found")
-    payload = load_trace_payload(run.session_id, run_id=run_id)
-    return {"run_id": run_id, "tree": payload.get("tree") or {}, "total": payload.get("total", 0)}
+    tree = load_tree_projection(run.session_id, run_id=run_id)
+    return {"run_id": run_id, "tree": tree, "total": tree.get("event_count", 0)}
+
+
+@router.get("/api/runs/{run_id}/evidence")
+async def get_run_evidence(
+    run_id: str,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    import json
+
+    run = get_run_store().get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run_not_found")
+    path = _OUTPUT_DIR / f"session_{run.session_id}" / "runs" / run_id / "evidence.json"
+    if not path.exists():
+        return {
+            "run_id": run_id,
+            "session_id": run.session_id,
+            "sources": [],
+            "total": 0,
+            "message": "本 run 暂无证据链",
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail="evidence_unreadable") from exc
+    rows = list(payload.get("sources") or [])
+    return {
+        "run_id": run_id,
+        "session_id": run.session_id,
+        "sources": rows[offset : offset + limit],
+        "total": len(rows),
+        "generated_at": payload.get("generated_at"),
+    }
 
 
 @router.get("/api/runs/{run_id}")

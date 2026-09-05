@@ -48,12 +48,16 @@ class WorkerResult:
     sources: list[str] = field(default_factory=list)
     raw: Any = None
     fail_reason: str = ""
+    queue_ms: int = 0
+    execution_ms: int = 0
+    duration_ms: int = 0
 
 
 @runtime_checkable
 class WorkerRuntime(Protocol):
-    async def execute(self, task: ResearchTask, context: ResearchContext) -> WorkerResult:
-        ...
+    async def execute(
+        self, task: ResearchTask, context: ResearchContext
+    ) -> WorkerResult: ...
 
 
 class LangChainWorkerRuntime:
@@ -66,7 +70,9 @@ class LangChainWorkerRuntime:
         self.harness = harness
         self.session = session
 
-    async def execute(self, task: ResearchTask, context: ResearchContext) -> WorkerResult:
+    async def execute(
+        self, task: ResearchTask, context: ResearchContext
+    ) -> WorkerResult:
         from app.agent.harness.state import StepStatus
         from app.research.runtime.isolation import (
             IsolatedWorkerOutcome,
@@ -79,10 +85,14 @@ class LangChainWorkerRuntime:
         session = self.session
         step_index = int(task.step_index)
         if session is None or session.state.plan is None:
-            return WorkerResult(ok=False, task_id=task.task_id, fail_reason="missing_session")
+            return WorkerResult(
+                ok=False, task_id=task.task_id, fail_reason="missing_session"
+            )
         plan = session.state.plan
         if step_index >= len(plan.steps):
-            return WorkerResult(ok=False, task_id=task.task_id, fail_reason="missing_step")
+            return WorkerResult(
+                ok=False, task_id=task.task_id, fail_reason="missing_step"
+            )
         step = plan.steps[step_index]
 
         import time
@@ -126,6 +136,9 @@ class LangChainWorkerRuntime:
                     "step_type": task.step_type,
                     "allowed_tools": list(task.allowed_tools or []),
                 },
+                run_id=session.run_id,
+                session_id=session.session_id,
+                trace_id=str(getattr(session.state, "trace_id", "") or ""),
             )
 
         try:
@@ -136,13 +149,19 @@ class LangChainWorkerRuntime:
                 async with session.lock:
                     child = snapshot_worker_loop_state(session.state)
                     child.step_index = step_index
-                    session.state.plan.steps[step_index].metadata["status"] = StepStatus.RUNNING.value
-                child_step = child.plan.steps[step_index] if child.plan is not None else step
+                    session.state.plan.steps[step_index].metadata[
+                        "status"
+                    ] = StepStatus.RUNNING.value
+                child_step = (
+                    child.plan.steps[step_index] if child.plan is not None else step
+                )
                 # 外层墙钟：含 retries；与剩余 run deadline 取 min
                 try:
                     from app.agent.harness.run_budget import get_or_create_run_budget
 
-                    mgr = get_or_create_run_budget(session.state, self.harness.harness_config)
+                    mgr = get_or_create_run_budget(
+                        session.state, self.harness.harness_config
+                    )
                     mgr.sync_from_usage(
                         session_id=session.session_id,
                         tool_calls=session.state.tool_calls_count,
@@ -155,7 +174,9 @@ class LangChainWorkerRuntime:
                     remaining = float(self.harness.harness_config.step_timeout_sec)
                 if not allowed:
                     async with session.lock:
-                        session.state.plan.steps[step_index].metadata["status"] = StepStatus.FAILED.value
+                        session.state.plan.steps[step_index].metadata[
+                            "status"
+                        ] = StepStatus.FAILED.value
                         session.state.metadata["force_synthesis"] = True
                     return {
                         "task_status": {task.task_id: "failed"},
@@ -176,19 +197,35 @@ class LangChainWorkerRuntime:
                             "reason": "force_synthesis_budget",
                         },
                     }
-                step_timeout = max(10, int(self.harness.harness_config.step_timeout_sec))
-                max_retries = max(0, int(getattr(self.harness.harness_config, "max_retries", 2) or 2))
+                step_timeout = max(
+                    10, int(self.harness.harness_config.step_timeout_sec)
+                )
+                max_retries = max(
+                    0, int(getattr(self.harness.harness_config, "max_retries", 2) or 2)
+                )
                 # 外层墙钟：不再 * (retries+1)；retry 共享同一 deadline，避免 6min straggler
                 retry_slack = 1.0 + min(0.5, 0.25 * max_retries)
-                worker_timeout = min(float(step_timeout) * retry_slack, max(5.0, remaining))
+                worker_timeout = min(
+                    float(step_timeout) * retry_slack, max(5.0, remaining)
+                )
                 # 可选任务：若已 force_synthesis / enough，直接跳过
                 if bool(step.metadata.get("optional")) and (
-                    (isinstance(session.state.metadata, dict) and session.state.metadata.get("force_synthesis"))
-                    or str((session.state.metadata or {}).get("progress_assessment", {}).get("verdict") or "")
+                    (
+                        isinstance(session.state.metadata, dict)
+                        and session.state.metadata.get("force_synthesis")
+                    )
+                    or str(
+                        (session.state.metadata or {})
+                        .get("progress_assessment", {})
+                        .get("verdict")
+                        or ""
+                    )
                     == "enough"
                 ):
                     async with session.lock:
-                        session.state.plan.steps[step_index].metadata["status"] = "skipped"
+                        session.state.plan.steps[step_index].metadata[
+                            "status"
+                        ] = "skipped"
                     return {
                         "task_status": {task.task_id: "skipped"},
                         "worker_results": [
@@ -235,11 +272,15 @@ class LangChainWorkerRuntime:
                     )
                     async with session.lock:
                         apply_isolated_outcome(session.state, outcome)
-                        session.state.plan.steps[step_index].metadata["status"] = StepStatus.FAILED.value
-                        session.state.plan.steps[step_index].metadata["queue_ms"] = queue_ms
-                        session.state.plan.steps[step_index].metadata["execution_ms"] = int(
-                            (time.perf_counter() - exec_started) * 1000
-                        )
+                        session.state.plan.steps[step_index].metadata[
+                            "status"
+                        ] = StepStatus.FAILED.value
+                        session.state.plan.steps[step_index].metadata[
+                            "queue_ms"
+                        ] = queue_ms
+                        session.state.plan.steps[step_index].metadata[
+                            "execution_ms"
+                        ] = int((time.perf_counter() - exec_started) * 1000)
                     return {
                         "task_status": {task.task_id: "failed"},
                         "worker_results": [
@@ -250,7 +291,9 @@ class LangChainWorkerRuntime:
                                 "step_type": task.step_type,
                                 "fail_reason": fail_reason,
                                 "queue_ms": queue_ms,
-                                "execution_ms": int((time.perf_counter() - exec_started) * 1000),
+                                "execution_ms": int(
+                                    (time.perf_counter() - exec_started) * 1000
+                                ),
                             }
                         ],
                     }
@@ -267,7 +310,9 @@ class LangChainWorkerRuntime:
                 async with session.lock:
                     apply_isolated_outcome(session.state, outcome)
                     session.state.plan.steps[step_index].metadata["queue_ms"] = queue_ms
-                    session.state.plan.steps[step_index].metadata["execution_ms"] = exec_ms
+                    session.state.plan.steps[step_index].metadata[
+                        "execution_ms"
+                    ] = exec_ms
                     session.state.step_validation_results.append(
                         {
                             "step_index": step_index,
@@ -317,7 +362,11 @@ class LangChainWorkerRuntime:
                     note_first_evidence(
                         session.state,
                         evidence_count=len(findings)
-                        or len(list(payload.get("facts") or []) if isinstance(payload, dict) else []),
+                        or len(
+                            list(payload.get("facts") or [])
+                            if isinstance(payload, dict)
+                            else []
+                        ),
                     )
                 except Exception:
                     pass
@@ -355,7 +404,11 @@ class LangChainWorkerRuntime:
                     input_refs=[
                         item
                         for item in [
-                            {"type": "research_brief", "id": brief_id} if brief_id else None,
+                            (
+                                {"type": "research_brief", "id": brief_id}
+                                if brief_id
+                                else None
+                            ),
                             {"type": "research_plan", "id": plan_id},
                             {"type": "task", "id": task.task_id},
                         ]
@@ -363,8 +416,14 @@ class LangChainWorkerRuntime:
                     ],
                     output_refs=[
                         *[{"type": "finding", "id": fid} for fid in finding_ids],
-                        *[{"type": "evidence", "id": eid} for eid in (evidence_ids if ok else [])],
+                        *[
+                            {"type": "evidence", "id": eid}
+                            for eid in (evidence_ids if ok else [])
+                        ],
                     ],
+                    run_id=session.run_id,
+                    session_id=session.session_id,
+                    trace_id=str(getattr(session.state, "trace_id", "") or ""),
                 )
                 if span_key:
                     recorder.end_span(
@@ -382,6 +441,9 @@ class LangChainWorkerRuntime:
                 sources=list((payload or {}).get("sources") or []),
                 raw=outcome,
                 fail_reason="" if ok else "worker_failed",
+                queue_ms=queue_ms,
+                execution_ms=exec_ms,
+                duration_ms=duration_ms,
             )
         except Exception as exc:
             duration_ms = int((time.perf_counter() - worker_started) * 1000)
@@ -399,6 +461,9 @@ class LangChainWorkerRuntime:
                         "step_type": task.step_type,
                         "fail_reason": str(exc)[:500],
                     },
+                    run_id=session.run_id,
+                    session_id=session.session_id,
+                    trace_id=str(getattr(session.state, "trace_id", "") or ""),
                 )
                 if span_key:
                     recorder.end_span(span_key, status="error", duration_ms=duration_ms)
@@ -413,11 +478,15 @@ class LangChainWorkerRuntime:
 class PlaceholderWorkerRuntime:
     """无 harness 时的图编译 / 单测工人。"""
 
-    async def execute(self, task: ResearchTask, context: ResearchContext) -> WorkerResult:
+    async def execute(
+        self, task: ResearchTask, context: ResearchContext
+    ) -> WorkerResult:
         return WorkerResult(
             ok=True,
             task_id=task.task_id,
             summary="placeholder",
-            findings=[{"task_id": task.task_id, "summary": task.objective or task.description}],
+            findings=[
+                {"task_id": task.task_id, "summary": task.objective or task.description}
+            ],
             evidence_refs=[task.task_id] if task.task_id else [],
         )

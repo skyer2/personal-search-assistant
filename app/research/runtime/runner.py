@@ -95,15 +95,21 @@ class ResearchGraphRunner:
         bind_session(session)
         session.state.metadata["graph_runtime"] = True
         session.state.metadata["workflow_authority"] = "research_state"
-        persist_loop = bool(getattr(self.harness.harness_config, "persist_loop_state", False))
+        persist_loop = bool(
+            getattr(self.harness.harness_config, "persist_loop_state", False)
+        )
         # LoopState checkpoint 不再作为 Graph 的种子。仅当显式打开旧 persist 时保留 HITL 桥。
         if persist_loop and ctx.restored_full:
             waiting = dict((session.state.metadata or {}).get("hitl_waiting") or {})
             gate = str(waiting.get("gate_type") or "")
             if gate in {"clarification", "intent_clarification"}:
-                session.state = await self.harness._maybe_intent_clarification(session.state)
+                session.state = await self.harness._maybe_intent_clarification(
+                    session.state
+                )
             elif gate == "plan_review":
-                session.state = await self.harness._maybe_plan_hitl_review(session.state)
+                session.state = await self.harness._maybe_plan_hitl_review(
+                    session.state
+                )
         config = {
             "configurable": {"thread_id": session.run_id},
             "recursion_limit": 80,
@@ -163,7 +169,9 @@ class ResearchGraphRunner:
         finally:
             drop_session(session.run_id)
 
-    async def _bridge_interrupts(self, result: dict[str, Any], session: RunSession) -> Any:
+    async def _bridge_interrupts(
+        self, result: dict[str, Any], session: RunSession
+    ) -> Any:
         """图内 interrupt() 暂停后，用现有 coordinator 等前端 POST /resume。"""
         from app.agent.harness.hitl import hitl_coordinator
         from app.api.monitor import monitor
@@ -174,11 +182,11 @@ class ResearchGraphRunner:
         item = payloads[0]
         coordinator_payload = dict(item.get("coordinator_payload") or item)
         gate_type = str(
-            coordinator_payload.get("gate_type")
-            or item.get("kind")
-            or "step"
+            coordinator_payload.get("gate_type") or item.get("kind") or "step"
         )
-        step_index = int(coordinator_payload.get("step_index", item.get("step_index", -1)))
+        step_index = int(
+            coordinator_payload.get("step_index", item.get("step_index", -1))
+        )
         action_requests = list(coordinator_payload.get("action_requests") or [])
         review_configs = list(coordinator_payload.get("review_configs") or [])
         monitor.report_hitl_interrupt(
@@ -240,14 +248,51 @@ class ResearchGraphRunner:
             ),
             "findings": [],
         }
+        synthesis_status = "not_started"
         try:
-            await self.node_synthesize(gstate)
-        except Exception:
-            pass
+            # A node executes exactly one deliverable. Drain the complete pipeline
+            # (markdown/summarize/PDF), rather than silently dropping later steps.
+            while True:
+                before = task_status_map(state.plan) if state.plan is not None else {}
+                update = await self.node_synthesize(gstate)
+                gstate.update(update or {})
+                after = task_status_map(state.plan) if state.plan is not None else {}
+                synthesis_status = (
+                    "failed"
+                    if any(
+                        step.step_type
+                        in {"generate_markdown", "summarize", "convert_pdf"}
+                        and after.get(step.resolved_task_id(i)) == "failed"
+                        for i, step in enumerate(
+                            state.plan.steps if state.plan is not None else []
+                        )
+                    )
+                    else "completed"
+                )
+                if before == after or not any(
+                    step.step_type in {"generate_markdown", "summarize", "convert_pdf"}
+                    and after.get(step.resolved_task_id(i), "pending")
+                    not in {"done", "failed", "skipped"}
+                    for i, step in enumerate(
+                        state.plan.steps if state.plan is not None else []
+                    )
+                ):
+                    break
+        except Exception as exc:
+            synthesis_status = "failed"
+            self._record_emergency_failure(session, "synthesis", exc)
         try:
-            await self.node_quality_gate(gstate)
-        except Exception:
-            pass
+            update = await self.node_quality_gate(gstate)
+            gstate.update(update or {})
+        except Exception as exc:
+            self._record_emergency_failure(session, "quality", exc)
+        state.metadata["termination"] = {
+            "status": "partial",
+            "reason": reason,
+            "stage": "research",
+            "synthesis_attempted": synthesis_status != "not_started",
+            "synthesis_status": synthesis_status,
+        }
         try:
             gstate["status"] = "partial"
             return await self.node_finalize(gstate)
@@ -262,7 +307,44 @@ class ResearchGraphRunner:
                 )
             return await self._finalize_run(session, success=False)
 
-    async def _complete_from_graph(self, session: RunSession, graph_result: dict[str, Any]) -> Any:
+    @staticmethod
+    def _record_emergency_failure(
+        session: RunSession, stage: str, exc: Exception
+    ) -> None:
+        """Never turn emergency-delivery failures into a false healthy trace."""
+        logger.exception(
+            "Emergency %s failed for run %s", stage, session.run_id, exc_info=exc
+        )
+        try:
+            from app.observability import EventType, get_recorder
+
+            get_recorder().emit(
+                (
+                    EventType.SYNTHESIS_FAILED
+                    if stage == "synthesis"
+                    else EventType.QUALITY_EVALUATED
+                ),
+                phase=stage,
+                status="failed",
+                attributes={
+                    "failure.origin_stage": stage,
+                    "failure.detected_stage": f"emergency_{stage}",
+                    "error": repr(exc)[:1000],
+                    "run_id": session.run_id,
+                    "session_id": session.session_id,
+                },
+                run_id=session.run_id,
+                session_id=session.session_id,
+                trace_id=str(getattr(session.state, "trace_id", "") or ""),
+            )
+        except Exception:
+            logger.exception(
+                "Could not record emergency failure for run %s", session.run_id
+            )
+
+    async def _complete_from_graph(
+        self, session: RunSession, graph_result: dict[str, Any]
+    ) -> Any:
         ctx = session.ctx
         state = session.state
         if graph_result.get("status") == "aborted" or state.abort_reason:
@@ -285,7 +367,7 @@ class ResearchGraphRunner:
             state.numeric_citation_coverage = float(
                 metrics.get("numeric_citation_coverage") or 0.0
             )
-            citation_manager.save_evidence_json(ctx.session_dir)
+            citation_manager.save_evidence_json(ctx.session_dir, run_id=session.run_id)
 
         finalize_outcome = self.harness.validator.validate_finalize(
             state,
@@ -320,7 +402,11 @@ class ResearchGraphRunner:
         from app.agent.harness.state import ExecutionPlan, PlanStep
         from app.research.runtime.isolation import worker_row
         from app.research.runtime.project import apply_graph_to_loop
-        from app.research.runtime.worker import LangChainWorkerRuntime, ResearchContext, ResearchTask
+        from app.research.runtime.worker import (
+            LangChainWorkerRuntime,
+            ResearchContext,
+            ResearchTask,
+        )
 
         session = _require_session(gstate)
         apply_graph_to_loop(session.state, gstate)
@@ -359,7 +445,11 @@ class ResearchGraphRunner:
         )
         answer = result.summary or query
         if result.findings:
-            bits = [str(item.get("summary") or "") for item in result.findings if isinstance(item, dict)]
+            bits = [
+                str(item.get("summary") or "")
+                for item in result.findings
+                if isinstance(item, dict)
+            ]
             bits = [b for b in bits if b]
             if bits:
                 answer = "\n".join(bits[:8])
@@ -374,7 +464,11 @@ class ResearchGraphRunner:
                 "ok": result.ok,
                 "summary": result.summary,
                 "step_type": "research",
-                "payload": {"summary": result.summary, "facts": result.facts, "sources": result.sources},
+                "payload": {
+                    "summary": result.summary,
+                    "facts": result.facts,
+                    "sources": result.sources,
+                },
             }
         )
         return {
@@ -467,8 +561,16 @@ class ResearchGraphRunner:
                         "freshness": brief.get("freshness"),
                         "deliverable": brief.get("deliverable"),
                         "prefer_primary": brief.get("prefer_primary"),
-                        "planner_source": getattr(intent_obj, "planner_source", None) if intent_obj else None,
-                        "intent_confidence": getattr(intent_obj, "intent_confidence", None) if intent_obj else None,
+                        "planner_source": (
+                            getattr(intent_obj, "planner_source", None)
+                            if intent_obj
+                            else None
+                        ),
+                        "intent_confidence": (
+                            getattr(intent_obj, "intent_confidence", None)
+                            if intent_obj
+                            else None
+                        ),
                         "brief_ref": ref.ref,
                         "brief_hash": ref.sha256,
                     },
@@ -481,6 +583,7 @@ class ResearchGraphRunner:
                     session.state.metadata["brief_ref"] = ref.ref
         except Exception:
             import logging as _log
+
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return {
             "intent": intent_payload,
@@ -626,7 +729,9 @@ class ResearchGraphRunner:
             return {"progress": "dispatch"}
         if self.harness._apply_run_guardrails(session.state, session.ctx.run_started):
             # 若仍可合成，优先走 synthesis 而不是直接 abort dump
-            if isinstance(session.state.metadata, dict) and session.state.metadata.get("force_synthesis"):
+            if isinstance(session.state.metadata, dict) and session.state.metadata.get(
+                "force_synthesis"
+            ):
                 status = skip_optional_pending(
                     session.state.plan,
                     task_status_map(session.state.plan),
@@ -648,7 +753,9 @@ class ResearchGraphRunner:
                 "progress": "abort",
             }
         # Research 触顶但未超 hard：阻止再开 research，推进 synthesis
-        if isinstance(session.state.metadata, dict) and session.state.metadata.get("force_synthesis"):
+        if isinstance(session.state.metadata, dict) and session.state.metadata.get(
+            "force_synthesis"
+        ):
             status = skip_optional_pending(
                 session.state.plan,
                 task_status_map(session.state.plan),
@@ -675,7 +782,9 @@ class ResearchGraphRunner:
                 include_optional=False,
             )
         return {
-            "replan_count": int(gstate.get("replan_count") or session.state.replan_count),
+            "replan_count": int(
+                gstate.get("replan_count") or session.state.replan_count
+            ),
             "progress": "dispatch",
         }
 
@@ -684,7 +793,11 @@ class ResearchGraphRunner:
 
         from app.research.runtime.isolation import worker_row
         from app.research.runtime.project import apply_graph_to_loop
-        from app.research.runtime.worker import LangChainWorkerRuntime, ResearchContext, ResearchTask
+        from app.research.runtime.worker import (
+            LangChainWorkerRuntime,
+            ResearchContext,
+            ResearchTask,
+        )
 
         session = get_session(str(gstate.get("run_id") or ""))
         step_index = int(gstate.get("step_index") or 0)
@@ -710,12 +823,14 @@ class ResearchGraphRunner:
                     "status": "aborted",
                     "abort_reason": "step_rejected",
                     "task_status": {step.resolved_task_id(step_index): "failed"},
-                    "worker_results": [{
-                        "task_id": task_id,
-                        "ok": False,
-                        "summary": "step_rejected",
-                        "step_type": step.step_type,
-                    }],
+                    "worker_results": [
+                        {
+                            "task_id": task_id,
+                            "ok": False,
+                            "summary": "step_rejected",
+                            "step_type": step.step_type,
+                        }
+                    ],
                 }
             session.state = self.harness._apply_hitl_decisions(
                 session.state, _as_decisions(resume), step, step_index
@@ -745,18 +860,22 @@ class ResearchGraphRunner:
         )
         outcome = result.raw
         tid = step.resolved_task_id(step_index)
-        row = worker_row(tid, step, result.ok, getattr(outcome, "result", None)) if outcome is not None else {
-            "task_id": tid,
-            "ok": result.ok,
-            "summary": result.summary,
-            "step_type": step.step_type,
-            "payload": {
+        row = (
+            worker_row(tid, step, result.ok, getattr(outcome, "result", None))
+            if outcome is not None
+            else {
+                "task_id": tid,
+                "ok": result.ok,
                 "summary": result.summary,
-                "facts": result.facts,
-                "sources": result.sources,
-                "findings": result.findings,
-            },
-        }
+                "step_type": step.step_type,
+                "payload": {
+                    "summary": result.summary,
+                    "facts": result.facts,
+                    "sources": result.sources,
+                    "findings": result.findings,
+                },
+            }
+        )
         return {
             "worker_results": [row],
             "task_status": {tid: "done" if result.ok else "failed"},
@@ -786,7 +905,9 @@ class ResearchGraphRunner:
 
             reconciliation = reconcile_worker_results(worker_rows)
             if session is not None and isinstance(session.state.metadata, dict):
-                session.state.metadata["claim_reconciliation"] = reconciliation.to_dict()
+                session.state.metadata["claim_reconciliation"] = (
+                    reconciliation.to_dict()
+                )
         except Exception:
             reconciliation = None
         assessment = assess_progress(
@@ -800,7 +921,9 @@ class ResearchGraphRunner:
                 or gstate.get("abort_reason")
             ),
             enabled=enabled,
-            intent=session.state.intent if session is not None else gstate.get("intent"),
+            intent=(
+                session.state.intent if session is not None else gstate.get("intent")
+            ),
             previous_gap_ids=list(
                 (
                     (session.state.metadata.get("progress_assessment") or {})
@@ -816,9 +939,14 @@ class ResearchGraphRunner:
             if assessment.verdict == "enough":
                 try:
                     from app.research.runtime.latency import note_enough_evidence
-                    from app.research.runtime.scheduler import skip_optional_pending, task_status_map
+                    from app.research.runtime.scheduler import (
+                        skip_optional_pending,
+                        task_status_map,
+                    )
 
-                    note_enough_evidence(session.state, reason=assessment.reason or "enough")
+                    note_enough_evidence(
+                        session.state, reason=assessment.reason or "enough"
+                    )
                     skip_optional_pending(
                         session.state.plan,
                         task_status_map(session.state.plan),
@@ -838,7 +966,10 @@ class ResearchGraphRunner:
                     attributes={"progress_id": assessment.progress_id},
                 )
                 store = get_payload_store()
-                run_id = str(gstate.get("run_id") or (session.session_id if session else "unknown"))
+                run_id = str(
+                    gstate.get("run_id")
+                    or (session.session_id if session else "unknown")
+                )
                 ref = store.put(
                     run_id=run_id,
                     artifact_type="progress",
@@ -869,7 +1000,11 @@ class ResearchGraphRunner:
                     input_refs=[
                         item
                         for item in [
-                            {"type": "research_brief", "id": brief_id} if brief_id else None,
+                            (
+                                {"type": "research_brief", "id": brief_id}
+                                if brief_id
+                                else None
+                            ),
                             {
                                 "type": "research_plan",
                                 "id": f"plan_v{int(getattr(plan, 'plan_version', 1) or 1)}",
@@ -882,6 +1017,7 @@ class ResearchGraphRunner:
                 recorder.end_span(span_key, status=assessment.verdict)
         except Exception:
             import logging as _log
+
             _log.getLogger("observability").debug("obs emit failed", exc_info=True)
         payload = {
             "progress_assessment": assessment.to_dict(),
@@ -903,7 +1039,10 @@ class ResearchGraphRunner:
             return {"status": "synthesized", "progress": "synthesized"}
         status = task_status_map(plan)
         force = bool(
-            (isinstance(session.state.metadata, dict) and session.state.metadata.get("force_synthesis"))
+            (
+                isinstance(session.state.metadata, dict)
+                and session.state.metadata.get("force_synthesis")
+            )
             or session.state.abort_reason
         )
         nxt = next_synthesis_step(plan, status, allow_failed_deps=force)
@@ -911,13 +1050,21 @@ class ResearchGraphRunner:
             # Emergency synthesis deliberately bypasses the normal research DAG.
             # A cancelled LangGraph superstep may leave stale dependency metadata.
             nxt = next(
-                ((index, step) for index, step in enumerate(plan.steps)
-                 if step.step_type in {"generate_markdown", "summarize"}
-                 and status.get(step.resolved_task_id(index), "pending") not in {"done", "failed"}),
+                (
+                    (index, step)
+                    for index, step in enumerate(plan.steps)
+                    if step.step_type in {"generate_markdown", "summarize"}
+                    and status.get(step.resolved_task_id(index), "pending")
+                    not in {"done", "failed"}
+                ),
                 None,
             )
         if nxt is None:
-            return {"status": "synthesized", "progress": "synthesized", "task_status": status}
+            return {
+                "status": "synthesized",
+                "progress": "synthesized",
+                "task_status": status,
+            }
         index, step = nxt
         session.state.step_index = index
         step.metadata["status"] = StepStatus.RUNNING.value
@@ -934,7 +1081,9 @@ class ResearchGraphRunner:
                 if session.ctx.citation_manager is not None:
                     evidence_ids = [
                         str(getattr(src, "source_id", "") or "")
-                        for src in list(getattr(session.ctx.citation_manager, "sources", []) or [])
+                        for src in list(
+                            getattr(session.ctx.citation_manager, "sources", []) or []
+                        )
                         if getattr(src, "source_id", None)
                     ][:40]
                 synth_span = recorder.start_span(
@@ -961,7 +1110,11 @@ class ResearchGraphRunner:
                     input_refs=[
                         item
                         for item in [
-                            {"type": "research_brief", "id": brief_id} if brief_id else None,
+                            (
+                                {"type": "research_brief", "id": brief_id}
+                                if brief_id
+                                else None
+                            ),
                             {"type": "research_plan", "id": plan_id},
                         ]
                         if item
@@ -970,12 +1123,15 @@ class ResearchGraphRunner:
                 )
         except Exception:
             import logging as _log
+
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         async with session.lock:
             try:
                 from app.agent.harness.run_budget import get_or_create_run_budget
 
-                mgr = get_or_create_run_budget(session.state, self.harness.harness_config)
+                mgr = get_or_create_run_budget(
+                    session.state, self.harness.harness_config
+                )
                 mgr.sync_from_usage(
                     session_id=session.session_id,
                     tool_calls=session.state.tool_calls_count,
@@ -1005,8 +1161,12 @@ class ResearchGraphRunner:
                 )
             except asyncio.TimeoutError:
                 ok = False
-                session.state.abort_reason = session.state.abort_reason or "deadline_exceeded"
-                session.state.abort_message = session.state.abort_message or "synthesis step timeout"
+                session.state.abort_reason = (
+                    session.state.abort_reason or "deadline_exceeded"
+                )
+                session.state.abort_message = (
+                    session.state.abort_message or "synthesis step timeout"
+                )
             session.state.step_validation_results.append(
                 {
                     "step_index": index,
@@ -1058,16 +1218,25 @@ class ResearchGraphRunner:
                 if session.ctx.citation_manager is not None:
                     evidence_ids = [
                         str(getattr(src, "source_id", "") or "")
-                        for src in list(getattr(session.ctx.citation_manager, "sources", []) or [])
+                        for src in list(
+                            getattr(session.ctx.citation_manager, "sources", []) or []
+                        )
                         if getattr(src, "source_id", None)
                     ][:40]
                     claim_ids = [
                         f"c{i + 1}"
                         for i, _ in enumerate(
-                            list(getattr(session.ctx.citation_manager, "fact_bindings", []) or [])[:24]
+                            list(
+                                getattr(
+                                    session.ctx.citation_manager, "fact_bindings", []
+                                )
+                                or []
+                            )[:24]
                         )
                     ]
-                event_type = EventType.SYNTHESIS_COMPLETED if ok else EventType.SYNTHESIS_FAILED
+                event_type = (
+                    EventType.SYNTHESIS_COMPLETED if ok else EventType.SYNTHESIS_FAILED
+                )
                 recorder.emit(
                     event_type,
                     phase="synthesis",
@@ -1092,7 +1261,11 @@ class ResearchGraphRunner:
                     input_refs=[
                         item
                         for item in [
-                            {"type": "research_brief", "id": brief_id} if brief_id else None,
+                            (
+                                {"type": "research_brief", "id": brief_id}
+                                if brief_id
+                                else None
+                            ),
                             {"type": "research_plan", "id": plan_id},
                         ]
                         if item
@@ -1106,6 +1279,7 @@ class ResearchGraphRunner:
                     session.state.metadata["answer_ref"] = ref.ref
         except Exception:
             import logging as _log
+
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return {
             "task_status": {tid: "done" if ok else "failed"},
@@ -1116,7 +1290,10 @@ class ResearchGraphRunner:
 
     async def node_replan(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.agent.harness.guardrails import can_replan
-        from app.research.planning.plan_patch import apply_plan_patch, build_progress_patch
+        from app.research.planning.plan_patch import (
+            apply_plan_patch,
+            build_progress_patch,
+        )
         from app.research.planning.policy import parse_source_policy
         from app.research.runtime.project import apply_graph_to_loop
 
@@ -1147,14 +1324,28 @@ class ResearchGraphRunner:
             durations = sorted(
                 int(row.get("execution_ms") or row.get("duration_ms") or 0) / 1000.0
                 for row in list(gstate.get("worker_results") or [])
-                if isinstance(row, dict) and int(row.get("execution_ms") or row.get("duration_ms") or 0) > 0
+                if isinstance(row, dict)
+                and int(row.get("execution_ms") or row.get("duration_ms") or 0) > 0
             )
-            estimated_wave = durations[-1] if durations else float(self.harness.harness_config.step_timeout_sec)
+            # Nearest-rank P95 over recent observations; unlike a fixed timeout it
+            # follows actual worker latency while remaining conservative.
+            recent = durations[-20:]
+            estimated_wave = (
+                recent[max(0, int(len(recent) * 0.95 + 0.999) - 1)]
+                if recent
+                else float(self.harness.harness_config.step_timeout_sec)
+            )
             progress_overhead = min(30.0, max(5.0, estimated_wave * 0.1))
-            if mgr.remaining_for_research_sec() < estimated_wave + progress_overhead:
+            safety_margin = min(30.0, max(10.0, estimated_wave * 0.2))
+            if (
+                mgr.remaining_for_research_sec()
+                < estimated_wave + progress_overhead + safety_margin
+            ):
                 if isinstance(state.metadata, dict):
                     state.metadata["force_synthesis"] = True
-                    state.metadata["replan_skipped_reason"] = "insufficient_research_time"
+                    state.metadata["replan_skipped_reason"] = (
+                        "insufficient_research_time"
+                    )
                 return {
                     **exhausted,
                     "progress_assessment": {
@@ -1174,7 +1365,8 @@ class ResearchGraphRunner:
         max_new = int(
             run_budget.get(
                 "max_plan_patch_tasks",
-                getattr(self.harness.harness_config, "planner_max_plan_patch_tasks", 2) or 2,
+                getattr(self.harness.harness_config, "planner_max_plan_patch_tasks", 2)
+                or 2,
             )
         )
         grant_retrieval = int(
@@ -1188,9 +1380,14 @@ class ResearchGraphRunner:
         )
         grant: dict[str, Any] = {}
         try:
-            from app.research.planning.effort import grant_on_gap, resolve_effective_budget
+            from app.research.planning.effort import (
+                grant_on_gap,
+                resolve_effective_budget,
+            )
 
-            effective = resolve_effective_budget(state.intent, self.harness.harness_config)
+            effective = resolve_effective_budget(
+                state.intent, self.harness.harness_config
+            )
             grant = grant_on_gap(
                 effective,
                 assessment=assessment,
@@ -1200,6 +1397,7 @@ class ResearchGraphRunner:
             grant_retrieval = int(grant.get("max_retrieval_calls", grant_retrieval))
         except Exception:
             import logging as _log
+
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         patch = build_progress_patch(
             state.plan,
@@ -1219,7 +1417,9 @@ class ResearchGraphRunner:
 
             recorder = get_recorder()
             if recorder.is_active:
-                target_gap_ids = list(patch.get("target_gap_ids") or assessment.get("open_gap_ids") or [])
+                target_gap_ids = list(
+                    patch.get("target_gap_ids") or assessment.get("open_gap_ids") or []
+                )
                 recorder.emit(
                     EventType.REPLAN_PROPOSED,
                     phase="recover",
@@ -1227,10 +1427,23 @@ class ResearchGraphRunner:
                     plan_version=int(getattr(state.plan, "plan_version", 1) or 1),
                     attributes={
                         "patch_id": str(patch.get("patch_id") or ""),
-                        "triggered_by": str(patch.get("triggered_by") or assessment.get("progress_id") or ""),
+                        "triggered_by": str(
+                            patch.get("triggered_by")
+                            or assessment.get("progress_id")
+                            or ""
+                        ),
                         "target_gap_ids": [str(x) for x in target_gap_ids if x],
-                        "reason": str(patch.get("reason") or assessment.get("reason") or "semantic_gap"),
-                        "gaps": list(assessment.get("gaps") or assessment.get("missing_dimensions") or assessment.get("coverage_gaps") or []),
+                        "reason": str(
+                            patch.get("reason")
+                            or assessment.get("reason")
+                            or "semantic_gap"
+                        ),
+                        "gaps": list(
+                            assessment.get("gaps")
+                            or assessment.get("missing_dimensions")
+                            or assessment.get("coverage_gaps")
+                            or []
+                        ),
                         "added_tasks": [
                             str(item.get("task_id") or "")
                             for item in list(patch.get("add_tasks") or [])
@@ -1240,6 +1453,7 @@ class ResearchGraphRunner:
                 )
         except Exception:
             import logging as _log
+
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         plan, issues = apply_plan_patch(
             state.plan,
@@ -1309,7 +1523,10 @@ class ResearchGraphRunner:
                     budget = self.harness.remaining_budget(state)
                 except Exception:
                     budget = {}
-                patch_id = str(patch.get("patch_id") or f"patch_{from_version}_{state.plan.plan_version}")
+                patch_id = str(
+                    patch.get("patch_id")
+                    or f"patch_{from_version}_{state.plan.plan_version}"
+                )
                 store = get_payload_store()
                 ref = store.put(
                     run_id=str(gstate.get("run_id") or session.session_id),
@@ -1317,7 +1534,9 @@ class ResearchGraphRunner:
                     artifact_id=patch_id,
                     payload=dict(patch),
                 )
-                target_gap_ids = [str(x) for x in (patch.get("target_gap_ids") or []) if x]
+                target_gap_ids = [
+                    str(x) for x in (patch.get("target_gap_ids") or []) if x
+                ]
                 recorder.emit(
                     EventType.REPLAN_APPLIED,
                     phase="recover",
@@ -1325,12 +1544,27 @@ class ResearchGraphRunner:
                     plan_version=int(getattr(state.plan, "plan_version", 1) or 1),
                     attributes={
                         "patch_id": patch_id,
-                        "triggered_by": str(patch.get("triggered_by") or assessment.get("progress_id") or ""),
+                        "triggered_by": str(
+                            patch.get("triggered_by")
+                            or assessment.get("progress_id")
+                            or ""
+                        ),
                         "target_gap_ids": target_gap_ids,
                         "from_plan_version": from_version,
-                        "to_plan_version": int(getattr(state.plan, "plan_version", 1) or 1),
-                        "reason": str(patch.get("reason") or assessment.get("reason") or "semantic_gap"),
-                        "gaps": list(assessment.get("gaps") or assessment.get("missing_dimensions") or assessment.get("coverage_gaps") or []),
+                        "to_plan_version": int(
+                            getattr(state.plan, "plan_version", 1) or 1
+                        ),
+                        "reason": str(
+                            patch.get("reason")
+                            or assessment.get("reason")
+                            or "semantic_gap"
+                        ),
+                        "gaps": list(
+                            assessment.get("gaps")
+                            or assessment.get("missing_dimensions")
+                            or assessment.get("coverage_gaps")
+                            or []
+                        ),
                         "added_tasks": [tid for tid in added if tid],
                         "removed_tasks": [],
                         "remaining_budget": budget,
@@ -1338,7 +1572,10 @@ class ResearchGraphRunner:
                         "patch_hash": ref.sha256,
                     },
                     input_refs=[
-                        {"type": "progress", "id": str(assessment.get("progress_id") or "")},
+                        {
+                            "type": "progress",
+                            "id": str(assessment.get("progress_id") or ""),
+                        },
                         *[{"type": "gap", "id": gid} for gid in target_gap_ids],
                     ],
                     output_refs=[
@@ -1351,6 +1588,7 @@ class ResearchGraphRunner:
                 )
         except Exception:
             import logging as _log
+
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return {
             "plan": state.plan.to_dict(),
@@ -1380,7 +1618,7 @@ class ResearchGraphRunner:
             state.numeric_citation_coverage = float(
                 metrics.get("numeric_citation_coverage") or 0.0
             )
-            citation_manager.save_evidence_json(ctx.session_dir)
+            citation_manager.save_evidence_json(ctx.session_dir, run_id=session.run_id)
         outcome = self.harness.validator.validate_finalize(
             state,
             ctx.session_dir,
@@ -1406,18 +1644,31 @@ class ResearchGraphRunner:
                     attributes={
                         "passed": passed,
                         "severity": getattr(outcome, "severity", ""),
-                        "citation_coverage_rate": getattr(state, "citation_coverage_rate", None),
-                        "hallucination_rate": getattr(state, "hallucination_rate", None),
-                        "unsupported_claim_rate": getattr(state, "hallucination_rate", None),
+                        "citation_coverage_rate": getattr(
+                            state, "citation_coverage_rate", None
+                        ),
+                        "hallucination_rate": getattr(
+                            state, "hallucination_rate", None
+                        ),
+                        "unsupported_claim_rate": getattr(
+                            state, "hallucination_rate", None
+                        ),
                         "conflict_disclosure_passed": (
                             True
                             if getattr(outcome, "reason", "")
-                            not in {"conflict_not_disclosed", "unsupported_reconciled_value"}
+                            not in {
+                                "conflict_not_disclosed",
+                                "unsupported_reconciled_value",
+                            }
                             else False
                         ),
-                        "conflict_disclosure_reason": str(getattr(outcome, "reason", "") or ""),
+                        "conflict_disclosure_reason": str(
+                            getattr(outcome, "reason", "") or ""
+                        ),
                         "target_type": "synthesis",
-                        "target_artifact_id": str((state.metadata or {}).get("answer_id") or ""),
+                        "target_artifact_id": str(
+                            (state.metadata or {}).get("answer_id") or ""
+                        ),
                         "target_span_id": "",
                         "grader": "finalize_validator",
                         "grader_version": "v1",
@@ -1425,11 +1676,14 @@ class ResearchGraphRunner:
                         "score": 1.0 if passed else 0.0,
                         "failure.origin_stage": "synthesis" if not passed else "",
                         "failure.detected_stage": "quality" if not passed else "",
-                        "failure.cause_artifact_id": str((state.metadata or {}).get("answer_id") or ""),
+                        "failure.cause_artifact_id": str(
+                            (state.metadata or {}).get("answer_id") or ""
+                        ),
                     },
                 )
         except Exception:
             import logging as _log
+
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return {
             "quality_passed": passed,
@@ -1439,14 +1693,19 @@ class ResearchGraphRunner:
 
     async def node_finalize(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.project import apply_graph_to_loop
-        from app.research.runtime.latency import critical_path_summary, note_final_answer
+        from app.research.runtime.latency import (
+            critical_path_summary,
+            note_final_answer,
+        )
 
         session = _require_session(gstate)
         apply_graph_to_loop(session.state, gstate)
         try:
             note_final_answer(session.state)
             if isinstance(session.state.metadata, dict):
-                session.state.metadata["critical_path"] = critical_path_summary(session.state.metadata)
+                session.state.metadata["critical_path"] = critical_path_summary(
+                    session.state.metadata
+                )
         except Exception:
             pass
         if not str(session.state.final_content or "").strip() or (
@@ -1458,7 +1717,9 @@ class ResearchGraphRunner:
 
             session.state.final_content = render_partial_report(
                 state=session.state,
-                abort_reason=str(session.state.abort_reason or gstate.get("status") or "incomplete"),
+                abort_reason=str(
+                    session.state.abort_reason or gstate.get("status") or "incomplete"
+                ),
                 synthesis_failed=bool(
                     isinstance(session.state.metadata, dict)
                     and session.state.metadata.get("synthesis_failed")
@@ -1536,12 +1797,14 @@ def _require_session(gstate: dict[str, Any]) -> RunSession:
 
 def _failed_worker(task_id: str, step_type: str, reason: str) -> dict[str, Any]:
     return {
-        "worker_results": [{
-            "task_id": task_id,
-            "ok": False,
-            "summary": reason,
-            "step_type": step_type,
-        }],
+        "worker_results": [
+            {
+                "task_id": task_id,
+                "ok": False,
+                "summary": reason,
+                "step_type": step_type,
+            }
+        ],
         "task_status": {task_id: "failed"},
     }
 
@@ -1592,7 +1855,11 @@ async def _ainvoke_resilient(graph: Any, payload: Any, config: dict[str, Any]) -
     try:
         return await graph.ainvoke(payload, config)
     except Exception as exc:
-        if type(exc).__name__ not in {"GraphInterrupt", "NodeInterrupt", "GraphBubbleUp"}:
+        if type(exc).__name__ not in {
+            "GraphInterrupt",
+            "NodeInterrupt",
+            "GraphBubbleUp",
+        }:
             raise
         interrupts = _interrupt_from_exception(exc)
         if interrupts is not None:
@@ -1645,7 +1912,9 @@ def _clarification_payload(harness: Any, state: LoopState) -> dict[str, Any]:
                 },
             }
         ],
-        "review_configs": [{"action_name": "task_intent", "allowed_decisions": allowed}],
+        "review_configs": [
+            {"action_name": "task_intent", "allowed_decisions": allowed}
+        ],
         "gate_type": "intent_clarification",
         "editable": harness.harness_config.hitl_allow_edit,
         "step_index": -1,
@@ -1664,7 +1933,9 @@ def _plan_review_payload(harness: Any, state: LoopState) -> dict[str, Any]:
                     "summary": state.plan.summary if state.plan else "",
                     "steps": plan_to_editable_dict(state.plan) if state.plan else [],
                     "intent": state.intent.to_dict() if state.intent else {},
-                    "intent_confidence": state.intent.intent_confidence if state.intent else 1.0,
+                    "intent_confidence": (
+                        state.intent.intent_confidence if state.intent else 1.0
+                    ),
                 },
             }
         ],
@@ -1704,7 +1975,9 @@ def _as_decisions(resume: Any) -> list[dict[str, Any]]:
     if resume is True or resume == "approve":
         return [{"type": "approve"}]
     if isinstance(resume, list):
-        return [item if isinstance(item, dict) else {"type": str(item)} for item in resume]
+        return [
+            item if isinstance(item, dict) else {"type": str(item)} for item in resume
+        ]
     if isinstance(resume, dict):
         if "type" in resume or "action" in resume:
             return [resume]

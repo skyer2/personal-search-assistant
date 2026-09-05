@@ -336,6 +336,12 @@ class AgentTelemetry:
             output_refs=[dict(x) for x in refs_out if isinstance(x, dict)],
         )
         self.journal.append(event)
+        try:
+            from app.observability.projection_store import get_projection_store
+            get_projection_store().append(event)
+        except Exception:
+            # JSONL remains the audit fallback if the query store is unavailable.
+            pass
         self._record_metrics(event)
         self._emitting.busy = True
         try:
