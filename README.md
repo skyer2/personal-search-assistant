@@ -65,7 +65,7 @@ Query → single agent + search tool → Answer
 已有 3.12 与 Node 的开发机：
 
 ```bash
-cp .env.example .env          # 填写 OPENAI_* 与 TAVILY_API_KEY
+cp .env.example .env          # 填写 OPENAI_* 与搜索 Provider 配置
 pip install -r requirements.txt
 uvicorn app.api.server:app --reload --app-dir . --host 0.0.0.0 --port 8000
 cd frontend && pnpm install && pnpm dev

@@ -12,11 +12,29 @@ from typing import Any, Literal
 from dotenv import load_dotenv
 from tavily import TavilyClient
 
+from app.tools.bocha_provider import BochaSearchProvider
+
 load_dotenv()
 
 _client: TavilyClient | None = None
 _browsecomp_retriever: Any = None
 _browsecomp_database_path = ""
+
+
+def _configured_provider() -> str:
+    provider = os.getenv("SEARCH_PROVIDER", "tavily").strip().lower()
+    if provider not in {"tavily", "bocha"}:
+        raise RuntimeError(f"Unsupported SEARCH_PROVIDER: {provider}")
+    return provider
+
+
+def _search_provider() -> tuple[Any, float]:
+    provider = _configured_provider()
+    if provider == "bocha":
+        timeout = float(os.getenv("BOCHA_TIMEOUT_SEC", os.getenv("TAVILY_TIMEOUT_SEC", "20")))
+        return BochaSearchProvider(), timeout
+    timeout = float(os.getenv("TAVILY_TIMEOUT_SEC", "20"))
+    return get_tavily_client(), timeout
 
 
 def get_tavily_client() -> TavilyClient:
@@ -54,12 +72,12 @@ def search_internet(
         return search_fixture(query, max_results, include_raw_content)
 
     # Soft online timeout：宁可 miss 一个源，也不要把整个 Worker 拖成 straggler
-    timeout = float(os.getenv("TAVILY_TIMEOUT_SEC", "20"))
+    provider, timeout = _search_provider()
     try:
         from app.tools.retrieval_cache import cached_call, search_cache_key
 
         def _call() -> dict[str, Any]:
-            return get_tavily_client().search(
+            return provider.search(
                 query=query,
                 topic=topic,
                 max_results=max_results,
@@ -73,7 +91,7 @@ def search_internet(
             producer=_call,
         )
     except Exception:
-        return get_tavily_client().search(
+        return provider.search(
             query=query,
             topic=topic,
             max_results=max_results,

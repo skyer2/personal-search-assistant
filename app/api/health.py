@@ -56,7 +56,9 @@ async def _check_llm(timeout: float = 8.0) -> DependencyStatus:
 
 
 def _check_tavily() -> DependencyStatus:
-    return _status_from_bool(bool(os.getenv("TAVILY_API_KEY")))
+    provider = (os.getenv("SEARCH_PROVIDER") or "tavily").strip().lower()
+    key_name = "BOCHA_API_KEY" if provider == "bocha" else "TAVILY_API_KEY"
+    return _status_from_bool(bool(os.getenv(key_name)))
 
 
 def _check_langfuse() -> DependencyStatus:
