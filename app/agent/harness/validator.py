@@ -110,6 +110,7 @@ class ResultValidator:
         session_dir: Path,
         citation_manager: Optional["CitationManager"] = None,
         min_citation_coverage: float = 0.2,
+        deliverable_dir: Path | None = None,
     ) -> ValidationOutcome:
         intent = state.intent
         content = state.final_content or ""
@@ -126,18 +127,22 @@ class ResultValidator:
                 materialize_requested_files,
             )
 
+            deliverable_root = Path(deliverable_dir) if deliverable_dir else Path(session_dir)
             materialize_requested_files(
-                session_dir,
+                deliverable_root,
                 deliverable=intent.deliverable,
                 content=content_from_loop_state(state) or content,
                 query=intent.raw_query,
             )
-            md_files = list_markdown_files(session_dir, include_internal=False)
+            md_files = list_markdown_files(deliverable_root, include_internal=False)
             if not md_files:
                 return ValidationOutcome(False, "no_file_generated", "error")
 
         if intent and intent.deliverable == "pdf":
-            pdf_files = list_pdf_files(session_dir, include_internal=False)
+            pdf_files = list_pdf_files(
+                (Path(deliverable_dir) if deliverable_dir else Path(session_dir)),
+                include_internal=False,
+            )
             if not pdf_files:
                 return ValidationOutcome(False, "no_file_generated", "error")
 

@@ -367,13 +367,14 @@ class ResearchGraphRunner:
             state.numeric_citation_coverage = float(
                 metrics.get("numeric_citation_coverage") or 0.0
             )
-            citation_manager.save_evidence_json(ctx.session_dir, run_id=session.run_id)
+            citation_manager.save_evidence_json(ctx.run_dir, run_id=session.run_id)
 
         finalize_outcome = self.harness.validator.validate_finalize(
             state,
             ctx.session_dir,
             citation_manager=citation_manager,
             min_citation_coverage=self.harness.harness_config.citations_min_coverage_rate,
+            deliverable_dir=ctx.deliverable_dir,
         )
         await self.harness._phase_validate(
             state,
@@ -391,6 +392,7 @@ class ResearchGraphRunner:
             ctx.session_dir,
             success=ok,
             started_at=ctx.run_started,
+            deliverable_dir=ctx.deliverable_dir,
         )
         session.result = result
         return result
@@ -1658,12 +1660,13 @@ class ResearchGraphRunner:
             state.numeric_citation_coverage = float(
                 metrics.get("numeric_citation_coverage") or 0.0
             )
-            citation_manager.save_evidence_json(ctx.session_dir, run_id=session.run_id)
+            citation_manager.save_evidence_json(ctx.run_dir, run_id=session.run_id)
         outcome = self.harness.validator.validate_finalize(
             state,
             ctx.session_dir,
             citation_manager=citation_manager,
             min_citation_coverage=self.harness.harness_config.citations_min_coverage_rate,
+            deliverable_dir=ctx.deliverable_dir,
         )
         await self.harness._phase_validate(
             state,
@@ -1778,6 +1781,7 @@ class ResearchGraphRunner:
             session.ctx.session_dir,
             success=success,
             started_at=session.ctx.run_started,
+            deliverable_dir=session.ctx.deliverable_dir,
         )
         session.result = result
         return {
@@ -1817,6 +1821,7 @@ class ResearchGraphRunner:
             session.ctx.session_dir,
             success=False,
             started_at=session.ctx.run_started,
+            deliverable_dir=session.ctx.deliverable_dir,
         )
         session.result = result
         return {

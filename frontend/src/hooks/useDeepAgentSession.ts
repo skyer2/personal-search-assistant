@@ -4,6 +4,7 @@ import {
   cancelTask,
   fetchRunEvents,
   fetchSessionBootstrap,
+  listRunArtifacts,
   listSessionArtifacts,
   resumeHitl,
   startTask,
@@ -184,7 +185,11 @@ export function useDeepAgentSession() {
   }, [resetProjection]);
 
   const refreshFiles = useCallback(async () => {
-    const response = await listSessionArtifacts(threadId);
+    // Run 隔离：Files 面板默认只展示当前 Run 的交付物，不再混入 Session 历史
+    const currentRunId = currentRunIdRef.current;
+    const response = currentRunId
+      ? await listRunArtifacts(currentRunId).catch(() => listSessionArtifacts(threadId))
+      : await listSessionArtifacts(threadId);
     if (response.error) {
       if (response.error.includes("拒绝访问")) {
         setSessionPath("");
@@ -306,6 +311,14 @@ export function useDeepAgentSession() {
           if (payload.type !== "monitor_event") {
             return;
           }
+          // Run 隔离：忽略其他 Run（含旧 Run 迟到的 terminal 事件）的实时消息
+          if (
+            payload.run_id &&
+            currentRunIdRef.current &&
+            payload.run_id !== currentRunIdRef.current
+          ) {
+            return;
+          }
 
           ingestEvents([payload]);
 
@@ -341,11 +354,12 @@ export function useDeepAgentSession() {
 
           if (payload.event === "task_result") {
             const finalResult = extractString(payload.data, "result");
+            const finalStatus = extractString(payload.data, "status") || "completed";
             setElapsedClock((previous) => stopElapsedClock(previous, Date.now()));
             setResult(finalResult || payload.message);
             setIsRunning(false);
             setIsCancelling(false);
-            setServerStatus("completed");
+            setServerStatus(finalStatus);
             setHitlPending(null);
             void refreshFiles().catch(() => undefined);
           }

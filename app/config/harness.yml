@@ -102,17 +102,17 @@ harness:
   budget:
     # Hard Safety Ceiling（确定性顶；Adaptive Effort 只能 clamp 到其下，不能抬高）
     # 详见 docs/HARD_CEILING_ADAPTIVE_EFFORT.md
-    max_total_tokens: 100000
-    max_tool_calls: 40
-    max_step_tool_calls: 8
-    max_run_sec: 600
+    max_total_tokens: 180000
+    max_tool_calls: 120
+    max_step_tool_calls: 16
+    max_run_sec: 900
     # 留给 Synthesis 的墙钟储备（秒）；Research 不得吃掉
-    synthesis_reserve_sec: 210
+    synthesis_reserve_sec: 120
     max_replan_count: 2
-    max_plan_steps: 8
+    max_plan_steps: 10
     # Invocation-level caps（Research 不可吃掉 Synthesis reserve）
-    max_llm_calls_per_run: 30
-    max_llm_calls_per_worker: 8
+    max_llm_calls_per_run: 45
+    max_llm_calls_per_worker: 10
 
   # Adaptive Effort：ComplexityEstimator 根据 Research Brief 提出软配额，再与 budget 硬顶 min()
   # 不在此写死 soft 数字；实现见 app/research/planning/effort.py
@@ -126,8 +126,8 @@ harness:
       web: true
       file: true
     agent:
-      max_tool_calls: 40
-      max_research_tasks: 5
+      max_tool_calls: 120
+      max_research_tasks: 6
       max_replan: 2
       parallel: true
       progress_eval: true
@@ -148,8 +148,8 @@ harness:
       file: true
     experiment:
       agent:
-        max_tool_calls: 40
-        max_research_tasks: 5
+        max_tool_calls: 120
+        max_research_tasks: 6
         max_replan: 2
         parallel: true
         progress_eval: true

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,16 @@ class RunStore:
         self.db.close()
 
     def ensure_session(self, session_id: str) -> SessionRecord:
+        return self.ensure_session_owned(session_id)
+
+    def ensure_session_owned(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str = "local",
+        user_id: str = "me",
+        project_id: str = "Inbox",
+    ) -> SessionRecord:
         now = utc_now()
         existing = self.get_session(session_id)
         if existing:
@@ -57,10 +68,21 @@ class RunStore:
             )
             return SessionRecord(session_id=session_id, created_at=existing.created_at, updated_at=now)
         self.db.execute(
-            "INSERT INTO sessions(session_id, created_at, updated_at) VALUES (?,?,?)",
-            (session_id, now, now),
+            """
+            INSERT INTO sessions(
+                session_id, created_at, updated_at, tenant_id, user_id, project_id, archived
+            ) VALUES (?,?,?,?,?,?,0)
+            """,
+            (session_id, now, now, tenant_id, user_id, project_id),
         )
-        return SessionRecord(session_id=session_id, created_at=now, updated_at=now)
+        return SessionRecord(
+            session_id=session_id,
+            created_at=now,
+            updated_at=now,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            project_id=project_id,
+        )
 
     def get_session(self, session_id: str) -> SessionRecord | None:
         row = self.db.query_one("SELECT * FROM sessions WHERE session_id=?", (session_id,))
@@ -74,8 +96,16 @@ class RunStore:
         query: str,
         mode: str = "agent",
         session_workspace: str = "",
+        tenant_id: str = "local",
+        user_id: str = "me",
+        project_id: str = "Inbox",
     ) -> RunRecord:
-        self.ensure_session(session_id)
+        self.ensure_session_owned(
+            session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            project_id=project_id,
+        )
         now = utc_now()
         workspace = session_workspace or f"session_{session_id}"
         self.db.execute(
@@ -83,10 +113,22 @@ class RunStore:
             INSERT INTO runs(
                 run_id, session_id, query, status, mode, created_at,
                 session_workspace, last_event_seq, paused_total_ms,
-                tool_calls, assistant_calls, errors, final_result, error
-            ) VALUES (?,?,?,?,?,?,?,0,0,0,0,0,'','')
+                tool_calls, assistant_calls, errors, final_result, error,
+                tenant_id, user_id, project_id
+            ) VALUES (?,?,?,?,?,?,?,0,0,0,0,0,'','',?,?,?)
             """,
-            (run_id, session_id, query, STATUS_QUEUED, mode, now, workspace),
+            (
+                run_id,
+                session_id,
+                query,
+                STATUS_QUEUED,
+                mode,
+                now,
+                workspace,
+                tenant_id,
+                user_id,
+                project_id,
+            ),
         )
         record = self.get_run(run_id)
         assert record is not None
@@ -95,6 +137,107 @@ class RunStore:
     def get_run(self, run_id: str) -> RunRecord | None:
         row = self.db.query_one("SELECT * FROM runs WHERE run_id=?", (run_id,))
         return self.db.run_from_row(row) if row else None
+
+    def get_run_scoped(self, run_id: str, tenant_id: str) -> RunRecord | None:
+        """租户边界：即使知道 run_id，跨租户也视为不可见（403 由路由层判定）。"""
+        run = self.get_run(run_id)
+        if run is None or run.tenant_id != tenant_id:
+            return None
+        return run
+
+    def list_sessions(
+        self,
+        *,
+        tenant_id: str = "local",
+        include_archived: bool = False,
+    ) -> list[SessionRecord]:
+        sql = "SELECT * FROM sessions WHERE tenant_id=?"
+        if not include_archived:
+            sql += " AND COALESCE(archived, 0)=0"
+        sql += " ORDER BY updated_at DESC"
+        rows = self.db.query(sql, (tenant_id,))
+        return [self.db.session_from_row(row) for row in rows]
+
+    def set_session_archived(
+        self,
+        session_id: str,
+        *,
+        archived: bool,
+        tenant_id: str | None = None,
+    ) -> SessionRecord | None:
+        session = self.get_session(session_id)
+        if session is None:
+            return None
+        if tenant_id is not None and session.tenant_id != tenant_id:
+            return None
+        self.db.execute(
+            "UPDATE sessions SET archived=?, updated_at=? WHERE session_id=?",
+            (1 if archived else 0, utc_now(), session_id),
+        )
+        return self.get_session(session_id)
+
+    def delete_session(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str | None = None,
+        output_root: Path | None = None,
+        updated_root: Path | None = None,
+        traces_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """Tombstone + 级联清理：runs / uploads / 工作区 / trace 全部按 Session 删除。"""
+        session = self.get_session(session_id)
+        if session is None:
+            return {"deleted": False, "reason": "not_found"}
+        if tenant_id is not None and session.tenant_id != tenant_id:
+            return {"deleted": False, "reason": "forbidden"}
+        runs = self.list_runs(session_id)
+        self.db.execute("DELETE FROM runs WHERE session_id=?", (session_id,))
+        self.db.execute("DELETE FROM uploads WHERE session_id=?", (session_id,))
+        self.db.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
+        removed_paths: list[str] = []
+        output = output_root or (APP_ROOT / "output")
+        for root in (
+            output / f"session_{session_id}",
+            (updated_root or (APP_ROOT / "updated")) / f"session_{session_id}",
+            (traces_root or (APP_ROOT / "logs" / "traces")) / f"{session_id}.jsonl",
+        ):
+            if root.exists():
+                shutil.rmtree(root, ignore_errors=True) if root.is_dir() else root.unlink(missing_ok=True)
+                removed_paths.append(str(root))
+        return {
+            "deleted": True,
+            "session_id": session_id,
+            "runs_deleted": len(runs),
+            "paths_removed": removed_paths,
+        }
+
+    def delete_run(
+        self,
+        run_id: str,
+        *,
+        tenant_id: str | None = None,
+        output_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """删除单次 Run 的 Run-owned 数据（DB 行 + runs/{run_id}/ 目录）。"""
+        run = self.get_run(run_id)
+        if run is None:
+            return {"deleted": False, "reason": "not_found"}
+        if tenant_id is not None and run.tenant_id != tenant_id:
+            return {"deleted": False, "reason": "forbidden"}
+        self.db.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
+        output = output_root or (APP_ROOT / "output")
+        run_dir = output / f"session_{run.session_id}" / "runs" / run_id
+        removed = False
+        if run_dir.exists():
+            shutil.rmtree(run_dir, ignore_errors=True)
+            removed = True
+        return {
+            "deleted": True,
+            "run_id": run_id,
+            "session_id": run.session_id,
+            "run_dir_removed": removed,
+        }
 
     def list_runs(self, session_id: str) -> list[RunRecord]:
         rows = self.db.query(

@@ -55,6 +55,20 @@ CREATE TABLE IF NOT EXISTS uploads (
 CREATE INDEX IF NOT EXISTS idx_uploads_session ON uploads(session_id, uploaded_at);
 """
 
+_MIGRATIONS = {
+    "sessions": {
+        "tenant_id": "ALTER TABLE sessions ADD COLUMN tenant_id TEXT DEFAULT 'local'",
+        "user_id": "ALTER TABLE sessions ADD COLUMN user_id TEXT DEFAULT 'me'",
+        "project_id": "ALTER TABLE sessions ADD COLUMN project_id TEXT DEFAULT 'Inbox'",
+        "archived": "ALTER TABLE sessions ADD COLUMN archived INTEGER DEFAULT 0",
+    },
+    "runs": {
+        "tenant_id": "ALTER TABLE runs ADD COLUMN tenant_id TEXT DEFAULT 'local'",
+        "user_id": "ALTER TABLE runs ADD COLUMN user_id TEXT DEFAULT 'me'",
+        "project_id": "ALTER TABLE runs ADD COLUMN project_id TEXT DEFAULT 'Inbox'",
+    },
+}
+
 
 class SqliteRunStore:
     def __init__(self, path: Path):
@@ -66,6 +80,18 @@ class SqliteRunStore:
         with self._conn:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """向前兼容：旧库缺列时补齐（tenant / archive 所有权字段）。"""
+        for table, columns in _MIGRATIONS.items():
+            existing = {
+                row["name"]
+                for row in self._conn.execute(f"PRAGMA table_info({table})")
+            }
+            for column, ddl in columns.items():
+                if column not in existing:
+                    self._conn.execute(ddl)
 
     def close(self) -> None:
         with self._lock:
@@ -91,6 +117,10 @@ class SqliteRunStore:
             session_id=row["session_id"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            tenant_id=str(row["tenant_id"] or "local"),
+            user_id=str(row["user_id"] or "me"),
+            project_id=str(row["project_id"] or "Inbox"),
+            archived=bool(row["archived"]),
         )
 
     @staticmethod
@@ -124,6 +154,9 @@ class SqliteRunStore:
             tool_calls=int(row["tool_calls"] or 0),
             assistant_calls=int(row["assistant_calls"] or 0),
             errors=int(row["errors"] or 0),
+            tenant_id=str(row["tenant_id"] or "local"),
+            user_id=str(row["user_id"] or "me"),
+            project_id=str(row["project_id"] or "Inbox"),
         )
 
     @staticmethod

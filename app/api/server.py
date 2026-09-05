@@ -68,6 +68,25 @@ async def lifespan(_app: FastAPI):
     recovered = store.recover_stale_runs(set())
     if recovered:
         print(f"[Server] marked {len(recovered)} run(s) recoverable after restart")
+    # P2: durable queue 模式启动 worker；单机默认直连执行保持兼容
+    try:
+        from app.run_queue.service import run_queue_enabled
+        from app.run_queue.worker import start_run_queue_worker
+
+        if run_queue_enabled():
+            await start_run_queue_worker()
+            print("[Server] durable run queue worker started")
+    except Exception as exc:
+        print(f"[Server] run queue worker skipped: {exc}")
+    # P1: 启动时按保留策略清理 Run 中间数据（deliverables / summary 保留）
+    try:
+        from app.run_store.retention import apply_retention
+
+        result = apply_retention(store)
+        if result.get("purged_runs"):
+            print(f"[Server] retention purged {result['purged_runs']} run(s)")
+    except Exception as exc:
+        print(f"[Server] retention skipped: {exc}")
     print(f"[Server] WebSocket Manager bound to loop: {id(loop)}")
     yield
 
@@ -180,9 +199,33 @@ async def run_task(request: TaskRequest):
         query=request.query,
         mode=request.mode or "agent",
         session_workspace=f"session_{thread_id}",
+        tenant_id=request.tenant_id or "local",
+        user_id=request.user_id or "me",
+        project_id=request.project_id or "Inbox",
     )
 
     # 同一个 thread_id 只保留一个活跃任务，新任务会先取消旧任务，避免并发写同一会话目录
+    # P2 durable queue 模式：API 只入队，Worker 独立消费（可拆进程部署）
+    try:
+        from app.run_queue.service import get_run_queue, run_queue_enabled
+        from app.run_queue.worker import start_run_queue_worker
+
+        if run_queue_enabled():
+            queue = get_run_queue()
+            queue.enqueue(
+                job_id=run_id,
+                session_id=thread_id,
+                query=request.query,
+                mode=request.mode or "agent",
+                user_id=request.user_id or "me",
+                tenant_id=request.tenant_id or "local",
+                project_id=request.project_id or "Inbox",
+            )
+            await start_run_queue_worker()
+            return {"status": "queued", "thread_id": thread_id, "run_id": run_id}
+    except Exception as exc:
+        print(f"[Server] queue enqueue failed, fallback to direct: {exc}")
+
     old_task = active_tasks.get(thread_id)
     if old_task and not old_task.done():
         if previous and previous.run_id != run_id:

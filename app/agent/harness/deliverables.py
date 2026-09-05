@@ -170,9 +170,8 @@ def persist_markdown_if_missing(
     intended = root / f"{stem}.md"
     if intended.exists() and not overwrite:
         return intended
-    existing = list_markdown_files(root, include_internal=False)
-    if existing and not overwrite:
-        return existing[0]
+    # Run 隔离不变量：绝不回退复用目录里"随便一个已有 Markdown"。
+    # 旧行为（existing[0]）会把 Run1 的报告当成 Run2 的交付物，直接导致 PDF 串题。
     text = usable_report_text(content)
     if not text:
         return intended if intended.exists() else None

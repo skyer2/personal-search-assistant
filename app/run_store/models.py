@@ -53,6 +53,10 @@ class SessionRecord:
     session_id: str
     created_at: str
     updated_at: str
+    tenant_id: str = "local"
+    user_id: str = "me"
+    project_id: str = "Inbox"
+    archived: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -81,6 +85,9 @@ class RunRecord:
     tool_calls: int = 0
     assistant_calls: int = 0
     errors: int = 0
+    tenant_id: str = "local"
+    user_id: str = "me"
+    project_id: str = "Inbox"
 
     def elapsed_ms(self, now_iso: str | None = None) -> int:
         if not self.started_at:

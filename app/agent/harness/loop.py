@@ -146,6 +146,9 @@ class HarnessRunContext:
     search_mode: str = "agent"
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     context_built: bool = False
+    run_dir: Path | None = None
+    artifact_dir: Path | None = None
+    deliverable_dir: Path | None = None
 
 
 class AgentHarness:
@@ -228,18 +231,25 @@ class AgentHarness:
             )
         return cached, new_key
 
-    def _graph_thread_id(self, session_id: str, step_index: int, *, parallel: bool = False) -> str:
+    def _graph_thread_id(
+        self,
+        session_id: str,
+        step_index: int,
+        *,
+        parallel: bool = False,
+        run_id: str = "",
+    ) -> str:
         if not self.harness_config.context_fresh_thread_per_step:
             return session_id
         if parallel:
-            return parallel_graph_thread_id(session_id, step_index)
-        return step_graph_thread_id(session_id, step_index)
+            return parallel_graph_thread_id(session_id, step_index, run_id)
+        return step_graph_thread_id(session_id, step_index, run_id)
 
     def _refresh_working_memory(
         self,
         state: LoopState,
         citation_manager: Optional[CitationManager],
-        session_dir: Optional[Path] = None,
+        run_dir: Optional[Path] = None,
         task_query: str = "",
     ) -> None:
         sources = citation_manager.sources if citation_manager is not None else []
@@ -262,22 +272,23 @@ class AgentHarness:
                 step_results=state.step_results,
                 evidence_sources=sources,
             )
-            if session_dir is not None:
+            if run_dir is not None:
                 try:
-                    write_working_notes_file(session_dir, state.working_notes)
+                    write_working_notes_file(run_dir, state.working_notes)
                 except Exception as exc:
                     print(f"[Context] working_notes write skipped: {exc}")
         if citation_manager is not None and self.harness_config.context_evidence_lookup_enabled:
             state.evidence_lookup_block = citation_manager.build_lookup_block()
             state.evidence_lookup = citation_manager.to_dict_list()
-            if session_dir is not None:
+            if run_dir is not None:
                 try:
-                    citation_manager.save_evidence_json(session_dir, run_id=state.run_id or None)
+                    citation_manager.save_evidence_json(run_dir, run_id=state.run_id or None)
                 except Exception as exc:
                     print(f"[Context] evidence.json write skipped: {exc}")
         try:
-            get_artifact_store().persist(session_dir)
-            get_evidence_store().persist(session_dir)
+            # Store 自带 run-scoped 目录；persist(None) 落回构造目录，禁止写 Session 根
+            get_artifact_store().persist(None)
+            get_evidence_store().persist(None)
             state.obs_artifacts_stored = len(get_artifact_store())
         except Exception as exc:
             print(f"[Context] artifact/evidence persist skipped: {exc}")
@@ -363,11 +374,31 @@ class AgentHarness:
         session_dir, relative_session_dir, uploaded_prompt, tokens = (
             self._prepare_session(session_id)
         )
+        # P1 FollowUpResolver：跨 Run 上下文只能通过显式 RunSummary 引用流动
+        try:
+            from app.research.followup import resolve_followup
+
+            followup = resolve_followup(
+                task_query,
+                session_dir,
+                current_run_id=str(obs_ctx.run_id),
+            )
+            state.metadata["followup_context"] = followup.to_dict()
+        except Exception as exc:
+            logger.debug("followup resolve skipped: %s", exc)
+        # Run 隔离：可变执行数据全部落 runs/{run_id}/，Session 根只放共享上传资产。
+        run_dir = session_dir / "runs" / str(obs_ctx.run_id)
+        state_dir = run_dir / "state"
+        artifact_dir = run_dir / "artifacts"
+        evidence_dir = run_dir / "evidence"
+        deliverable_dir = run_dir / "deliverables"
+        for directory in (state_dir, artifact_dir, evidence_dir, deliverable_dir):
+            directory.mkdir(parents=True, exist_ok=True)
         tracer = HarnessTracer(session_id=session_id, task_query=task_query)
         tracer.start()
         self._current_tracer = tracer
         citation_manager = CitationManager() if self.harness_config.citations_enabled else None
-        checkpoint_store = StepCheckpointStore(session_dir)
+        checkpoint_store = StepCheckpointStore(state_dir)
         self._run_checkpoint_store = checkpoint_store
         self._run_citation_manager = citation_manager
         idempotency = IdempotencyRegistry()
@@ -381,10 +412,10 @@ class AgentHarness:
         )
         identity_token = set_memory_identity(identity)
         policy_token = None
-        artifact_store = ArtifactStore(session_dir)
-        artifact_store.load(session_dir)
-        evidence_store = EvidenceStore(session_dir)
-        evidence_store.load(session_dir)
+        artifact_store = ArtifactStore(artifact_dir)
+        artifact_store.load(artifact_dir)
+        evidence_store = EvidenceStore(evidence_dir)
+        evidence_store.load(evidence_dir)
         set_artifact_store(artifact_store)
         set_evidence_store(evidence_store)
         state.memory_user_id = identity.user_id
@@ -437,6 +468,9 @@ class AgentHarness:
             step_index=step_index,
             search_mode=mode or "agent",
             original_query=task_query,
+            run_dir=run_dir,
+            artifact_dir=artifact_dir,
+            deliverable_dir=deliverable_dir,
         )
 
     def _teardown_run(self, ctx: HarnessRunContext) -> None:
@@ -688,13 +722,18 @@ class AgentHarness:
             state.numeric_citation_coverage = float(
                 metrics.get("numeric_citation_coverage") or 0.0
             )
-            citation_manager.save_evidence_json(session_dir, run_id=state.run_id or None)
+        if state.run_id:
+            citation_manager.save_evidence_json(
+                session_dir / "runs" / str(state.run_id),
+                run_id=state.run_id,
+            )
 
         finalize_outcome = self.validator.validate_finalize(
             state,
             session_dir,
             citation_manager=citation_manager,
             min_citation_coverage=self.harness_config.citations_min_coverage_rate,
+            deliverable_dir=ctx.deliverable_dir,
         )
         state = await self._phase_validate(
             state,
@@ -712,6 +751,7 @@ class AgentHarness:
             session_dir,
             success=success,
             started_at=run_started,
+            deliverable_dir=ctx.deliverable_dir,
         )
 
 
@@ -882,7 +922,9 @@ class AgentHarness:
                 session_dir,
                 citation_manager,
                 timeout_sec=timeout_sec,
-                run_session_id=self._graph_thread_id(session_id, step_index),
+                run_session_id=self._graph_thread_id(
+                    session_id, step_index, run_id=str(state.run_id or "")
+                ),
                 json_only=json_only,
             )
             if passed:
@@ -890,7 +932,10 @@ class AgentHarness:
                 state.final_content = result.compressed_content or result.content
                 await self._maybe_remember_step(state, step, result)
                 self._refresh_working_memory(
-                    state, citation_manager, session_dir, task_query
+                    state,
+                    citation_manager,
+                    session_dir / "runs" / str(state.run_id or "") if state.run_id else session_dir,
+                    task_query,
                 )
                 if idempotency is not None:
                     idempotency.register(idem_key, result)
@@ -1012,7 +1057,10 @@ class AgentHarness:
                         timeout_sec=timeout_sec,
                         context_builder=ContextBuilder.from_harness_config(),
                         run_session_id=self._graph_thread_id(
-                            session_id, idx, parallel=True
+                            session_id,
+                            idx,
+                            parallel=True,
+                            run_id=str(state.run_id or ""),
                         ),
                     )
             except Exception as exc:
@@ -1087,7 +1135,12 @@ class AgentHarness:
         if ordered:
             last_result = ordered[-1][1]
             state.final_content = last_result.compressed_content or last_result.content
-        self._refresh_working_memory(state, citation_manager, session_dir, task_query)
+        self._refresh_working_memory(
+            state,
+            citation_manager,
+            session_dir / "runs" / str(state.run_id or "") if state.run_id else session_dir,
+            task_query,
+        )
 
         if all_passed and checkpoint_store is not None:
             next_index = batch_indices[-1] + 1
@@ -2001,6 +2054,22 @@ class AgentHarness:
                 trust_filtered=recalled_result.trust_filtered,
             )
 
+        # 显式跨 Run 上下文：注入相关历史 RunSummary（不含 raw artifact / 聊天历史）
+        followup_ctx = state.metadata.get("followup_context") if isinstance(state.metadata, dict) else None
+        if isinstance(followup_ctx, dict) and followup_ctx.get("context_block"):
+            block = str(followup_ctx["context_block"])
+            state.memory_facts = [block] + state.memory_facts
+            state.obs_memory_recalled_count = len(state.memory_facts)
+            monitor.report_phase(
+                "memory",
+                "done",
+                session_id=state.session_id,
+                count=1,
+                source="followup_resolver",
+                followup_type=str(followup_ctx.get("followup_type") or ""),
+                selected_runs=list(followup_ctx.get("selected_run_ids") or []),
+            )
+
         duration = int((time.perf_counter() - started) * 1000)
         self._report_phase(
             Phase.BUILD_CONTEXT,
@@ -2809,6 +2878,7 @@ class AgentHarness:
         session_dir: Path,
         success: bool,
         started_at: float,
+        deliverable_dir: Path | None = None,
     ) -> HarnessResult:
         phase_started = time.perf_counter()
         self._report_phase(Phase.FINALIZE, "start", state=state)
@@ -2823,8 +2893,50 @@ class AgentHarness:
             usable_report_text,
         )
 
-        written = ensure_requested_deliverables(session_dir, state)
-        artifacts = session_artifact_names(session_dir)
+        # Run 隔离：交付物只写/只读当前 runs/{run_id}/deliverables
+        deliverable_root = Path(deliverable_dir) if deliverable_dir else Path(session_dir)
+        written = ensure_requested_deliverables(deliverable_root, state)
+        artifacts = session_artifact_names(deliverable_root)
+        # P1 RunSummary：结构化结论落盘，供后续 Run 显式继承
+        try:
+            from app.observability.events import utc_now
+            from app.research.run_summary import RunSummary, save_run_summary
+
+            brief = getattr(state, "research_brief_obj", None)
+            entities = [str(x) for x in (getattr(brief, "entities", None) or [])][:12]
+            conclusions = [
+                line.lstrip("# ").strip()
+                for line in str(state.final_content or "").splitlines()
+                if line.strip().startswith(("-", "*", "•")) or line.startswith("## ")
+            ][:8]
+            gaps = []
+            if isinstance(state.metadata, dict):
+                assessment = state.metadata.get("progress_assessment") or {}
+                if isinstance(assessment, dict):
+                    gaps = [str(x) for x in assessment.get("gaps") or []][:5]
+            summary = RunSummary(
+                run_id=str(state.run_id or ""),
+                session_id=str(state.session_id or ""),
+                query=str(getattr(state.intent, "raw_query", "") or ""),
+                intent_summary=str(getattr(state.intent, "summary", "") or "")[:240],
+                entities=entities,
+                conclusions=conclusions,
+                key_evidence_refs=[
+                    str(getattr(src, "source_id", "") or "")
+                    for src in (self._run_citation_manager.sources if self._run_citation_manager else [])
+                ][:12],
+                artifact_refs=[str(name) for name in artifacts][:8],
+                unresolved_questions=gaps,
+                status="completed" if success else "partial",
+                created_at=utc_now(),
+            )
+            if state.run_id:
+                save_run_summary(
+                    Path(session_dir) / "runs" / str(state.run_id),
+                    summary,
+                )
+        except Exception as exc:
+            logger.debug("run summary save skipped: %s", exc)
         abort_reason = str(state.abort_reason or "")
         if abort_reason:
             pdf_path = written.get("pdf")
@@ -2920,7 +3032,13 @@ class AgentHarness:
             status=persist_status,
             error=state.abort_message or abort_reason,
         )
-        monitor.report_task_result(state.final_content)
+        monitor.report_task_result(
+            state.final_content,
+            status=persist_status if persist_status != "success" else "completed",
+            run_id=str(state.run_id or ""),
+            termination_reason=abort_reason,
+            termination_stage="research" if abort_reason else "finalize",
+        )
 
         duration = int((time.perf_counter() - phase_started) * 1000)
         status = "success" if success else "partial"

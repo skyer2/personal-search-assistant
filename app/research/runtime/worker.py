@@ -347,7 +347,7 @@ class LangChainWorkerRuntime:
                     self.harness._refresh_working_memory(
                         session.state,
                         session.ctx.citation_manager,
-                        session.ctx.session_dir,
+                        session.ctx.run_dir,
                         session.ctx.task_query,
                     )
                     session.state.metadata.pop("graph_step_gated", None)

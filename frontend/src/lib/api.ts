@@ -107,6 +107,10 @@ export async function listSessionArtifacts(sessionId: string): Promise<FileListR
   return requestJson<FileListResponse>(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts`));
 }
 
+export async function listRunArtifacts(runId: string): Promise<FileListResponse> {
+  return requestJson<FileListResponse>(apiUrl(`/api/runs/${encodeURIComponent(runId)}/artifacts`));
+}
+
 export async function fetchRunEvents(
   runId: string,
   options?: { afterSeq?: number; beforeSeq?: number; limit?: number }

@@ -202,9 +202,29 @@ class ToolMonitor:
             {"assistant_name": assistant_name, "args": args},
         )
 
-    def report_task_result(self, result: str) -> None:
-        """报告任务最终结果"""
-        self._emit("task_result", "任务执行完成", {"result": result})
+    def report_task_result(
+        self,
+        result: str,
+        *,
+        status: str = "completed",
+        run_id: str = "",
+        termination_reason: str = "",
+        termination_stage: str = "",
+    ) -> None:
+        """报告任务最终结果（结构化终态，禁止 partial 冒充 completed）。"""
+        self._emit(
+            "task_result",
+            "任务执行完成" if status == "completed" else f"任务结束（{status}）",
+            {
+                "result": result,
+                "status": status,
+                "run_id": run_id,
+                "termination": {
+                    "reason": termination_reason,
+                    "stage": termination_stage,
+                },
+            },
+        )
 
     def report_task_cancelled(self) -> None:
         """报告任务已被用户取消"""

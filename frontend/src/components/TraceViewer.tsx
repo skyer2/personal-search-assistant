@@ -190,15 +190,24 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
       if (activeRun && activeRun !== selectedRunId) {
         setSelectedRunId(activeRun);
       }
-      const [jsonl, lfConfig, apiMeta] = await Promise.all([
+      const [jsonl, lfConfig, apiMetaResult] = await Promise.all([
         activeRun ? fetchRunTraceSummary(activeRun) : Promise.resolve({ summary: {}, total: 0, session_id: sessionId }),
         fetchLangfuseConfig().catch(() => ({
           enabled: false,
           host: "",
           ui_url: null
         })),
-        fetchApiMeta()
+        // Meta 是版本兼容提示，不是 Trace 渲染的硬依赖：404 时降级为 unknown
+        fetchApiMeta().catch(() => ({
+          git_sha: "unknown",
+          api_schema: "unknown",
+          event_schema: "unknown",
+          config_hash: "unknown",
+          started_at: "",
+          environment: "unknown"
+        }))
       ]);
+      const apiMeta = apiMetaResult;
       if (generation !== requestGeneration.current) return;
       const nextSummary: TraceSummary = "summary" in jsonl && jsonl.summary ? jsonl.summary : {};
       setSummary(nextSummary);

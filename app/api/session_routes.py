@@ -19,12 +19,114 @@ from app.observability.replay import (
     load_wire_events,
 )
 from app.run_store import get_run_store
-from app.run_store.files import list_output_files, resolve_output_file
+from app.run_store.files import list_output_files, list_run_output_files, resolve_output_file
 
 router = APIRouter()
 
 _APP_ROOT = Path(__file__).resolve().parents[1]
 _OUTPUT_DIR = _APP_ROOT / "output"
+_UPDATED_DIR = _APP_ROOT / "updated"
+_TRACES_DIR = _APP_ROOT / "logs" / "traces"
+
+
+@router.get("/api/sessions")
+async def list_sessions(
+    tenant_id: str | None = None,
+    include_archived: bool = False,
+):
+    """Session 列表（租户隔离；归档 Session 默认不参与）。"""
+    store = get_run_store()
+    sessions = store.list_sessions(
+        tenant_id=_tenant_of(tenant_id),
+        include_archived=include_archived,
+    )
+    return {
+        "tenant_id": _tenant_of(tenant_id),
+        "sessions": [item.to_dict() for item in sessions],
+    }
+
+
+@router.post("/api/sessions/{session_id}/archive")
+async def archive_session(session_id: str, tenant_id: str | None = None):
+    store = get_run_store()
+    updated = store.set_session_archived(
+        session_id,
+        archived=True,
+        tenant_id=_tenant_of(tenant_id),
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="session_not_found_or_forbidden")
+    return {"session_id": session_id, "archived": True}
+
+
+@router.post("/api/sessions/{session_id}/unarchive")
+async def unarchive_session(session_id: str, tenant_id: str | None = None):
+    store = get_run_store()
+    updated = store.set_session_archived(
+        session_id,
+        archived=False,
+        tenant_id=_tenant_of(tenant_id),
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="session_not_found_or_forbidden")
+    return {"session_id": session_id, "archived": False}
+
+
+@router.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str, tenant_id: str | None = None):
+    """删除 Session：tombstone + 级联清理 runs / uploads / 工作区 / trace。"""
+    store = get_run_store()
+    result = store.delete_session(
+        session_id,
+        tenant_id=_tenant_of(tenant_id),
+        output_root=_OUTPUT_DIR,
+        updated_root=_UPDATED_DIR,
+        traces_root=_TRACES_DIR,
+    )
+    if result.get("reason") == "forbidden":
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not result.get("deleted"):
+        raise HTTPException(status_code=404, detail="session_not_found")
+    return result
+
+
+@router.delete("/api/runs/{run_id}")
+async def delete_run(run_id: str, tenant_id: str | None = None):
+    """删除单次 Run 及其 Run-owned 数据。"""
+    store = get_run_store()
+    result = store.delete_run(
+        run_id,
+        tenant_id=_tenant_of(tenant_id),
+        output_root=_OUTPUT_DIR,
+    )
+    if result.get("reason") == "forbidden":
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not result.get("deleted"):
+        raise HTTPException(status_code=404, detail="run_not_found")
+    return result
+
+
+@router.post("/api/admin/retention/apply")
+async def apply_retention_policy(
+    intermediate_days: int = 7,
+    trace_days: int = 90,
+):
+    from app.run_store.retention import RetentionPolicy, apply_retention
+
+    result = apply_retention(
+        get_run_store(),
+        policy=RetentionPolicy(
+            intermediate_retention_days=max(0, intermediate_days),
+            trace_retention_days=max(0, trace_days),
+        ),
+        output_root=_OUTPUT_DIR,
+    )
+    return result
+
+
+def _tenant_of(requested: str | None) -> str:
+    # 单机版默认 local；企业部署替换为认证中间件注入的 tenant
+    return (requested or "local").strip() or "local"
 
 
 @router.get("/api/sessions/{session_id}/bootstrap")
@@ -254,5 +356,6 @@ async def list_run_artifacts(run_id: str):
     return {
         "run_id": run_id,
         "session_id": run.session_id,
-        "files": list_output_files(_OUTPUT_DIR, run.session_id),
+        # Run endpoint 必须 Run Scope：禁止借 session_id 列出整段 Session 历史
+        "files": list_run_output_files(_OUTPUT_DIR, run.session_id, run_id),
     }

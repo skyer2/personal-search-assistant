@@ -59,10 +59,17 @@ def test_ensure_pdf_from_markdown_and_rglob(tmp_path: Path):
     nested.mkdir()
     md = nested / "行业调研.md"
     md.write_text("# Agent 落地调研\n\nOpenAI Operator 已发布。\n", encoding="utf-8")
-    pdf = ensure_pdf_from_markdown(tmp_path)
+    # Run 隔离：目录里已有的旧 Markdown 不得被当作本次交付物复用
+    pdf = ensure_pdf_from_markdown(
+        tmp_path,
+        content="# 新一轮报告\n\n本次运行正文。",
+        filename_stem="新一轮报告",
+    )
     assert pdf is not None and pdf.exists()
     assert pdf.read_bytes()[:4] == b"%PDF"
     assert list_pdf_files(tmp_path)
+    assert pdf.parent == tmp_path
+    assert "新一轮报告" in pdf.name
 
 
 def test_abort_still_writes_partial_pdf(tmp_path: Path):

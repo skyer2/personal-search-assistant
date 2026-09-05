@@ -13,12 +13,20 @@ TOOL_RESULT_PLACEHOLDER = "[tool_result cleared: re-fetchable payload omitted]"
 BULKY_TOOL_RESULT_CHARS = 500
 
 
-def step_graph_thread_id(session_id: str, step_index: int) -> str:
-    """主 Agent 单步执行使用的 LangGraph thread_id。"""
+def step_graph_thread_id(session_id: str, step_index: int, run_id: str = "") -> str:
+    """主 Agent 单步执行使用的 LangGraph thread_id（Run 隔离）。
+
+    thread_id 必须包含 run_id：否则同一 Session 的 Run2 Step0 会命中
+    Run1 Step0 的全局 InMemorySaver checkpoint，直接污染 LLM 上下文。
+    """
+    if run_id:
+        return f"{session_id}:{run_id}:step:{step_index}"
     return f"{session_id}:step:{step_index}"
 
 
-def parallel_graph_thread_id(session_id: str, step_index: int) -> str:
+def parallel_graph_thread_id(session_id: str, step_index: int, run_id: str = "") -> str:
+    if run_id:
+        return f"{session_id}:{run_id}:parallel:{step_index}"
     return f"{session_id}:parallel:{step_index}"
 
 
