@@ -8,6 +8,7 @@ export type RunStatus =
   | "completed"
   | "failed"
   | "recoverable"
+  | "interrupted"
   | "partial";
 
 export function deriveRunStatus(input: {
@@ -43,7 +44,7 @@ export function deriveRunStatus(input: {
     return "completed";
   }
   if (input.events.some((event) => event.event === "task_cancelled") || input.serverStatus === "interrupted") {
-    return "idle";
+    return "interrupted";
   }
   return "idle";
 }
@@ -65,6 +66,7 @@ export function runStatusLabel(status: RunStatus): string {
     completed: "已完成",
     failed: "失败",
     recoverable: "可恢复",
+    interrupted: "已中断",
     partial: "部分完成"
   };
   return labels[status];

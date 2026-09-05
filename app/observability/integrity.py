@@ -18,7 +18,7 @@ def check_trace_integrity(
     issues: list[str] = []
     counts: dict[str, int] = {}
     seq_values: list[int] = []
-    is_completed = run_status in {"success", "completed", "partial", "ok", "done"}
+    is_terminal = run_status in {"success", "completed", "partial", "failed", "interrupted", "ok", "done"}
     is_agent_mode = False
 
     for event in events:
@@ -52,11 +52,17 @@ def check_trace_integrity(
         if plan_count == 0:
             issues.append("missing_plan_event")
 
-    if is_completed and is_agent_mode:
+    if is_terminal and run_started == 0:
+        issues.append("missing_run_started_event")
+
+    if is_terminal and is_agent_mode:
+        if worker_done == 0:
+            issues.append("missing_worker_terminal_event")
         if progress_count == 0:
             issues.append("missing_progress_event")
-        if synthesis_count == 0 and plan_count > 0:
-            issues.append("missing_synthesis_event")
+        termination_count = counts.get("termination.reason", 0) + counts.get("run.failed", 0)
+        if synthesis_count == 0 and termination_count == 0:
+            issues.append("missing_synthesis_or_termination_event")
         if quality_count == 0:
             issues.append("missing_quality_event")
 

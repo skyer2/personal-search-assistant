@@ -3,6 +3,7 @@ import { Alert, Button, Card, Space, Tabs, Tag, Typography } from "antd";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchRunCitations,
+  fetchApiMeta,
   fetchLangfuseConfig,
   fetchRunEvents,
   fetchRunLineage,
@@ -137,6 +138,8 @@ function SpanTree({
 }
 
 function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
+  const [loadState, setLoadState] = useState<"not_loaded" | "loading" | "loaded" | "error">("not_loaded");
+  const [releaseMismatch, setReleaseMismatch] = useState("");
   const [jsonlEvents, setJsonlEvents] = useState<JsonlTraceEvent[]>([]);
   const [traceTree, setTraceTree] = useState<TraceTree>({ roots: [], span_count: 0, event_count: 0 });
   const [summary, setSummary] = useState<TraceSummary>({});
@@ -170,6 +173,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
     }
     const generation = ++requestGeneration.current;
     setLoading(true);
+    setLoadState("loading");
     setError("");
     setJsonlEvents([]);
     setTraceTree({ roots: [], span_count: 0, event_count: 0 });
@@ -186,13 +190,14 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
       if (activeRun && activeRun !== selectedRunId) {
         setSelectedRunId(activeRun);
       }
-      const [jsonl, lfConfig] = await Promise.all([
+      const [jsonl, lfConfig, apiMeta] = await Promise.all([
         activeRun ? fetchRunTraceSummary(activeRun) : Promise.resolve({ summary: {}, total: 0, session_id: sessionId }),
         fetchLangfuseConfig().catch(() => ({
           enabled: false,
           host: "",
           ui_url: null
-        }))
+        })),
+        fetchApiMeta()
       ]);
       if (generation !== requestGeneration.current) return;
       const nextSummary: TraceSummary = "summary" in jsonl && jsonl.summary ? jsonl.summary : {};
@@ -202,8 +207,18 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
       setLangfuseEnabled(Boolean(lfConfig.enabled));
       setLangfuseUrl(lfConfig.enabled ? lfConfig.ui_url || lfConfig.host || null : null);
       setLangfuseMessage(lfConfig.enabled ? "" : "Langfuse 未配置，已跳过");
+      const expectedSchema = import.meta.env.VITE_API_SCHEMA || "research-api.v3";
+      const uiSha = import.meta.env.VITE_GIT_SHA || "unknown";
+      const shaMismatch = uiSha !== "unknown" && apiMeta.git_sha !== "unknown" && !apiMeta.git_sha.startsWith(uiSha) && !uiSha.startsWith(apiMeta.git_sha);
+      const schemaMismatch = apiMeta.api_schema !== expectedSchema;
+      setReleaseMismatch(schemaMismatch || shaMismatch
+        ? `Frontend/Backend version mismatch · UI ${uiSha} (${expectedSchema}) · API ${apiMeta.git_sha.slice(0, 8)} (${apiMeta.api_schema})`
+        : "");
+      setLoadState("loaded");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "加载 Trace 失败");
+      const message = err instanceof Error ? err.message : "加载 Trace 失败";
+      setError(`Trace data unavailable · ${message} · 无法判断 Brief / Plan / Worker / Synthesis 状态`);
+      setLoadState("error");
     } finally {
       setLoading(false);
     }
@@ -296,6 +311,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
         </Space>
       </div>
 
+      {releaseMismatch ? <Alert message={releaseMismatch} showIcon type="error" style={{ marginBottom: 12 }} /> : null}
       {error ? <Alert message={error} showIcon type="error" /> : null}
 
       {/* 语义流水线 → 产物证据 → 运行时/调试：
@@ -366,7 +382,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     Brief {asText(brief.brief_id)} · dims={(brief.dimensions as string[] | undefined)?.join(", ") || "-"}
                   </Typography.Paragraph>
                 ) : (
-                  <Alert message="尚未写入 brief.compiled" showIcon type="info" />
+                  <Alert message={loadState === "loaded" ? "已加载：未写入 brief.compiled" : "Trace 未加载，Brief 状态未知"} showIcon type="info" />
                 )}
               </Card>
             )
@@ -377,7 +393,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
             children: (
               <Card size="small">
                 {!brief ? (
-                  <Alert message="尚未写入 ResearchBrief 投影（brief.compiled）" showIcon type="info" />
+                  <Alert message={loadState === "loaded" ? "已加载：未写入 ResearchBrief 投影（brief.compiled）" : "Trace 未加载，ResearchBrief 状态未知"} showIcon type="info" />
                 ) : (
                   <ResizableTable
                     dataSource={[
@@ -402,11 +418,11 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "plans",
-            label: `Plan (${plans.length})`,
+            label: `Plan (${loadState === "loaded" ? plans.length : "—"})`,
             children: (
               <Card size="small">
                 {plans.length === 0 ? (
-                  <Alert message="尚未写入 plan.created 语义字段" showIcon type="info" />
+                  <Alert message={loadState === "loaded" ? "已加载：未写入 plan.created 语义字段" : "Trace 未加载，Plan 状态未知"} showIcon type="info" />
                 ) : (
                   <ResizableTable
                     dataSource={plans.map((row, index) => ({ ...row, key: `${String(row.plan_id || "p")}-${index}` }))}
@@ -439,11 +455,11 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "workers",
-            label: `Worker (${summary.worker_count || workers.length})`,
+            label: `Worker (${loadState === "loaded" ? summary.worker_count || workers.length : "—"})`,
             children: (
               <Card size="small">
                 {workers.length === 0 ? (
-                  <Alert message="本 run 尚未写入 worker.started / worker.completed" showIcon type="info" />
+                  <Alert message={loadState === "loaded" ? "已加载：未写入 worker.started / worker.completed" : "Trace 未加载，Worker 状态未知"} showIcon type="info" />
                 ) : (
                   <ResizableTable
                     dataSource={workers.map((row, index) => ({ ...row, key: `${String(row.task_id || "w")}-${String(row.attempt || index)}` }))}
@@ -496,7 +512,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "replan",
-            label: `进度 (${progressCount}) / Replan (${replanCount})`,
+            label: `进度 (${loadState === "loaded" ? progressCount : "—"}) / Replan (${loadState === "loaded" ? replanCount : "—"})`,
             children: (
               <Card size="small">
                 {progress.length === 0 && replans.length === 0 ? (
@@ -596,7 +612,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "synthesis",
-            label: `Synthesis (${synthesis.length})`,
+            label: `Synthesis (${loadState === "loaded" ? synthesis.length : "—"})`,
             children: (
               <Card size="small">
                 {synthesis.length === 0 ? (
@@ -626,7 +642,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "citations",
-            label: `证据链 (${citationsTotal})`,
+            label: `证据链 (${loadState === "loaded" ? citationsTotal : "—"})`,
             children: (
               <Card size="small">
                 {citationsMessage ? <Alert message={citationsMessage} showIcon type="info" /> : null}
@@ -699,7 +715,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "lineage",
-            label: `Lineage (${lineageTotal})`,
+            label: `Lineage (${loadState === "loaded" ? lineageTotal : "—"})`,
             children: (
               <Card size="small">
                 {lineage.length === 0 ? (
@@ -735,7 +751,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "tree",
-            label: `因果树 (${traceTree.span_count || Number(summary.counts?.spans || 0)})`,
+            label: `因果树 (${loadState === "loaded" ? traceTree.span_count || Number(summary.counts?.spans || 0) : "—"})`,
             children: (
               <div style={{ display: "grid", gridTemplateColumns: selectedSpan ? "1.2fr 0.8fr" : "1fr", gap: 12 }}>
                 <Card size="small">
@@ -808,7 +824,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "eval",
-            label: `Eval (${evals.length})`,
+            label: `Eval (${loadState === "loaded" ? evals.length : "—"})`,
             children: (
               <Card size="small">
                 {summary.usage ? (
@@ -893,7 +909,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "jsonl",
-            label: `JSONL (${Number(summary.counts?.events || summary.event_count || 0)})`,
+            label: `JSONL (${loadState === "loaded" ? Number(summary.counts?.events || summary.event_count || 0) : "—"})`,
             children: (
               <Card size="small">
                 {jsonlMessage ? <Alert message={jsonlMessage} showIcon type="info" /> : null}

@@ -2123,6 +2123,7 @@ class AgentHarness:
         )
         final_content = ""
         tool_calls = 0
+        retrieval_units = 0
         tools_invoked: list[str] = []
         pending_tools: dict[str, tuple[str, float]] = {}
         step_assistants: list[str] = []
@@ -2171,6 +2172,13 @@ class AgentHarness:
                         tool_calls += len(last_msg.tool_calls)
                         for tool_call in last_msg.tool_calls:
                             tool_name = tool_call["name"]
+                            tool_args = tool_call.get("args") or {}
+                            if tool_name in {"internet_search", "fetch_url"}:
+                                retrieval_units += 1
+                            elif tool_name == "batch_search":
+                                retrieval_units += max(1, len(tool_args.get("queries") or []))
+                            elif tool_name == "batch_fetch":
+                                retrieval_units += max(1, len(tool_args.get("urls") or []))
                             tools_invoked.append(tool_name)
                             tool_call_id = str(tool_call.get("id") or tool_call.get("tool_call_id") or "")
                             pending_tools[tool_call_id or tool_name] = (
@@ -2267,6 +2275,16 @@ class AgentHarness:
                 final_content = extracted
 
         state.tool_calls_count += tool_calls
+        if isinstance(state.metadata, dict):
+            state.metadata["retrieval_units_used"] = int(
+                state.metadata.get("retrieval_units_used") or 0
+            ) + retrieval_units
+            initial_lease = int(run_budget.get("initial_retrieval_units") or 0)
+            if initial_lease and state.metadata["retrieval_units_used"] >= initial_lease:
+                # Soft lease exhaustion ends this wave and protects delivery;
+                # Progress may still spend the separately tracked replan reserve.
+                state.metadata["force_synthesis"] = True
+                state.metadata["research_lease_exhausted"] = True
         duration = int((time.perf_counter() - started) * 1000)
         self._report_phase(
             Phase.EXECUTE,
@@ -2282,6 +2300,7 @@ class AgentHarness:
             content=final_content,
             metadata={
                 "tool_calls": tool_calls,
+                "retrieval_units": retrieval_units,
                 "duration_ms": duration,
                 "tools_invoked": tools_invoked,
                 "step_assistants_called": step_assistants,

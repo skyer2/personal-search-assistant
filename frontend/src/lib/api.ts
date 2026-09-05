@@ -34,10 +34,24 @@ async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Pro
       typeof payload === "object" && payload && "detail" in payload
         ? String(payload.detail)
         : `HTTP ${response.status}`;
-    throw new Error(message);
+    const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : "request";
+    throw new Error(`${response.status} ${response.statusText}: ${message} · ${target}`);
   }
 
   return payload as T;
+}
+
+export interface ApiMeta {
+  git_sha: string;
+  api_schema: string;
+  event_schema: string;
+  config_hash: string;
+  started_at: string;
+  environment: string;
+}
+
+export function fetchApiMeta(): Promise<ApiMeta> {
+  return requestJson<ApiMeta>(apiUrl("/api/meta"));
 }
 
 export async function startTask(
