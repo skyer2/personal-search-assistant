@@ -1,13 +1,16 @@
 """
-【Phase 13】Harness 运行时护栏
+【Phase 13】Harness 运行时护栏（三态资源决策）
 
-企业生产：显式 Kill Switch — 工具次数 / token / 墙钟时限 / 重规划次数 / 计划步数。
-默认 fail-closed：任一超限立即 ABORT，保留已完成步结果做 partial 交付。
+资源耗尽 ≠ 系统失败：
+- CONTINUE：预算充足，继续研究；
+- DEGRADE ：预算触顶，停止研究、基于已有证据合成（保留交付能力）；
+- ABORT   ：仅用户取消 / 状态损坏等不可恢复错误才终止运行。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -26,15 +29,32 @@ class AbortReason:
     ERROR = "error"
 
 
+class GuardrailAction(str, Enum):
+    CONTINUE = "continue"
+    DEGRADE = "degrade"
+    ABORT = "abort"
+
+
 @dataclass
 class GuardrailDecision:
-    abort: bool
+    action: GuardrailAction = GuardrailAction.CONTINUE
     reason: str = ""
     message: str = ""
 
+    @property
+    def abort(self) -> bool:
+        """向后兼容：仅不可恢复错误视为 abort。"""
+        return self.action == GuardrailAction.ABORT
+
+    @property
+    def degrade(self) -> bool:
+        return self.action == GuardrailAction.DEGRADE
+
     def to_dict(self) -> dict[str, Any]:
         return {
+            "action": self.action.value,
             "abort": self.abort,
+            "degrade": self.degrade,
             "reason": self.reason,
             "message": self.message,
         }
@@ -50,7 +70,9 @@ def evaluate_run_guardrails(
     """每步执行前评估护栏。先命中先返回。
 
     Adaptive research leases are deliberately ignored here. Only ``hard.*``
-    ceilings may abort the run.
+    ceilings may degrade the run (stop research, synthesize what we have).
+    Resource exhaustion never aborts: it degrades to synthesis so the user
+    still gets a cited partial deliverable.
     """
     run_budget = {}
     meta = getattr(state, "metadata", None) or {}
@@ -67,7 +89,7 @@ def evaluate_run_guardrails(
     max_tools = _cap("max_agent_actions", "max_tool_calls", 0)
     if max_tools > 0 and state.tool_calls_count >= max_tools:
         return GuardrailDecision(
-            abort=True,
+            action=GuardrailAction.DEGRADE,
             reason=AbortReason.BUDGET_TOOL_CALLS,
             message=f"工具调用达到上限 {max_tools}",
         )
@@ -76,7 +98,7 @@ def evaluate_run_guardrails(
     retrieval_used = int(meta.get("retrieval_units_used") or 0)
     if hard_retrieval > 0 and retrieval_used >= hard_retrieval:
         return GuardrailDecision(
-            abort=True,
+            action=GuardrailAction.DEGRADE,
             reason=AbortReason.BUDGET_RETRIEVAL_UNITS,
             message=f"检索资源达到硬上限 {hard_retrieval} units",
         )
@@ -84,7 +106,7 @@ def evaluate_run_guardrails(
     max_tokens = _cap("max_total_tokens", "max_total_tokens", 0)
     if max_tokens > 0 and estimated_tokens >= max_tokens:
         return GuardrailDecision(
-            abort=True,
+            action=GuardrailAction.DEGRADE,
             reason=AbortReason.BUDGET_TOKENS,
             message=f"token 达到上限 {max_tokens}（含真实 LLM usage）",
         )
@@ -95,7 +117,7 @@ def evaluate_run_guardrails(
         llm_used = int(meta.get("llm_calls_used") or 0)
     if max_llm > 0 and llm_used >= max_llm:
         return GuardrailDecision(
-            abort=True,
+            action=GuardrailAction.DEGRADE,
             reason=AbortReason.BUDGET_TOKENS,
             message=f"LLM 调用达到上限 {max_llm}",
         )
@@ -103,7 +125,7 @@ def evaluate_run_guardrails(
     max_run_sec = _cap("max_run_sec", "max_run_sec", 0)
     if max_run_sec > 0 and elapsed_sec >= max_run_sec:
         return GuardrailDecision(
-            abort=True,
+            action=GuardrailAction.DEGRADE,
             reason=AbortReason.DEADLINE,
             message=f"任务墙钟时限 {max_run_sec}s 已到",
         )
@@ -111,7 +133,7 @@ def evaluate_run_guardrails(
     max_replan = _cap("max_replan_count", "max_replan_count", 0)
     if max_replan > 0 and state.replan_count >= max_replan:
         return GuardrailDecision(
-            abort=True,
+            action=GuardrailAction.DEGRADE,
             reason=AbortReason.MAX_REPLAN,
             message=f"动态重规划达到上限 {max_replan}",
         )
@@ -120,12 +142,12 @@ def evaluate_run_guardrails(
     plan_len = len(state.plan.steps) if state.plan else 0
     if max_steps > 0 and plan_len > max_steps:
         return GuardrailDecision(
-            abort=True,
+            action=GuardrailAction.DEGRADE,
             reason=AbortReason.MAX_PLAN_STEPS,
             message=f"计划步数 {plan_len} 超过上限 {max_steps}",
         )
 
-    return GuardrailDecision(abort=False)
+    return GuardrailDecision(action=GuardrailAction.CONTINUE)
 
 
 def can_replan(state: "LoopState", config: "HarnessConfig") -> bool:

@@ -514,6 +514,22 @@ class ResearchGraphRunner:
                 needs = False
         intent_payload = state.intent.to_dict() if state.intent is not None else None
         brief = brief_from_intent(intent_payload)
+        from app.research.routing.task_shape import (
+            classify_task_shape,
+            execution_profile_for_shape,
+        )
+
+        shape = classify_task_shape(ctx.task_query, brief)
+        profile = execution_profile_for_shape(shape.shape)
+        budget = dict(gstate.get("budget") or {})
+        budget["max_parallel_workers"] = int(profile["parallel_workers"])
+        existing_replan = budget.get("max_replan_count")
+        existing_replan = (
+            int(existing_replan)
+            if existing_replan is not None
+            else int(profile["max_replan_count"])
+        )
+        budget["max_replan_count"] = min(existing_replan, int(profile["max_replan_count"]))
         try:
             from app.observability import EventType, get_recorder
             from app.observability.events import new_id
@@ -590,6 +606,8 @@ class ResearchGraphRunner:
             "brief": brief,
             "needs_clarification": needs,
             "search_mode": "agent",
+            "route_signals": [f"task_shape:{shape.shape.value}"],
+            "budget": budget,
             "progress": "intent",
         }
 
@@ -934,8 +952,27 @@ class ResearchGraphRunner:
             ),
             reconciliation=reconciliation,
         )
+        # Evidence-driven marginal gain：连续波次零增益 → 即使预算未耗尽也停止研究
+        from app.research.planning.marginal_gain import (
+            MarginalGainState,
+            evaluate_marginal_gain,
+            record_wave_gain,
+        )
+
+        marginal_state = MarginalGainState.from_dict(
+            dict(gstate.get("marginal_gain") or {})
+        )
+        wave_gain = record_wave_gain(marginal_state, worker_rows)
+        marginal_decision = evaluate_marginal_gain(marginal_state)
+        if (
+            marginal_decision.stop
+            and assessment.verdict == "gap"
+        ):
+            assessment.verdict = "enough"
+            assessment.reason = "marginal_gain_low"
         if session is not None:
             session.state.metadata["progress_assessment"] = assessment.to_dict()
+            session.state.metadata["marginal_gain"] = marginal_state.to_dict()
             if assessment.verdict == "enough":
                 try:
                     from app.research.runtime.latency import note_enough_evidence
@@ -996,6 +1033,8 @@ class ResearchGraphRunner:
                         "brief_id": brief_id,
                         "progress_ref": ref.ref,
                         "progress_hash": ref.sha256,
+                        "marginal_gain": marginal_decision.to_dict(),
+                        "wave_gain": wave_gain.to_dict(),
                     },
                     input_refs=[
                         item
@@ -1021,6 +1060,7 @@ class ResearchGraphRunner:
             _log.getLogger("observability").debug("obs emit failed", exc_info=True)
         payload = {
             "progress_assessment": assessment.to_dict(),
+            "marginal_gain": marginal_state.to_dict(),
             "progress": "progress_eval",
         }
         if assessment.verdict == "abort":

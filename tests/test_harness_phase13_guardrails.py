@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.guardrails import (
     AbortReason,
+    GuardrailAction,
     can_replan,
     evaluate_run_guardrails,
 )
@@ -31,9 +32,10 @@ def test_tool_call_budget():
         elapsed_sec=1.0,
         estimated_tokens=10,
     )
-    assert decision.abort
+    assert decision.action == GuardrailAction.DEGRADE
+    assert decision.abort is False
     assert decision.reason == AbortReason.BUDGET_TOOL_CALLS
-    print("[OK] tool call budget")
+    print("[OK] tool call budget degrades to synthesis")
 
 
 def test_deadline():
@@ -44,9 +46,10 @@ def test_deadline():
         elapsed_sec=10.0,
         estimated_tokens=10,
     )
-    assert decision.abort
+    assert decision.action == GuardrailAction.DEGRADE
+    assert decision.abort is False
     assert decision.reason == AbortReason.DEADLINE
-    print("[OK] deadline")
+    print("[OK] deadline degrades to synthesis")
 
 
 def test_max_replan_blocks_can_replan():
@@ -68,9 +71,10 @@ def test_max_plan_steps():
         elapsed_sec=1.0,
         estimated_tokens=1,
     )
-    assert decision.abort
+    assert decision.action == GuardrailAction.DEGRADE
+    assert decision.abort is False
     assert decision.reason == AbortReason.MAX_PLAN_STEPS
-    print("[OK] max plan steps")
+    print("[OK] max plan steps degrades to synthesis")
 
 
 def test_config_phase13():

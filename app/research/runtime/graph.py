@@ -31,11 +31,30 @@ def intent_node(state: ResearchState) -> dict[str, Any]:
     query = str(state.get("resolved_query") or state.get("task_query") or "")
     intent = understand_task(query)
     payload = intent.to_dict()
+    brief = brief_from_intent(payload)
+    from app.research.routing.task_shape import (
+        classify_task_shape,
+        execution_profile_for_shape,
+    )
+
+    shape = classify_task_shape(query, brief)
+    profile = execution_profile_for_shape(shape.shape)
+    budget = dict(state.get("budget") or {})
+    budget["max_parallel_workers"] = int(profile["parallel_workers"])
+    existing_replan = budget.get("max_replan_count")
+    existing_replan = (
+        int(existing_replan)
+        if existing_replan is not None
+        else int(profile["max_replan_count"])
+    )
+    budget["max_replan_count"] = min(existing_replan, int(profile["max_replan_count"]))
     return {
         "intent": payload,
-        "brief": brief_from_intent(payload),
+        "brief": brief,
         "needs_clarification": bool(intent.needs_clarification),
         "search_mode": "agent",
+        "route_signals": [f"task_shape:{shape.shape.value}"],
+        "budget": budget,
         "progress": "intent",
     }
 

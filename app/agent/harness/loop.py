@@ -54,6 +54,7 @@ from app.agent.harness.planner import (
 from app.agent.harness.orchestration import (
     IdempotencyRegistry,
     JSON_ONLY_FAIL_REASONS,
+    RETRIEVAL_STEP_TYPES,
     StepCheckpointStore,
     attach_structured_payload,
     build_strict_json_retry_instruction,
@@ -71,7 +72,11 @@ from app.agent.harness.orchestration import (
 )
 from app.agent.harness.loop_state_store import deserialize_loop_state, serialize_loop_state
 from app.agent.harness.worker_runtime import resolve_execute_target
-from app.agent.harness.guardrails import can_replan, evaluate_run_guardrails
+from app.agent.harness.guardrails import (
+    GuardrailAction,
+    can_replan,
+    evaluate_run_guardrails,
+)
 from app.agent.harness.step_budget import retrieval_budget
 from app.agent.harness.observability import build_observability_snapshot
 from app.agent.harness.planner_llm import build_plan_for_intent, understand_intent
@@ -556,6 +561,10 @@ class AgentHarness:
 
         while step_index < len(state.plan.steps):
             step = state.plan.steps[step_index]
+            if str(step.metadata.get("status") or "") == StepStatus.SKIPPED.value:
+                # 预算降级 / early-stop 跳过的检索步：直接推进，让合成步继续
+                step_index += 1
+                continue
             state.step_index = step_index
             step.metadata["status"] = StepStatus.RUNNING.value
             if self._apply_run_guardrails(state, run_started):
@@ -568,6 +577,10 @@ class AgentHarness:
                     abort_message=state.abort_message,
                 )
                 break
+            if str(step.metadata.get("status") or "") == StepStatus.SKIPPED.value:
+                # 护栏降级把当前检索步标记为 skipped：不再执行，推进到合成步
+                step_index += 1
+                continue
 
             batch_indices = find_parallel_batch(
                 state.plan.steps,
@@ -3053,7 +3066,13 @@ class AgentHarness:
         return max(content_est, usage_tokens)
 
     def _apply_run_guardrails(self, state: LoopState, run_started: float) -> bool:
-        """【Phase 13】每步前评估护栏；命中则写入 abort_reason 并返回 True。"""
+        """【Phase 13】每步前评估护栏（三态）。
+
+        - CONTINUE：返回 False，继续执行；
+        - DEGRADE ：资源触顶 → 停止剩余检索步、标记 force_synthesis，返回 False
+          （主循环会跳过已标记 skipped 的检索步，让合成步基于已有证据交付）；
+        - ABORT   ：仅不可恢复错误才返回 True 并写入 abort_reason。
+        """
         from app.agent.harness.run_budget import get_or_create_run_budget
 
         mgr = get_or_create_run_budget(
@@ -3076,6 +3095,44 @@ class AgentHarness:
             elapsed_sec=time.perf_counter() - run_started,
             estimated_tokens=self._estimate_run_tokens(state),
         )
+        if decision.action == GuardrailAction.DEGRADE:
+            # 资源耗尽 ≠ 系统失败：停止研究、保留合成交付能力
+            if isinstance(state.metadata, dict):
+                state.metadata["force_synthesis"] = True
+                state.metadata["budget_degrade_reason"] = decision.reason
+                state.metadata["budget_degrade_message"] = decision.message
+            if state.plan is not None:
+                for pending_step in state.plan.steps:
+                    if str(pending_step.step_type or "") not in RETRIEVAL_STEP_TYPES:
+                        continue
+                    if str(pending_step.metadata.get("status") or "pending") not in {
+                        "pending",
+                        "running",
+                    }:
+                        continue
+                    pending_step.metadata["status"] = StepStatus.SKIPPED.value
+                    pending_step.metadata["skip_reason"] = f"budget_degraded:{decision.reason}"
+            try:
+                from app.observability import EventType, get_recorder
+
+                recorder = get_recorder()
+                if recorder.is_active:
+                    recorder.emit(
+                        EventType.BUDGET_EXHAUSTED,
+                        phase="run",
+                        status="degrade",
+                        attributes={
+                            "fail_reason": str(decision.reason or "budget_exhausted"),
+                            "message": str(decision.message or "")[:240],
+                            "decision": "degrade",
+                            "remaining_budget": self.remaining_budget(state),
+                            "budget_snapshot": snap.to_dict(),
+                        },
+                    )
+            except Exception:
+                import logging as _log
+                _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
+            return False
         if not decision.abort:
             return False
         state.abort_reason = decision.reason
@@ -3104,13 +3161,13 @@ class AgentHarness:
         return True
 
     def _budget_exceeded(self, state: LoopState) -> bool:
-        """向后兼容：仅检查工具次数与 token 预算。"""
+        """向后兼容：预算触顶（degrade 或 abort）均视为 exceeded。"""
         return evaluate_run_guardrails(
             state,
             self.harness_config,
             elapsed_sec=0.0,
             estimated_tokens=self._estimate_run_tokens(state),
-        ).abort
+        ).action != GuardrailAction.CONTINUE
 
     def remaining_budget(self, state: LoopState) -> dict[str, int]:
         run_budget = {}

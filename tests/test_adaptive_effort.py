@@ -176,8 +176,9 @@ def test_run_budget_guardrail_uses_hard_action_ceiling():
     assert decision.abort is False
     state.tool_calls_count = 4
     decision = evaluate_run_guardrails(state, cfg, elapsed_sec=1.0, estimated_tokens=10)
-    assert decision.abort is True and decision.reason == AbortReason.BUDGET_TOOL_CALLS
-    print("[OK] soft lease cannot abort; hard action ceiling can")
+    assert decision.action.value == "degrade"
+    assert decision.reason == AbortReason.BUDGET_TOOL_CALLS
+    print("[OK] soft lease cannot degrade; hard action ceiling degrades to synthesis")
 
 
 def test_retrieval_units_have_independent_hard_ceiling():
@@ -193,7 +194,7 @@ def test_retrieval_units_have_independent_hard_ceiling():
     assert evaluate_run_guardrails(state, cfg, elapsed_sec=1, estimated_tokens=1).abort is False
     state.metadata["retrieval_units_used"] = 4
     decision = evaluate_run_guardrails(state, cfg, elapsed_sec=1, estimated_tokens=1)
-    assert decision.abort is True
+    assert decision.action.value == "degrade"
     assert decision.reason == AbortReason.BUDGET_RETRIEVAL_UNITS
 
 

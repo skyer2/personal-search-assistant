@@ -186,6 +186,8 @@ class RunBudgetManager:
             self._force_synthesis = True
         if self.llm_call_limit > 0 and self._llm_calls >= self.llm_call_limit:
             self._force_synthesis = True
+        if self.tool_call_limit > 0 and self._tool_calls >= self.tool_call_limit:
+            self._force_synthesis = True
         # Time reserve: leave wall-clock for synthesis
         if self.remaining_for_research_sec() <= 0 and self.deadline_sec > 0:
             self._force_synthesis = True
@@ -233,8 +235,7 @@ class RunBudgetManager:
 
     def research_allowed(self) -> tuple[bool, str]:
         snap = self.snapshot()
-        if snap.force_synthesis:
-            return False, "synthesis_reserve_protect"
+        # 先报具体资源原因，再回落到通用 synthesis 保护，便于观测归因
         if snap.token_limit > 0 and snap.used_tokens >= snap.token_limit:
             return False, "budget_tokens"
         if snap.token_limit > 0 and snap.used_tokens >= snap.research_cap_tokens:

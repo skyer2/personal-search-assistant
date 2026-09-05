@@ -205,7 +205,9 @@ def test_replan_metrics_na_when_not_attempted():
 
 
 def test_graph_worker_edges_to_progress():
-    src = Path("/workspace/app/research/runtime/graph.py").read_text()
+    src = (Path(__file__).resolve().parents[1] / "app/research/runtime/graph.py").read_text(
+        encoding="utf-8"
+    )
     assert 'builder.add_edge("research_worker", "progress")' in src
     assert 'builder.add_edge("research_worker", "dispatch")' not in src
     print("[OK] worker → progress edge")

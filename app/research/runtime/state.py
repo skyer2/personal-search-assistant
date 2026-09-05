@@ -62,6 +62,7 @@ class ResearchState(TypedDict):
     quality_passed: bool
     progress_assessment: dict[str, Any]
     replan_exhausted: bool
+    marginal_gain: dict[str, Any]
 
 
 class WorkerTaskState(TypedDict):
@@ -132,4 +133,5 @@ def empty_research_state(
         "quality_passed": False,
         "progress_assessment": {},
         "replan_exhausted": False,
+        "marginal_gain": {},
     }

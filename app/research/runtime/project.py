@@ -26,6 +26,18 @@ def apply_graph_to_loop(loop: LoopState, gstate: dict[str, Any]) -> LoopState:
                 step.metadata["status"] = status[tid]
     if "replan_count" in gstate:
         loop.replan_count = int(gstate.get("replan_count") or 0)
+    budget = gstate.get("budget")
+    if isinstance(budget, dict) and budget:
+        run_budget = dict(loop.metadata.get("run_budget") or {})
+        for key in ("max_parallel_workers", "max_replan_count"):
+            if budget.get(key) is None:
+                continue
+            value = max(0, int(budget[key]))
+            existing = run_budget.get(key)
+            if existing is not None:
+                value = min(value, int(existing))
+            run_budget[key] = value
+        loop.metadata["run_budget"] = run_budget
     final = gstate.get("final_content")
     if isinstance(final, str) and final:
         loop.final_content = final
