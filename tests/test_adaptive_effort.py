@@ -50,7 +50,8 @@ def test_compare_query_breadth_heavy_still_under_ceiling():
     assert effective.effort.complexity in {"breadth_heavy", "open_ended", "compound", "depth_heavy"}
     assert effective.research_tasks <= hard.max_research_tasks
     assert effective.session_tool_calls <= hard.max_tool_calls
-    assert effective.as_run_budget()["max_tool_calls"] == effective.session_tool_calls
+    assert effective.as_run_budget()["max_tool_calls"] == hard.max_tool_calls
+    assert effective.as_run_budget()["initial_retrieval_units"] == effective.session_tool_calls
     grant = grant_on_gap(effective, assessment={"verdict": "gap", "coverage_gaps": ["a", "b"]})
     assert grant["max_new_tasks"] <= hard.max_plan_patch_tasks
     assert grant["gap_severity"] >= 1
@@ -160,20 +161,54 @@ def test_grant_depletes_remaining_reserve():
     print("[OK] grant depletes remaining reserve", budget)
 
 
-def test_run_budget_guardrail_uses_metadata_ceiling():
+def test_run_budget_guardrail_uses_hard_action_ceiling():
     cfg = get_harness_config()
     state = LoopState(session_id="s_effort")
     state.metadata["run_budget"] = {
         "max_tool_calls": 2,
+        "max_agent_actions": 4,
         "max_run_sec": 600,
         "max_replan_count": 2,
         "max_plan_steps": 8,
     }
     state.tool_calls_count = 2
     decision = evaluate_run_guardrails(state, cfg, elapsed_sec=1.0, estimated_tokens=10)
+    assert decision.abort is False
+    state.tool_calls_count = 4
+    decision = evaluate_run_guardrails(state, cfg, elapsed_sec=1.0, estimated_tokens=10)
+    assert decision.abort is True and decision.reason == AbortReason.BUDGET_TOOL_CALLS
+    print("[OK] soft lease cannot abort; hard action ceiling can")
+
+
+def test_retrieval_units_have_independent_hard_ceiling():
+    cfg = get_harness_config()
+    state = LoopState(session_id="s_retrieval")
+    state.metadata["run_budget"] = {
+        "max_agent_actions": 40,
+        "hard_retrieval_units": 4,
+        "initial_retrieval_units": 2,
+    }
+    state.metadata["retrieval_units_used"] = 2
+    state.tool_calls_count = 1
+    assert evaluate_run_guardrails(state, cfg, elapsed_sec=1, estimated_tokens=1).abort is False
+    state.metadata["retrieval_units_used"] = 4
+    decision = evaluate_run_guardrails(state, cfg, elapsed_sec=1, estimated_tokens=1)
     assert decision.abort is True
-    assert decision.reason == AbortReason.BUDGET_TOOL_CALLS
-    print("[OK] run_budget overrides guardrail tool ceiling")
+    assert decision.reason == AbortReason.BUDGET_RETRIEVAL_UNITS
+
+
+def test_pdf_changes_delivery_not_research_complexity():
+    plain = estimate_complexity(understand_task("苹果 CEO 是谁"))
+    pdf = estimate_complexity(understand_task("苹果 CEO 是谁，输出 PDF"))
+    assert "file_deliverable" not in pdf.signals
+    assert pdf.initial_session_tool_budget == plain.initial_session_tool_budget
+
+
+def test_subject_aliases_do_not_create_independent_entities():
+    intent = understand_task("AI coding 能不能彻底解决编程？")
+    brief = intent.brief
+    assert len(brief.subjects) == 1
+    assert len(brief.subjects) <= max(1, len(brief.entities))
 
 
 def test_progress_scores_brief_success_criteria():

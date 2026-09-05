@@ -19,14 +19,20 @@ export function RunProgress({ durationLabel, progress, runStatus }: RunProgressP
       ? "正在取消当前任务"
       : runStatus === "completed"
         ? "运行完成"
+        : runStatus === "partial"
+          ? "执行已结束 · 部分完成"
         : runStatus === "failed"
           ? "任务失败"
+          : runStatus === "interrupted"
+            ? "执行已中断"
           : "正在运行";
 
   const detail = paused
     ? "计时与进度已冻结，审批通过后才会继续"
     : runStatus === "completed"
       ? "全部阶段已完成"
+      : runStatus === "partial"
+        ? `未达到完整交付标准 · ${progress.stepHint || "research_budget_exhausted"}`
       : progress.stepHint
         ? `${progress.currentLabel} · ${progress.stepHint}`
         : progress.currentLabel;

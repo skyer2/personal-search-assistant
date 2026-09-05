@@ -65,15 +65,28 @@ PRIMARY_SOURCE_HINTS = (
 
 
 @dataclass
+class ResearchSubject:
+    """One independent research subject and its lexical aliases."""
+
+    canonical: str
+    aliases: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class ResearchBrief:
     """Research Spec / Task Understanding IR（语义合同）。"""
 
     objective: str = ""
     entities: list[str] = field(default_factory=list)
+    subjects: list[ResearchSubject] = field(default_factory=list)
     dimensions: list[str] = field(default_factory=list)
     time_range: str = ""
     source_policy: str = ""
     deliverable: str = "text"
+    delivery_requirements: list[str] = field(default_factory=list)
     citation_policy: str = "claim-evidence"
     constraints: list[str] = field(default_factory=list)
     success_criteria: list[str] = field(default_factory=list)
@@ -94,6 +107,15 @@ class ResearchBrief:
         lines.append(f"    目标: {self.objective or self.raw_query}")
         if self.entities:
             lines.append(f"    实体: {', '.join(self.entities[:12])}")
+        if self.subjects:
+            lines.append(
+                "    独立主题: "
+                + "; ".join(
+                    f"{subject.canonical} ({', '.join(subject.aliases)})"
+                    if subject.aliases else subject.canonical
+                    for subject in self.subjects[:8]
+                )
+            )
         if self.dimensions:
             lines.append(f"    维度: {', '.join(self.dimensions[:12])}")
         if self.time_range:
@@ -107,6 +129,8 @@ class ResearchBrief:
         if self.preferred_domains:
             lines.append(f"    提示域名: {', '.join(self.preferred_domains[:8])}")
         lines.append(f"    交付物: {self.deliverable}")
+        if self.delivery_requirements:
+            lines.append(f"    交付要求: {', '.join(self.delivery_requirements[:6])}")
         lines.append(f"    引用策略: {self.citation_policy}")
         if self.constraints:
             lines.append("    约束:")
@@ -136,13 +160,24 @@ class ResearchBrief:
         if depth not in {"shallow", "standard", "thorough"}:
             depth = "standard"
         freshness = str(data.get("freshness") or "any") or "any"
+        subjects = []
+        for raw in data.get("subjects") or []:
+            if isinstance(raw, str) and raw.strip():
+                subjects.append(ResearchSubject(canonical=raw.strip()))
+            elif isinstance(raw, dict) and str(raw.get("canonical") or "").strip():
+                subjects.append(ResearchSubject(
+                    canonical=str(raw["canonical"]).strip(),
+                    aliases=[str(x) for x in (raw.get("aliases") or []) if x],
+                ))
         return cls(
             objective=str(data.get("objective") or ""),
             entities=[str(x) for x in (data.get("entities") or []) if x],
+            subjects=subjects,
             dimensions=[str(x) for x in (data.get("dimensions") or []) if x],
             time_range=str(data.get("time_range") or ""),
             source_policy=str(data.get("source_policy") or ""),
             deliverable=str(data.get("deliverable") or "text"),
+            delivery_requirements=[str(x) for x in (data.get("delivery_requirements") or []) if x],
             citation_policy=str(data.get("citation_policy") or "claim-evidence"),
             constraints=[str(x) for x in (data.get("constraints") or []) if x],
             success_criteria=[str(x) for x in (data.get("success_criteria") or []) if x],
@@ -171,7 +206,8 @@ def _split_entities(text: str) -> list[str]:
 
 def _infer_depth(query: str, *, deliverable: str, entity_count: int, dimensions: list[str]) -> str:
     q = query or ""
-    if deliverable in {"md", "pdf"} or entity_count >= 2 or _COMPARE.search(q):
+    # Output formatting belongs to DeliveryEffort, never ResearchEffort.
+    if entity_count >= 2 or _COMPARE.search(q):
         return "thorough"
     if any(m in q for m in THOROUGH_MARKERS) or len(dimensions) >= 2:
         return "thorough"
@@ -209,6 +245,7 @@ def compile_research_brief(
     time_range = ""
     constraints: list[str] = []
     entities: list[str] = []
+    subjects: list[ResearchSubject] = []
     dimensions: list[str] = []
     source_bits: list[str] = []
     citation_policy = "claim-evidence"
@@ -218,6 +255,7 @@ def compile_research_brief(
     existing = getattr(intent, "brief", None) if intent is not None else None
     if isinstance(existing, ResearchBrief) and not existing.is_empty() and existing.entities:
         entities = list(existing.entities)
+        subjects = list(existing.subjects)
         dimensions = list(existing.dimensions)
     if intent is not None:
         summary = str(getattr(intent, "summary", "") or "")
@@ -259,6 +297,13 @@ def compile_research_brief(
         compared = extract_compare_entities(query)
     except Exception:
         compared = []
+    if not compared and "核对" in query and "与" in query:
+        comparison = query.split("核对", 1)[1].split("，", 1)[0]
+        left, right = comparison.split("与", 1)
+        left_name = left.strip().split()[-1] if left.strip() else ""
+        right_name = right.strip().split()[0] if right.strip() else ""
+        if left_name and right_name:
+            compared = [left_name, right_name]
     if compared:
         entities = compared
 
@@ -278,6 +323,15 @@ def compile_research_brief(
     if not entities:
         entities = _split_entities(summary or query)[:8]
 
+    # Backward-compatible normalization. Explicit subjects win; otherwise a
+    # comparison has independent subjects while ordinary topic strings are
+    # aliases of one canonical subject (rather than accidental fan-out).
+    if not subjects:
+        if compared:
+            subjects = [ResearchSubject(canonical=item) for item in entities]
+        elif entities:
+            subjects = [ResearchSubject(canonical=entities[0], aliases=entities[1:])]
+
     prefer_primary = _infer_prefer_primary(query)
     if prefer_primary:
         constraints.append("优先官方/一手来源")
@@ -285,7 +339,7 @@ def compile_research_brief(
     depth = _infer_depth(
         query,
         deliverable=deliverable,
-        entity_count=len(entities),
+        entity_count=len(subjects),
         dimensions=dimensions,
     )
     freshness = _infer_freshness(query, time_range)
@@ -300,8 +354,9 @@ def compile_research_brief(
         "结论可追溯到 evidence_id / artifact_id",
         "冲突数字并列保留，不自行消解",
     ]
+    delivery_requirements = []
     if deliverable in {"md", "pdf"}:
-        success.append("交付物写入当前 session 工作目录")
+        delivery_requirements.append("交付物写入当前 session 工作目录")
     if prefer_primary:
         success.append("关键结论尽量落到官方或一手来源")
     if freshness == "recent" or (time_range and time_range[:4].isdigit()):
@@ -331,10 +386,12 @@ def compile_research_brief(
     return ResearchBrief(
         objective=objective[:500],
         entities=entities,
+        subjects=subjects,
         dimensions=dimensions or ["关键事实"],
         time_range=time_range,
         source_policy=source_policy,
         deliverable=deliverable,
+        delivery_requirements=delivery_requirements,
         citation_policy=citation_policy,
         constraints=constraints,
         success_criteria=success,

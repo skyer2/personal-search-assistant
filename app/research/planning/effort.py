@@ -70,6 +70,16 @@ class HardCeiling:
 
 
 @dataclass(frozen=True)
+class DeliveryEffort:
+    format: str = "text"
+    reserved_token_ratio: float = 0.25
+    needs_artifact: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class EffortPlan:
     complexity: Complexity = "narrow"
     tier: EffortTier = "standard"
@@ -81,6 +91,7 @@ class EffortPlan:
     reserve_step_tool_calls: int = 2
     stop_criteria: tuple[str, ...] = ()
     signals: tuple[str, ...] = ()
+    delivery: DeliveryEffort = field(default_factory=DeliveryEffort)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -94,6 +105,7 @@ class EffortPlan:
             "reserve_step_tool_calls": self.reserve_step_tool_calls,
             "stop_criteria": list(self.stop_criteria),
             "signals": list(self.signals),
+            "delivery": self.delivery.to_dict(),
         }
 
 
@@ -129,9 +141,16 @@ class EffectiveBudget:
         }
 
     def as_run_budget(self) -> dict[str, int]:
-        """写入 LoopState.metadata['run_budget']，供护栏与步预算读取。"""
+        """Separate the adaptive lease from hard abort ceilings."""
         return {
-            "max_tool_calls": self.session_tool_calls,
+            # Only hard ceilings are kill switches.
+            "max_tool_calls": self.hard.max_tool_calls,
+            "max_agent_actions": self.hard.max_tool_calls,
+            "hard_retrieval_units": self.hard.max_tool_calls,
+            # Adaptive values are initial research leases. Exhaustion asks the
+            # progress controller to synthesize/replan; it never aborts a run.
+            "initial_retrieval_units": self.session_tool_calls,
+            "remaining_initial_retrieval_units": self.session_tool_calls,
             "max_step_tool_calls": self.step_tool_calls,
             "max_replan_count": self.replan_count,
             "max_plan_steps": self.max_plan_steps,
@@ -162,6 +181,8 @@ def estimate_complexity(intent: Any) -> EffortPlan:
     query = str(getattr(intent, "raw_query", "") or "")
     brief = _brief_of(intent)
     entities = [str(x) for x in (getattr(brief, "entities", None) or []) if x]
+    subjects = list(getattr(brief, "subjects", None) or [])
+    independent_subject_count = len(subjects) if subjects else len(entities)
     dimensions = [str(x) for x in (getattr(brief, "dimensions", None) or []) if x]
     depth = str(getattr(brief, "depth", "") or "standard")
     if depth not in {"shallow", "standard", "thorough"}:
@@ -172,11 +193,16 @@ def estimate_complexity(intent: Any) -> EffortPlan:
     prefer_primary = bool(getattr(brief, "prefer_primary", False))
     freshness = str(getattr(brief, "freshness", "") or "any")
     deliverable = str(getattr(intent, "deliverable", "") or getattr(brief, "deliverable", "") or "text")
+    delivery = DeliveryEffort(
+        format=deliverable,
+        reserved_token_ratio=0.30 if deliverable in {"md", "pdf"} else 0.25,
+        needs_artifact=deliverable in {"md", "pdf"},
+    )
 
     signals: list[str] = []
     score = 0
 
-    if any(m in query for m in _COMPARE) or len(entities) >= 2:
+    if any(m in query for m in _COMPARE) or independent_subject_count >= 2:
         score += 3
         signals.append("multi_entity_or_compare")
     if any(m in query for m in _LANDSCAPE) or len(dimensions) >= 3:
@@ -192,7 +218,7 @@ def estimate_complexity(intent: Any) -> EffortPlan:
         score += 1
         signals.append("multi_dimension")
     # 实体 × 维度：组合爆炸 → 明确推高 breadth
-    matrix = len(entities) * max(1, len([d for d in dimensions if d != "关键事实"]))
+    matrix = independent_subject_count * max(1, len([d for d in dimensions if d != "关键事实"]))
     if matrix >= 6:
         score += 2
         signals.append("entity_dimension_matrix")
@@ -211,15 +237,12 @@ def estimate_complexity(intent: Any) -> EffortPlan:
     if len(query) >= 80 or any(m in query for m in _CHAIN):
         score += 2
         signals.append("long_or_chain_query")
-    if any(m in query for m in _OPEN) and len(entities) < 2:
+    if any(m in query for m in _OPEN) and independent_subject_count < 2:
         score += 1
         signals.append("open_phrasing")
     if prefer_primary or freshness not in {"", "any"}:
         score += 1
         signals.append("primary_or_freshness")
-    if deliverable in {"md", "pdf"}:
-        score += 1
-        signals.append("file_deliverable")
 
     if score <= 1:
         complexity: Complexity = "narrow"
@@ -258,7 +281,7 @@ def estimate_complexity(intent: Any) -> EffortPlan:
     ):
         complexity = "breadth_heavy"
         tier = "thorough" if depth == "thorough" else "standard"
-        entity_n = len(entities) if len(entities) >= 2 else 3
+        entity_n = independent_subject_count if independent_subject_count >= 2 else 3
         suggested_tasks = min(5, max(3, entity_n + 1))
         plan = EffortPlan(
             complexity=complexity,
@@ -302,7 +325,7 @@ def estimate_complexity(intent: Any) -> EffortPlan:
             stop_criteria=("diminishing_returns", "budget_reserve_ok"),
             signals=tuple(signals),
         )
-    return plan
+    return EffortPlan(**{**plan.__dict__, "delivery": delivery})
 
 
 def apply_effort_to_hard_ceiling(effort: EffortPlan, hard: HardCeiling) -> EffectiveBudget:
@@ -379,9 +402,29 @@ def brief_payload_for_lead_planner(
 
 
 def _gap_severity(assessment: dict[str, Any] | None) -> int:
-    """粗粒度缺口强度：用于增量发放（1=轻，2=中，3=重）。"""
+    """Score unique blocking gap ids; advisory gaps never receive budget."""
     data = dict(assessment or {})
-    n = 0
+    unique: dict[str, int] = {}
+    for item in data.get("gaps") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("blocking", item.get("actionable", True)) is False:
+            continue
+        severity = str(item.get("severity") or "medium").lower()
+        if severity in {"advisory", "low", "info"}:
+            continue
+        key = str(item.get("gap_id") or item.get("description") or item.get("dimension") or "").strip()
+        if key:
+            unique[key] = 2 if severity in {"high", "blocking"} else 1
+    for gap_id in data.get("open_gap_ids") or []:
+        if str(gap_id):
+            unique.setdefault(str(gap_id), 1)
+    if unique:
+        score = sum(unique.values())
+        return 1 if score <= 1 else 2 if score <= 3 else 3
+    # Legacy projections without materialized gaps: dedupe repeated labels
+    # across coverage_gaps/gaps/open_gap_ids instead of adding list lengths.
+    labels: set[str] = set()
     for key in (
         "coverage_gaps",
         "conflicts",
@@ -389,14 +432,13 @@ def _gap_severity(assessment: dict[str, Any] | None) -> int:
         "stale_evidence",
         "unmet_success_criteria",
         "unmet_constraints",
-        "gaps",
-        "open_gap_ids",
     ):
         val = data.get(key) or []
         if isinstance(val, list):
-            n += len(val)
+            labels.update(str(x).strip().lower() for x in val if str(x).strip())
         elif val:
-            n += 1
+            labels.add(str(val).strip().lower())
+    n = len(labels)
     if n <= 1:
         return 1
     if n <= 3:

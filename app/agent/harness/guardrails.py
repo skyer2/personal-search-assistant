@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 class AbortReason:
     BUDGET_TOOL_CALLS = "budget_tool_calls"
     BUDGET_TOKENS = "budget_tokens"
+    BUDGET_RETRIEVAL_UNITS = "budget_retrieval_units"
     DEADLINE = "deadline_exceeded"
     MAX_REPLAN = "max_replan"
     MAX_PLAN_STEPS = "max_plan_steps"
@@ -48,8 +49,8 @@ def evaluate_run_guardrails(
 ) -> GuardrailDecision:
     """每步执行前评估护栏。先命中先返回。
 
-    若 state.metadata['run_budget'] 存在（Adaptive Effort clamp 后），优先用其作为
-    本 run 的有效顶；该顶仍 ≤ Hard Ceiling，不会抬高全局配置。
+    Adaptive research leases are deliberately ignored here. Only ``hard.*``
+    ceilings may abort the run.
     """
     run_budget = {}
     meta = getattr(state, "metadata", None) or {}
@@ -63,12 +64,21 @@ def evaluate_run_guardrails(
             return int(run_budget[key])
         return int(getattr(config, attr, default) or default)
 
-    max_tools = _cap("max_tool_calls", "max_tool_calls", 0)
+    max_tools = _cap("max_agent_actions", "max_tool_calls", 0)
     if max_tools > 0 and state.tool_calls_count >= max_tools:
         return GuardrailDecision(
             abort=True,
             reason=AbortReason.BUDGET_TOOL_CALLS,
             message=f"工具调用达到上限 {max_tools}",
+        )
+
+    hard_retrieval = _cap("hard_retrieval_units", "max_tool_calls", 0)
+    retrieval_used = int(meta.get("retrieval_units_used") or 0)
+    if hard_retrieval > 0 and retrieval_used >= hard_retrieval:
+        return GuardrailDecision(
+            abort=True,
+            reason=AbortReason.BUDGET_RETRIEVAL_UNITS,
+            message=f"检索资源达到硬上限 {hard_retrieval} units",
         )
 
     max_tokens = _cap("max_total_tokens", "max_total_tokens", 0)

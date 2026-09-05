@@ -1,5 +1,3 @@
-const DEFAULT_API_BASE_URL = "http://localhost:8000";
-
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
 }
@@ -72,11 +70,12 @@ function resolveApiBaseUrl(): string {
     return "";
   }
 
-  return DEFAULT_API_BASE_URL;
+  // Production is always same-origin. Reverse proxies own /api and /ws.
+  return "";
 }
 
 const resolvedApiBaseUrl = resolveApiBaseUrl();
-const devProxyApiBaseUrl = import.meta.env.DEV ? "" : DEFAULT_API_BASE_URL;
+const devProxyApiBaseUrl = "";
 
 /** HTTP API 根地址；开发代理模式下为空字符串，请求应使用相对路径 */
 export const API_BASE_URL = fixLocalhostForRemoteBrowser(
@@ -85,7 +84,7 @@ export const API_BASE_URL = fixLocalhostForRemoteBrowser(
 );
 
 export const WS_BASE_URL = fixLocalhostForRemoteBrowser(
-  deriveWsBaseUrl(resolvedApiBaseUrl || DEFAULT_API_BASE_URL),
+  deriveWsBaseUrl(resolvedApiBaseUrl),
   sameOriginWsBaseUrl()
 );
 
