@@ -101,21 +101,17 @@ harness:
 
   budget:
     # Hard Safety Ceiling（确定性顶；Adaptive Effort 只能 clamp 到其下，不能抬高）
-    # 详见 docs/HARD_CEILING_ADAPTIVE_EFFORT.md
-    max_total_tokens: 180000
-    max_tool_calls: 120
-    max_step_tool_calls: 16
-    max_run_sec: 900
-    # 留给 Synthesis 的墙钟储备（秒）；Research 不得吃掉
-    synthesis_reserve_sec: 120
-    max_replan_count: 2
-    max_plan_steps: 10
-    # Invocation-level caps（Research 不可吃掉 Synthesis reserve）
-    max_llm_calls_per_run: 45
-    max_llm_calls_per_worker: 10
+    # 复杂深研搜允许最多 30 分钟；Research 必须给 Synthesis 留出固定墙钟预算。
+    max_total_tokens: 300000
+    max_tool_calls: 240
+    max_step_tool_calls: 24
+    max_run_sec: 1800
+    synthesis_reserve_sec: 180
+    max_replan_count: 3
+    max_plan_steps: 12
+    max_llm_calls_per_run: 80
+    max_llm_calls_per_worker: 14
 
-  # Adaptive Effort：ComplexityEstimator 根据 Research Brief 提出软配额，再与 budget 硬顶 min()
-  # 不在此写死 soft 数字；实现见 app/research/planning/effort.py
   effort:
     adaptive_enabled: true
     note: "static ceiling + adaptive allocation + evidence-driven stop/replan"
@@ -126,9 +122,9 @@ harness:
       web: true
       file: true
     agent:
-      max_tool_calls: 120
-      max_research_tasks: 6
-      max_replan: 2
+      max_tool_calls: 240
+      max_research_tasks: 8
+      max_replan: 3
       parallel: true
       progress_eval: true
       compression: true
@@ -148,9 +144,9 @@ harness:
       file: true
     experiment:
       agent:
-        max_tool_calls: 120
-        max_research_tasks: 6
-        max_replan: 2
+        max_tool_calls: 240
+        max_research_tasks: 8
+        max_replan: 3
         parallel: true
         progress_eval: true
       direct:
@@ -192,7 +188,7 @@ harness:
   orchestration:
     parallel_retrieval_enabled: true
     max_parallel_workers: 3
-    step_timeout_sec: 90
+    step_timeout_sec: 120
     enforce_subagent_binding: true
     step_checkpoint_enabled: true
     resume_checkpoint: true
@@ -217,5 +213,5 @@ harness:
     plan_review_min_confidence: 0.75
     hybrid_enabled: true
     dynamic_lead_planner: true
-    max_research_tasks: 5
-    max_plan_patch_tasks: 2
+    max_research_tasks: 8
+    max_plan_patch_tasks: 3
