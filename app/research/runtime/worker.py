@@ -14,6 +14,66 @@ from typing import Any, Literal, Protocol, runtime_checkable
 WorkerResultStatus = Literal["done", "failed", "skipped", "blocked"]
 
 
+class WorkerIdleTimeoutError(Exception):
+    """Raised when a worker makes no observable progress within its lease."""
+
+
+async def _run_worker_step_with_lease(
+    awaitable: Any,
+    *,
+    child: Any,
+    wall_timeout_sec: float,
+    idle_timeout_sec: float,
+) -> Any:
+    task = asyncio.create_task(awaitable)
+    started = time.perf_counter()
+    last_progress = started
+
+    def signature() -> tuple[int, ...]:
+        try:
+            from app.agent.harness.artifacts import get_artifact_store
+
+            artifact_count = len(get_artifact_store())
+        except Exception:
+            artifact_count = 0
+        return (
+            int(getattr(child, "tool_calls_count", 0) or 0),
+            len(getattr(child, "trace", None) or []),
+            len(getattr(child, "step_results", None) or []),
+            artifact_count,
+        )
+
+    last_signature = signature()
+    while not task.done():
+        now = time.perf_counter()
+        remaining_wall = wall_timeout_sec - (now - started)
+        remaining_idle = idle_timeout_sec - (now - last_progress)
+        delay = min(1.0, max(0.05, min(remaining_wall, remaining_idle)))
+        done, _pending = await asyncio.wait({task}, timeout=delay)
+        if done:
+            return task.result()
+        now = time.perf_counter()
+        current_signature = signature()
+        if current_signature != last_signature:
+            last_signature = current_signature
+            last_progress = now
+        if now - last_progress >= idle_timeout_sec:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            raise WorkerIdleTimeoutError("worker idle timeout")
+        if now - started >= wall_timeout_sec:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            raise asyncio.TimeoutError()
+    return task.result()
+
+
 def salvage_worker_evidence(
     *,
     task_id: str,
@@ -23,6 +83,7 @@ def salvage_worker_evidence(
     """Recover artifact-backed evidence when a worker misses its deadline."""
     try:
         from app.agent.harness.artifacts import get_artifact_store
+        from app.research.runtime.untrusted import structured_evidence_from_artifact
 
         store = get_artifact_store()
         artifacts = [
@@ -42,14 +103,18 @@ def salvage_worker_evidence(
         locator = artifact.locator or artifact.ref()
         if locator not in sources:
             sources.append(locator)
+        evidence = structured_evidence_from_artifact(artifact)
         findings.append(
             {
                 "task_id": task_id,
                 "finding_id": f"salvage_{artifact.artifact_id}",
-                "summary": (artifact.summary or artifact.title or locator)[:400],
-                "facts": [artifact.title or locator][:1],
+                "summary": evidence["excerpt"] or evidence["title"],
+                "facts": [evidence["title"]][:1],
                 "sources": [locator],
                 "artifact_id": artifact.artifact_id,
+                "evidence_ids": [evidence["evidence_id"]],
+                "trust": evidence["trust"],
+                "instruction_free": evidence["instruction_free"],
                 "partial": True,
             }
         )
@@ -329,26 +394,66 @@ class LangChainWorkerRuntime:
                         duration_ms=duration_ms,
                     )
                 try:
-                    ok = await asyncio.wait_for(
-                        self.harness._run_single_step(
-                            child,
-                            child_step,
-                            step_index,
-                            session.ctx.task_query,
-                            session.ctx.relative_session_dir,
-                            session.ctx.uploaded_prompt,
-                            session.session_id,
-                            session.ctx.session_dir,
-                            None,
-                            session.ctx.idempotency,
-                            None,
-                        ),
-                        timeout=worker_timeout,
-                    )
-                    fail_reason = "" if ok else "worker_failed"
-                except asyncio.TimeoutError:
+                    provider_attempt = 0
                     ok = False
-                    fail_reason = "step_timeout"
+                    while True:
+                        try:
+                            ok = await _run_worker_step_with_lease(
+                                self.harness._run_single_step(
+                                    child,
+                                    child_step,
+                                    step_index,
+                                    session.ctx.task_query,
+                                    session.ctx.relative_session_dir,
+                                    session.ctx.uploaded_prompt,
+                                    session.session_id,
+                                    session.ctx.session_dir,
+                                    None,
+                                    session.ctx.idempotency,
+                                    None,
+                                ),
+                                child=child,
+                                wall_timeout_sec=worker_timeout,
+                                idle_timeout_sec=max(
+                                    0.05,
+                                    float(
+                                        getattr(
+                                            self.harness.harness_config,
+                                            "worker_idle_timeout_sec",
+                                            30,
+                                        )
+                                        or 30
+                                    ),
+                                ),
+                            )
+                            break
+                        except Exception as exc:
+                            from app.agent.llm_errors import (
+                                classify_llm_exception,
+                                failure_policy,
+                                retry_delay_sec,
+                            )
+
+                            failure = classify_llm_exception(exc)
+                            policy = failure_policy(failure.kind)
+                            if (
+                                policy.retryable
+                                and provider_attempt < policy.max_attempts - 1
+                            ):
+                                provider_attempt += 1
+                                await asyncio.sleep(
+                                    min(2.0, retry_delay_sec(exc))
+                                )
+                                continue
+                            raise
+                    fail_reason = "" if ok else "worker_failed"
+                except (asyncio.TimeoutError, WorkerIdleTimeoutError) as timeout_exc:
+                    ok = False
+                    fail_reason = (
+                        "idle_timeout"
+                        if isinstance(timeout_exc, WorkerIdleTimeoutError)
+                        else "step_timeout"
+                    )
                     exec_ms = int((time.perf_counter() - exec_started) * 1000)
                     duration_ms = int((time.perf_counter() - worker_started) * 1000)
                     salvaged = salvage_worker_evidence(
@@ -402,12 +507,12 @@ class LangChainWorkerRuntime:
                         ok=False,
                         task_id=task.task_id,
                         status="failed",
-                        summary="step_timeout",
+                        summary=fail_reason,
                         findings=list(salvaged["findings"]),
                         evidence_refs=list(salvaged["evidence_refs"]),
                         sources=list(salvaged["sources"]),
                         raw=outcome,
-                        fail_reason="step_timeout",
+                        fail_reason=fail_reason,
                         queue_ms=queue_ms,
                         execution_ms=exec_ms,
                         duration_ms=duration_ms,

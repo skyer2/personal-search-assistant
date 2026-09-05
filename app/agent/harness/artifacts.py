@@ -213,12 +213,20 @@ class ArtifactStore:
         urls = _URL_RE.findall(content)
         loc = locator or (urls[0].rstrip(".,;") if urls else f"tool:{tool_name}")
         kind = infer_kind(step_type, loc)
+        metadata = {"tool_name": tool_name}
+        if kind in {
+            ARTIFACT_KIND_WEB,
+            ARTIFACT_KIND_FILE,
+            ARTIFACT_KIND_KB,
+            ARTIFACT_KIND_PDF,
+        }:
+            metadata["trust"] = "untrusted_external"
         return self.put(
             content,
             kind=kind,
             locator=loc,
             title=title or tool_name,
-            metadata={"tool_name": tool_name},
+            metadata=metadata,
             step_index=step_index,
             step_type=step_type,
         )

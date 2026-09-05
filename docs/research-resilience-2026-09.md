@@ -56,6 +56,7 @@ Lead Planner Prompt 也加入同样的硬约束，并要求开放式市场/赛�
 
 - `content_filter`
 - `rate_limit`
+- `usage_limit`
 - `timeout`
 - `context_length`
 - `auth`
@@ -63,6 +64,15 @@ Lead Planner Prompt 也加入同样的硬约束，并要求开放式市场/赛�
 - `unknown`
 
 `SensitiveContentDetected` 会归类为 `content_filter`。Worker 对已知 Provider 错误返回 `WorkerResult(status="failed")`，不再把异常穿透 StateGraph。未知异常仍保持 fail-fast，避免掩盖代码 invariant 错误。
+
+Tavily 的套餐额度错误：
+
+```text
+This request exceeds your plan's set usage limit.
+Please upgrade your plan or contact support@tavily.com
+```
+
+会归类为 `usage_limit`。这属于外部检索服务配额耗尽，不能通过重试解决；系统应停止继续搜索、保留已获取 Artifact，并进入 partial synthesis。用户需要升级 Tavily 套餐、更换 API Key / 计划，或等待额度重置后再运行完整研究。
 
 ### 3. Timeout Partial Evidence Salvage
 
@@ -184,6 +194,7 @@ Trace Integrity = PASS
 2. 拆分后下游依赖自动改写。
 3. Worker timeout 回收 Artifact partial evidence。
 4. `SensitiveContentDetected` 返回 `WorkerResult(content_filter)`，Graph 不 crash。
+4. Tavily `usage limit` 返回 `WorkerResult(usage_limit)`，Graph 不 crash。
 5. 失败 Worker 有 partial evidence 时不产生 empty gap。
 6. 全部 Worker 失败但有 evidence 时输出 partial report。
 7. worker / compress 失败 Run 不要求 quality event。

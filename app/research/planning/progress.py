@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from app.agent.harness.state import ExecutionPlan, LoopState
+from app.research.planning.coverage import build_coverage_matrix, coverage_gap_items
 from app.research.planning.validator import RESEARCH_TYPES, SYNTHESIS_TYPES
 from app.research.runtime.scheduler import ready_research_steps
 
@@ -61,6 +62,8 @@ class ProgressAssessment:
     open_gap_ids: list[str] = field(default_factory=list)
     resolved_gap_ids: list[str] = field(default_factory=list)
     progress_id: str = ""
+    coverage_matrix: list[dict[str, Any]] = field(default_factory=list)
+    coverage_ratio: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -95,6 +98,12 @@ class ProgressAssessment:
             open_gap_ids=[str(x) for x in (data.get("open_gap_ids") or []) if x],
             resolved_gap_ids=[str(x) for x in (data.get("resolved_gap_ids") or []) if x],
             progress_id=str(data.get("progress_id") or ""),
+            coverage_matrix=[
+                dict(item)
+                for item in (data.get("coverage_matrix") or [])
+                if isinstance(item, dict)
+            ],
+            coverage_ratio=float(data.get("coverage_ratio") or 0.0),
         )
 
     def materialize_gaps(self, *, previous_gap_ids: list[str] | None = None) -> "ProgressAssessment":
@@ -304,6 +313,20 @@ def assess_progress(
         from app.agent.harness.state import TaskIntent
 
         resolved_intent = TaskIntent.from_dict(resolved_intent)
+
+    coverage = build_coverage_matrix(
+        plan,
+        rows,
+        brief=getattr(resolved_intent, "brief", None),
+    )
+    assessment.coverage_matrix = list(coverage["cells"])
+    assessment.coverage_ratio = float(coverage["coverage_ratio"])
+    for gap in coverage_gap_items(coverage):
+        if not any(
+            isinstance(item, dict) and item.get("description") == gap.get("description")
+            for item in assessment.gaps
+        ):
+            assessment.gaps.append(gap)
 
     mode = str(plan.planning_mode or "")
     year = int(current_year or datetime.now().year)

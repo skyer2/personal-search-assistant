@@ -130,7 +130,18 @@ def test_worker_timeout_returns_worker_result_failed(monkeypatch):
             awaitable.close()
         raise asyncio.TimeoutError
 
-    monkeypatch.setattr(worker_module.asyncio, "wait_for", timeout_immediately)
+    async def lease_timeout(
+        awaitable: Any,
+        *,
+        child: Any,
+        wall_timeout_sec: float,
+        idle_timeout_sec: float,
+    ) -> bool:
+        if hasattr(awaitable, "close"):
+            awaitable.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(worker_module, "_run_worker_step_with_lease", lease_timeout)
     result = asyncio.run(runtime.execute(_task(), _context()))
     assert isinstance(result, WorkerResult)
     assert result.status == "failed"
