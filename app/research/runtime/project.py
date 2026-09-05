@@ -52,6 +52,11 @@ def apply_graph_to_loop(loop: LoopState, gstate: dict[str, Any]) -> LoopState:
 
             loop.intent.brief = ResearchBrief.from_dict(brief)
     loop.metadata["workflow_authority"] = "research_state"
+    findings = gstate.get("findings")
+    if isinstance(findings, list):
+        loop.metadata["partial_findings"] = [
+            dict(item) for item in findings if isinstance(item, dict)
+        ][:24]
     if gstate.get("progress"):
         loop.metadata["graph_progress"] = gstate.get("progress")
     if gstate.get("search_mode"):

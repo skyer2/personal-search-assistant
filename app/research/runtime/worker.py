@@ -14,6 +14,48 @@ from typing import Any, Literal, Protocol, runtime_checkable
 WorkerResultStatus = Literal["done", "failed", "skipped", "blocked"]
 
 
+def salvage_worker_evidence(
+    *,
+    task_id: str,
+    step_index: int,
+    limit: int = 8,
+) -> dict[str, list[Any]]:
+    """Recover artifact-backed evidence when a worker misses its deadline."""
+    try:
+        from app.agent.harness.artifacts import get_artifact_store
+
+        store = get_artifact_store()
+        artifacts = [
+            item
+            for item in store.iter_artifacts()
+            if item.step_index == step_index
+            or str(item.metadata.get("task_id") or "") == task_id
+        ][:limit]
+    except Exception:
+        return {"findings": [], "evidence_refs": [], "sources": []}
+
+    findings: list[dict[str, Any]] = []
+    evidence_refs: list[str] = []
+    sources: list[str] = []
+    for artifact in artifacts:
+        evidence_refs.append(artifact.artifact_id)
+        locator = artifact.locator or artifact.ref()
+        if locator not in sources:
+            sources.append(locator)
+        findings.append(
+            {
+                "task_id": task_id,
+                "finding_id": f"salvage_{artifact.artifact_id}",
+                "summary": (artifact.summary or artifact.title or locator)[:400],
+                "facts": [artifact.title or locator][:1],
+                "sources": [locator],
+                "artifact_id": artifact.artifact_id,
+                "partial": True,
+            }
+        )
+    return {"findings": findings, "evidence_refs": evidence_refs, "sources": sources}
+
+
 @dataclass
 class ResearchTask:
     """按研究目标描述的工人任务，而不是「请调用某类工具」。"""
@@ -113,6 +155,14 @@ class LangChainWorkerRuntime:
         recorder = get_recorder()
         worker_started = time.perf_counter()
         attempt = int(step.metadata.get("attempt") or 1)
+        queue_ms = 0
+        exec_ms = 0
+        child = None
+        salvaged: dict[str, list[Any]] = {
+            "findings": [],
+            "evidence_refs": [],
+            "sources": [],
+        }
         parent_ctx = None
         span_key = ""
         if recorder.is_active:
@@ -301,6 +351,10 @@ class LangChainWorkerRuntime:
                     fail_reason = "step_timeout"
                     exec_ms = int((time.perf_counter() - exec_started) * 1000)
                     duration_ms = int((time.perf_counter() - worker_started) * 1000)
+                    salvaged = salvage_worker_evidence(
+                        task_id=task.task_id,
+                        step_index=step_index,
+                    )
                     outcome = IsolatedWorkerOutcome(
                         step_index=step_index,
                         task_id=task.task_id,
@@ -336,6 +390,7 @@ class LangChainWorkerRuntime:
                                 "fail_reason": fail_reason,
                                 "queue_ms": queue_ms,
                                 "execution_ms": exec_ms,
+                                "partial_evidence_count": len(salvaged["evidence_refs"]),
                             },
                             run_id=session.run_id,
                             session_id=session.session_id,
@@ -348,6 +403,9 @@ class LangChainWorkerRuntime:
                         task_id=task.task_id,
                         status="failed",
                         summary="step_timeout",
+                        findings=list(salvaged["findings"]),
+                        evidence_refs=list(salvaged["evidence_refs"]),
+                        sources=list(salvaged["sources"]),
                         raw=outcome,
                         fail_reason="step_timeout",
                         queue_ms=queue_ms,
@@ -449,7 +507,7 @@ class LangChainWorkerRuntime:
                         "brief_id": brief_id,
                         "plan_id": plan_id,
                         "finding_ids": finding_ids,
-                        "evidence_ids": evidence_ids if ok else [],
+                        "evidence_ids": evidence_ids,
                         "gaps": list((payload or {}).get("gaps") or [])[:8],
                         "conflicts": list((payload or {}).get("conflicts") or [])[:8],
                         "confidence": (payload or {}).get("confidence"),
@@ -476,7 +534,7 @@ class LangChainWorkerRuntime:
                         *[{"type": "finding", "id": fid} for fid in finding_ids],
                         *[
                             {"type": "evidence", "id": eid}
-                            for eid in (evidence_ids if ok else [])
+                            for eid in evidence_ids
                         ],
                     ],
                     run_id=session.run_id,
@@ -495,7 +553,7 @@ class LangChainWorkerRuntime:
                 status="done" if ok else "failed",
                 summary=str(row.get("summary") or ""),
                 findings=findings,
-                evidence_refs=evidence_ids if ok else [],
+                evidence_refs=evidence_ids,
                 facts=list((payload or {}).get("facts") or []),
                 sources=list((payload or {}).get("sources") or []),
                 raw=outcome,
@@ -506,6 +564,32 @@ class LangChainWorkerRuntime:
             )
         except Exception as exc:
             duration_ms = int((time.perf_counter() - worker_started) * 1000)
+            from app.agent.llm_errors import LLMFailureKind, classify_llm_exception
+
+            provider_failure = classify_llm_exception(exc)
+            if provider_failure.kind is not LLMFailureKind.UNKNOWN:
+                if child is None:
+                    child = snapshot_worker_loop_state(session.state)
+                    child.step_index = step_index
+                salvaged = salvage_worker_evidence(
+                    task_id=task.task_id,
+                    step_index=step_index,
+                )
+                outcome = IsolatedWorkerOutcome(
+                    step_index=step_index,
+                    task_id=task.task_id,
+                    ok=False,
+                    result=None,
+                    child_state=child,
+                    fail_reason=provider_failure.kind.value,
+                )
+                async with session.lock:
+                    apply_isolated_outcome(session.state, outcome)
+                    session.state.plan.steps[step_index].metadata["status"] = (
+                        StepStatus.FAILED.value
+                    )
+                    session.state.plan.steps[step_index].metadata["queue_ms"] = queue_ms
+                    session.state.plan.steps[step_index].metadata["execution_ms"] = exec_ms
             if recorder.is_active:
                 recorder.emit(
                     EventType.WORKER_FAILED,
@@ -518,7 +602,14 @@ class LangChainWorkerRuntime:
                     attributes={
                         "objective": task.objective,
                         "step_type": task.step_type,
-                        "fail_reason": str(exc)[:500],
+                        "fail_reason": provider_failure.kind.value
+                        if provider_failure.kind is not LLMFailureKind.UNKNOWN
+                        else str(exc)[:500],
+                        "provider_error_kind": provider_failure.kind.value,
+                        "exception_type": provider_failure.exception_type,
+                        "partial_evidence_count": len(salvaged["evidence_refs"])
+                        if provider_failure.kind is not LLMFailureKind.UNKNOWN
+                        else 0,
                     },
                     run_id=session.run_id,
                     session_id=session.session_id,
@@ -526,6 +617,21 @@ class LangChainWorkerRuntime:
                 )
                 if span_key:
                     recorder.end_span(span_key, status="error", duration_ms=duration_ms)
+            if provider_failure.kind is not LLMFailureKind.UNKNOWN:
+                return WorkerResult(
+                    ok=False,
+                    task_id=task.task_id,
+                    status="failed",
+                    summary=f"provider_{provider_failure.kind.value}",
+                    findings=list(salvaged["findings"]),
+                    evidence_refs=list(salvaged["evidence_refs"]),
+                    sources=list(salvaged["sources"]),
+                    raw=outcome,
+                    fail_reason=provider_failure.kind.value,
+                    queue_ms=queue_ms,
+                    execution_ms=exec_ms,
+                    duration_ms=duration_ms,
+                )
             raise
         finally:
             if parent_ctx is not None:

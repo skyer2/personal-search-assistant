@@ -916,6 +916,12 @@ class ResearchGraphRunner:
         row["fail_reason"] = result.fail_reason or row.get("fail_reason", "")
         row["queue_ms"] = result.queue_ms or row.get("queue_ms", 0)
         row["execution_ms"] = result.execution_ms or row.get("execution_ms", 0)
+        raw_row_payload = row.get("payload")
+        row_payload: dict[str, Any] = (
+            raw_row_payload if isinstance(raw_row_payload, dict) else {}
+        )
+        row_payload["evidence_ids"] = list(result.evidence_refs or [])
+        row["payload"] = row_payload
         if not result.ok:
             row["summary"] = result.summary or row.get("summary", "")
         graph_task_status = {
@@ -1119,12 +1125,16 @@ class ResearchGraphRunner:
         if plan is None:
             return {"status": "synthesized", "progress": "synthesized"}
         status = task_status_map(plan)
+        evidence_refs = list(gstate.get("evidence_refs") or [])
+        findings = [item for item in list(gstate.get("findings") or []) if isinstance(item, dict)]
         force = bool(
             (
                 isinstance(session.state.metadata, dict)
                 and session.state.metadata.get("force_synthesis")
             )
             or session.state.abort_reason
+            or evidence_refs
+            or findings
         )
         nxt = next_synthesis_step(plan, status, allow_failed_deps=force)
         if nxt is None and force:
@@ -1243,6 +1253,19 @@ class ResearchGraphRunner:
                 )
                 session.state.abort_message = (
                     session.state.abort_message or "synthesis step timeout"
+                )
+            except Exception as exc:
+                from app.agent.llm_errors import LLMFailureKind, classify_llm_exception
+
+                provider_failure = classify_llm_exception(exc)
+                if provider_failure.kind is LLMFailureKind.UNKNOWN:
+                    raise
+                ok = False
+                session.state.abort_reason = (
+                    session.state.abort_reason or f"provider_{provider_failure.kind.value}"
+                )
+                session.state.abort_message = (
+                    session.state.abort_message or provider_failure.message[:500]
                 )
             session.state.step_validation_results.append(
                 {

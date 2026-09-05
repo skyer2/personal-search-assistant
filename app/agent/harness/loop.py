@@ -533,8 +533,25 @@ class AgentHarness:
             ctx.tracer.finish({"status": "cancelled"})
             raise
         except Exception as e:
+            from app.agent.llm_errors import classify_llm_exception
+            from app.observability.failure import record_failure
+
             state.abort_reason = "error"
             state.abort_message = str(e)
+            provider_failure = classify_llm_exception(e)
+            failure_type = (
+                provider_failure.kind.value
+                if provider_failure.kind.value != "unknown"
+                else "runtime_error"
+            )
+            current_stage = str(state.phase.value if state.phase else "runtime")
+            failure_attribution = record_failure(
+                state,
+                origin_stage=current_stage,
+                detected_stage=current_stage,
+                failure_type=failure_type,
+                reason=str(e),
+            )
             logger.exception("Harness execution failed (run_id=%s)", state.run_id)
             self._report_phase(Phase.ABORT, "error", state=state, error=str(e))
             _project_run_fail(state.run_id, str(e))
@@ -549,8 +566,7 @@ class AgentHarness:
                     "exception_type": type(e).__name__,
                     "abort_reason": state.abort_reason,
                     "abort_message": state.abort_message,
-                    "failure.origin_stage": str(state.phase.value if state.phase else "run"),
-                    "failure.detected_stage": str(state.phase.value if state.phase else "run"),
+                    **failure_attribution,
                 }
                 duration_ms = int((time.perf_counter() - ctx.run_started) * 1000)
                 if recorder.is_active:
@@ -582,8 +598,7 @@ class AgentHarness:
                     "exception_type": type(e).__name__,
                     "abort_reason": state.abort_reason,
                     "abort_message": state.abort_message,
-                    "failure.origin_stage": str(state.phase.value if state.phase else "run"),
-                    "failure.detected_stage": str(state.phase.value if state.phase else "run"),
+                    **failure_attribution,
                 },
             )
         finally:

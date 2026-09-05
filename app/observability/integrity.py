@@ -4,20 +4,37 @@ from __future__ import annotations
 
 from typing import Any
 
+_STAGE_ALIAS = {
+    "understand": "understand",
+    "brief": "understand",
+    "plan": "planning",
+    "planning": "planning",
+    "execute": "worker",
+    "worker": "worker",
+    "compress": "worker",
+    "progress": "progress",
+    "replan": "progress",
+    "synthesis": "synthesis",
+    "finalize": "synthesis",
+    "validate": "quality",
+    "quality": "quality",
+    "runtime": "runtime",
+}
+
 _STAGE_ORDER = {
     "understand": 1,
-    "brief": 1,
     "planning": 2,
-    "plan": 2,
     "worker": 3,
     "progress": 4,
     "synthesis": 5,
     "quality": 6,
+    "runtime": 7,
 }
 
 
 def _stage_required(stage: str, failure_origin_stage: str) -> bool:
-    origin = failure_origin_stage.lower()
+    origin = _STAGE_ALIAS.get(failure_origin_stage.lower(), failure_origin_stage.lower())
+    stage = _STAGE_ALIAS.get(stage.lower(), stage.lower())
     if not origin or origin not in _STAGE_ORDER or stage not in _STAGE_ORDER:
         return True
     return _STAGE_ORDER[stage] < _STAGE_ORDER[origin]
@@ -92,7 +109,10 @@ def check_trace_integrity(
             and _stage_required("synthesis", failure_origin_stage)
         ):
             issues.append("missing_synthesis_or_termination_event")
-        if quality_count == 0 and _stage_required("quality", failure_origin_stage):
+        quality_required = run_status in {"success", "completed", "partial", "ok", "done"} or (
+            _STAGE_ALIAS.get(failure_origin_stage.lower(), failure_origin_stage.lower()) == "quality"
+        )
+        if quality_count == 0 and quality_required and _stage_required("quality", failure_origin_stage):
             issues.append("missing_quality_event")
 
     if worker_started > 0 and worker_done < worker_started:

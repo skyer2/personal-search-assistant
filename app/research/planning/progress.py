@@ -269,12 +269,28 @@ def assess_progress(
         and status.get(step.resolved_task_id(index), "pending") == "failed"
     ]
     assessment = ProgressAssessment(verdict="enough", reason="coverage_ok")
+    latest_rows = latest_worker_results(worker_results)
+    rows_by_task = {
+        str(row.get("task_id") or ""): row
+        for row in latest_rows
+        if isinstance(row, dict)
+    }
     for step in failed_research:
-        assessment.coverage_gaps.append(
-            f"failed:{step.task_id}:{step.objective or step.description}"
+        row = rows_by_task.get(step.task_id or "")
+        payload = row.get("payload") if isinstance(row, dict) and isinstance(row.get("payload"), dict) else {}
+        has_partial_evidence = bool(
+            payload.get("findings")
+            or payload.get("evidence_ids")
+            or payload.get("sources")
         )
+        if not has_partial_evidence:
+            assessment.coverage_gaps.append(
+                f"failed:{step.task_id}:{step.objective or step.description}"
+            )
+        elif assessment.reason == "coverage_ok":
+            assessment.reason = "partial_evidence_available"
 
-    rows = latest_worker_results(worker_results)
+    rows = latest_rows
     if not rows and state is not None:
         rows = _rows_from_loop_state(state)
 
@@ -467,7 +483,9 @@ def _fill_worker_signals(
         summary = str(row.get("summary") or payload.get("summary") or "").strip()
         facts = [str(x) for x in (payload.get("facts") or []) if str(x).strip()]
         sources = [str(x) for x in (payload.get("sources") or []) if str(x).strip()]
-        if not row.get("ok", True) or not summary:
+        findings = list(payload.get("findings") or [])
+        evidence_ids = list(payload.get("evidence_ids") or [])
+        if (not row.get("ok", True) or not summary) and not findings and not evidence_ids:
             assessment.coverage_gaps.append(f"empty:{tid}:{step.objective or step.description}")
         for gap in payload.get("gaps") or []:
             # Legacy string gaps are limitations, not proof that a core brief

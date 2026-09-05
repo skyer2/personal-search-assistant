@@ -37,7 +37,9 @@ LEAD_PLANNER_PROMPT = """你是 Lead Research Planner，不是运行时。
 8. 不要生成写报告 / PDF / summarize 任务，系统会追加。
 9. task 数量 2~{max_tasks}（已是 Hard Ceiling clamp 后的上限）。
 10. 每个 P0 维度默认 evidence_target.independent_sources=3、max_sources=6，不要为堆来源而拆额外任务。
-11. 只输出一个 JSON 对象。
+11. 任务粒度硬约束：单个 task 最多 2 个独立实体、4 个核心维度、8 个信息单元；超过必须拆成多个 task。
+12. 开放式市场/赛道问题先拆 Landscape Discovery（候选发现），不要一开始就对全部候选做完整深度调研；后续 Progress/Replan 再决定深挖对象。
+13. 只输出一个 JSON 对象。
 
 格式：
 {{
@@ -319,6 +321,15 @@ def plan_from_lead_payload(
         steps.append(step)
     if not steps:
         return None
+    from app.agent.harness.research_brief import brief_of
+    from app.research.planning.granularity import normalize_plan_granularity
+
+    brief = brief_of(intent, query=intent.raw_query)
+    steps = normalize_plan_granularity(
+        steps,
+        brief,
+        max_research_tasks=max_tasks,
+    )
     append_synthesis(intent, steps)
     from app.research.planning.priority import stamp_semantic_priority
 

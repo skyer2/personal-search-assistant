@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.agent.harness.state import ExecutionPlan, PlanStep, TaskIntent
+from app.research.planning.granularity import analyze_task_granularity
 from app.research.planning.policy import SOURCE_TOOLS, SourcePolicy, parse_source_policy
 
 SYNTHESIS_TYPES = frozenset({"generate_markdown", "summarize", "convert_pdf"})
@@ -77,6 +78,18 @@ def validate_hybrid_plan(
 
     if _has_cycle(plan.steps):
         issues.append("cycle_in_dependencies")
+
+    brief = getattr(intent, "brief", None)
+    for step in plan.steps:
+        if step.step_type not in RESEARCH_TYPES:
+            continue
+        complexity = analyze_task_granularity(step, brief)
+        if complexity.oversized:
+            issues.append(
+                "task_too_large:"
+                f"{step.task_id}:entities={complexity.entity_count},"
+                f"dimensions={complexity.dimension_count},cells={complexity.estimated_cells}"
+            )
 
     if intent.needs_network and "web" not in policy.forbidden_sources:
         if not _covers_source(plan, "web"):

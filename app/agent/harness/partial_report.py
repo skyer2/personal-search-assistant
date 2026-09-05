@@ -117,6 +117,25 @@ def render_partial_report(
 def _collect_findings(state: Any) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
+    metadata = getattr(state, "metadata", None)
+    if isinstance(metadata, dict):
+        for item in list(metadata.get("partial_findings") or []):
+            if not isinstance(item, dict):
+                continue
+            summary = str(item.get("summary") or "").strip()
+            if not summary:
+                continue
+            key = str(item.get("task_id") or "") or summary[:40]
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                {
+                    "task_id": str(item.get("task_id") or ""),
+                    "summary": summary[:800],
+                    "facts": [str(x)[:200] for x in (item.get("facts") or []) if str(x).strip()][:8],
+                }
+            )
     for item in list(getattr(state, "step_results", None) or []):
         step_type = str(getattr(item, "step_type", "") or "")
         if step_type not in {"research", "network_search", "file_read"}:

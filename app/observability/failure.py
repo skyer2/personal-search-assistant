@@ -21,6 +21,16 @@ FAILURE_STAGES = (
 )
 
 _TYPE_ALIASES: dict[str, str] = {
+    "content_filter": "content_filter",
+    "provider_content_filter": "content_filter",
+    "sensitivecontentdetected": "content_filter",
+    "rate_limit": "rate_limit",
+    "context_length": "context_length",
+    "context_length_exceeded": "context_length",
+    "auth": "provider_auth",
+    "provider_auth": "provider_auth",
+    "bad_request": "provider_error",
+    "provider_bad_request": "provider_error",
     "timeout": "timeout",
     "step_timeout": "timeout",
     "deadline_exceeded": "timeout",
@@ -42,6 +52,15 @@ _TYPE_ALIASES: dict[str, str] = {
     "missing_session": "runtime",
     "missing_step": "runtime",
     "worker_failed": "worker_failed",
+}
+
+_TYPE_BY_PROVIDER_KIND: dict[str, str] = {
+    "content_filter": "content_filter",
+    "rate_limit": "rate_limit",
+    "timeout": "timeout",
+    "context_length": "context_length",
+    "auth": "provider_auth",
+    "bad_request": "provider_error",
 }
 
 _STAGE_BY_PHASE: dict[str, str] = {
@@ -71,8 +90,41 @@ _STAGE_BY_TYPE: dict[str, str] = {
     "unauthorized_tool": "tool",
     "dependency_failed": "worker",
     "worker_failed": "worker",
+    "content_filter": "worker",
+    "rate_limit": "worker",
+    "context_length": "worker",
+    "provider_auth": "worker",
+    "provider_error": "worker",
     "runtime": "runtime",
 }
+
+
+def record_failure(
+    state: Any,
+    *,
+    origin_stage: str,
+    detected_stage: str,
+    failure_type: str = "",
+    reason: str = "",
+) -> dict[str, str]:
+    """Record origin once; detected stage may move as termination progresses."""
+    metadata = getattr(state, "metadata", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+        setattr(state, "metadata", metadata)
+    origin = str(metadata.get("failure.origin_stage") or origin_stage or "runtime")
+    detected = str(detected_stage or origin)
+    metadata["failure.origin_stage"] = origin
+    metadata["failure.detected_stage"] = detected
+    if failure_type:
+        metadata["failure.type"] = str(failure_type)
+    if reason:
+        metadata["failure.reason"] = str(reason)[:500]
+    return {
+        "failure.origin_stage": origin,
+        "failure.detected_stage": detected,
+        **({"failure.type": str(failure_type)} if failure_type else {}),
+    }
 
 
 def classify_failure(

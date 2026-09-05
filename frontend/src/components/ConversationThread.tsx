@@ -291,12 +291,12 @@ function AssistantMessage({
   const durationLabel = <ElapsedTimer clock={elapsedClock} />;
   const isCancelled = events.some((event) => event.event === "task_cancelled");
   const clockLive = runStatus === "running" || runStatus === "cancelling";
-  const syncLabel =
+  const syncPrefix =
     runStatus === "awaiting_approval"
-      ? `已暂停 · ${durationLabel}`
+      ? "已暂停 · "
       : clockLive
-        ? `生成中 · 用时 ${durationLabel}`
-        : `${isCancelled ? "已取消" : "已同步"} · 用时 ${durationLabel}`;
+        ? "生成中 · 用时 "
+        : `${isCancelled ? "已取消" : "已同步"} · 用时 `;
 
   return (
     <article className="chat-message chat-message--assistant">
@@ -304,7 +304,10 @@ function AssistantMessage({
       <div className="message-bubble">
         <div className="message-meta">
           <span>Harness</span>
-          <time>{syncLabel}</time>
+          <time>
+            {syncPrefix}
+            {durationLabel}
+          </time>
         </div>
 
         {files.length > 0 ? (
