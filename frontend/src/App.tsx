@@ -114,12 +114,17 @@ export default function App() {
       }
       const lastTurn = previous[previous.length - 1];
       setQuery(lastTurn.content);
-      return previous.slice(0, -1);
+      return [
+        ...previous.slice(0, -1),
+        {
+          ...lastTurn,
+          isRunning: false,
+          result: `任务失败：${failureMessage}`
+        }
+      ];
     });
-    hydratedTurnsRef.current = false;
-    session.discardFailedTask();
-    message.warning(`任务失败，已撤回本次提问：${failureMessage}`);
-  }, [message, session.discardFailedTask, session.taskFailure, session.events.length]);
+    message.error(`任务失败：${failureMessage}`);
+  }, [message, session.taskFailure, session.events.length]);
 
   async function handleSubmit() {
     const cleanQuery = query.trim();

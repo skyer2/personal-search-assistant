@@ -23,6 +23,8 @@ def run_elapsed_ms(meta: dict[str, Any] | None) -> int | None:
     if not isinstance(meta, dict):
         return None
     started = meta.get("run_started_monotonic")
+    if started is None:
+        return None
     try:
         return int((time.perf_counter() - float(started)) * 1000)
     except (TypeError, ValueError):
@@ -96,7 +98,8 @@ def note_dispatch_wave(
 def critical_path_summary(meta: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(meta, dict):
         return {}
-    bucket = meta.get("latency") if isinstance(meta.get("latency"), dict) else {}
+    raw_bucket = meta.get("latency")
+    bucket = raw_bucket if isinstance(raw_bucket, dict) else {}
     return {
         "time_to_first_evidence_ms": bucket.get("first_evidence_ms"),
         "time_to_enough_evidence_ms": bucket.get("enough_evidence_ms"),

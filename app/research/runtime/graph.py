@@ -7,7 +7,7 @@ Research StateGraph：workflow 调度权威。
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from app.agent.harness.planner import build_plan, understand_task
 from app.agent.harness.state import ExecutionPlan
@@ -39,15 +39,17 @@ def intent_node(state: ResearchState) -> dict[str, Any]:
 
     shape = classify_task_shape(query, brief)
     profile = execution_profile_for_shape(shape.shape)
-    budget = dict(state.get("budget") or {})
-    budget["max_parallel_workers"] = int(profile["parallel_workers"])
+    budget = dict(state["budget"])
+    budget["max_parallel_workers"] = int(cast(Any, profile)["parallel_workers"])
     existing_replan = budget.get("max_replan_count")
     existing_replan = (
-        int(existing_replan)
+        int(cast(Any, existing_replan))
         if existing_replan is not None
-        else int(profile["max_replan_count"])
+        else int(cast(Any, profile)["max_replan_count"])
     )
-    budget["max_replan_count"] = min(existing_replan, int(profile["max_replan_count"]))
+    budget["max_replan_count"] = min(
+        existing_replan, int(cast(Any, profile)["max_replan_count"])
+    )
     return {
         "intent": payload,
         "brief": brief,
@@ -117,12 +119,12 @@ def dispatch_node(state: ResearchState) -> dict[str, Any]:
 
 
 def _max_replan(state: ResearchState) -> int:
-    budget = state.get("budget") or {}
+    budget = state["budget"]
     return int(budget.get("max_replan_count") or 3)
 
 
 def _wave_parallel(state: ResearchState) -> int:
-    budget = state.get("budget") or {}
+    budget = state["budget"]
     try:
         n = int(budget.get("max_parallel_workers") or 3)
     except (TypeError, ValueError):

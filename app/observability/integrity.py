@@ -4,6 +4,24 @@ from __future__ import annotations
 
 from typing import Any
 
+_STAGE_ORDER = {
+    "understand": 1,
+    "brief": 1,
+    "planning": 2,
+    "plan": 2,
+    "worker": 3,
+    "progress": 4,
+    "synthesis": 5,
+    "quality": 6,
+}
+
+
+def _stage_required(stage: str, failure_origin_stage: str) -> bool:
+    origin = failure_origin_stage.lower()
+    if not origin or origin not in _STAGE_ORDER or stage not in _STAGE_ORDER:
+        return True
+    return _STAGE_ORDER[stage] < _STAGE_ORDER[origin]
+
 
 def check_trace_integrity(
     events: list[dict[str, Any]],
@@ -20,6 +38,7 @@ def check_trace_integrity(
     seq_values: list[int] = []
     is_terminal = run_status in {"success", "completed", "partial", "failed", "interrupted", "ok", "done"}
     is_agent_mode = False
+    failure_origin_stage = ""
 
     for event in events:
         event_type = str(event.get("type") or event.get("event") or "")
@@ -34,6 +53,12 @@ def check_trace_integrity(
         attrs = event.get("attributes") if isinstance(event.get("attributes"), dict) else {}
         if attrs.get("search_mode") == "agent" or event_type == "brief.compiled":
             is_agent_mode = True
+        if event_type in {"run.failed", "run_summary"}:
+            failure_origin_stage = str(
+                attrs.get("failure.origin_stage")
+                or ((attrs.get("metadata") or {}).get("failure.origin_stage") if isinstance(attrs.get("metadata"), dict) else "")
+                or failure_origin_stage
+            )
 
     brief_count = counts.get("brief.compiled", 0)
     plan_count = counts.get("plan.created", 0)
@@ -47,23 +72,27 @@ def check_trace_integrity(
     run_completed = counts.get("run.completed", 0) + counts.get("run.failed", 0)
 
     if is_agent_mode:
-        if brief_count == 0:
+        if brief_count == 0 and _stage_required("brief", failure_origin_stage):
             issues.append("missing_brief_event")
-        if plan_count == 0:
+        if plan_count == 0 and _stage_required("plan", failure_origin_stage):
             issues.append("missing_plan_event")
 
     if is_terminal and run_started == 0:
         issues.append("missing_run_started_event")
 
     if is_terminal and is_agent_mode:
-        if worker_done == 0:
+        if worker_done == 0 and _stage_required("worker", failure_origin_stage):
             issues.append("missing_worker_terminal_event")
-        if progress_count == 0:
+        if progress_count == 0 and _stage_required("progress", failure_origin_stage):
             issues.append("missing_progress_event")
         termination_count = counts.get("termination.reason", 0) + counts.get("run.failed", 0)
-        if synthesis_count == 0 and termination_count == 0:
+        if (
+            synthesis_count == 0
+            and termination_count == 0
+            and _stage_required("synthesis", failure_origin_stage)
+        ):
             issues.append("missing_synthesis_or_termination_event")
-        if quality_count == 0:
+        if quality_count == 0 and _stage_required("quality", failure_origin_stage):
             issues.append("missing_quality_event")
 
     if worker_started > 0 and worker_done < worker_started:
@@ -101,6 +130,7 @@ def check_trace_integrity(
     return {
         "passed": len(issues) == 0,
         "issues": issues,
+        "failure_origin_stage": failure_origin_stage,
         "counts": {
             "brief": brief_count,
             "plan": plan_count,

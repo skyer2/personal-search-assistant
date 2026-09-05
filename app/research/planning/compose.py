@@ -72,7 +72,7 @@ def _stamp(
     return plan
 
 
-def compose_execution_plan_sync(
+def _compose_execution_plan_strict(
     intent: TaskIntent,
     *,
     limits: PlanningLimits | None = None,
@@ -115,6 +115,25 @@ def compose_execution_plan_sync(
         max_research_tasks=limits.max_research_tasks,
     )
     return plan, issues
+
+
+def compose_execution_plan_sync(
+    intent: TaskIntent,
+    *,
+    limits: PlanningLimits | None = None,
+    config: Any | None = None,
+) -> tuple[ExecutionPlan, list[str]]:
+    """Compose a plan, with a deterministic template fallback for planner defects."""
+
+    try:
+        return _compose_execution_plan_strict(intent, limits=limits, config=config)
+    except Exception as exc:
+        from app.agent.harness.planner import build_plan, finalize_plan, validate_plan_against_intent
+
+        plan = finalize_plan(build_plan(intent))
+        plan.planning_mode = "fallback_template"
+        _passed, issues = validate_plan_against_intent(intent, plan)
+        return plan, [f"planning_fallback:{type(exc).__name__}", *issues]
 
 
 async def compose_execution_plan(

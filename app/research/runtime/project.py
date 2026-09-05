@@ -67,7 +67,8 @@ def brief_from_intent(intent: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def findings_from_worker_row(row: dict[str, Any]) -> list[dict[str, Any]]:
-    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    raw_payload = row.get("payload")
+    payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
     findings: list[dict[str, Any]] = []
     raw = payload.get("findings") if isinstance(payload, dict) else None
     if isinstance(raw, list):

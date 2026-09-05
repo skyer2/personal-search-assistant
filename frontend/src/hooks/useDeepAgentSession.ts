@@ -174,13 +174,6 @@ export function useDeepAgentSession() {
     setThreadId(nextThreadId);
   }, [resetProjection]);
 
-  const discardFailedTask = useCallback(() => {
-    const nextThreadId = createThreadId();
-    storeThreadId(nextThreadId);
-    resetProjection();
-    setThreadId(nextThreadId);
-  }, [resetProjection]);
-
   const setFilesIfChanged = useCallback((nextFiles: OutputFile[]) => {
     setFiles((previous) => {
       if (
@@ -675,7 +668,6 @@ export function useDeepAgentSession() {
     loadOlderEvents,
     refreshFiles,
     resetSession,
-    discardFailedTask,
     result,
     runStatus,
     sessionFound,

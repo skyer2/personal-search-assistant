@@ -26,7 +26,7 @@
 | P1 | Markdown 无谓重渲染 | `MarkdownRenderer` 使用 `memo` |
 | P1 | 文件列表轮询 | 改为初始化 + WebSocket 事件触发，`tool_end` 至多 1 秒一次，终态强制刷新 |
 | P1 | 相同文件列表触发重渲染 | 按 name/path/size/mtime 浅比较，无变化不 setState |
-| P2 | Session 级扫描重复执行 | 5 秒 TTL 缓存，缓存键包含 Session 输出目录 mtime |
+| P2 | Session 级扫描重复执行 | 5 秒 TTL 缓存，缓存键包含输出目录及一级子项 stat 指纹 |
 | P2 | async 端点内同步 IO 阻塞事件循环 | Bootstrap、Session artifacts、Run artifacts 扫描改用 `asyncio.to_thread` |
 
 ## 实施细节

@@ -16,7 +16,12 @@ _list_cache_lock = threading.Lock()
 def _cache_key(root: Path) -> str:
     resolved = str(root.resolve())
     try:
-        return f"{resolved}:{root.stat().st_mtime_ns}"
+        children = sorted(root.iterdir(), key=lambda path: path.name)
+        fingerprint = [
+            f"{child.name}:{child.stat().st_mtime_ns}:{child.stat().st_size}"
+            for child in children
+        ]
+        return f"{resolved}:{root.stat().st_mtime_ns}:{'|'.join(fingerprint)}"
     except OSError:
         return resolved
 

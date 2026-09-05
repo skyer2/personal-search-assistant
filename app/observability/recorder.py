@@ -152,19 +152,44 @@ class AgentTelemetry:
     ) -> None:
         ctx = current_context()
         event_type = EventType.RUN_COMPLETED if status in {"success", "partial", "ok"} else EventType.RUN_FAILED
+        attributes = {
+            "metadata": metadata or {},
+            "result_preview": result_preview[:240],
+            "error": error,
+        }
+        origin_stage = str((metadata or {}).get("failure.origin_stage") or "")
+        detected_stage = str(
+            (metadata or {}).get("failure.detected_stage") or origin_stage
+        )
+        if origin_stage:
+            attributes["failure.origin_stage"] = origin_stage
+            attributes["failure.detected_stage"] = detected_stage
+            attributes["failure.stage"] = origin_stage
         self.emit(
             event_type,
             phase="run",
             status=status,
             duration_ms=duration_ms,
-            attributes={"metadata": metadata or {}, "result_preview": result_preview[:240], "error": error},
+            attributes=attributes,
         )
         self.emit(
             EventType.RUN_SUMMARY,
             phase="run",
             status=status,
             duration_ms=duration_ms,
-            attributes={"event": "run_summary", "metadata": metadata or {}},
+            attributes={
+                "event": "run_summary",
+                "metadata": metadata or {},
+                **(
+                    {
+                        "failure.origin_stage": origin_stage,
+                        "failure.detected_stage": detected_stage,
+                        "failure.stage": origin_stage,
+                    }
+                    if origin_stage
+                    else {}
+                ),
+            },
         )
         replan_count = int((metadata or {}).get("replan_count") or 0)
         if replan_count > 0:

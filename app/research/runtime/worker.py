@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
+
+WorkerResultStatus = Literal["done", "failed", "skipped", "blocked"]
 
 
 @dataclass
@@ -41,6 +43,7 @@ class ResearchContext:
 class WorkerResult:
     ok: bool
     task_id: str
+    status: WorkerResultStatus = "done"
     summary: str = ""
     findings: list[dict[str, Any]] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
@@ -86,12 +89,20 @@ class LangChainWorkerRuntime:
         step_index = int(task.step_index)
         if session is None or session.state.plan is None:
             return WorkerResult(
-                ok=False, task_id=task.task_id, fail_reason="missing_session"
+                ok=False,
+                task_id=task.task_id,
+                status="failed",
+                summary="missing_session",
+                fail_reason="missing_session",
             )
         plan = session.state.plan
         if step_index >= len(plan.steps):
             return WorkerResult(
-                ok=False, task_id=task.task_id, fail_reason="missing_step"
+                ok=False,
+                task_id=task.task_id,
+                status="failed",
+                summary="missing_step",
+                fail_reason="missing_step",
             )
         step = plan.steps[step_index]
 
@@ -169,30 +180,44 @@ class LangChainWorkerRuntime:
                     allowed, why = True, ""
                     remaining = float(self.harness.harness_config.step_timeout_sec)
                 if not allowed:
+                    duration_ms = int((time.perf_counter() - worker_started) * 1000)
                     async with session.lock:
                         session.state.plan.steps[step_index].metadata[
                             "status"
                         ] = StepStatus.FAILED.value
                         session.state.metadata["force_synthesis"] = True
-                    return {
-                        "task_status": {task.task_id: "failed"},
-                        "worker_results": [
-                            {
-                                "task_id": task.task_id,
-                                "ok": False,
-                                "summary": f"budget_blocked:{why}",
+                    if recorder.is_active:
+                        recorder.emit(
+                            EventType.WORKER_FAILED,
+                            phase="execute",
+                            status="blocked",
+                            duration_ms=duration_ms,
+                            task_id=task.task_id,
+                            attempt=attempt,
+                            plan_version=int(task.plan_version or 1),
+                            attributes={
+                                "objective": task.objective,
                                 "step_type": task.step_type,
+                                "worker_status": "blocked",
                                 "fail_reason": why or "budget_blocked",
                                 "queue_ms": queue_ms,
-                                "execution_ms": 0,
-                            }
-                        ],
-                        "replan_exhausted": True,
-                        "progress_assessment": {
-                            "verdict": "enough",
-                            "reason": "force_synthesis_budget",
-                        },
-                    }
+                            },
+                            run_id=session.run_id,
+                            session_id=session.session_id,
+                            trace_id=str(getattr(session.state, "trace_id", "") or ""),
+                        )
+                        if span_key:
+                            recorder.end_span(span_key, status="blocked", duration_ms=duration_ms)
+                    return WorkerResult(
+                        ok=False,
+                        task_id=task.task_id,
+                        status="blocked",
+                        summary=f"budget_blocked:{why}",
+                        fail_reason=why or "budget_blocked",
+                        queue_ms=queue_ms,
+                        execution_ms=0,
+                        duration_ms=duration_ms,
+                    )
                 step_timeout = max(
                     10, int(self.harness.harness_config.step_timeout_sec)
                 )
@@ -218,24 +243,41 @@ class LangChainWorkerRuntime:
                     )
                     == "enough"
                 ):
+                    duration_ms = int((time.perf_counter() - worker_started) * 1000)
                     async with session.lock:
                         session.state.plan.steps[step_index].metadata[
                             "status"
                         ] = "skipped"
-                    return {
-                        "task_status": {task.task_id: "skipped"},
-                        "worker_results": [
-                            {
-                                "task_id": task.task_id,
-                                "ok": True,
-                                "summary": "skipped_optional_early_stop",
+                    if recorder.is_active:
+                        recorder.emit(
+                            EventType.WORKER_COMPLETED,
+                            phase="execute",
+                            status="skipped",
+                            duration_ms=duration_ms,
+                            task_id=task.task_id,
+                            attempt=attempt,
+                            plan_version=int(task.plan_version or 1),
+                            attributes={
+                                "objective": task.objective,
                                 "step_type": task.step_type,
-                                "fail_reason": "",
+                                "worker_status": "skipped",
                                 "queue_ms": queue_ms,
-                                "execution_ms": 0,
-                            }
-                        ],
-                    }
+                            },
+                            run_id=session.run_id,
+                            session_id=session.session_id,
+                            trace_id=str(getattr(session.state, "trace_id", "") or ""),
+                        )
+                        if span_key:
+                            recorder.end_span(span_key, status="skipped", duration_ms=duration_ms)
+                    return WorkerResult(
+                        ok=True,
+                        task_id=task.task_id,
+                        status="skipped",
+                        summary="skipped_optional_early_stop",
+                        queue_ms=queue_ms,
+                        execution_ms=0,
+                        duration_ms=duration_ms,
+                    )
                 try:
                     ok = await asyncio.wait_for(
                         self.harness._run_single_step(
@@ -257,7 +299,8 @@ class LangChainWorkerRuntime:
                 except asyncio.TimeoutError:
                     ok = False
                     fail_reason = "step_timeout"
-                    result = None
+                    exec_ms = int((time.perf_counter() - exec_started) * 1000)
+                    duration_ms = int((time.perf_counter() - worker_started) * 1000)
                     outcome = IsolatedWorkerOutcome(
                         step_index=step_index,
                         task_id=task.task_id,
@@ -277,22 +320,40 @@ class LangChainWorkerRuntime:
                         session.state.plan.steps[step_index].metadata[
                             "execution_ms"
                         ] = int((time.perf_counter() - exec_started) * 1000)
-                    return {
-                        "task_status": {task.task_id: "failed"},
-                        "worker_results": [
-                            {
-                                "task_id": task.task_id,
-                                "ok": False,
-                                "summary": "step_timeout",
+                    if recorder.is_active:
+                        recorder.emit(
+                            EventType.WORKER_FAILED,
+                            phase="execute",
+                            status="failed",
+                            duration_ms=duration_ms,
+                            task_id=task.task_id,
+                            attempt=attempt,
+                            plan_version=int(task.plan_version or 1),
+                            attributes={
+                                "objective": task.objective,
                                 "step_type": task.step_type,
+                                "worker_status": "failed",
                                 "fail_reason": fail_reason,
                                 "queue_ms": queue_ms,
-                                "execution_ms": int(
-                                    (time.perf_counter() - exec_started) * 1000
-                                ),
-                            }
-                        ],
-                    }
+                                "execution_ms": exec_ms,
+                            },
+                            run_id=session.run_id,
+                            session_id=session.session_id,
+                            trace_id=str(getattr(session.state, "trace_id", "") or ""),
+                        )
+                        if span_key:
+                            recorder.end_span(span_key, status="failed", duration_ms=duration_ms)
+                    return WorkerResult(
+                        ok=False,
+                        task_id=task.task_id,
+                        status="failed",
+                        summary="step_timeout",
+                        raw=outcome,
+                        fail_reason="step_timeout",
+                        queue_ms=queue_ms,
+                        execution_ms=exec_ms,
+                        duration_ms=duration_ms,
+                    )
                 result = child.step_results[-1] if child.step_results else None
                 exec_ms = int((time.perf_counter() - exec_started) * 1000)
                 outcome = IsolatedWorkerOutcome(
@@ -392,6 +453,7 @@ class LangChainWorkerRuntime:
                         "gaps": list((payload or {}).get("gaps") or [])[:8],
                         "conflicts": list((payload or {}).get("conflicts") or [])[:8],
                         "confidence": (payload or {}).get("confidence"),
+                        "worker_status": "done" if ok else "failed",
                         "tool_calls": int((payload or {}).get("tool_calls") or 0),
                         "search_calls": int((payload or {}).get("search_calls") or 0),
                         "tokens": int((payload or {}).get("tokens") or 0),
@@ -430,6 +492,7 @@ class LangChainWorkerRuntime:
             return WorkerResult(
                 ok=bool(ok),
                 task_id=task.task_id,
+                status="done" if ok else "failed",
                 summary=str(row.get("summary") or ""),
                 findings=findings,
                 evidence_refs=evidence_ids if ok else [],
@@ -480,6 +543,7 @@ class PlaceholderWorkerRuntime:
         return WorkerResult(
             ok=True,
             task_id=task.task_id,
+            status="done",
             summary="placeholder",
             findings=[
                 {"task_id": task.task_id, "summary": task.objective or task.description}

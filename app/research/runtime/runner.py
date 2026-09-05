@@ -413,6 +413,7 @@ class ResearchGraphRunner:
             LangChainWorkerRuntime,
             ResearchContext,
             ResearchTask,
+            WorkerResult,
         )
 
         session = _require_session(gstate)
@@ -826,6 +827,7 @@ class ResearchGraphRunner:
             LangChainWorkerRuntime,
             ResearchContext,
             ResearchTask,
+            WorkerResult,
         )
 
         session = get_session(str(gstate.get("run_id") or ""))
@@ -887,6 +889,11 @@ class ResearchGraphRunner:
                 session_id=session.session_id,
             ),
         )
+        if not isinstance(result, WorkerResult):
+            raise TypeError(
+                "WorkerRuntime.execute must return WorkerResult, got "
+                f"{type(result).__name__}"
+            )
         outcome = result.raw
         tid = step.resolved_task_id(step_index)
         row = (
@@ -905,12 +912,35 @@ class ResearchGraphRunner:
                 },
             }
         )
-        return {
+        row["status"] = result.status
+        row["fail_reason"] = result.fail_reason or row.get("fail_reason", "")
+        row["queue_ms"] = result.queue_ms or row.get("queue_ms", 0)
+        row["execution_ms"] = result.execution_ms or row.get("execution_ms", 0)
+        if not result.ok:
+            row["summary"] = result.summary or row.get("summary", "")
+        graph_task_status = {
+            "done": "done",
+            "failed": "failed",
+            "skipped": "skipped",
+            "blocked": "failed",
+        }[result.status]
+        projected_state: dict[str, Any] = {
             "worker_results": [row],
-            "task_status": {tid: "done" if result.ok else "failed"},
+            "task_status": {tid: graph_task_status},
             "evidence_refs": result.evidence_refs or ([tid] if result.ok else []),
             "findings": result.findings,
         }
+        if result.status == "blocked":
+            projected_state.update(
+                {
+                    "replan_exhausted": True,
+                    "progress_assessment": {
+                        "verdict": "enough",
+                        "reason": "force_synthesis_budget",
+                    },
+                }
+            )
+        return projected_state
 
     async def node_progress(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.planning.progress import assess_progress
@@ -1875,7 +1905,7 @@ async def _default_checkpointer():
 
 async def _initial_or_resume_payload(
     graph: Any,
-    payload: dict[str, Any],
+    payload: Any,
     config: dict[str, Any],
     ctx: Any,
 ) -> Any:

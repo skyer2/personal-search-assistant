@@ -535,10 +535,42 @@ class AgentHarness:
         except Exception as e:
             state.abort_reason = "error"
             state.abort_message = str(e)
+            logger.exception("Harness execution failed (run_id=%s)", state.run_id)
             self._report_phase(Phase.ABORT, "error", state=state, error=str(e))
             _project_run_fail(state.run_id, str(e))
             monitor._emit("error", f"Harness 执行异常：{str(e)}")
             ctx.tracer.finish({"status": "failed", "error": str(e)})
+            try:
+                from app.observability import get_recorder
+
+                recorder = get_recorder()
+                failure_metadata = {
+                    "error": str(e),
+                    "exception_type": type(e).__name__,
+                    "abort_reason": state.abort_reason,
+                    "abort_message": state.abort_message,
+                    "failure.origin_stage": str(state.phase.value if state.phase else "run"),
+                    "failure.detected_stage": str(state.phase.value if state.phase else "run"),
+                }
+                duration_ms = int((time.perf_counter() - ctx.run_started) * 1000)
+                if recorder.is_active:
+                    recorder.finish_run(
+                        status="failed",
+                        duration_ms=duration_ms,
+                        metadata=failure_metadata,
+                        result_preview=state.final_content[:240],
+                        error=str(e),
+                    )
+                else:
+                    self.trace_logger.log_run_summary(
+                        trace_id=self._current_trace_id,
+                        session_id=state.session_id,
+                        status="failed",
+                        duration_ms=duration_ms,
+                        metadata=failure_metadata,
+                    )
+            except Exception:
+                logger.exception("Failed to close observability run (run_id=%s)", state.run_id)
             return HarnessResult(
                 session_id=session_id,
                 status="failed",
@@ -547,8 +579,11 @@ class AgentHarness:
                 retry_count=state.retry_count,
                 metadata={
                     "error": str(e),
+                    "exception_type": type(e).__name__,
                     "abort_reason": state.abort_reason,
                     "abort_message": state.abort_message,
+                    "failure.origin_stage": str(state.phase.value if state.phase else "run"),
+                    "failure.detected_stage": str(state.phase.value if state.phase else "run"),
                 },
             )
         finally:

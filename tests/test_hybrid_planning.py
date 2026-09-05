@@ -60,6 +60,24 @@ def test_dynamic_compare_builds_objective_dag():
     print("[OK] dynamic DAG")
 
 
+def test_planner_defect_falls_back_to_template(monkeypatch):
+    from app.research.planning import compose as compose_module
+
+    intent = understand_task("搜索 Tesla 2026 动态，生成 Markdown 报告")
+
+    def strict_failure(*args, **kwargs):
+        raise RuntimeError("planner exploded")
+
+    monkeypatch.setattr(compose_module, "_compose_execution_plan_strict", strict_failure)
+    plan, issues = compose_execution_plan_sync(intent)
+
+    assert plan.planning_mode == "fallback_template"
+    assert plan.steps
+    assert issues[0] == "planning_fallback:RuntimeError"
+    assert "generate_markdown" in [step.step_type for step in plan.steps]
+    print("[OK] planner defect falls back to template")
+
+
 def test_research_worker_allowlist_and_registry():
     step = PlanStep(
         step_type="research",

@@ -95,7 +95,7 @@ def test_trace_integrity_detects_missing_events():
     result = check_trace_integrity(events, run_status="success")
     assert not result["passed"]
     assert "missing_progress_event" in result["issues"]
-    assert "missing_synthesis_event" in result["issues"]
+    assert "missing_synthesis_or_termination_event" in result["issues"]
     assert "missing_quality_event" in result["issues"]
     assert result["counts"]["brief"] == 1
     assert result["counts"]["plan"] == 1
@@ -119,6 +119,61 @@ def test_trace_integrity_passes_complete_run():
     assert result["issues"] == []
     assert result["span_tree"]["valid"] is True
     print("[OK] integrity passes complete run")
+
+
+def test_failed_run_records_origin_and_passes_stage_integrity():
+    tel = AgentTelemetry()
+    tel._ws_enabled = False
+    tel.start_run(session_id="s_failed", run_id="r_failed", trace_id="tr_failed")
+    tel.emit(EventType.BRIEF_COMPILED, phase="understand", status="ok")
+    tel.finish_run(
+        status="failed",
+        duration_ms=43,
+        metadata={
+            "error": "planner exploded",
+            "failure.origin_stage": "planning",
+            "failure.detected_stage": "planning",
+        },
+        error="planner exploded",
+    )
+    events = [event.to_dict() for event in tel.journal.replay("s_failed")]
+    failed = next(event for event in events if event["type"] == "run.failed")
+
+    assert failed["attributes"]["failure.origin_stage"] == "planning"
+    assert failed["attributes"]["failure.stage"] == "planning"
+
+    result = check_trace_integrity(events, run_status="failed")
+    assert result["passed"]
+    assert result["issues"] == []
+    assert result["failure_origin_stage"] == "planning"
+    assert result["counts"]["plan"] == 0
+    print("[OK] failed run records origin and stage-aware integrity")
+
+
+def test_plan_phase_emits_created_and_validated(monkeypatch):
+    from app.agent.harness.loop import AgentHarness
+    from app.agent.harness.planner import build_plan, understand_task
+    from app.agent.harness.state import LoopState, Phase
+    tel = AgentTelemetry()
+    tel._ws_enabled = False
+    tel.start_run(session_id="s_plan", run_id="r_plan", trace_id="tr_plan")
+    monkeypatch.setattr("app.observability.get_recorder", lambda: tel)
+    harness = object.__new__(AgentHarness)
+    harness._current_tracer = None
+    harness.trace_logger = None
+    state = LoopState(session_id="s_plan", phase=Phase.PLAN)
+    state.intent = understand_task("搜索 Tesla 2026 动态，生成 Markdown 报告")
+    state.plan = build_plan(state.intent)
+
+    try:
+        harness._report_phase(Phase.PLAN, "done", state=state)
+    finally:
+        tel.finish_run(status="success", duration_ms=1)
+
+    event_types = [event.type for event in tel.journal.replay("s_plan")]
+    assert EventType.PLAN_CREATED in event_types
+    assert EventType.PLAN_VALIDATED in event_types
+    print("[OK] plan phase emits created and validated")
 
 
 def test_plan_coverage_fuzzy_keywords():
