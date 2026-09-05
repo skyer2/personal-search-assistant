@@ -20,7 +20,6 @@ Agent Harness 主循环
 """
 
 import asyncio
-import copy
 import json
 import logging
 import shutil
@@ -145,6 +144,7 @@ class HarnessRunContext:
     original_query: str = ""
     search_mode: str = "agent"
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    budget_manager: Any = None
     context_built: bool = False
     run_dir: Path | None = None
     artifact_dir: Path | None = None
@@ -336,16 +336,26 @@ class AgentHarness:
         run_started = time.perf_counter()
         state.metadata["run_started_monotonic"] = float(run_started)
         # Absolute deadline clock — create RunBudgetManager at run start (no origin drift)
-        try:
-            from app.agent.harness.run_budget import get_or_create_run_budget
+        from app.agent.harness.run_budget import create_run_budget_manager
 
-            get_or_create_run_budget(
-                state,
-                self.harness_config,
-                run_started=run_started,
-            )
-        except Exception:
-            pass
+        run_budget = (
+            dict(state.metadata["run_budget"])
+            if isinstance(state.metadata.get("run_budget"), dict)
+            else {}
+        )
+        budget_manager = create_run_budget_manager(
+            self.harness_config,
+            run_budget=run_budget,
+            run_started=run_started,
+        )
+        snap = budget_manager.snapshot()
+        run_budget.setdefault("max_total_tokens", snap.token_limit)
+        run_budget["research_cap_tokens"] = snap.research_cap_tokens
+        run_budget["synthesis_reserve_tokens"] = snap.synthesis_reserve_tokens
+        run_budget["max_llm_calls"] = snap.llm_call_limit
+        run_budget["synthesis_reserve_sec"] = budget_manager.synthesis_reserve_sec
+        run_budget["deadline_at_monotonic"] = budget_manager.deadline_at
+        state.metadata["run_budget"] = run_budget
         state.metadata.setdefault(
             "latency",
             {
@@ -468,6 +478,7 @@ class AgentHarness:
             step_index=step_index,
             search_mode=mode or "agent",
             original_query=task_query,
+            budget_manager=budget_manager,
             run_dir=run_dir,
             artifact_dir=artifact_dir,
             deliverable_dir=deliverable_dir,
@@ -601,7 +612,7 @@ class AgentHarness:
                 continue
             state.step_index = step_index
             step.metadata["status"] = StepStatus.RUNNING.value
-            if self._apply_run_guardrails(state, run_started):
+            if self._apply_run_guardrails(state, run_started, ctx.budget_manager):
                 self._report_phase(
                     Phase.ABORT,
                     state.abort_reason or "guardrail",
@@ -1017,8 +1028,9 @@ class AgentHarness:
 
             # fan-out 任务只读父状态，并在独立副本上累计 trace/counter。
             # join 阶段按 step_index 单线程合并，杜绝共享 LoopState 的竞态。
-            child_state = copy.deepcopy(state)
-            child_state.metadata["_parallel_child"] = True
+            from app.research.runtime.isolation import snapshot_worker_loop_state
+
+            child_state = snapshot_worker_loop_state(state)
             child_state.step_index = idx
             child_state.trace = []
             child_state.assistants_called = []
@@ -3183,7 +3195,12 @@ class AgentHarness:
             pass
         return max(content_est, usage_tokens)
 
-    def _apply_run_guardrails(self, state: LoopState, run_started: float) -> bool:
+    def _apply_run_guardrails(
+        self,
+        state: LoopState,
+        run_started: float,
+        budget_manager: Any,
+    ) -> bool:
         """【Phase 13】每步前评估护栏（三态）。
 
         - CONTINUE：返回 False，继续执行；
@@ -3191,13 +3208,7 @@ class AgentHarness:
           （主循环会跳过已标记 skipped 的检索步，让合成步基于已有证据交付）；
         - ABORT   ：仅不可恢复错误才返回 True 并写入 abort_reason。
         """
-        from app.agent.harness.run_budget import get_or_create_run_budget
-
-        mgr = get_or_create_run_budget(
-            state,
-            self.harness_config,
-            run_started=run_started,
-        )
+        mgr = budget_manager
         mgr.sync_from_usage(session_id=state.session_id or "", tool_calls=state.tool_calls_count)
         snap = mgr.snapshot()
         if isinstance(state.metadata, dict):

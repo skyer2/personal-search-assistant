@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep, StepResult
+from app.agent.harness.run_budget import RunBudgetManager
 from app.research.runtime.isolation import (
     IsolatedWorkerOutcome,
     apply_isolated_outcome,
@@ -93,7 +94,24 @@ def test_snapshot_does_not_alias_parent_plan():
     print("[OK] child snapshot is isolated")
 
 
+def test_snapshot_filters_runtime_lock_handles():
+    parent = LoopState(session_id="runtime-handle")
+    parent.plan = _plan()
+    parent.metadata["_run_budget_manager"] = RunBudgetManager()
+    parent.metadata["_parallel_child"] = True
+    parent.metadata["budget_snapshot"] = {"used_tokens": 1}
+
+    child = snapshot_worker_loop_state(parent)
+
+    assert "_run_budget_manager" not in child.metadata
+    assert child.metadata["_parallel_child"] is True
+    assert child.metadata["budget_snapshot"] == {"used_tokens": 1}
+    assert isinstance(parent.metadata["_run_budget_manager"], RunBudgetManager)
+    print("[OK] runtime handles never enter worker snapshots")
+
+
 if __name__ == "__main__":
     asyncio.run(test_isolated_workers_overlap_and_merge())
     test_snapshot_does_not_alias_parent_plan()
+    test_snapshot_filters_runtime_lock_handles()
     print("\n=== Parallelism tests passed ===")

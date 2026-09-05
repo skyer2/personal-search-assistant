@@ -101,6 +101,26 @@ def test_loop_state_roundtrip():
     print("[OK] LoopState serialize/deserialize")
 
 
+def test_loop_state_metadata_is_workflow_safe():
+    state = LoopState(session_id="runtime-metadata")
+    state.metadata["_run_budget_manager"] = object()
+    state.metadata["followup_context"] = {"safe": True}
+
+    payload = serialize_loop_state(state)
+
+    assert "_run_budget_manager" not in payload["metadata"]
+    assert payload["metadata"]["followup_context"] == {"safe": True}
+
+    state.metadata["callback_manager"] = object()
+    try:
+        serialize_loop_state(state)
+    except TypeError as exc:
+        assert "metadata.callback_manager" in str(exc)
+    else:
+        raise AssertionError("non-serializable metadata must fail explicitly")
+    print("[OK] loop state metadata is workflow-safe")
+
+
 def test_checkpoint_contains_loop_state(tmp_path: Path):
     store = StepCheckpointStore(tmp_path)
     state = LoopState(session_id="sess", phase=Phase.PLAN)

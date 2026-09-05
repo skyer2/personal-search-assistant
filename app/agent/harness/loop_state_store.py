@@ -7,6 +7,8 @@ LangGraph InMemorySaver 只覆盖单步 messages / interrupt。
 
 from __future__ import annotations
 
+import copy
+import json
 from datetime import datetime
 from typing import Any, Optional
 
@@ -22,6 +24,7 @@ from app.agent.memory.models import MemoryRecord
 
 
 LOOP_STATE_SCHEMA = "loop_state_v1"
+_RUNTIME_METADATA_PREFIX = "_"
 
 _OBS_INT_FIELDS = (
     "obs_structured_checks",
@@ -94,6 +97,21 @@ def _memory_to_dict(record: Any) -> Optional[dict[str, Any]]:
     return None
 
 
+def _workflow_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    workflow_metadata: dict[str, Any] = {}
+    for key, value in dict(metadata or {}).items():
+        if key.startswith(_RUNTIME_METADATA_PREFIX):
+            continue
+        try:
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"non-serializable state: metadata.{key} -> {type(value).__name__}"
+            ) from exc
+        workflow_metadata[key] = copy.deepcopy(value)
+    return workflow_metadata
+
+
 def serialize_loop_state(state: LoopState) -> dict[str, Any]:
     started = state.started_at
     started_s = started.isoformat() if isinstance(started, datetime) else str(started)
@@ -134,7 +152,7 @@ def serialize_loop_state(state: LoopState) -> dict[str, Any]:
         "step_validation_results": list(state.step_validation_results),
         "compression_ratios": list(state.compression_ratios),
         "started_at": started_s,
-        "metadata": dict(state.metadata or {}),
+        "metadata": _workflow_metadata(state.metadata),
         "replan_count": state.replan_count,
         "evidence_source_count": state.evidence_source_count,
         "citation_coverage_rate": state.citation_coverage_rate,

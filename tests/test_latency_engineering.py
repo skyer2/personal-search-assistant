@@ -10,7 +10,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.agent.harness.run_budget import RunBudgetManager, get_or_create_run_budget
+from app.agent.harness.run_budget import RunBudgetManager, create_run_budget_manager
 from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep
 from app.agent.harness.step_budget import retrieval_budget, consume_n_retrieval_or_block
 from app.research.runtime.scheduler import (
@@ -105,15 +105,14 @@ def test_absolute_deadline_uses_run_started_origin():
     print("[OK] absolute deadline + synthesis time reserve")
 
 
-def test_get_or_create_run_budget_binds_run_started():
+def test_create_run_budget_manager_binds_run_started():
     state = LoopState(session_id="lat1")
     started = time.perf_counter() - 50
     state.metadata["run_started_monotonic"] = started
-    mgr = get_or_create_run_budget(state, None, run_started=started)
+    mgr = create_run_budget_manager(None, run_started=started)
     assert mgr.remaining_run_sec() < 560  # not a fresh 600 clock
-    mgr2 = get_or_create_run_budget(state, None)
-    assert mgr2 is mgr
-    print("[OK] run budget origin sticky")
+    assert "_run_budget_manager" not in state.metadata
+    print("[OK] run budget origin is runtime-local")
 
 
 def test_optional_tasks_and_early_skip():
@@ -184,7 +183,7 @@ if __name__ == "__main__":
     test_batch_fetch_parallel()
     test_retrieval_cache_single_flight()
     test_absolute_deadline_uses_run_started_origin()
-    test_get_or_create_run_budget_binds_run_started()
+    test_create_run_budget_manager_binds_run_started()
     test_optional_tasks_and_early_skip()
     test_consume_n_retrieval_budget()
     test_worker_timeout_cap_formula()

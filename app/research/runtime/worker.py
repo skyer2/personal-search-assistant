@@ -157,11 +157,7 @@ class LangChainWorkerRuntime:
                 )
                 # 外层墙钟：含 retries；与剩余 run deadline 取 min
                 try:
-                    from app.agent.harness.run_budget import get_or_create_run_budget
-
-                    mgr = get_or_create_run_budget(
-                        session.state, self.harness.harness_config
-                    )
+                    mgr = session.budget_manager
                     mgr.sync_from_usage(
                         session_id=session.session_id,
                         tool_calls=session.state.tool_calls_count,

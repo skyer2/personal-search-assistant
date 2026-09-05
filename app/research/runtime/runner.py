@@ -38,6 +38,17 @@ class RunSession:
         )
         self.session_id: str = ctx.session_id
         self.lock = ctx.lock
+        if ctx.budget_manager is None:
+            from app.agent.harness.run_budget import create_run_budget_manager
+
+            metadata = getattr(ctx.state, "metadata", None) or {}
+            run_budget = metadata.get("run_budget") if isinstance(metadata, dict) else None
+            ctx.budget_manager = create_run_budget_manager(
+                harness.harness_config,
+                run_budget=run_budget if isinstance(run_budget, dict) else None,
+                run_started=ctx.run_started,
+            )
+        self.budget_manager = ctx.budget_manager
         self.result: Any = None
         self.worker_sem = asyncio.Semaphore(self._resolve_max_workers())
 
@@ -134,13 +145,7 @@ class ResearchGraphRunner:
                 checkpointer=checkpointer or await _default_checkpointer(),
                 profile=profile,
             )
-            from app.agent.harness.run_budget import get_or_create_run_budget
-
-            mgr = get_or_create_run_budget(
-                session.state,
-                self.harness.harness_config,
-                run_started=ctx.run_started,
-            )
+            mgr = session.budget_manager
             initial = await _initial_or_resume_payload(graph, payload, config, ctx)
             research_sec = mgr.remaining_for_research_sec()
             if research_sec <= 1.0:
@@ -747,7 +752,11 @@ class ResearchGraphRunner:
         apply_graph_to_loop(session.state, gstate)
         if session.state.plan is None:
             return {"progress": "dispatch"}
-        if self.harness._apply_run_guardrails(session.state, session.ctx.run_started):
+        if self.harness._apply_run_guardrails(
+            session.state,
+            session.ctx.run_started,
+            session.budget_manager,
+        ):
             # 若仍可合成，优先走 synthesis 而不是直接 abort dump
             if isinstance(session.state.metadata, dict) and session.state.metadata.get(
                 "force_synthesis"
@@ -1169,11 +1178,7 @@ class ResearchGraphRunner:
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         async with session.lock:
             try:
-                from app.agent.harness.run_budget import get_or_create_run_budget
-
-                mgr = get_or_create_run_budget(
-                    session.state, self.harness.harness_config
-                )
+                mgr = session.budget_manager
                 mgr.sync_from_usage(
                     session_id=session.session_id,
                     tool_calls=session.state.tool_calls_count,
@@ -1360,9 +1365,7 @@ class ResearchGraphRunner:
         # Do not start a wave that cannot finish before the synthesis reserve.
         # Use the slowest observed worker as a conservative online p95 estimate.
         try:
-            from app.agent.harness.run_budget import get_or_create_run_budget
-
-            mgr = get_or_create_run_budget(state, self.harness.harness_config)
+            mgr = session.budget_manager
             durations = sorted(
                 int(row.get("execution_ms") or row.get("duration_ms") or 0) / 1000.0
                 for row in list(gstate.get("worker_results") or [])

@@ -251,42 +251,16 @@ class RunBudgetManager:
         return True, ""
 
 
-def get_or_create_run_budget(
-    state: Any,
+def create_run_budget_manager(
     config: Any | None,
     *,
+    run_budget: dict[str, Any] | None = None,
     run_started: float | None = None,
 ) -> RunBudgetManager:
-    meta = getattr(state, "metadata", None)
-    if not isinstance(meta, dict):
-        meta = {}
-        try:
-            state.metadata = meta
-        except Exception:
-            pass
-    existing = meta.get("_run_budget_manager")
-    if isinstance(existing, RunBudgetManager):
-        return existing
-    run_budget = meta.get("run_budget") if isinstance(meta.get("run_budget"), dict) else {}
-    started = run_started
-    if started is None:
-        raw = meta.get("run_started_monotonic")
-        try:
-            started = float(raw) if raw is not None else None
-        except (TypeError, ValueError):
-            started = None
-    mgr = RunBudgetManager.from_config(config, run_budget=run_budget, started_at=started)
-    meta["_run_budget_manager"] = mgr
-    if started is not None:
-        meta["run_started_monotonic"] = float(started)
-    # Persist phase caps into run_budget for observability
-    snap = mgr.snapshot()
-    budget = dict(run_budget)
-    budget.setdefault("max_total_tokens", snap.token_limit)
-    budget["research_cap_tokens"] = snap.research_cap_tokens
-    budget["synthesis_reserve_tokens"] = snap.synthesis_reserve_tokens
-    budget["max_llm_calls"] = snap.llm_call_limit
-    budget["synthesis_reserve_sec"] = mgr.synthesis_reserve_sec
-    budget["deadline_at_monotonic"] = mgr.deadline_at
-    meta["run_budget"] = budget
-    return mgr
+    """Create a process-local manager; callers must keep it out of workflow state."""
+
+    return RunBudgetManager.from_config(
+        config,
+        run_budget=run_budget,
+        started_at=run_started,
+    )

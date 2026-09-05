@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -27,7 +28,20 @@ _INCREMENTAL_ZERO_FIELDS = (
 
 def snapshot_worker_loop_state(state: LoopState) -> LoopState:
     """fan-out 任务只读父状态，在独立副本上累计 trace / counter。"""
-    child = copy.deepcopy(state)
+    workflow_metadata: dict[str, Any] = {}
+    for key, value in dict(state.metadata or {}).items():
+        if key.startswith("_"):
+            continue
+        try:
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"non-serializable worker state: metadata.{key} -> {type(value).__name__}"
+            ) from exc
+        workflow_metadata[key] = copy.deepcopy(value)
+    source = copy.copy(state)
+    source.metadata = workflow_metadata
+    child = copy.deepcopy(source)
     child.metadata["_parallel_child"] = True
     child.trace = []
     child.assistants_called = []
