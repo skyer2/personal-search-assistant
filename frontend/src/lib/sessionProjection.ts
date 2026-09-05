@@ -92,7 +92,23 @@ export function runToTurn(run: RunSnapshot, data: SessionBootstrap): ChatTurn {
     isRunning: active,
     result: run.final_result || run.error || "",
     timestamp: run.started_at || run.created_at || new Date().toISOString(),
-    elapsedMs: run.elapsed_ms || 0
+    elapsedClock: runToElapsedClock(run)
+  };
+}
+
+function runToElapsedClock(run: RunSnapshot): ElapsedClockState {
+  if (run.started_at) {
+    return clockFromRun(run);
+  }
+  const elapsedMs = run.elapsed_ms || 0;
+  if (elapsedMs <= 0) {
+    return IDLE_ELAPSED_CLOCK;
+  }
+  return {
+    startedAtMs: 0,
+    endedAtMs: elapsedMs,
+    pauseStartedAtMs: null,
+    pausedAccumulatedMs: 0
   };
 }
 

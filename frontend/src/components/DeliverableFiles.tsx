@@ -1,5 +1,6 @@
 import { DownloadOutlined, FileMarkdownOutlined, FilePdfOutlined, FileTextOutlined } from "@ant-design/icons";
 import { Button, Tooltip } from "antd";
+import { useState } from "react";
 import { getDownloadUrl } from "../lib/api";
 import type { OutputFile } from "../types";
 
@@ -52,7 +53,7 @@ export function linkifyArtifactNames(content: string, files: OutputFile[], sessi
     return content;
   }
   let next = content;
-  sortDeliverableFiles(files).forEach((file) => {
+  sortDeliverableFiles(files).slice(0, 20).forEach((file) => {
     if (!file.name || next.includes(`](${getDownloadUrl(file.path, sessionId)})`)) {
       return;
     }
@@ -60,6 +61,28 @@ export function linkifyArtifactNames(content: string, files: OutputFile[], sessi
     next = next.replaceAll(file.name, `[${file.name}](${openUrl})`);
   });
   return next;
+}
+
+function ArtifactDisclosure({ files, sessionId }: { files: OutputFile[]; sessionId?: string }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <details
+      className="deliverable-more"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        其余 {files.length} 个文件
+      </summary>
+      {open ? (
+        <div className="deliverable-more-list">
+          {files.map((file) => (
+            <ArtifactRow compact file={file} key={file.path} sessionId={sessionId} />
+          ))}
+        </div>
+      ) : null}
+    </details>
+  );
 }
 
 function ArtifactRow({
@@ -122,6 +145,9 @@ interface DeliverableFilesProps {
 
 export function DeliverableFiles({ files, sessionId, variant = "shelf" }: DeliverableFilesProps) {
   const ordered = sortDeliverableFiles(files);
+  const visibleCount = variant === "banner" ? 5 : 20;
+  const visible = ordered.slice(0, visibleCount);
+  const rest = ordered.slice(visibleCount);
   if (ordered.length === 0) {
     if (variant === "banner") {
       return null;
@@ -135,31 +161,22 @@ export function DeliverableFiles({ files, sessionId, variant = "shelf" }: Delive
   }
 
   if (variant === "banner") {
-    const [primary, ...rest] = ordered;
     return (
       <div className="artifact-shelf artifact-shelf--banner">
-        <ArtifactRow compact file={primary} sessionId={sessionId} />
-        {rest.length > 0 ? (
-          <details className="deliverable-more">
-            <summary>
-              其余 {rest.length} 个文件
-            </summary>
-            <div className="deliverable-more-list">
-              {rest.map((file) => (
-                <ArtifactRow compact file={file} key={file.path} sessionId={sessionId} />
-              ))}
-            </div>
-          </details>
-        ) : null}
+        {visible.map((file) => (
+          <ArtifactRow compact file={file} key={file.path} sessionId={sessionId} />
+        ))}
+        {rest.length > 0 ? <ArtifactDisclosure files={rest} sessionId={sessionId} /> : null}
       </div>
     );
   }
 
   return (
     <div className="artifact-shelf">
-      {ordered.map((file) => (
+      {visible.map((file) => (
         <ArtifactRow file={file} key={file.path} sessionId={sessionId} />
       ))}
+      {rest.length > 0 ? <ArtifactDisclosure files={rest} sessionId={sessionId} /> : null}
     </div>
   );
 }

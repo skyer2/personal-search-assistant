@@ -13,7 +13,12 @@ import {
 import { Button } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { DeliverableFiles, linkifyArtifactNames } from "./DeliverableFiles";
-import { formatElapsedClock } from "../lib/elapsedClock";
+import {
+  elapsedClockIsTicking,
+  formatElapsedClock,
+  readElapsedMs,
+  type ElapsedClockState
+} from "../lib/elapsedClock";
 import { computePhaseProgress } from "../lib/phaseProgress";
 import { type RunStatus } from "../lib/runStatus";
 import { MarkdownRenderer } from "./MarkdownRenderer";
@@ -29,7 +34,7 @@ export interface ChatTurn {
   isRunning: boolean;
   result: string;
   timestamp: string;
-  elapsedMs: number;
+  elapsedClock: ElapsedClockState;
 }
 
 interface ConversationThreadProps {
@@ -175,7 +180,7 @@ function ThinkingTimeline({
 }
 
 function ProcessDock({
-  elapsedMs,
+  elapsedClock,
   events,
   hasMoreEvents,
   isLatest,
@@ -184,7 +189,7 @@ function ProcessDock({
   processHeight,
   runStatus,
 }: {
-  elapsedMs: number;
+  elapsedClock: ElapsedClockState;
   events: MonitorMessage[];
   hasMoreEvents?: boolean;
   isLatest: boolean;
@@ -214,7 +219,7 @@ function ProcessDock({
     >
       <div className="process-dock-progress">
         <RunProgress
-          durationLabel={formatElapsedClock(elapsedMs)}
+          durationLabel={<ElapsedTimer clock={elapsedClock} />}
           progress={phaseProgress}
           runStatus={runStatus}
         />
@@ -255,8 +260,23 @@ function ProcessDock({
   );
 }
 
+function ElapsedTimer({ clock }: { clock: ElapsedClockState }) {
+  const [now, setNow] = useState(() => Date.now());
+  const ticking = elapsedClockIsTicking(clock);
+
+  useEffect(() => {
+    if (!ticking) {
+      return;
+    }
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [ticking]);
+
+  return <>{formatElapsedClock(readElapsedMs(clock, now))}</>;
+}
+
 function AssistantMessage({
-  elapsedMs,
+  elapsedClock,
   events,
   files,
   isRunning,
@@ -264,11 +284,11 @@ function AssistantMessage({
   runStatus,
   sessionId,
 }: Pick<ChatTurn, "events" | "files" | "isRunning" | "result"> & {
-  elapsedMs: number;
+  elapsedClock: ElapsedClockState;
   runStatus: RunStatus;
   sessionId?: string;
 }) {
-  const durationLabel = formatElapsedClock(elapsedMs);
+  const durationLabel = <ElapsedTimer clock={elapsedClock} />;
   const isCancelled = events.some((event) => event.event === "task_cancelled");
   const clockLive = runStatus === "running" || runStatus === "cancelling";
   const syncLabel =
@@ -313,18 +333,6 @@ function AssistantMessage({
           </div>
         )}
 
-        {files.length > 0 ? (
-          <details className="thinking-block artifact-block">
-            <summary>
-              <span>
-                <FileSearchOutlined aria-hidden />
-                证据与相关文档
-              </span>
-              <strong>{files.length}</strong>
-            </summary>
-            <DeliverableFiles files={files} sessionId={sessionId} />
-          </details>
-        ) : null}
       </div>
     </article>
   );
@@ -410,7 +418,7 @@ export function ConversationThread({
 
             {showProcess ? (
               <ProcessDock
-                elapsedMs={turn.elapsedMs}
+                elapsedClock={turn.elapsedClock}
                 events={turn.events}
                 hasMoreEvents={hasMoreEvents}
                 isLatest={isLatest}
@@ -422,7 +430,7 @@ export function ConversationThread({
             ) : null}
 
             <AssistantMessage
-              elapsedMs={turn.elapsedMs}
+              elapsedClock={turn.elapsedClock}
               events={turn.events}
               files={turn.files}
               isRunning={turn.isRunning}

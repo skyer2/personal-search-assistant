@@ -17,6 +17,7 @@ from app.agent.harness.window_hygiene import (
 )
 from app.api.monitor import monitor
 from app.config.loader import reload_harness_config
+from app.run_store import RunStore
 from app.run_store.files import list_run_output_files, list_output_files
 
 
@@ -76,6 +77,34 @@ def test_run_artifacts_listing_is_run_scoped(tmp_path):
     session_names = {f["name"] for f in session_files}
     assert {"A.pdf", "B.pdf", "legacy.pdf"} <= session_names
     print("[OK] run endpoint lists only run-owned files")
+
+
+def test_bootstrap_output_files_are_current_run_scoped(tmp_path):
+    output_root = tmp_path / "output"
+    store = RunStore(tmp_path / "run.sqlite")
+    store.create_run(run_id="run_001", session_id="s1", query="q1")
+    store.create_run(run_id="run_002", session_id="s1", query="q2")
+
+    session_root = output_root / "session_s1"
+    legacy = session_root / "legacy.pdf"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"legacy")
+    for run_id, name in (("run_001", "A.pdf"), ("run_002", "B.pdf")):
+        deliverables = session_root / "runs" / run_id / "deliverables"
+        deliverables.mkdir(parents=True)
+        (deliverables / name).write_bytes(name.encode())
+
+    boot = store.bootstrap("s1", output_root=output_root)
+    assert boot.current_run is not None
+    assert boot.current_run.run_id == "run_002"
+    assert [item["name"] for item in boot.output_files] == ["B.pdf"]
+
+    upload_only = RunStore(tmp_path / "upload-only.sqlite")
+    upload_only.add_upload("s2", "paper.pdf", 12)
+    (output_root / "session_s2" / "legacy.pdf").parent.mkdir(parents=True)
+    (output_root / "session_s2" / "legacy.pdf").write_bytes(b"legacy")
+    assert upload_only.bootstrap("s2", output_root=output_root).output_files == []
+    print("[OK] bootstrap lists only current run files")
 
 
 def test_leaf_graph_thread_ids_differ_across_runs():

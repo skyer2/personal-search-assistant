@@ -2,10 +2,41 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 _INTERNAL_STEMS = {"working_notes", "evidence", "checkpoint"}
+_LIST_CACHE_TTL_SECONDS = 5.0
+_list_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_list_cache_lock = threading.Lock()
+
+
+def _cache_key(root: Path) -> str:
+    resolved = str(root.resolve())
+    try:
+        return f"{resolved}:{root.stat().st_mtime_ns}"
+    except OSError:
+        return resolved
+
+
+def _cached_list(key: str, producer) -> list[dict[str, Any]]:
+    now = time.monotonic()
+    with _list_cache_lock:
+        cached = _list_cache.get(key)
+        if cached and cached[0] > now:
+            return [dict(item) for item in cached[1]]
+
+    files = producer()
+    with _list_cache_lock:
+        _list_cache[key] = (time.monotonic() + _LIST_CACHE_TTL_SECONDS, files)
+    return [dict(item) for item in files]
+
+
+def invalidate_output_file_cache() -> None:
+    with _list_cache_lock:
+        _list_cache.clear()
 
 
 def _artifact_sort_key(item: dict[str, Any]) -> tuple:
@@ -31,6 +62,10 @@ def session_upload_dir(updated_root: Path, session_id: str) -> Path:
 
 def list_output_files(output_root: Path, session_id: str) -> list[dict[str, Any]]:
     root = session_output_dir(output_root, session_id)
+    return _cached_list(_cache_key(root), lambda: _scan_output_files(root))
+
+
+def _scan_output_files(root: Path) -> list[dict[str, Any]]:
     if not root.exists():
         return []
     files: list[dict[str, Any]] = []
@@ -59,25 +94,7 @@ def list_run_output_files(
 ) -> list[dict[str, Any]]:
     """严格 Run Scope：只列 runs/{run_id}/ 下的文件；不存在则空（不回落 Session）。"""
     root = run_output_dir(output_root, session_id, run_id)
-    if not root.exists():
-        return []
-    files: list[dict[str, Any]] = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root).as_posix()
-        stat = path.stat()
-        files.append(
-            {
-                "name": path.name,
-                "type": "file",
-                "path": rel,
-                "size": stat.st_size,
-                "mtime": stat.st_mtime,
-            }
-        )
-    files.sort(key=_artifact_sort_key)
-    return files
+    return _scan_output_files(root)
 
 
 def resolve_output_file(output_root: Path, session_id: str, relative_name: str) -> Path:

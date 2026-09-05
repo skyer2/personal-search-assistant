@@ -5,6 +5,8 @@ Frontend state is a projection. These endpoints restore UX after refresh / recon
 
 from __future__ import annotations
 
+import asyncio
+
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -132,17 +134,18 @@ def _tenant_of(requested: str | None) -> str:
 @router.get("/api/sessions/{session_id}/bootstrap")
 async def bootstrap_session(session_id: str):
     store = get_run_store()
-    current = store.latest_run(session_id)
+    current = await asyncio.to_thread(store.latest_run, session_id)
     events = []
     if current:
-        events = load_wire_events(
+        events = await asyncio.to_thread(
+            load_wire_events,
             session_id,
             run_id=current.run_id,
             after_seq=0,
             limit=120,
             replay=True,
         )
-    payload = store.bootstrap(session_id, output_root=_OUTPUT_DIR, events=events)
+    payload = await asyncio.to_thread(store.bootstrap, session_id, output_root=_OUTPUT_DIR, events=events)
     return payload.to_dict()
 
 
@@ -161,7 +164,7 @@ async def list_session_uploads(session_id: str):
 async def list_session_artifacts(session_id: str):
     return {
         "session_id": session_id,
-        "files": list_output_files(_OUTPUT_DIR, session_id),
+        "files": await asyncio.to_thread(list_output_files, _OUTPUT_DIR, session_id),
     }
 
 
@@ -357,5 +360,5 @@ async def list_run_artifacts(run_id: str):
         "run_id": run_id,
         "session_id": run.session_id,
         # Run endpoint 必须 Run Scope：禁止借 session_id 列出整段 Session 历史
-        "files": list_run_output_files(_OUTPUT_DIR, run.session_id, run_id),
+        "files": await asyncio.to_thread(list_run_output_files, _OUTPUT_DIR, run.session_id, run_id),
     }

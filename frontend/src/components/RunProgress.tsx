@@ -1,9 +1,10 @@
 import { PauseCircleOutlined } from "@ant-design/icons";
+import type { ReactNode } from "react";
 import { PHASE_LABELS, PHASE_ORDER, type PhaseProgress } from "../lib/phaseProgress";
 import { type RunStatus } from "../lib/runStatus";
 
 interface RunProgressProps {
-  durationLabel: string;
+  durationLabel: ReactNode;
   progress: PhaseProgress;
   runStatus: RunStatus;
 }
@@ -51,7 +52,7 @@ export function RunProgress({ durationLabel, progress, runStatus }: RunProgressP
         )}
         <strong>{title}</strong>
         <span className="run-progress-duration">
-          {paused ? `暂停于 ${durationLabel}` : `已用时 ${durationLabel}`}
+          {paused ? <>暂停于 {durationLabel}</> : <>已用时 {durationLabel}</>}
         </span>
         <span className="run-progress-percent">{progress.percent}%</span>
       </div>

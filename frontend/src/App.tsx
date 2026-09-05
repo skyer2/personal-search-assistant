@@ -21,6 +21,7 @@ import { EvalPanel } from "./components/EvalPanel";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { TraceViewer } from "./components/TraceViewer";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
+import { IDLE_ELAPSED_CLOCK } from "./lib/elapsedClock";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
 import { usePersistentNumber } from "./hooks/usePersistentNumber";
 import { isLiveRun, runStatusLabel } from "./lib/runStatus";
@@ -45,7 +46,7 @@ function createTurn(content: string): ChatTurn {
     isRunning: true,
     result: "",
     timestamp: new Date().toISOString(),
-    elapsedMs: 0
+    elapsedClock: IDLE_ELAPSED_CLOCK
   };
 }
 
@@ -88,12 +89,12 @@ export default function App() {
         files: session.files,
         isRunning: session.isRunning,
         result: session.result,
-        elapsedMs: session.elapsedMs
+        elapsedClock: session.elapsedClock
       };
 
       return [...previous.slice(0, index), nextLatestTurn, ...previous.slice(index + 1)];
     });
-  }, [session.currentRunId, session.elapsedMs, session.events, session.files, session.isRunning, session.result]);
+  }, [session.currentRunId, session.elapsedClock, session.events, session.files, session.isRunning, session.result]);
 
   useEffect(() => {
     if (!session.taskFailure) {

@@ -5,7 +5,6 @@ import {
   fetchRunEvents,
   fetchSessionBootstrap,
   listRunArtifacts,
-  listSessionArtifacts,
   resumeHitl,
   startTask,
   uploadSessionFiles
@@ -16,7 +15,6 @@ import {
   IDLE_ELAPSED_CLOCK,
   elapsedClockIsTicking,
   pauseElapsedClock,
-  readElapsedMs,
   resumeElapsedClock,
   startElapsedClock,
   stopElapsedClock
@@ -62,6 +60,7 @@ export function useDeepAgentSession() {
   const uploadedNameSetRef = useRef<Set<string>>(new Set());
   const seenEventKeysRef = useRef<Set<string>>(new Set());
   const lastEventSeqRef = useRef(0);
+  const lastEventFileRefreshRef = useRef(0);
   const currentRunIdRef = useRef("");
   const statsBaseRef = useRef({ tool: 0, assistant: 0, errors: 0 });
   const [threadId, setThreadId] = useState(getStoredThreadId);
@@ -80,7 +79,6 @@ export function useDeepAgentSession() {
   const [isHitlSubmitting, setIsHitlSubmitting] = useState(false);
   const [taskFailure, setTaskFailure] = useState<{ message: string } | null>(null);
   const [elapsedClock, setElapsedClock] = useState(IDLE_ELAPSED_CLOCK);
-  const [elapsedNow, setElapsedNow] = useState(() => Date.now());
   const [hydrated, setHydrated] = useState(false);
   const [sessionFound, setSessionFound] = useState(true);
   const [bootstrapNotice, setBootstrapNotice] = useState("");
@@ -148,7 +146,6 @@ export function useDeepAgentSession() {
     setIsHitlSubmitting(false);
     setTaskFailure(null);
     setElapsedClock(IDLE_ELAPSED_CLOCK);
-    setElapsedNow(Date.now());
     setInitialTurns([]);
     setCurrentRunId("");
     setServerStatus("");
@@ -184,12 +181,31 @@ export function useDeepAgentSession() {
     setThreadId(nextThreadId);
   }, [resetProjection]);
 
+  const setFilesIfChanged = useCallback((nextFiles: OutputFile[]) => {
+    setFiles((previous) => {
+      if (
+        previous.length === nextFiles.length &&
+        previous.every((file, index) =>
+          file.name === nextFiles[index].name &&
+          file.path === nextFiles[index].path &&
+          file.size === nextFiles[index].size &&
+          file.mtime === nextFiles[index].mtime
+        )
+      ) {
+        return previous;
+      }
+      return nextFiles;
+    });
+  }, []);
+
   const refreshFiles = useCallback(async () => {
     // Run 隔离：Files 面板默认只展示当前 Run 的交付物，不再混入 Session 历史
     const currentRunId = currentRunIdRef.current;
-    const response = currentRunId
-      ? await listRunArtifacts(currentRunId).catch(() => listSessionArtifacts(threadId))
-      : await listSessionArtifacts(threadId);
+    if (!currentRunId) {
+      setFiles([]);
+      return;
+    }
+    const response = await listRunArtifacts(currentRunId);
     if (response.error) {
       if (response.error.includes("拒绝访问")) {
         setSessionPath("");
@@ -197,8 +213,17 @@ export function useDeepAgentSession() {
       }
       throw new Error(response.error);
     }
-    setFiles(response.files || []);
-  }, [threadId]);
+    setFilesIfChanged(response.files || []);
+  }, [setFilesIfChanged]);
+
+  const refreshFilesAfterEvent = useCallback(() => {
+    const now = Date.now();
+    if (now - lastEventFileRefreshRef.current < 1000) {
+      return;
+    }
+    lastEventFileRefreshRef.current = now;
+    void refreshFiles().catch(() => undefined);
+  }, [refreshFiles]);
 
   const hydrateFromServer = useCallback(async () => {
     setHydrated(false);
@@ -234,7 +259,6 @@ export function useDeepAgentSession() {
       setIsCancelling(current?.status === "cancelling");
       setServerStatus(current?.status || "");
       setElapsedClock(clockFromRun(current));
-      setElapsedNow(Date.now());
       statsBaseRef.current = {
         tool: data.stats?.tool_calls || 0,
         assistant: data.stats?.assistant_calls || 0,
@@ -322,6 +346,17 @@ export function useDeepAgentSession() {
 
           ingestEvents([payload]);
 
+          if (
+            payload.event === "task_result" ||
+            payload.event === "task_cancelled" ||
+            payload.event === "error"
+          ) {
+            lastEventFileRefreshRef.current = 0;
+            void refreshFiles().catch(() => undefined);
+          } else if (payload.event === "tool_end") {
+            refreshFilesAfterEvent();
+          }
+
           if (payload.event === "session_created") {
             const path = extractString(payload.data, "path");
             if (path) {
@@ -361,7 +396,6 @@ export function useDeepAgentSession() {
             setIsCancelling(false);
             setServerStatus(finalStatus);
             setHitlPending(null);
-            void refreshFiles().catch(() => undefined);
           }
 
           if (payload.event === "task_cancelled") {
@@ -370,7 +404,6 @@ export function useDeepAgentSession() {
             setIsRunning(false);
             setIsCancelling(false);
             setServerStatus("interrupted");
-            void refreshFiles().catch(() => undefined);
           }
 
           if (payload.event === "error") {
@@ -380,7 +413,6 @@ export function useDeepAgentSession() {
             setIsRunning(false);
             setIsCancelling(false);
             setServerStatus("failed");
-            void refreshFiles().catch(() => undefined);
           }
         } catch (error) {
           setLastError(error instanceof Error ? error.message : "WebSocket 消息解析失败");
@@ -416,25 +448,16 @@ export function useDeepAgentSession() {
       clearSocketTimers();
       socketRef.current?.close();
     };
-  }, [clearSocketTimers, ingestEvents, refreshFiles, threadId, hydrated]);
+  }, [clearSocketTimers, ingestEvents, refreshFiles, refreshFilesAfterEvent, threadId, hydrated]);
 
   useEffect(() => {
     if (!hydrated) {
       return;
     }
-
     refreshFiles().catch((error: unknown) => {
       setLastError(error instanceof Error ? error.message : "文件列表刷新失败");
     });
-
-    const timer = window.setInterval(() => {
-      refreshFiles().catch((error: unknown) => {
-        setLastError(error instanceof Error ? error.message : "文件列表刷新失败");
-      });
-    }, isRunning && !hitlPending ? 2500 : 8000);
-
-    return () => window.clearInterval(timer);
-  }, [hitlPending, hydrated, isRunning, refreshFiles]);
+  }, [hydrated, refreshFiles]);
 
   const submitTask = useCallback(
     async (query: string, mode: SearchMode = "agent") => {
@@ -444,8 +467,7 @@ export function useDeepAgentSession() {
       }
 
       const startedAt = Date.now();
-      setElapsedNow(startedAt);
-      setElapsedClock(startElapsedClock(startedAt));
+    setElapsedClock(startElapsedClock(startedAt));
       setIsRunning(true);
       setIsCancelling(false);
       setEvents([]);
@@ -632,23 +654,11 @@ export function useDeepAgentSession() {
     [events, hitlPending, isCancelling, isRunning, result, serverStatus, taskFailure]
   );
 
-  useEffect(() => {
-    if (!elapsedClockIsTicking(elapsedClock)) {
-      return;
-    }
-    const timer = window.setInterval(() => {
-      setElapsedNow(Date.now());
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [elapsedClock]);
-
-  const elapsedMs = readElapsedMs(elapsedClock, elapsedNow);
-
   return {
     bootstrapNotice,
     connectionState,
     currentRunId,
-    elapsedMs,
+    elapsedClock,
     events,
     files,
     hasMoreEvents,

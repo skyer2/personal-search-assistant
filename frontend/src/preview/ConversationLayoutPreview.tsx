@@ -57,7 +57,7 @@ export function ConversationLayoutPreview() {
       result:
         "任务因 deadline_exceeded 提前结束，已根据已有材料生成部分 PDF：brief.pdf",
       timestamp: new Date(now - elapsedMs).toISOString(),
-      elapsedMs
+      elapsedClock: started
     }
   ];
 

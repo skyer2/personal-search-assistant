@@ -10,7 +10,7 @@ from typing import Any
 
 from app.observability.events import utc_now
 from app.observability.paths import APP_ROOT
-from app.run_store.files import list_output_files
+from app.run_store.files import list_run_output_files
 from app.run_store.models import (
     ACTIVE_STATUSES,
     RECOVERABLE_ON_STARTUP,
@@ -449,7 +449,12 @@ class RunStore:
             hitl.setdefault("session_id", session_id)
             hitl.setdefault("run_id", current.run_id)
         uploads = self.list_uploads(session_id)
-        files = list_output_files(output_root or (APP_ROOT / "output"), session_id)
+        output_root = output_root or (APP_ROOT / "output")
+        files = (
+            list_run_output_files(output_root, session_id, current.run_id)
+            if current
+            else []
+        )
         stats = RunStats()
         if current:
             stats = RunStats(
