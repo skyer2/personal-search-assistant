@@ -34,13 +34,20 @@ def merge_events(*groups: list[AgentEvent]) -> list[AgentEvent]:
     seen: set[str] = set()
     for group in groups:
         for event in group:
-            key = str(event.event_id or "").strip()
+            event_id = str(event.event_id or "").strip()
+            key = f"{event.run_id}:{event.seq}:{event_id}" if event_id else ""
             if key:
                 if key in seen:
                     continue
                 seen.add(key)
             merged.append(event)
-    merged.sort(key=lambda event: (str(event.run_id or ""), int(event.seq or 0), event.timestamp or ""))
+    merged.sort(
+        key=lambda event: (
+            str(event.run_id or ""),
+            int(event.seq or 0),
+            event.timestamp or "",
+        )
+    )
     return merged
 
 
@@ -53,8 +60,30 @@ def load_events(
     limit: int | None = None,
 ) -> list[AgentEvent]:
     recorder = get_recorder()
-    memory_events = recorder.journal.replay(session_id)
-    durable_events = events_from_jsonl(session_id, run_id=run_id)
+    memory_events = (
+        recorder.journal.events_for_run(session_id, run_id)
+        if run_id
+        else recorder.journal.replay(session_id)
+    )
+    durable_events: list[AgentEvent] = []
+    if run_id:
+        try:
+            from app.observability.projection_store import get_projection_store
+
+            durable_events = [
+                AgentEvent.from_dict(row)
+                for row in get_projection_store().events(
+                    run_id,
+                    after_seq=after_seq,
+                    before_seq=before_seq,
+                    limit=limit,
+                )
+                if str(row.get("session_id") or "") == session_id
+            ]
+        except Exception:
+            durable_events = []
+    if not durable_events:
+        durable_events = events_from_jsonl(session_id, run_id=run_id)
     # Durable first so in-memory updates with same event_id win? Prefer memory for live.
     # Spec: merge durable + memory, dedupe by event_id. Memory usually has fresher copy —
     # put durable first then memory so memory overwrites when we change to last-wins.
@@ -67,7 +96,13 @@ def load_events(
         events = [event for event in events if int(event.seq or 0) > after_seq]
     if before_seq is not None:
         events = [event for event in events if int(event.seq or 0) < before_seq]
-    events.sort(key=lambda event: (str(event.run_id or ""), int(event.seq or 0), event.timestamp or ""))
+    events.sort(
+        key=lambda event: (
+            str(event.run_id or ""),
+            int(event.seq or 0),
+            event.timestamp or "",
+        )
+    )
     if limit is not None and limit >= 0:
         if before_seq is not None or not after_seq:
             events = events[-limit:]
@@ -81,13 +116,20 @@ def _merge_last_wins(*groups: list[AgentEvent]) -> list[AgentEvent]:
     anonymous: list[AgentEvent] = []
     for group in groups:
         for event in group:
-            key = str(event.event_id or "").strip()
+            event_id = str(event.event_id or "").strip()
+            key = f"{event.run_id}:{event.seq}:{event_id}" if event_id else ""
             if not key:
                 anonymous.append(event)
                 continue
             by_id[key] = event
     merged = list(by_id.values()) + anonymous
-    merged.sort(key=lambda event: (str(event.run_id or ""), int(event.seq or 0), event.timestamp or ""))
+    merged.sort(
+        key=lambda event: (
+            str(event.run_id or ""),
+            int(event.seq or 0),
+            event.timestamp or "",
+        )
+    )
     return merged
 
 
@@ -132,3 +174,55 @@ def load_trace_payload(
         "summary": summarize_trace(records),
         "scope": "run" if run_id else "session",
     }
+
+
+def load_summary_projection(session_id: str, *, run_id: str) -> dict[str, Any]:
+    """Build only the overview projection; deliberately skips tree construction."""
+    from app.observability.projection_store import get_projection_store
+
+    store = get_projection_store()
+    cached = store.get_projection(run_id, "summary")
+    if cached is not None:
+        return cached
+    events = load_events(session_id, run_id=run_id)
+    records = [event.to_jsonl_record() for event in events]
+    summary = summarize_trace(
+        records, include_lineage=False, include_tree_integrity=False
+    )
+    payload = {
+        "session_id": session_id,
+        "run_id": run_id,
+        "summary": summary,
+        "total": len(records),
+    }
+    store.put_projection(run_id, "summary", payload)
+    return payload
+
+
+def load_lineage_projection(session_id: str, *, run_id: str) -> list[dict[str, Any]]:
+    from app.observability.semantic import build_lineage_edges
+    from app.observability.projection_store import get_projection_store
+
+    store = get_projection_store()
+    cached = store.get_projection(run_id, "lineage")
+    if cached is not None:
+        return list(cached.get("items") or [])
+    rows = build_lineage_edges(
+        [event.to_jsonl_record() for event in load_events(session_id, run_id=run_id)]
+    )
+    store.put_projection(run_id, "lineage", {"items": rows})
+    return rows
+
+
+def load_tree_projection(session_id: str, *, run_id: str) -> dict[str, Any]:
+    from app.observability.projection_store import get_projection_store
+
+    store = get_projection_store()
+    cached = store.get_projection(run_id, "tree")
+    if cached is not None:
+        return cached
+    tree = build_span_tree(
+        [event.to_jsonl_record() for event in load_events(session_id, run_id=run_id)]
+    )
+    store.put_projection(run_id, "tree", tree)
+    return tree

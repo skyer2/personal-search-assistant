@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 URL_PATTERN = re.compile(r"https?://[^\s\]\)\"'<>]+", re.IGNORECASE)
 CITATION_MARKER_PATTERN = re.compile(r"\[(\d+)\]")
@@ -52,6 +54,48 @@ class CitationManager:
         self.sources: list[EvidenceSource] = []
         self._counter = 0
         self.fact_bindings: list[dict[str, Any]] = []
+        self._admission_keys: set[str] = set()
+        self.max_sources_per_step = 6
+
+    @staticmethod
+    def _canonical_locator(locator: str) -> str:
+        value = str(locator or "").strip().rstrip(".,;")
+        if not value.lower().startswith(("http://", "https://")):
+            return value
+        parts = urlsplit(value)
+        query = urlencode(
+            sorted(
+                (k, v)
+                for k, v in parse_qsl(parts.query)
+                if not k.lower().startswith("utm_")
+            )
+        )
+        return urlunsplit(
+            (
+                parts.scheme.lower(),
+                parts.netloc.lower(),
+                parts.path.rstrip("/") or "/",
+                query,
+                "",
+            )
+        )
+
+    def _admit(self, src: EvidenceSource) -> bool:
+        if (
+            sum(1 for old in self.sources if old.step_index == src.step_index)
+            >= self.max_sources_per_step
+        ):
+            return False
+        src.locator = self._canonical_locator(src.locator)
+        content_hash = hashlib.sha256(
+            (src.excerpt or src.bound_fact).strip().lower().encode()
+        ).hexdigest()
+        keys = {f"locator:{src.locator}", f"content:{content_hash}"}
+        if any(key in self._admission_keys for key in keys):
+            return False
+        self._admission_keys.update(keys)
+        self.sources.append(src)
+        return True
 
     def _next_id(self) -> str:
         self._counter += 1
@@ -82,8 +126,8 @@ class CitationManager:
                 excerpt=excerpt,
                 artifact_id=str(meta.get("artifact_id") or ""),
             )
-            self.sources.append(src)
-            registered.append(src)
+            if self._admit(src):
+                registered.append(src)
 
         if step_type == "file_read":
             src = EvidenceSource(
@@ -95,8 +139,8 @@ class CitationManager:
                 excerpt=content[:800].replace("\n", " "),
                 artifact_id=str(meta.get("artifact_id") or ""),
             )
-            self.sources.append(src)
-            registered.append(src)
+            if self._admit(src):
+                registered.append(src)
 
         if not registered and len(content.strip()) >= 80:
             src = EvidenceSource(
@@ -108,8 +152,8 @@ class CitationManager:
                 excerpt=content[:800].replace("\n", " "),
                 artifact_id=str(meta.get("artifact_id") or ""),
             )
-            self.sources.append(src)
-            registered.append(src)
+            if self._admit(src):
+                registered.append(src)
 
         if registered:
             try:
@@ -132,7 +176,11 @@ class CitationManager:
                                 "artifact_id": src.artifact_id,
                                 "source_kind": src.source_kind,
                                 "support_type": "direct",
-                                "source_quality": "primary" if src.source_kind == "url" else "secondary",
+                                "source_quality": (
+                                    "primary"
+                                    if src.source_kind == "url"
+                                    else "secondary"
+                                ),
                                 "freshness": "",
                                 "step_index": src.step_index,
                                 "step_type": src.step_type,
@@ -146,13 +194,18 @@ class CitationManager:
                                 item
                                 for item in [
                                     {"type": "evidence", "id": src.source_id},
-                                    {"type": "artifact", "id": src.artifact_id} if src.artifact_id else None,
+                                    (
+                                        {"type": "artifact", "id": src.artifact_id}
+                                        if src.artifact_id
+                                        else None
+                                    ),
                                 ]
                                 if item
                             ],
                         )
             except Exception:
                 import logging as _log
+
                 _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
 
         return registered
@@ -167,15 +220,19 @@ class CitationManager:
         """把工人 JSON 的 fact 与 source 绑成可回读证据，避免只靠段落序号贴 [n]。"""
         registered: list[EvidenceSource] = []
         locators = [str(s).strip() for s in (sources or []) if str(s).strip()][:10]
-        kind = "url" if step_type == "network_search" else (
-            "file" if step_type == "file_read" else "text"
+        kind = (
+            "url"
+            if step_type == "network_search"
+            else ("file" if step_type == "file_read" else "text")
         )
         for i, fact in enumerate((facts or [])[:10]):
             text = str(fact).strip()
             if not text:
                 continue
-            locator = locators[i] if i < len(locators) else (
-                locators[0] if locators else f"step:{step_index}:{step_type}"
+            locator = (
+                locators[i]
+                if i < len(locators)
+                else (locators[0] if locators else f"step:{step_index}:{step_type}")
             )
             src = EvidenceSource(
                 source_id=self._next_id(),
@@ -186,7 +243,8 @@ class CitationManager:
                 excerpt=text[:800],
                 bound_fact=text,
             )
-            self.sources.append(src)
+            if not self._admit(src):
+                continue
             self.fact_bindings.append(
                 {
                     "fact": text,
@@ -198,7 +256,9 @@ class CitationManager:
             registered.append(src)
         return registered
 
-    def bind_evidence_spans(self, spans: list[Any], findings: list[Any] | None = None) -> list[EvidenceSource]:
+    def bind_evidence_spans(
+        self, spans: list[Any], findings: list[Any] | None = None
+    ) -> list[EvidenceSource]:
         """把 EvidenceStore span/finding 登记为可引用 source。"""
         registered: list[EvidenceSource] = []
         claim_by_eid: dict[str, str] = {}
@@ -245,7 +305,8 @@ class CitationManager:
                 start_offset=start,
                 end_offset=end,
             )
-            self.sources.append(src)
+            if not self._admit(src):
+                continue
             if src.bound_fact:
                 self.fact_bindings.append(
                     {
@@ -259,7 +320,9 @@ class CitationManager:
             registered.append(src)
         return registered
 
-    def build_lookup_block(self, *, max_items: int = 12, excerpt_chars: int = 480) -> str:
+    def build_lookup_block(
+        self, *, max_items: int = 12, excerpt_chars: int = 480
+    ) -> str:
         """写报告步可回读的证据目录（digest 之外的原文摘录）。"""
         if not self.sources:
             return ""
@@ -402,9 +465,7 @@ class CitationManager:
         ]
         pool = numeric_sentences or sentences
         uncited = sum(1 for s in pool if not CITATION_MARKER_PATTERN.search(s))
-        numeric_coverage = (
-            (len(pool) - uncited) / len(pool) if pool else source_mention
-        )
+        numeric_coverage = (len(pool) - uncited) / len(pool) if pool else source_mention
         hallucination = uncited / len(pool) if pool else (1.0 - source_mention)
         coverage = numeric_coverage if numeric_sentences else source_mention
 
@@ -418,11 +479,16 @@ class CitationManager:
             "numeric_sentence_count": len(numeric_sentences),
         }
 
-    def validate_citations(self, final_content: str, min_coverage: float = 0.2) -> tuple[bool, str]:
+    def validate_citations(
+        self, final_content: str, min_coverage: float = 0.2
+    ) -> tuple[bool, str]:
         metrics = self.compute_metrics(final_content)
         if metrics["registered_sources"] == 0:
             return True, ""
-        if "## 参考文献" not in final_content and metrics["citation_coverage_rate"] < min_coverage:
+        if (
+            "## 参考文献" not in final_content
+            and metrics["citation_coverage_rate"] < min_coverage
+        ):
             return False, "citation_coverage_low"
         if metrics["citation_coverage_rate"] < min_coverage:
             return False, "citation_coverage_low"
@@ -463,23 +529,44 @@ class CitationManager:
                 )
             )
         self.fact_bindings = [
-            dict(item) for item in (payload.get("fact_bindings") or []) if isinstance(item, dict)
+            dict(item)
+            for item in (payload.get("fact_bindings") or [])
+            if isinstance(item, dict)
         ]
+        self._admission_keys = set()
+        for src in self.sources:
+            locator = self._canonical_locator(src.locator)
+            content_hash = hashlib.sha256(
+                (src.excerpt or src.bound_fact).strip().lower().encode()
+            ).hexdigest()
+            self._admission_keys.update(
+                {f"locator:{locator}", f"content:{content_hash}"}
+            )
         counter = payload.get("counter")
         if counter is not None:
             self._counter = int(counter)
         else:
             self._counter = len(self.sources)
 
-    def save_evidence_json(self, session_dir: Path) -> Path | None:
+    def save_evidence_json(
+        self, session_dir: Path, *, run_id: str | None = None
+    ) -> Path | None:
         if not self.sources:
             return None
-        path = session_dir / "evidence.json"
+        path = (
+            session_dir / "evidence.json"
+            if not run_id
+            else session_dir / "runs" / run_id / "evidence.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "sources": self.to_dict_list(),
             "generated_at": datetime.now().isoformat(),
+            "run_id": run_id,
         }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         return path
 
 

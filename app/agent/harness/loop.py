@@ -267,7 +267,7 @@ class AgentHarness:
             state.evidence_lookup = citation_manager.to_dict_list()
             if session_dir is not None:
                 try:
-                    citation_manager.save_evidence_json(session_dir)
+                    citation_manager.save_evidence_json(session_dir, run_id=state.run_id or None)
                 except Exception as exc:
                     print(f"[Context] evidence.json write skipped: {exc}")
         try:
@@ -675,7 +675,7 @@ class AgentHarness:
             state.numeric_citation_coverage = float(
                 metrics.get("numeric_citation_coverage") or 0.0
             )
-            citation_manager.save_evidence_json(session_dir)
+            citation_manager.save_evidence_json(session_dir, run_id=state.run_id or None)
 
         finalize_outcome = self.validator.validate_finalize(
             state,

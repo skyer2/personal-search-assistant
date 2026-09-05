@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +76,30 @@ class JsonlExporter:
         if not path.exists():
             return []
         events: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        with path.open("r", encoding="utf-8") as handle:
+            lines = handle
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return events
+
+    def read_page(self, session_id: str, run_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Bound memory and JSON parsing to the requested tail page."""
+        path = self._run_path(session_id, run_id)
+        if not path.exists():
+            return self.read(session_id, run_id=run_id)[-limit:]
+        tail: deque[str] = deque(maxlen=max(1, limit))
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    tail.append(line)
+        events: list[dict[str, Any]] = []
+        for line in tail:
             line = line.strip()
             if not line:
                 continue

@@ -43,6 +43,31 @@ JSON_ONLY_FAIL_REASONS = frozenset(
 
 
 @dataclass
+class GapSignal:
+    """A machine-readable research gap carried unchanged through the pipeline."""
+
+    type: str = "evidence_gap"
+    dimension: str = ""
+    description: str = ""
+    severity: str = "advisory"
+    blocking: bool = False
+
+
+def _normalize_gap(value: Any) -> GapSignal:
+    if isinstance(value, GapSignal):
+        return value
+    if isinstance(value, dict):
+        return GapSignal(
+            type=str(value.get("type") or "evidence_gap"),
+            dimension=str(value.get("dimension") or ""),
+            description=str(value.get("description") or value.get("message") or ""),
+            severity=str(value.get("severity") or "advisory"),
+            blocking=bool(value.get("blocking", False)),
+        )
+    return GapSignal(description=str(value or ""))
+
+
+@dataclass
 class WorkerResultPayload:
     """工人回传的结构化载荷（监督者消费）。"""
 
@@ -55,7 +80,7 @@ class WorkerResultPayload:
     worker: str = ""
     step_type: str = ""
     findings: list[dict[str, Any]] = field(default_factory=list)
-    gaps: list[str] = field(default_factory=list)
+    gaps: list[GapSignal] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
     suggested_followups: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
@@ -78,7 +103,10 @@ class WorkerResultPayload:
         if self.sources:
             parts.append("来源: " + ", ".join(self.sources[:5]))
         if self.gaps:
-            parts.append("缺口: " + "; ".join(self.gaps[:3]))
+            parts.append(
+                "缺口: "
+                + "; ".join(g.description for g in self.gaps[:3] if g.description)
+            )
         if self.conflicts:
             parts.append("冲突: " + "; ".join(self.conflicts[:3]))
         if not self.ok and self.error_code:
@@ -173,7 +201,9 @@ def parse_worker_payload(
         facts = [str(f) for f in json_blob.get("facts", []) if f][:10]
         findings = _normalize_findings(json_blob.get("findings"), facts)
         if findings and not facts:
-            facts = [str(item.get("claim") or "") for item in findings if item.get("claim")][:10]
+            facts = [
+                str(item.get("claim") or "") for item in findings if item.get("claim")
+            ][:10]
         return WorkerResultPayload(
             ok=bool(json_blob.get("ok", True)),
             summary=str(json_blob.get("summary", text))[:4000],
@@ -184,11 +214,19 @@ def parse_worker_payload(
             worker=str(json_blob.get("worker", subagent)),
             step_type=str(json_blob.get("step_type", step_type)),
             findings=findings,
-            gaps=[str(x) for x in (json_blob.get("gaps") or []) if x][:8],
-            conflicts=[_conflict_text(x) for x in (json_blob.get("conflicts") or []) if x][:8],
-            suggested_followups=[str(x) for x in (json_blob.get("suggested_followups") or []) if x][:6],
-            evidence_ids=[str(x) for x in (json_blob.get("evidence_ids") or []) if x][:20],
-            artifact_ids=[str(x) for x in (json_blob.get("artifact_ids") or []) if x][:20],
+            gaps=[_normalize_gap(x) for x in (json_blob.get("gaps") or []) if x][:8],
+            conflicts=[
+                _conflict_text(x) for x in (json_blob.get("conflicts") or []) if x
+            ][:8],
+            suggested_followups=[
+                str(x) for x in (json_blob.get("suggested_followups") or []) if x
+            ][:6],
+            evidence_ids=[str(x) for x in (json_blob.get("evidence_ids") or []) if x][
+                :20
+            ],
+            artifact_ids=[str(x) for x in (json_blob.get("artifact_ids") or []) if x][
+                :20
+            ],
         )
 
     return WorkerResultPayload(
@@ -199,7 +237,9 @@ def parse_worker_payload(
     )
 
 
-def attach_structured_payload(result: StepResult, payload: WorkerResultPayload) -> StepResult:
+def attach_structured_payload(
+    result: StepResult, payload: WorkerResultPayload
+) -> StepResult:
     """将结构化载荷写入 StepResult.metadata。"""
     result.metadata["worker_payload"] = asdict(payload)
     result.metadata["structured_ok"] = payload.ok
@@ -309,7 +349,9 @@ def format_evidence_digest_for_prompt(
         blocks = blocks[-max_steps:]
     lines = ["    【多源证据_digest — 写报告必须引用 evidence_id / [n]】"]
     if truncated:
-        lines.append(f"    （仅最近 {max_steps} 步证据卡，省略 {truncated} 步；其余 read_evidence）")
+        lines.append(
+            f"    （仅最近 {max_steps} 步证据卡，省略 {truncated} 步；其余 read_evidence）"
+        )
     for block in blocks:
         lines.append(
             f"  步骤{block['step_index']} [{block['step_type']}] "
@@ -447,7 +489,9 @@ class StepCheckpointStore:
             payload["loop_state"] = loop_state
         if citation_snapshot is not None:
             payload["citation_snapshot"] = citation_snapshot
-        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     def load(self) -> Optional[dict[str, Any]]:
         if not self.path.exists():
@@ -485,7 +529,9 @@ class IdempotencyRegistry:
     def keys(self) -> list[str]:
         return list(self._completed.keys())
 
-    def load_from_checkpoint(self, data: dict[str, Any], store: StepCheckpointStore) -> None:
+    def load_from_checkpoint(
+        self, data: dict[str, Any], store: StepCheckpointStore
+    ) -> None:
         results = store.restore_step_results(data)
         keys = data.get("completed_step_keys") or []
         for key, result in zip(keys, results):
@@ -497,14 +543,18 @@ def _normalize_findings(raw: Any, facts: list[str]) -> list[dict[str, Any]]:
     if isinstance(raw, list):
         for i, item in enumerate(raw[:20]):
             if isinstance(item, str) and item.strip():
-                items.append({"claim_id": f"C{i+1}", "claim": item.strip(), "evidence_ids": []})
+                items.append(
+                    {"claim_id": f"C{i+1}", "claim": item.strip(), "evidence_ids": []}
+                )
             elif isinstance(item, dict) and (item.get("claim") or item.get("text")):
                 claim = str(item.get("claim") or item.get("text") or "").strip()
                 items.append(
                     {
                         "claim_id": str(item.get("claim_id") or f"C{i+1}"),
                         "claim": claim,
-                        "evidence_ids": [str(x) for x in (item.get("evidence_ids") or []) if x],
+                        "evidence_ids": [
+                            str(x) for x in (item.get("evidence_ids") or []) if x
+                        ],
                         "confidence": float(item.get("confidence") or 1.0),
                         "source_quality": str(item.get("source_quality") or "unknown"),
                     }
@@ -533,7 +583,9 @@ def apply_step_status(plan: ExecutionPlan, completed_count: int) -> None:
 
 def message_text(msg: Any) -> str:
     """把 LangChain / dict 消息的 content 收成纯文本。"""
-    content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+    content = (
+        msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+    )
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -565,7 +617,10 @@ def is_tool_message(msg: Any) -> bool:
 def is_assistant_message(msg: Any) -> bool:
     role = _message_role(msg)
     class_name = type(msg).__name__.lower()
-    return role in {"ai", "assistant", "aimessage", "aimessagechunk"} or "aimessage" in class_name
+    return (
+        role in {"ai", "assistant", "aimessage", "aimessagechunk"}
+        or "aimessage" in class_name
+    )
 
 
 def extract_last_assistant_text(messages: list[Any] | None) -> str:
@@ -605,7 +660,9 @@ def salvage_payload_from_artifacts(
     if not items:
         return payload
     if step_index >= 0:
-        scoped = [a for a in items if int(getattr(a, "step_index", -1) or -1) == step_index]
+        scoped = [
+            a for a in items if int(getattr(a, "step_index", -1) or -1) == step_index
+        ]
         if scoped:
             items = scoped
     items = items[-12:]
@@ -618,7 +675,9 @@ def salvage_payload_from_artifacts(
         if loc.startswith("http"):
             sources.append(loc)
         title = str(getattr(art, "title", "") or art.artifact_id)
-        snippet = str(getattr(art, "summary", "") or getattr(art, "content", "") or "")[:240]
+        snippet = str(getattr(art, "summary", "") or getattr(art, "content", "") or "")[
+            :240
+        ]
         if snippet:
             facts.append(f"{title}: {snippet}")
         elif loc and loc not in sources:
@@ -629,7 +688,9 @@ def salvage_payload_from_artifacts(
     payload.error_code = ""
     payload.facts = facts[:10]
     payload.sources = list(dict.fromkeys(sources))[:10]
-    payload.artifact_ids = list(dict.fromkeys(list(payload.artifact_ids or []) + ids))[:20]
+    payload.artifact_ids = list(dict.fromkeys(list(payload.artifact_ids or []) + ids))[
+        :20
+    ]
     if not payload.summary.strip():
         payload.summary = f"已根据 {len(ids)} 份已存原文整理要点，未重新检索。"
     if step is not None:

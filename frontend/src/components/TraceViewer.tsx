@@ -1,8 +1,8 @@
 import { LinkOutlined, ReloadOutlined } from "@ant-design/icons";
 import { Alert, Button, Card, Space, Tabs, Tag, Typography } from "antd";
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  fetchCitations,
+  fetchRunCitations,
   fetchLangfuseConfig,
   fetchRunEvents,
   fetchRunLineage,
@@ -154,6 +154,9 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
   const [selectedSpan, setSelectedSpan] = useState<TraceSpanNode | null>(null);
   const [activeTab, setActiveTab] = useState("overview");
   const [loadedTabs, setLoadedTabs] = useState<Set<string>>(() => new Set());
+  const [lineageTotal, setLineageTotal] = useState(0);
+  const [citationsTotal, setCitationsTotal] = useState(0);
+  const requestGeneration = useRef(0);
 
   useEffect(() => {
     if (runId) {
@@ -165,8 +168,16 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
     if (!sessionId) {
       return;
     }
+    const generation = ++requestGeneration.current;
     setLoading(true);
     setError("");
+    setJsonlEvents([]);
+    setTraceTree({ roots: [], span_count: 0, event_count: 0 });
+    setCitations([]);
+    setSelectedSpan(null);
+    setLineageTotal(0);
+    setCitationsTotal(0);
+    setLoadedTabs(new Set());
     try {
       const listed = await fetchSessionTraces(sessionId).catch(() => ({ traces: [] as SessionTraceItem[], current_run_id: "" }));
       const nextTraces = listed.traces || [];
@@ -183,11 +194,14 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           ui_url: null
         }))
       ]);
-      setSummary("summary" in jsonl && jsonl.summary ? jsonl.summary : {});
+      if (generation !== requestGeneration.current) return;
+      const nextSummary: TraceSummary = "summary" in jsonl && jsonl.summary ? jsonl.summary : {};
+      setSummary(nextSummary);
+      setLineageTotal(Number(nextSummary.counts?.lineage || 0));
+      setCitationsTotal(Number(nextSummary.counts?.evidence || 0));
       setLangfuseEnabled(Boolean(lfConfig.enabled));
       setLangfuseUrl(lfConfig.enabled ? lfConfig.ui_url || lfConfig.host || null : null);
       setLangfuseMessage(lfConfig.enabled ? "" : "Langfuse 未配置，已跳过");
-      setLoadedTabs(new Set());
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载 Trace 失败");
     } finally {
@@ -201,22 +215,29 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
 
   const loadTab = useCallback(async (key: string) => {
     if (!selectedRunId || loadedTabs.has(key)) return;
+    const generation = requestGeneration.current;
     if (key === "jsonl") {
       const response = await fetchRunEvents(selectedRunId, { limit: 100 });
+      if (generation !== requestGeneration.current) return;
       setJsonlEvents((response.events || []) as unknown as JsonlTraceEvent[]);
     } else if (key === "lineage") {
       const response = await fetchRunLineage(selectedRunId, 0, 100);
+      if (generation !== requestGeneration.current) return;
       setSummary((previous) => ({ ...previous, lineage: response.items }));
+      setLineageTotal(response.total);
     } else if (key === "tree" || key === "langfuse") {
       const response = await fetchRunTree(selectedRunId);
+      if (generation !== requestGeneration.current) return;
       setTraceTree(response.tree);
     } else if (key === "citations") {
-      const response = await fetchCitations(sessionId);
+      const response = await fetchRunCitations(selectedRunId);
+      if (generation !== requestGeneration.current) return;
       setCitations(response.sources || []);
+      setCitationsTotal(response.total || 0);
       setCitationsMessage(response.message || "");
     }
     setLoadedTabs((previous) => new Set(previous).add(key));
-  }, [loadedTabs, selectedRunId, sessionId]);
+  }, [loadedTabs, selectedRunId]);
 
   function handleCitationClick(source: EvidenceSource) {
     setHighlightSourceId(source.source_id);
@@ -250,6 +271,8 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
             session={summary.identity?.session_id || sessionId}
             {summary.identity?.run_id || selectedRunId ? ` · run=${summary.identity?.run_id || selectedRunId}` : ""}
             {summary.identity?.trace_id ? ` · trace=${String(summary.identity.trace_id).slice(0, 12)}` : ""}
+            {summary.identity?.git_sha ? ` · build=${String(summary.identity.git_sha).slice(0, 8)}` : ""}
+            {summary.identity?.config_hash ? ` · config=${String(summary.identity.config_hash).slice(0, 8)}` : ""}
           </Typography.Text>
         </div>
         <Space>
@@ -316,6 +339,8 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     style={{ marginBottom: 12 }}
                     type="warning"
                   />
+                ) : summary.status === "partial" ? (
+                  <Alert message={`Partial run: ${asText(summary.termination?.reason, "termination reason missing")}`} showIcon style={{ marginBottom: 12 }} type="error" />
                 ) : (
                   <Alert message="本 run 暂无语义 failure origin" showIcon style={{ marginBottom: 12 }} type="success" />
                 )}
@@ -334,7 +359,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       ? "yes"
                       : "no"}
                   {" · "}
-                  Lineage edges: {lineage.length}
+                  Lineage edges: {lineageTotal}
                 </Typography.Paragraph>
                 {brief ? (
                   <Typography.Paragraph>
@@ -601,7 +626,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "citations",
-            label: `证据链 (${citations.length})`,
+            label: `证据链 (${citationsTotal})`,
             children: (
               <Card size="small">
                 {citationsMessage ? <Alert message={citationsMessage} showIcon type="info" /> : null}
@@ -660,6 +685,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     }
                   ]}
                 />
+                {citationsTotal > citations.length ? <Typography.Text type="secondary">已加载 {citations.length} / {citationsTotal}</Typography.Text> : null}
                 {highlightSourceId ? (
                   <Alert
                     className="trace-citation-hint"
@@ -673,13 +699,13 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "lineage",
-            label: `Lineage (${lineage.length})`,
+            label: `Lineage (${lineageTotal})`,
             children: (
               <Card size="small">
                 {lineage.length === 0 ? (
                   <Alert message="尚无 semantic lineage edges（需要 brief/plan/worker/evidence/synthesis refs）" showIcon type="info" />
                 ) : (
-                  <ResizableTable
+                  <><ResizableTable
                     dataSource={lineage}
                     rowKey={(row) => `${String(row.from_id || row.from || "")}-${String(row.to_id || row.to || "")}-${String(row.span_id || "")}`}
                     pagination={{ pageSize: 20 }}
@@ -701,13 +727,15 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       { title: "Span", dataIndex: "span_id", key: "span_id", width: 140 }
                     ]}
                   />
+                  {lineageTotal > lineage.length ? <Typography.Text type="secondary">已加载 {lineage.length} / {lineageTotal}</Typography.Text> : null}
+                  </>
                 )}
               </Card>
             )
           },
           {
             key: "tree",
-            label: `因果树 (${traceTree.span_count})`,
+            label: `因果树 (${traceTree.span_count || Number(summary.counts?.spans || 0)})`,
             children: (
               <div style={{ display: "grid", gridTemplateColumns: selectedSpan ? "1.2fr 0.8fr" : "1fr", gap: 12 }}>
                 <Card size="small">
@@ -865,7 +893,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "jsonl",
-            label: `JSONL (${jsonlEvents.length})`,
+            label: `JSONL (${Number(summary.counts?.events || summary.event_count || 0)})`,
             children: (
               <Card size="small">
                 {jsonlMessage ? <Alert message={jsonlMessage} showIcon type="info" /> : null}

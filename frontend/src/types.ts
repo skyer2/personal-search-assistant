@@ -219,6 +219,11 @@ export interface TraceTree {
 }
 
 export interface TraceSummary {
+  status?: string;
+  started_at?: string | null;
+  ended_at?: string | null;
+  counts?: Record<string, number>;
+  termination?: Record<string, unknown> | null;
   identity?: {
     session_id?: string;
     run_id?: string;

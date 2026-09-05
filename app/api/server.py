@@ -12,6 +12,8 @@ fanout / RunJournal 都是进程内 cache，不要用 uvicorn --workers > 1。
 import asyncio
 import json
 import shutil
+import logging
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -45,6 +47,7 @@ from app.observability.recorder import get_recorder
 from app.observability.replay import load_wire_events
 from app.run_store import get_run_store
 
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """
@@ -73,6 +76,25 @@ current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent
 
 app = FastAPI(title="Research Agent Harness", lifespan=lifespan)
+_http_logger = logging.getLogger("app.http")
+
+
+@app.middleware("http")
+async def log_not_found_requests(request, call_next):
+    """Make otherwise opaque SVG/icon/API 404s actionable in development logs."""
+    started = time.perf_counter()
+    response = await call_next(request)
+    if response.status_code == 404:
+        _http_logger.warning(
+            "HTTP 404 method=%s url=%s referer=%s duration_ms=%d",
+            request.method,
+            request.url,
+            request.headers.get("referer", ""),
+            int((time.perf_counter() - started) * 1000),
+        )
+    return response
+
+
 app.include_router(eval_router)
 app.include_router(harness_router)
 app.include_router(trace_routes)
@@ -231,9 +253,21 @@ async def cancel_task(thread_id: str):
         get_run_store().mark_cancelling(latest.run_id)
     if not task or task.done():
         active_tasks.pop(thread_id, None)
-        if latest and latest.status in {"running", "awaiting_approval", "cancelling", "queued", "recoverable"}:
-            get_run_store().interrupt_run(latest.run_id, error="cancelled with no live task")
-            return {"status": "cancelled", "thread_id": thread_id, "run_id": latest.run_id}
+        if latest and latest.status in {
+            "running",
+            "awaiting_approval",
+            "cancelling",
+            "queued",
+            "recoverable",
+        }:
+            get_run_store().interrupt_run(
+                latest.run_id, error="cancelled with no live task"
+            )
+            return {
+                "status": "cancelled",
+                "thread_id": thread_id,
+                "run_id": latest.run_id,
+            }
         raise HTTPException(status_code=404, detail="任务不存在或已结束")
 
     # 先发出取消信号，再短暂等待协程响应；若底层阻塞中，则返回 cancelling 给前端继续展示状态
@@ -412,7 +446,9 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
         manager.disconnect(websocket, thread_id)
 
 
-async def _maybe_replay_subscribe(websocket: WebSocket, thread_id: str, raw: str) -> bool:
+async def _maybe_replay_subscribe(
+    websocket: WebSocket, thread_id: str, raw: str
+) -> bool:
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:

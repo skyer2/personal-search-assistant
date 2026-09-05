@@ -81,7 +81,7 @@ class RunBudgetManager:
         phase_plan: PhaseBudgetPlan | None = None,
         max_llm_calls_per_worker: int = 8,
         started_at: float | None = None,
-        synthesis_reserve_sec: float = 75.0,
+        synthesis_reserve_sec: float = 210.0,
     ) -> None:
         self.token_limit = max(0, int(token_limit or 0))
         self.llm_call_limit = max(0, int(llm_call_limit or 0))
@@ -133,7 +133,7 @@ class RunBudgetManager:
         per_worker = int(getattr(config, "max_llm_calls_per_worker", 8) or 8)
         reserve_sec = float(
             rb.get("synthesis_reserve_sec")
-            or getattr(config, "synthesis_reserve_sec", 75)
+            or getattr(config, "synthesis_reserve_sec", 210)
             or 75
         )
         return cls(

@@ -232,7 +232,9 @@ def _coalesce_worker_row(
         existing["step_type"] = incoming["step_type"]
 
 
-def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_trace(
+    events: list[dict[str, Any]], *, include_lineage: bool = True, include_tree_integrity: bool = True
+) -> dict[str, Any]:
     """把 journal 收成 Agent-native 视图：identity / brief / plan / worker / lineage / eval。"""
     from app.observability.semantic import (
         build_lineage_edges,
@@ -251,6 +253,7 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
     recoveries: list[dict[str, Any]] = []
     evals: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    termination: dict[str, Any] | None = None
     usage = {
         "prompt_tokens": 0,
         "completion_tokens": 0,
@@ -262,6 +265,16 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
     for event in events:
         event_type = str(event.get("type") or event.get("event") or "")
         attrs = event.get("attributes") if isinstance(event.get("attributes"), dict) else {}
+        if event_type in {"run.completed", "run.failed", "run_summary"}:
+            metadata = attrs.get("metadata") if isinstance(attrs.get("metadata"), dict) else {}
+            candidate = metadata.get("termination") if isinstance(metadata.get("termination"), dict) else None
+            if candidate:
+                termination = dict(candidate)
+            elif str(event.get("status") or "") == "partial":
+                termination = {
+                    "status": "partial",
+                    "reason": metadata.get("abort_reason") or attrs.get("error") or "unknown",
+                }
         if not identity.get("session_id"):
             identity = {
                 "session_id": event.get("session_id"),
@@ -471,10 +484,11 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
     eval_matrix = _eval_variant_matrix(evals)
     gap_closure = compute_replan_gap_closure(events)
     failure_origin = earliest_failure_origin(events)
-    lineage = build_lineage_edges(events)
+    lineage = build_lineage_edges(events) if include_lineage else []
     quality = {
         "gap_closure": gap_closure,
         "failure_origin": failure_origin,
+        "termination": termination,
         "brief_coverage": (plans[-1].get("brief_coverage") if plans else None),
     }
     return {
@@ -503,11 +517,11 @@ def summarize_trace(events: list[dict[str, Any]]) -> dict[str, Any]:
         "replan_useful": gap_closure.get("replan_useful"),
         "replan_attempted": bool(gap_closure.get("replan_attempted")),
         "progress_attempted": bool(gap_closure.get("progress_attempted")),
-        "trace_integrity": _check_integrity(events, identity),
+        "trace_integrity": _check_integrity(events, identity, include_tree=include_tree_integrity),
     }
 
 
-def _check_integrity(events: list[dict[str, Any]], identity: dict[str, Any]) -> dict[str, Any]:
+def _check_integrity(events: list[dict[str, Any]], identity: dict[str, Any], *, include_tree: bool = True) -> dict[str, Any]:
     try:
         from app.observability.integrity import check_trace_integrity
 
@@ -517,7 +531,7 @@ def _check_integrity(events: list[dict[str, Any]], identity: dict[str, Any]) -> 
             if event_type in {"run.completed", "run.failed"}:
                 run_status = str(event.get("status") or "completed" if event_type == "run.completed" else "failed")
                 break
-        return check_trace_integrity(events, run_status=run_status)
+        return check_trace_integrity(events, run_status=run_status, include_tree=include_tree)
     except Exception:
         return {"passed": None, "issues": ["integrity_check_failed"]}
 
