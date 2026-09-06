@@ -142,7 +142,7 @@ def test_dispatch_routes_to_progress_not_synthesize():
     ).to_dict()
     assert route_progress(state) == "replan"
     state["replan_exhausted"] = True
-    assert route_progress(state) in {"synthesize", "quality_gate"}
+    assert route_progress(state) == "prepare_synthesis"
     print("[OK] dispatch→progress→replan/exhausted")
 
 

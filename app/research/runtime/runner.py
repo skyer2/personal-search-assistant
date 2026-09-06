@@ -785,7 +785,6 @@ class ResearchGraphRunner:
         from app.research.planning.candidate import candidate_artifact_status
         from app.research.runtime.scheduler import (
             select_dispatch_wave,
-            skip_optional_pending,
             task_status_map,
         )
         from app.research.runtime.latency import note_dispatch_wave
@@ -806,11 +805,6 @@ class ResearchGraphRunner:
             if isinstance(session.state.metadata, dict) and session.state.metadata.get(
                 "force_synthesis"
             ):
-                status = skip_optional_pending(
-                    session.state.plan,
-                    task_status_map(session.state.plan),
-                    reason="force_synthesis_budget",
-                )
                 return {
                     "replan_exhausted": True,
                     "progress": "enough",
@@ -818,7 +812,6 @@ class ResearchGraphRunner:
                         "verdict": "enough",
                         "reason": "force_synthesis_budget",
                     },
-                    "task_status": status,
                     "status": "running",
                 }
             return {
@@ -830,19 +823,13 @@ class ResearchGraphRunner:
         if isinstance(session.state.metadata, dict) and session.state.metadata.get(
             "force_synthesis"
         ):
-            status = skip_optional_pending(
-                session.state.plan,
-                task_status_map(session.state.plan),
-                reason="force_synthesis_budget",
-            )
             return {
                 "replan_exhausted": True,
                 "progress": "enough",
                 "progress_assessment": {
-                    "verdict": "enough",
-                    "reason": "force_synthesis_budget",
-                },
-                "task_status": status,
+                        "verdict": "enough",
+                        "reason": "force_synthesis_budget",
+                    },
             }
         dispatch_status = task_status_map(session.state.plan)
         dispatch_status.update(artifact_status)
@@ -1083,24 +1070,28 @@ class ResearchGraphRunner:
         ):
             assessment.verdict = "enough"
             assessment.reason = "marginal_gain_low"
+        from app.research.runtime.graph import control_fingerprint
+
+        assessment_payload = assessment.to_dict()
+        fingerprint = control_fingerprint(gstate, assessment_payload, candidate_set)
+        stagnant_cycles = (
+            int(gstate.get("stagnant_cycles") or 0) + 1
+            if str(gstate.get("control_fingerprint") or "") == fingerprint
+            else 0
+        )
+        if stagnant_cycles >= 2:
+            assessment.verdict = "enough"
+            assessment.reason = "graph_no_progress"
+            assessment_payload = assessment.to_dict()
         if session is not None:
             session.state.metadata["progress_assessment"] = assessment.to_dict()
             session.state.metadata["marginal_gain"] = marginal_state.to_dict()
             if assessment.verdict == "enough":
                 try:
                     from app.research.runtime.latency import note_enough_evidence
-                    from app.research.runtime.scheduler import (
-                        skip_optional_pending,
-                        task_status_map,
-                    )
 
                     note_enough_evidence(
                         session.state, reason=assessment.reason or "enough"
-                    )
-                    skip_optional_pending(
-                        session.state.plan,
-                        task_status_map(session.state.plan),
-                        reason="early_stop_enough",
                     )
                 except Exception:
                     pass
@@ -1176,13 +1167,58 @@ class ResearchGraphRunner:
             "candidate_set": candidate_set,
             "marginal_gain": marginal_state.to_dict(),
             "progress": "progress_eval",
+            "control_fingerprint": fingerprint,
+            "stagnant_cycles": stagnant_cycles,
         }
+        if stagnant_cycles >= 2:
+            payload["progress_assessment"] = assessment_payload
+            payload["replan_exhausted"] = True
+            payload["synthesis_admission"] = True
         if assessment.verdict == "abort":
             payload["status"] = "aborted"
             payload["abort_reason"] = assessment.reason or "aborted"
         return payload
 
+    async def node_prepare_synthesis(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.graph import GraphInvariantViolation
+        from app.research.runtime.project import apply_graph_to_loop
+        from app.research.runtime.scheduler import (
+            next_synthesis_step,
+            skip_optional_pending,
+            skip_pending_research,
+        )
+
+        session = _require_session(gstate)
+        apply_graph_to_loop(session.state, gstate)
+        plan = session.state.plan
+        if plan is None:
+            raise GraphInvariantViolation("prepare_synthesis routed without a plan")
+        status = skip_optional_pending(
+            plan,
+            dict(gstate.get("task_status") or {}),
+            reason="early_stop_enough",
+        )
+        if next_synthesis_step(plan, status, allow_failed_deps=True) is None:
+            status = skip_pending_research(
+                plan,
+                status,
+                reason="early_stop_synthesis",
+                include_required=True,
+                include_running=True,
+            )
+        if next_synthesis_step(plan, status, allow_failed_deps=True) is None:
+            raise GraphInvariantViolation("prepare_synthesis cannot make synthesis runnable")
+        return {
+            "plan": plan.to_dict(),
+            "task_status": status,
+            "synthesis_admission": True,
+            "replan_exhausted": True,
+            "status": gstate.get("status") or "running",
+            "progress": "ready_for_synthesis",
+        }
+
     async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.graph import GraphInvariantViolation
         from app.research.runtime.scheduler import next_synthesis_step
         from app.research.runtime.project import apply_graph_to_loop
 
@@ -1190,16 +1226,27 @@ class ResearchGraphRunner:
         apply_graph_to_loop(session.state, gstate)
         plan = session.state.plan
         if plan is None:
-            return {"status": "synthesized", "progress": "synthesized"}
+            raise GraphInvariantViolation("synthesize routed without a plan")
         status = task_status_map(plan)
         evidence_refs = list(gstate.get("evidence_refs") or [])
         findings = [item for item in list(gstate.get("findings") or []) if isinstance(item, dict)]
+        raw_progress_assessment: Any = gstate.get("progress_assessment")
+        progress_assessment: dict[str, Any] = (
+            dict(raw_progress_assessment)
+            if isinstance(raw_progress_assessment, dict)
+            else {}
+        )
         allow_failed_deps = bool(
-            (
+            bool(gstate.get("synthesis_admission"))
+            or (
                 isinstance(session.state.metadata, dict)
                 and session.state.metadata.get("force_synthesis")
             )
             or session.state.abort_reason
+            or str(progress_assessment.get("verdict") or "") == "enough"
+            or str(progress_assessment.get("reason") or "")
+            in {"force_synthesis_budget", "graph_no_progress"}
+            or bool(gstate.get("replan_exhausted"))
             or evidence_refs
             or findings
         )
@@ -1224,25 +1271,24 @@ class ResearchGraphRunner:
             )
         )
         nxt = next_synthesis_step(plan, status, allow_failed_deps=allow_failed_deps)
-        if nxt is None and allow_failed_deps:
-            # Emergency synthesis deliberately bypasses the normal research DAG.
-            # A cancelled LangGraph superstep may leave stale dependency metadata.
-            nxt = next(
-                (
-                    (index, step)
-                    for index, step in enumerate(plan.steps)
-                    if step.step_type in {"generate_markdown", "summarize"}
-                    and status.get(step.resolved_task_id(index), "pending")
-                    not in {"done", "failed"}
-                ),
-                None,
-            )
         if nxt is None:
-            return {
-                "status": "synthesized",
-                "progress": "synthesized",
-                "task_status": status,
-            }
+            synthesis_steps = [
+                step.resolved_task_id(index)
+                for index, step in enumerate(plan.steps)
+                if step.step_type in {"generate_markdown", "summarize", "convert_pdf"}
+            ]
+            if synthesis_steps and all(
+                status.get(task_id) in {"done", "failed", "skipped"}
+                for task_id in synthesis_steps
+            ):
+                return {
+                    "status": "synthesized",
+                    "progress": "synthesized",
+                    "task_status": status,
+                }
+            raise GraphInvariantViolation(
+                "synthesize routed but no synthesis step is runnable"
+            )
         index, step = nxt
         session.state.step_index = index
         step.metadata["status"] = StepStatus.RUNNING.value

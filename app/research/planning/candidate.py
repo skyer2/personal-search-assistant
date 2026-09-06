@@ -9,6 +9,7 @@ from app.agent.harness.state import ExecutionPlan, PlanStep
 
 
 _DISCOVERY_MARKERS = ("候选", "发现", "landscape", "全景", "扫描", "候选池", "值得加入")
+_DEEP_DIVE_MARKERS = ("深挖", "单家", "单公司", "专项分析")
 _ITEM_SPLIT = re.compile(r"[、,，;；\n]")
 
 
@@ -18,16 +19,37 @@ def _is_discovery(step: PlanStep) -> bool:
     if str((step.metadata or {}).get("produces_artifact") or "") == "candidate_set":
         return True
     objective = f"{step.objective or ''} {step.description or ''}".lower()
+    if any(marker in objective for marker in _DEEP_DIVE_MARKERS):
+        return False
     return any(marker in objective for marker in _DISCOVERY_MARKERS)
 
 
 def annotate_candidate_dependencies(plan: ExecutionPlan) -> ExecutionPlan:
     """Convert discovery task dependencies into CandidateSet artifact dependencies."""
-    discovery_ids = {
+    explicit_discovery_ids = {
         step.task_id
         for step in plan.steps
-        if step.task_id and _is_discovery(step)
+        if step.task_id
+        and (
+            str((step.metadata or {}).get("task_kind") or "") == "discovery"
+            or bool((step.metadata or {}).get("produces_artifact"))
+        )
     }
+    heuristic_discovery_ids = {
+        step.task_id
+        for step in plan.steps
+        if step.task_id
+        and not step.depends_on
+        and _is_discovery(step)
+        and str((step.metadata or {}).get("task_kind") or "") != "deep_dive"
+        and not (step.metadata or {}).get("requires_artifacts")
+    }
+    heuristic_discovery_ids -= {
+        step.task_id
+        for step in plan.steps
+        if set(step.depends_on or []) & explicit_discovery_ids
+    }
+    discovery_ids = explicit_discovery_ids | heuristic_discovery_ids
     if not discovery_ids:
         return plan
     for step in plan.steps:
@@ -46,6 +68,32 @@ def annotate_candidate_dependencies(plan: ExecutionPlan) -> ExecutionPlan:
         meta["requires_artifacts"] = sorted(required)
         meta.setdefault("task_kind", "deep_dive")
         step.metadata = meta
+    promote_artifact_producers(plan)
+    return plan
+
+
+def promote_artifact_producers(plan: ExecutionPlan) -> ExecutionPlan:
+    """A required artifact consumer must not wait on an optional producer."""
+    producers: dict[str, list[PlanStep]] = {}
+    required_artifacts: set[str] = set()
+    for step in plan.steps:
+        meta = step.metadata if isinstance(step.metadata, dict) else {}
+        artifact = str(meta.get("produces_artifact") or "")
+        if artifact:
+            producers.setdefault(artifact, []).append(step)
+        if not bool(meta.get("optional")):
+            required_artifacts.update(str(x) for x in meta.get("requires_artifacts") or [])
+
+    for artifact in required_artifacts:
+        for producer in producers.get(artifact, []):
+            meta = dict(producer.metadata or {})
+            if bool(meta.get("required")) and not bool(meta.get("optional")):
+                continue
+            meta["required"] = True
+            meta["optional"] = False
+            meta["priority"] = 0
+            meta["promoted_for_artifact"] = artifact
+            producer.metadata = meta
     return plan
 
 

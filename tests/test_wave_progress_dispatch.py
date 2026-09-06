@@ -170,7 +170,7 @@ def test_progress_ignores_pending_optional():
     print("[OK] progress evaluates without draining optional", assessment.verdict)
 
 
-def test_route_progress_enough_goes_synthesize_not_optional_dispatch():
+def test_route_progress_enough_prepares_synthesis_not_optional_dispatch():
     plan = _ai_coding_plan()
     for step in plan.steps:
         if step.step_type == "research" and step.metadata.get("required"):
@@ -179,8 +179,8 @@ def test_route_progress_enough_goes_synthesize_not_optional_dispatch():
     state["plan"] = plan.to_dict()
     state["task_status"] = task_status_map(plan)
     state["progress_assessment"] = {"verdict": "enough", "reason": "coverage_ok"}
-    assert route_progress(state) in {"synthesize", "quality_gate"}
-    print("[OK] enough → synthesize")
+    assert route_progress(state) == "prepare_synthesis"
+    print("[OK] enough → prepare synthesis")
 
 
 def test_select_wave_never_dumps_all_five():
@@ -218,7 +218,7 @@ if __name__ == "__main__":
     test_stamp_does_not_use_first_half_heuristic()
     test_first_dispatch_is_p0_wave_capped()
     test_progress_ignores_pending_optional()
-    test_route_progress_enough_goes_synthesize_not_optional_dispatch()
+    test_route_progress_enough_prepares_synthesis_not_optional_dispatch()
     test_select_wave_never_dumps_all_five()
     test_replan_metrics_na_when_not_attempted()
     test_graph_worker_edges_to_progress()

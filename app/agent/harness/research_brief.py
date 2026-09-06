@@ -46,7 +46,7 @@ _ENTITY_STOP = {
 }
 
 PRIMARY_MARKERS = ("官方", "一手", "白皮书", "官网", "原论文", "primary", "first-party")
-RECENT_MARKERS = ("最新", "今天", "现在", "刚刚", "实时")
+RECENT_MARKERS = ("最新", "今天", "现在", "当下", "当前", "近期", "刚刚", "实时")
 THOROUGH_MARKERS = ("多维度", "综合", "全面", "深入", "官方", "白皮书", "对照")
 PRIMARY_SOURCE_HINTS = (
     ".gov",
@@ -306,6 +306,33 @@ def compile_research_brief(
             compared = [left_name, right_name]
     if compared:
         entities = compared
+
+    career_recommendation = (
+        "值得加入" in query
+        and ("公司" in query or "企业" in query)
+        and not compared
+    )
+    if career_recommendation:
+        domain_parts = []
+        if "国内" in query or "中国" in query:
+            domain_parts.append("国内")
+        if "ai" in query.lower() or "人工智能" in query:
+            domain_parts.append("AI")
+        if "初创" in query or "创业公司" in query:
+            domain_parts.append("初创公司")
+        entities = [" ".join(domain_parts) if domain_parts else "候选公司"]
+        subjects = [ResearchSubject(canonical=entities[0])]
+        for dimension in (
+            "技术实力",
+            "团队背景",
+            "融资与估值",
+            "商业化进展",
+            "赛道前景",
+            "招聘与人才机会",
+            "加入风险",
+        ):
+            if dimension not in dimensions:
+                dimensions.append(dimension)
 
     if _COMPARE.search(query) and "横向比较" not in dimensions:
         dimensions.append("横向比较")

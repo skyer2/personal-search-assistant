@@ -46,6 +46,36 @@ def _has_cycle(steps: list[PlanStep]) -> bool:
     return any(visit(tid) for tid in ids)
 
 
+def validate_artifact_dependencies(plan: ExecutionPlan) -> list[str]:
+    """Validate artifact producer reachability for required consumers."""
+    issues: list[str] = []
+    producers: dict[str, list[PlanStep]] = {}
+    for step in plan.steps:
+        meta = step.metadata if isinstance(step.metadata, dict) else {}
+        artifact = str(meta.get("produces_artifact") or "")
+        if artifact:
+            producers.setdefault(artifact, []).append(step)
+
+    for step in plan.steps:
+        meta = step.metadata if isinstance(step.metadata, dict) else {}
+        if bool(meta.get("optional")):
+            continue
+        for artifact in meta.get("requires_artifacts") or []:
+            artifact_name = str(artifact)
+            artifact_producers = producers.get(artifact_name, [])
+            if not artifact_producers:
+                issues.append(f"missing_artifact_producer:{artifact_name}:{step.task_id}")
+                continue
+            if all(
+                bool((producer.metadata or {}).get("optional"))
+                for producer in artifact_producers
+            ):
+                issues.append(
+                    f"required_task_depends_on_optional_artifact:{artifact_name}:{step.task_id}"
+                )
+    return issues
+
+
 def validate_hybrid_plan(
     intent: TaskIntent,
     plan: ExecutionPlan,
@@ -78,6 +108,8 @@ def validate_hybrid_plan(
 
     if _has_cycle(plan.steps):
         issues.append("cycle_in_dependencies")
+
+    issues.extend(validate_artifact_dependencies(plan))
 
     brief = getattr(intent, "brief", None)
     for step in plan.steps:

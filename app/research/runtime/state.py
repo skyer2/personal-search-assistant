@@ -64,6 +64,9 @@ class ResearchState(TypedDict):
     candidate_set: Annotated[dict[str, Any], merge_dicts]
     replan_exhausted: bool
     marginal_gain: dict[str, Any]
+    synthesis_admission: bool
+    control_fingerprint: str
+    stagnant_cycles: int
 
 
 class WorkerTaskState(TypedDict):
@@ -138,4 +141,7 @@ def empty_research_state(
         "candidate_set": {},
         "replan_exhausted": False,
         "marginal_gain": {},
+        "synthesis_admission": False,
+        "control_fingerprint": "",
+        "stagnant_cycles": 0,
     }

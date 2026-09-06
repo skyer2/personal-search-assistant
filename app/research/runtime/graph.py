@@ -7,6 +7,8 @@ Research StateGraph：workflow 调度权威。
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Literal, cast
 
 from app.agent.harness.planner import build_plan, understand_task
@@ -19,6 +21,10 @@ from app.research.runtime.scheduler import (
     ready_research_steps,
 )
 from app.research.runtime.state import ResearchState, empty_research_state
+
+
+class GraphInvariantViolation(RuntimeError):
+    """Raised when Graph routing and node admission disagree."""
 
 
 def _plan_from_state(state: ResearchState) -> ExecutionPlan | None:
@@ -134,13 +140,44 @@ def _wave_parallel(state: ResearchState) -> int:
     return max(1, n)
 
 
+def _has_pending_synthesis(plan: ExecutionPlan, status: dict[str, str]) -> bool:
+    return any(
+        step.step_type in {"generate_markdown", "summarize", "convert_pdf"}
+        and status.get(step.resolved_task_id(index), "pending") in {"pending", "running"}
+        for index, step in enumerate(plan.steps)
+    )
+
+
+def control_fingerprint(
+    state: dict[str, Any],
+    assessment: dict[str, Any],
+    candidate_set: dict[str, Any],
+) -> str:
+    payload = {
+        "plan_version": int(state.get("plan_version") or 1),
+        "task_status": dict(sorted((state.get("task_status") or {}).items())),
+        "progress_verdict": str(assessment.get("verdict") or ""),
+        "progress_reason": str(assessment.get("reason") or ""),
+        "replan_count": int(state.get("replan_count") or 0),
+        "status": str(state.get("status") or ""),
+        "candidate_status": str(candidate_set.get("status") or ""),
+        "candidate_items": [str(x) for x in candidate_set.get("items") or []],
+        "findings_count": len(state.get("findings") or []),
+        "evidence_count": len(state.get("evidence_refs") or []),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def route_dispatch(state: ResearchState) -> list[Any] | str:
     from langgraph.types import Send
 
-    from app.research.runtime.scheduler import select_dispatch_wave, skip_optional_pending
+    from app.research.runtime.scheduler import select_dispatch_wave
 
     if state.get("status") == "aborted" or state.get("abort_reason"):
         return "abort"
+    if state.get("status") in {"synthesized", "partial", "completed"}:
+        return "quality_gate"
     plan = _plan_from_state(state)
     if plan is None:
         return "finalize"
@@ -155,7 +192,7 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
         or bool(state.get("replan_exhausted"))
     )
     if early_stop:
-        status = skip_optional_pending(plan, status, reason="early_stop_enough")
+        return "progress"
     # Required-first: 永远不要在第一波把 optional 和 P0 一起 Send
     ready = select_dispatch_wave(
         plan,
@@ -224,25 +261,80 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
         intent=state.get("intent"),
         reconciliation=reconciliation,
     )
+    assessment_payload = assessment.to_dict()
+    fingerprint = control_fingerprint(
+        cast(dict[str, Any], state),
+        assessment_payload,
+        candidate_set,
+    )
+    stagnant_cycles = (
+        int(state.get("stagnant_cycles") or 0) + 1
+        if str(state.get("control_fingerprint") or "") == fingerprint
+        else 0
+    )
+    if stagnant_cycles >= 2:
+        assessment.verdict = "enough"
+        assessment.reason = "graph_no_progress"
+        assessment_payload = assessment.to_dict()
     payload = {
         "progress_assessment": assessment.to_dict(),
         "candidate_set": candidate_set,
         "progress": "progress_eval",
+        "control_fingerprint": fingerprint,
+        "stagnant_cycles": stagnant_cycles,
         "abort_reason": state.get("abort_reason")
         or (assessment.reason if assessment.verdict == "abort" else ""),
     }
+    if stagnant_cycles >= 2:
+        payload["progress_assessment"] = assessment_payload
+        payload["replan_exhausted"] = True
+        payload["synthesis_admission"] = True
     if reconciliation is not None:
         payload["claim_reconciliation"] = reconciliation.to_dict()
     return payload
 
 
+def prepare_synthesis_node(state: ResearchState) -> dict[str, Any]:
+    from app.research.runtime.scheduler import (
+        next_synthesis_step,
+        skip_optional_pending,
+        skip_pending_research,
+    )
+
+    plan = _plan_from_state(state)
+    if plan is None:
+        raise GraphInvariantViolation("prepare_synthesis routed without a plan")
+    status = skip_optional_pending(
+        plan,
+        dict(state.get("task_status") or {}),
+        reason="early_stop_enough",
+    )
+    if next_synthesis_step(plan, status, allow_failed_deps=True) is None:
+        status = skip_pending_research(
+            plan,
+            status,
+            reason="early_stop_synthesis",
+            include_required=True,
+            include_running=True,
+        )
+    if next_synthesis_step(plan, status, allow_failed_deps=True) is None:
+        raise GraphInvariantViolation("prepare_synthesis cannot make synthesis runnable")
+    return {
+        "plan": plan.to_dict(),
+        "task_status": status,
+        "synthesis_admission": True,
+        "replan_exhausted": True,
+        "status": state.get("status") or "running",
+        "progress": "ready_for_synthesis",
+    }
+
+
 def route_progress(state: ResearchState) -> str:
-    from app.research.runtime.scheduler import skip_optional_pending
     from app.research.planning.candidate import candidate_artifact_status
 
     if state.get("status") == "aborted" or state.get("abort_reason"):
         return "abort"
-    if state.get("status") == "partial":
+    if state.get("status") in {"synthesized", "partial", "completed"}:
         return "quality_gate"
     assessment = dict(state.get("progress_assessment") or {})
     verdict = str(assessment.get("verdict") or "enough")
@@ -255,11 +347,8 @@ def route_progress(state: ResearchState) -> str:
     if verdict == "abort":
         return "abort"
     if force_synth or exhausted or verdict == "enough":
-        if plan is not None:
-            status = skip_optional_pending(plan, status, reason="early_stop_enough")
-            nxt = next_synthesis_step(plan, status, allow_failed_deps=True)
-            if nxt is not None:
-                return "synthesize"
+        if plan is not None and _has_pending_synthesis(plan, status):
+            return "prepare_synthesis"
         return "quality_gate"
     if verdict == "run" and plan is not None and ready_research_steps(
         plan, status, include_optional=False
@@ -273,11 +362,8 @@ def route_progress(state: ResearchState) -> str:
     )
     if can_replan:
         return "replan"
-    if plan is not None:
-        status = skip_optional_pending(plan, status, reason="early_stop_synthesize")
-        nxt = next_synthesis_step(plan, status, allow_failed_deps=True)
-        if nxt is not None:
-            return "synthesize"
+    if plan is not None and _has_pending_synthesis(plan, status):
+        return "prepare_synthesis"
     return "quality_gate"
 
 
@@ -313,9 +399,35 @@ def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
 def synthesize_node(state: ResearchState) -> dict[str, Any]:
     plan = _plan_from_state(state)
     status = dict(state.get("task_status") or {})
-    nxt = next_synthesis_step(plan, status) if plan else None
+    if plan is None:
+        raise GraphInvariantViolation("synthesize routed without a plan")
+    assessment = dict(state.get("progress_assessment") or {})
+    allow_failed_deps = bool(
+        state.get("synthesis_admission")
+        or state.get("replan_exhausted")
+        or str(assessment.get("verdict") or "") == "enough"
+        or str(assessment.get("reason") or "")
+        in {"force_synthesis_budget", "graph_no_progress"}
+    )
+    nxt = next_synthesis_step(
+        plan,
+        status,
+        allow_failed_deps=allow_failed_deps,
+    )
     if nxt is None:
-        return {"status": "synthesized", "progress": "synthesized"}
+        synthesis_steps = [
+            step.resolved_task_id(index)
+            for index, step in enumerate(plan.steps)
+            if step.step_type in {"generate_markdown", "summarize", "convert_pdf"}
+        ]
+        if synthesis_steps and all(
+            status.get(task_id) in {"done", "failed", "skipped"}
+            for task_id in synthesis_steps
+        ):
+            return {"status": "synthesized", "progress": "synthesized"}
+        raise GraphInvariantViolation(
+            "synthesize routed but no synthesis step is runnable"
+        )
     index, step = nxt
     tid = step.resolved_task_id(index)
     status[tid] = "done"
@@ -377,6 +489,7 @@ def compile_research_graph(
         dispatch = runtime.node_dispatch
         worker = runtime.node_research_worker
         progress = runtime.node_progress
+        prepare_synthesis = runtime.node_prepare_synthesis
         synthesize = runtime.node_synthesize
         replan = runtime.node_replan
         quality_gate = runtime.node_quality_gate
@@ -391,6 +504,7 @@ def compile_research_graph(
         dispatch = dispatch_node
         worker = _worker
         progress = progress_node
+        prepare_synthesis = prepare_synthesis_node
         synthesize = synthesize_node
         replan = replan_node
         quality_gate = quality_gate_node
@@ -417,6 +531,7 @@ def compile_research_graph(
     builder.add_node("dispatch", dispatch)
     builder.add_node("research_worker", worker)
     builder.add_node("progress", progress)
+    builder.add_node("prepare_synthesis", prepare_synthesis)
     builder.add_node("synthesize", synthesize)
     builder.add_node("replan", replan)
     builder.add_node("quality_gate", quality_gate)
@@ -432,16 +547,17 @@ def compile_research_graph(
     builder.add_conditional_edges(
         "dispatch",
         route_dispatch,
-        ["research_worker", "progress", "abort", "finalize"],
+        ["research_worker", "progress", "quality_gate", "abort", "finalize"],
     )
     # 每一波 Worker 结束后必须 Progress，禁止 Worker → greedy Dispatch drain
     builder.add_edge("research_worker", "progress")
     builder.add_conditional_edges(
         "progress",
         route_progress,
-        ["dispatch", "replan", "synthesize", "quality_gate", "abort"],
+        ["dispatch", "replan", "prepare_synthesis", "quality_gate", "abort"],
     )
-    builder.add_edge("synthesize", "dispatch")
+    builder.add_edge("prepare_synthesis", "synthesize")
+    builder.add_edge("synthesize", "quality_gate")
     builder.add_edge("replan", "plan_validate")
     builder.add_edge("quality_gate", "finalize")
     builder.add_edge("finalize", END)
@@ -478,6 +594,8 @@ __all__ = [
     "intent_node",
     "plan_node",
     "progress_node",
+    "prepare_synthesis_node",
     "route_dispatch",
     "route_progress",
+    "GraphInvariantViolation",
 ]
