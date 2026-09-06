@@ -49,17 +49,24 @@ def apply_plan_patch(
             if str(s) in policy.allowed_sources
         ] or [s for s in ("web", "file") if s in policy.allowed_sources]
         depends = [str(x) for x in (raw.get("depends_on") or []) if str(x) in existing]
+        raw_meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        coverage_keys = [str(x) for x in (raw_meta.get("coverage_keys") or []) if str(x).strip()]
         step = research_step_from_task(
             task_id=tid,
             objective=objective,
             depends_on=depends,
             sources=sources,
+            coverage_keys=coverage_keys,
+            required=bool(raw_meta.get("required", True)),
+            priority=int(raw_meta.get("priority", 0) or 0),
+            task_kind=str(raw_meta.get("task_kind") or "deep_dive"),
+            subject_id=str(raw_meta.get("subject_id") or ""),
+            extra_metadata={
+                key: value
+                for key, value in raw_meta.items()
+                if key not in {"coverage_keys", "required", "priority", "task_kind", "subject_id"}
+            },
         )
-        raw_meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
-        if raw_meta:
-            merged = dict(getattr(step, "metadata", None) or {})
-            merged.update(raw_meta)
-            step.metadata = merged
         new_steps.insert(synth_index + inserted, step)
         existing.add(tid)
         inserted += 1
@@ -103,6 +110,7 @@ def build_progress_patch(
     assessment: dict[str, Any] | None = None,
     worker_results: list[Any] | None = None,
     max_new_tasks: int = 2,
+    candidate_set: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """把 ProgressAssessment 收成受约束的 PlanPatch proposal（仍须 apply_plan_patch）。
 
@@ -112,6 +120,14 @@ def build_progress_patch(
     from app.research.planning.progress import ProgressAssessment
 
     parsed = ProgressAssessment.from_dict(assessment or {})
+    brief_kind = _brief_task_kind(intent)
+    if brief_kind == "landscape_discovery":
+        return _build_landscape_gap_patch(
+            intent,
+            parsed=parsed,
+            candidate_set=candidate_set,
+            max_new_tasks=max_new_tasks,
+        )
     policy = parse_source_policy(intent.raw_query)
     default_sources = [s for s in ("web", "file") if s in policy.allowed_sources]
     if not default_sources:
@@ -228,6 +244,131 @@ def build_progress_patch(
         fallback["target_gap_ids"] = ids
         fallback.setdefault("triggered_by", parsed.progress_id or "")
     return fallback
+
+
+def _brief_task_kind(intent: TaskIntent) -> str:
+    brief = getattr(intent, "brief", None)
+    if isinstance(brief, dict):
+        return str(brief.get("task_kind") or "")
+    return str(getattr(brief, "task_kind", "") or "")
+
+
+def _slug(value: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", str(value or "").strip()).strip("_")
+    return cleaned[:48].lower() or "candidate"
+
+
+def _candidate_names(candidate_set: dict[str, Any] | None) -> list[str]:
+    if not isinstance(candidate_set, dict) or not candidate_set.get("available"):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in candidate_set.get("items") or []:
+        name = re.sub(r"^[\s\d\.\-、·]+", "", str(raw or "").strip())
+        name = re.split(r"[:：]", name, maxsplit=1)[0].strip()
+        if not 2 <= len(name) <= 48:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+        if len(names) >= 8:
+            break
+    return names
+
+
+def _gap_dimension(text: str) -> str:
+    value = str(text or "")
+    rules = (
+        ("招聘与人才机会", ("招聘", "薪酬", "人才", "岗位")),
+        ("团队背景", ("团队", "创始", "组织")),
+        ("商业化进展", ("商业化", "营收", "订单", "客户")),
+        ("融资与估值", ("融资", "估值", "投资")),
+        ("加入风险", ("风险", "监管", "竞争")),
+        ("技术路线与产品", ("技术", "产品", "模型")),
+    )
+    for dimension, markers in rules:
+        if any(marker in value for marker in markers):
+            return dimension
+    return "关键事实"
+
+
+def _build_landscape_gap_patch(
+    intent: TaskIntent,
+    *,
+    parsed: Any,
+    candidate_set: dict[str, Any] | None,
+    max_new_tasks: int,
+) -> dict[str, Any]:
+    policy = parse_source_policy(intent.raw_query)
+    allowed_sources = [
+        source
+        for source in ("web", "file")
+        if source in policy.allowed_sources
+    ]
+    candidates = _candidate_names(candidate_set)
+    gaps = [
+        item
+        for item in (parsed.gaps or [])
+        if isinstance(item, dict)
+        and item.get("blocking", item.get("actionable", True)) is not False
+        and str(item.get("gap_id") or "").strip()
+    ]
+    if not candidates or not gaps:
+        return {
+            "reason": "candidate_set_unavailable" if not candidates else "no_actionable_gap",
+            "add_tasks": [],
+            "target_gap_ids": [],
+            "triggered_by": parsed.progress_id or "",
+        }
+
+    dimensions: list[str] = []
+    gap_ids: list[str] = []
+    for gap in gaps:
+        dimension = _gap_dimension(str(gap.get("description") or ""))
+        if dimension not in dimensions:
+            dimensions.append(dimension)
+        gap_id = str(gap.get("gap_id") or "")
+        if gap_id and gap_id not in gap_ids:
+            gap_ids.append(gap_id)
+
+    tasks: list[dict[str, Any]] = []
+    for candidate in candidates[: max(0, max_new_tasks)]:
+        selected_dimensions = dimensions[:4]
+        subject_id = _slug(candidate)
+        objective = (
+            f"{candidate}：补充{'、'.join(selected_dimensions)}证据；"
+            "仅针对该候选补齐缺口，不重新扫描整个赛道。"
+        )
+        tasks.append(
+            {
+                "task_id": f"t_gap_{subject_id}",
+                "objective": objective[:200],
+                "depends_on": [],
+            "allowed_sources": list(allowed_sources),
+                "reason": "candidate_gap_fill",
+                "metadata": {
+                    "task_kind": "gap_fill",
+                    "subject_id": subject_id,
+                    "entities": [candidate],
+                    "coverage_keys": selected_dimensions,
+                    "resolves_gap_ids": gap_ids,
+                    "requires_artifacts": ["candidate_set"],
+                    "patch_reason": "candidate_gap_fill",
+                    "required": True,
+                    "optional": False,
+                    "priority": 0,
+                },
+            }
+        )
+    return {
+        "reason": "candidate_gap_fill",
+        "add_tasks": tasks,
+        "target_gap_ids": gap_ids,
+        "triggered_by": parsed.progress_id or "",
+        "patch_id": f"patch_gap_{_slug(intent.raw_query)[:16]}",
+    }
 
 
 def _objective_from_gap(item: str, plan: ExecutionPlan) -> str:

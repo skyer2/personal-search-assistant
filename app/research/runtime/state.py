@@ -48,6 +48,8 @@ class ResearchState(TypedDict):
 
     budget: BudgetState
     replan_count: int
+    replan_attempts: int
+    replan_applied_count: int
 
     draft_ref: str | None
     final_ref: str | None
@@ -67,6 +69,7 @@ class ResearchState(TypedDict):
     progress_assessment: dict[str, Any]
     candidate_set: Annotated[dict[str, Any], merge_dicts]
     replan_exhausted: bool
+    control_no_progress: bool
     marginal_gain: dict[str, Any]
     synthesis_admission: bool
     synthesis_mode: str
@@ -134,6 +137,8 @@ def empty_research_state(
             "max_parallel_workers": 3,
         },
         "replan_count": 0,
+        "replan_attempts": 0,
+        "replan_applied_count": 0,
         "draft_ref": None,
         "final_ref": None,
         "final_content": "",
@@ -151,6 +156,7 @@ def empty_research_state(
         "progress_assessment": {},
         "candidate_set": {},
         "replan_exhausted": False,
+        "control_no_progress": False,
         "marginal_gain": {},
         "synthesis_admission": False,
         "synthesis_mode": "",

@@ -26,6 +26,19 @@ def apply_graph_to_loop(loop: LoopState, gstate: dict[str, Any]) -> LoopState:
                 step.metadata["status"] = status[tid]
     if "replan_count" in gstate:
         loop.replan_count = int(gstate.get("replan_count") or 0)
+    if isinstance(loop.metadata, dict):
+        if "replan_attempts" in gstate:
+            loop.metadata["replan_attempts"] = int(gstate.get("replan_attempts") or 0)
+        if "replan_applied_count" in gstate:
+            loop.metadata["replan_applied_count"] = int(
+                gstate.get("replan_applied_count") or 0
+            )
+        if "control_no_progress" in gstate:
+            loop.metadata["control_no_progress"] = bool(
+                gstate.get("control_no_progress")
+            )
+        if "replan_exhausted" in gstate:
+            loop.metadata["replan_exhausted"] = bool(gstate.get("replan_exhausted"))
     budget = gstate.get("budget")
     if isinstance(budget, dict) and budget:
         run_budget = dict(loop.metadata.get("run_budget") or {})

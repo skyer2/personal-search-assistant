@@ -121,12 +121,16 @@ def salvage_worker_evidence(
     findings: list[dict[str, Any]] = []
     evidence_refs: list[str] = []
     sources: list[str] = []
+    facts: list[str] = []
     for artifact in artifacts:
         evidence_refs.append(artifact.artifact_id)
         locator = artifact.locator or artifact.ref()
         if locator not in sources:
             sources.append(locator)
         evidence = structured_evidence_from_artifact(artifact)
+        for fact in list(evidence.get("facts") or []):
+            if fact and fact not in facts:
+                facts.append(str(fact))
         findings.append(
             {
                 "task_id": task_id,
@@ -141,7 +145,12 @@ def salvage_worker_evidence(
                 "partial": True,
             }
         )
-    return {"findings": findings, "evidence_refs": evidence_refs, "sources": sources}
+    return {
+        "findings": findings,
+        "evidence_refs": evidence_refs,
+        "sources": sources,
+        "facts": facts,
+    }
 
 
 @dataclass
@@ -712,9 +721,21 @@ class LangChainWorkerRuntime:
 
             if isinstance(exc, BudgetReservationError):
                 reason = str(exc.reason or "budget_tokens")
+                salvaged = salvage_worker_evidence(
+                    task_id=task.task_id,
+                    step_index=step_index,
+                )
                 async with session.lock:
                     session.state.metadata["force_synthesis"] = True
                     session.state.metadata["budget_degrade_reason"] = reason
+                    citation_manager = getattr(session.ctx, "citation_manager", None)
+                    if citation_manager is not None:
+                        citation_manager.bind_worker_facts(
+                            step_index,
+                            step.step_type,
+                            list(salvaged["facts"]),
+                            list(salvaged["sources"]),
+                        )
                 if recorder.is_active:
                     recorder.emit(
                         EventType.WORKER_FAILED,
@@ -730,6 +751,7 @@ class LangChainWorkerRuntime:
                             "worker_status": "blocked",
                             "fail_reason": reason,
                             "queue_ms": queue_ms,
+                            "partial_evidence_count": len(salvaged["evidence_refs"]),
                         },
                         run_id=session.run_id,
                         session_id=session.session_id,
@@ -742,6 +764,10 @@ class LangChainWorkerRuntime:
                     task_id=task.task_id,
                     status="blocked",
                     summary=f"budget_blocked:{reason}",
+                    findings=list(salvaged["findings"]),
+                    evidence_refs=list(salvaged["evidence_refs"]),
+                    sources=list(salvaged["sources"]),
+                    facts=list(salvaged["facts"]),
                     fail_reason=reason,
                     queue_ms=queue_ms,
                     execution_ms=exec_ms,

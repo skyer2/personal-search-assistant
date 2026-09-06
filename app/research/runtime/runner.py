@@ -1009,9 +1009,14 @@ class ResearchGraphRunner:
                 "step_type": step.step_type,
                 "payload": {
                     "summary": result.summary,
+                    "subject_id": str(step.metadata.get("subject_id") or "general"),
+                    "dimension": str(
+                        (step.metadata.get("coverage_keys") or ["general"])[0]
+                    ),
                     "facts": result.facts,
                     "sources": result.sources,
                     "findings": result.findings,
+                    "partial_evidence_count": len(result.evidence_refs or []),
                 },
             }
         )
@@ -1023,6 +1028,25 @@ class ResearchGraphRunner:
         row_payload: dict[str, Any] = (
             raw_row_payload if isinstance(raw_row_payload, dict) else {}
         )
+        result_facts = [str(item) for item in list(result.facts or []) if str(item).strip()]
+        result_sources = [
+            str(item) for item in list(result.sources or []) if str(item).strip()
+        ]
+        for finding in list(result.findings or []):
+            if not isinstance(finding, dict):
+                continue
+            result_facts.extend(
+                str(item)
+                for item in list(finding.get("facts") or [])
+                if str(item).strip()
+            )
+            result_sources.extend(
+                str(item)
+                for item in list(finding.get("sources") or [])
+                if str(item).strip()
+            )
+        row_payload["facts"] = list(dict.fromkeys(result_facts))[:20]
+        row_payload["sources"] = list(dict.fromkeys(result_sources))[:20]
         row_payload["evidence_ids"] = list(result.evidence_refs or [])
         from app.research.runtime.findings import normalize_findings
 
@@ -1144,10 +1168,12 @@ class ResearchGraphRunner:
         ):
             assessment.verdict = "enough"
             assessment.reason = "marginal_gain_low"
-        from app.research.runtime.graph import control_fingerprint
+        from app.research.runtime.graph import control_plane_fingerprint
 
         assessment_payload = assessment.to_dict()
-        fingerprint = control_fingerprint(gstate, assessment_payload, candidate_set)
+        fingerprint = control_plane_fingerprint(
+            {**gstate, "progress_assessment": assessment_payload}
+        )
         stagnant_cycles = (
             int(gstate.get("stagnant_cycles") or 0) + 1
             if str(gstate.get("control_fingerprint") or "") == fingerprint
@@ -1247,6 +1273,7 @@ class ResearchGraphRunner:
         if stagnant_cycles >= 2:
             payload["progress_assessment"] = assessment_payload
             payload["replan_exhausted"] = True
+            payload["control_no_progress"] = True
             payload["synthesis_admission"] = True
         if assessment.verdict == "abort":
             payload["status"] = "aborted"
@@ -1733,6 +1760,18 @@ class ResearchGraphRunner:
         apply_graph_to_loop(session.state, gstate)
         state = session.state
         assessment = dict(gstate.get("progress_assessment") or {})
+        replan_attempts = int(gstate.get("replan_attempts") or 0) + 1
+        replan_applied = int(
+            gstate.get("replan_applied_count")
+            or gstate.get("replan_count")
+            or state.replan_count
+            or 0
+        )
+        max_replan_attempts = int(
+            (gstate.get("budget") or {}).get("max_replan_count")
+            or getattr(self.harness.harness_config, "max_replan_count", 3)
+            or 3
+        )
         exhausted = {
             "replan_exhausted": True,
             "progress": "enough",
@@ -1741,8 +1780,12 @@ class ResearchGraphRunner:
                 "verdict": "enough",
                 "reason": "replan_exhausted",
             },
-            "replan_count": state.replan_count,
+            "replan_count": replan_applied,
+            "replan_attempts": replan_attempts,
+            "replan_applied_count": replan_applied,
         }
+        if bool(gstate.get("control_no_progress")) or replan_attempts > max_replan_attempts:
+            return exhausted
         if state.plan is None or state.intent is None:
             return exhausted
         if not can_replan(state, self.harness.harness_config):
@@ -1875,6 +1918,7 @@ class ResearchGraphRunner:
             assessment=assessment,
             worker_results=list(gstate.get("worker_results") or []),
             max_new_tasks=max_new,
+            candidate_set=dict(gstate.get("candidate_set") or {}),
         )
         for item in list(patch.get("add_tasks") or []):
             if isinstance(item, dict):
@@ -1962,7 +2006,8 @@ class ResearchGraphRunner:
             if isinstance(item, dict)
         ]
         state.plan = plan
-        state.replan_count += 1
+        replan_applied += 1
+        state.replan_count = replan_applied
         # 消耗 GAP reserve（不抬会话硬顶）
         if grant and isinstance(getattr(state, "metadata", None), dict):
             try:
@@ -2064,8 +2109,10 @@ class ResearchGraphRunner:
             "plan": state.plan.to_dict(),
             "plan_version": int(getattr(state.plan, "plan_version", 1) or 1),
             "task_status": task_status_map(state.plan),
-            "replan_count": state.replan_count,
-            "replan_exhausted": False,
+            "replan_count": replan_applied,
+            "replan_attempts": replan_attempts,
+            "replan_applied_count": replan_applied,
+            "replan_exhausted": replan_attempts >= max_replan_attempts,
             "progress": "run",
             "progress_assessment": {**assessment, "verdict": "run"},
         }
@@ -2132,10 +2179,33 @@ class ResearchGraphRunner:
                 max_replans = int(
                     (gstate.get("budget") or {}).get("max_replan_count") or 3
                 )
-                if allowed and int(gstate.get("replan_count") or 0) < max_replans:
+                replan_attempts = int(gstate.get("replan_attempts") or 0)
+                if (
+                    allowed
+                    and not bool(gstate.get("replan_exhausted"))
+                    and not bool(gstate.get("control_no_progress"))
+                    and replan_attempts < max_replans
+                ):
                     repair_action = "replan"
             if not repair_action:
                 repair_action = "partial"
+        from app.research.runtime.graph import control_plane_fingerprint
+
+        fingerprint = control_plane_fingerprint(
+            {
+                **gstate,
+                "quality_reason": reason,
+                "quality_repair_action": repair_action,
+            }
+        )
+        stagnant_cycles = (
+            int(gstate.get("stagnant_cycles") or 0) + 1
+            if str(gstate.get("control_fingerprint") or "") == fingerprint
+            else 0
+        )
+        control_no_progress = stagnant_cycles >= 2
+        if control_no_progress:
+            repair_action = "partial"
         if isinstance(session.state.metadata, dict):
             session.state.metadata["quality"] = {
                 "passed": passed,
@@ -2159,6 +2229,10 @@ class ResearchGraphRunner:
                         "repairable": repairable,
                         "repair_action": repair_action,
                         "attempt": quality_attempts + 1,
+                        "replan_attempts": int(gstate.get("replan_attempts") or 0),
+                        "replan_exhausted": bool(gstate.get("replan_exhausted")),
+                        "control_no_progress": control_no_progress,
+                        "stagnant_cycles": stagnant_cycles,
                         "severity": getattr(outcome, "severity", ""),
                         "citation_coverage_rate": getattr(
                             state, "citation_coverage_rate", None
@@ -2207,6 +2281,12 @@ class ResearchGraphRunner:
             "quality_repairable": repairable,
             "quality_repair_action": repair_action,
             "quality_attempts": quality_attempts + 1,
+            "control_fingerprint": fingerprint,
+            "stagnant_cycles": stagnant_cycles,
+            "control_no_progress": control_no_progress,
+            "replan_exhausted": bool(
+                gstate.get("replan_exhausted") or control_no_progress
+            ),
             "final_content": state.final_content,
             "progress": "quality",
         }
@@ -2280,6 +2360,7 @@ class ResearchGraphRunner:
             bool(gstate.get("quality_passed", True))
             and not session.state.abort_reason
             and gstate.get("status") != "partial"
+            and not bool(gstate.get("control_no_progress"))
         )
         if not success and isinstance(session.state.metadata, dict):
             session.state.metadata.setdefault(
@@ -2287,7 +2368,9 @@ class ResearchGraphRunner:
                 {
                     "status": "partial",
                     "reason": str(
-                        gstate.get("quality_reason")
+                        "control_plane_no_progress"
+                        if gstate.get("control_no_progress")
+                        else gstate.get("quality_reason")
                         or session.state.abort_reason
                         or "incomplete"
                     ),

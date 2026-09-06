@@ -226,6 +226,17 @@ def validate_hybrid_plan(
 
     brief = getattr(intent, "brief", None)
     brief_kind = _brief_task_kind(brief)
+    brief_subject_ids = {
+        str(
+            (subject.get("subject_id") if isinstance(subject, dict) else getattr(subject, "subject_id", ""))
+            or ""
+        )
+        for subject in (
+            brief.get("subjects", [])
+            if isinstance(brief, dict)
+            else getattr(brief, "subjects", None) or []
+        )
+    }
     seen_research: set[tuple[str, str, tuple[str, ...]]] = set()
     for step in plan.steps:
         if step.step_type not in RESEARCH_TYPES:
@@ -236,8 +247,22 @@ def validate_hybrid_plan(
         if brief_kind == "landscape_discovery" and task_kind not in {
             "discovery",
             "landscape_discovery",
+            "gap_fill",
         }:
             issues.append(f"category_requires_discovery:{step.task_id}")
+        if task_kind == "gap_fill":
+            if brief_kind != "landscape_discovery":
+                issues.append(f"invalid_gap_fill_context:{step.task_id}")
+            if not (metadata.get("resolves_gap_ids") or []):
+                issues.append(f"invalid_gap_fill_missing_gap:{step.task_id}")
+            if not (metadata.get("coverage_keys") or []):
+                issues.append(f"invalid_gap_fill_missing_coverage:{step.task_id}")
+            if "candidate_set" not in (metadata.get("requires_artifacts") or []):
+                issues.append(f"invalid_gap_fill_missing_candidate_set:{step.task_id}")
+            if not (metadata.get("entities") or []):
+                issues.append(f"invalid_gap_fill_missing_entity:{step.task_id}")
+            if subject_id in brief_subject_ids | {"general", ""}:
+                issues.append(f"category_gap_too_broad:{step.task_id}")
         if (
             task_kind == "comparison"
             or step.task_id == "t_compare"

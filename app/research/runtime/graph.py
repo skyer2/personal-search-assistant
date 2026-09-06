@@ -131,6 +131,10 @@ def _max_replan(state: ResearchState) -> int:
     return int(budget.get("max_replan_count") or 3)
 
 
+def _max_replan_attempts(state: ResearchState) -> int:
+    return _max_replan(state)
+
+
 def _wave_parallel(state: ResearchState) -> int:
     budget = state["budget"]
     try:
@@ -164,6 +168,22 @@ def control_fingerprint(
         "candidate_items": [str(x) for x in candidate_set.get("items") or []],
         "findings_count": len(state.get("findings") or []),
         "evidence_count": len(state.get("evidence_refs") or []),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def control_plane_fingerprint(state: dict[str, Any]) -> str:
+    assessment = dict(state.get("progress_assessment") or {})
+    payload = {
+        "plan_version": int(state.get("plan_version") or 1),
+        "task_status": dict(sorted((state.get("task_status") or {}).items())),
+        "open_gap_ids": [str(x) for x in assessment.get("open_gap_ids") or []],
+        "replan_exhausted": bool(state.get("replan_exhausted")),
+        "replan_attempts": int(state.get("replan_attempts") or 0),
+        "quality_reason": str(state.get("quality_reason") or ""),
+        "quality_repair_action": str(state.get("quality_repair_action") or ""),
+        "synthesis_status": str(state.get("status") or ""),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -262,10 +282,8 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
         reconciliation=reconciliation,
     )
     assessment_payload = assessment.to_dict()
-    fingerprint = control_fingerprint(
-        cast(dict[str, Any], state),
-        assessment_payload,
-        candidate_set,
+    fingerprint = control_plane_fingerprint(
+        {**cast(dict[str, Any], state), "progress_assessment": assessment_payload}
     )
     stagnant_cycles = (
         int(state.get("stagnant_cycles") or 0) + 1
@@ -288,6 +306,7 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
     if stagnant_cycles >= 2:
         payload["progress_assessment"] = assessment_payload
         payload["replan_exhausted"] = True
+        payload["control_no_progress"] = True
         payload["synthesis_admission"] = True
     if reconciliation is not None:
         payload["claim_reconciliation"] = reconciliation.to_dict()
@@ -326,8 +345,9 @@ def route_progress(state: ResearchState) -> str:
     plan = _plan_from_state(state)
     status = dict(state.get("task_status") or {})
     status.update(candidate_artifact_status(state.get("candidate_set")))
-    replan_count = int(state.get("replan_count") or 0)
+    replan_attempts = int(state.get("replan_attempts") or 0)
     exhausted = bool(state.get("replan_exhausted"))
+    control_no_progress = bool(state.get("control_no_progress"))
     force_synth = str(assessment.get("reason") or "") == "force_synthesis_budget"
     if verdict == "abort":
         return "abort"
@@ -343,7 +363,12 @@ def route_progress(state: ResearchState) -> str:
                 return "prepare_synthesis"
             if ready_research_steps(plan, status, include_optional=False):
                 return "dispatch"
-            if not exhausted and verdict == "gap" and replan_count < _max_replan(state):
+            if (
+                not exhausted
+                and not control_no_progress
+                and verdict == "gap"
+                and replan_attempts < _max_replan_attempts(state)
+            ):
                 return "replan"
         return "quality_gate"
     if verdict == "run" and plan is not None and ready_research_steps(
@@ -353,8 +378,9 @@ def route_progress(state: ResearchState) -> str:
     can_replan = (
         verdict == "gap"
         and not exhausted
+        and not control_no_progress
         and not force_synth
-        and replan_count < _max_replan(state)
+        and replan_attempts < _max_replan_attempts(state)
     )
     if can_replan:
         return "replan"
@@ -463,8 +489,13 @@ def synthesize_node(state: ResearchState) -> dict[str, Any]:
 
 
 def replan_node(state: ResearchState) -> dict[str, Any]:
+    attempts = int(state.get("replan_attempts") or 0) + 1
+    applied = int(state.get("replan_applied_count") or state.get("replan_count") or 0)
     return {
-        "replan_count": int(state.get("replan_count") or 0) + 1,
+        "replan_attempts": attempts,
+        "replan_applied_count": applied,
+        "replan_count": applied,
+        "replan_exhausted": attempts >= _max_replan_attempts(state),
         "progress": "run",
     }
 
@@ -472,11 +503,15 @@ def replan_node(state: ResearchState) -> dict[str, Any]:
 def route_after_quality(state: ResearchState) -> str:
     if state.get("quality_passed", True):
         return "finalize"
+    if state.get("replan_exhausted") or state.get("control_no_progress"):
+        return "finalize"
     action = str(state.get("quality_repair_action") or "partial")
     attempts = int(state.get("quality_attempts") or 0)
     if action == "repair" and attempts <= 1:
         return "repair_synthesis"
     if action == "replan":
+        if int(state.get("replan_attempts") or 0) >= _max_replan_attempts(state):
+            return "finalize"
         replan_count = int(state.get("replan_count") or 0)
         max_replan = _max_replan(state)
         if replan_count < max_replan:

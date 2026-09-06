@@ -361,6 +361,7 @@ def summarize_trace(
                     "progress_id": attrs.get("progress_id"),
                     "verdict": attrs.get("verdict") or event.get("status"),
                     "reason": attrs.get("reason"),
+                    "issues": attrs.get("issues") or [],
                     "gaps": attrs.get("gaps") or [],
                     "open_gap_ids": attrs.get("open_gap_ids") or [],
                     "resolved_gap_ids": attrs.get("resolved_gap_ids") or [],

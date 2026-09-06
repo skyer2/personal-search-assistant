@@ -608,6 +608,19 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                         render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
                       },
                       {
+                        title: "Issues",
+                        dataIndex: "issues",
+                        width: 320,
+                        key: "issues",
+                        render: (value: unknown) => (
+                          <div className="table-wrap-cell">
+                            {Array.isArray(value) && value.length > 0
+                              ? value.map((item) => asText(item)).join("; ")
+                              : "-"}
+                          </div>
+                        )
+                      },
+                      {
                         title: "Added",
                         width: 240,
                         key: "added_tasks",

@@ -71,6 +71,16 @@ def build_minimal_evidence_pack(
         },
         "findings": findings[:16],
         "evidence_refs": evidence_refs[:32],
+        "sources": _dedupe_sources(
+            _sources_from_findings(findings)
+            + _sources_from_worker_rows(
+                [
+                    item
+                    for item in list(graph_state.get("worker_results") or [])
+                    if isinstance(item, dict)
+                ]
+            )
+        ),
         "artifact_summaries": [
             {
                 "task_id": str(item.get("task_id") or ""),
@@ -80,6 +90,41 @@ def build_minimal_evidence_pack(
         ],
         "coverage_gaps": coverage_gaps,
     }
+
+
+def _sources_from_findings(findings: list[dict[str, Any]]) -> list[str]:
+    sources: list[str] = []
+    seen: set[str] = set()
+    for finding in findings:
+        for source in list(finding.get("sources") or []):
+            value = str(source).strip()
+            if value and value.lower() not in seen:
+                seen.add(value.lower())
+                sources.append(value)
+            if len(sources) >= 16:
+                return sources
+    return sources
+
+
+def _sources_from_worker_rows(rows: list[dict[str, Any]]) -> list[str]:
+    sources: list[str] = []
+    for row in rows:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        sources.extend(str(item) for item in payload.get("sources") or [])
+    return sources
+
+
+def _dedupe_sources(sources: list[str]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        value = str(source).strip()
+        if value and value.lower() not in seen:
+            seen.add(value.lower())
+            output.append(value)
+        if len(output) >= 16:
+            break
+    return output
 
 
 def render_fast_partial_report(
@@ -114,6 +159,11 @@ def render_fast_partial_report(
                 lines.append("关键事实：")
                 lines.extend(f"- {fact[:240]}" for fact in facts[:5])
                 lines.append("")
+        sources = [str(x) for x in pack.get("sources") or [] if str(x).strip()]
+        if sources:
+            lines.append("证据来源：")
+            lines.extend(f"- {source[:400]}" for source in sources[:12])
+            lines.append("")
     else:
         lines.append("当前没有可结构化确认的 Worker 摘要。")
         lines.append("")

@@ -109,6 +109,12 @@ def _candidate_items_from_rows(rows: list[dict[str, Any]]) -> list[str]:
         fragments: list[str] = []
         fragments.extend(str(item) for item in payload.get("facts") or [])
         fragments.extend(
+            str(item)
+            for finding in payload.get("findings") or []
+            if isinstance(finding, dict)
+            for item in finding.get("facts") or []
+        )
+        fragments.extend(
             str(item.get("summary") or "")
             for item in payload.get("findings") or []
             if isinstance(item, dict)

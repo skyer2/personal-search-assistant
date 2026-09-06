@@ -159,7 +159,11 @@ def can_replan(state: "LoopState", config: "HarnessConfig") -> bool:
     if not getattr(config, "hitl_allow_replan", True):
         return False
     meta = getattr(state, "metadata", None) or {}
-    if isinstance(meta, dict) and meta.get("force_synthesis"):
+    if isinstance(meta, dict) and (
+        meta.get("force_synthesis")
+        or meta.get("replan_exhausted")
+        or meta.get("control_no_progress")
+    ):
         return False
     run_budget = {}
     if isinstance(meta, dict) and isinstance(meta.get("run_budget"), dict):
@@ -169,6 +173,10 @@ def can_replan(state: "LoopState", config: "HarnessConfig") -> bool:
     )
     if max_replan > 0 and state.replan_count >= max_replan:
         return False
+    if isinstance(meta, dict):
+        attempts = int(meta.get("replan_attempts") or 0)
+        if max_replan > 0 and attempts >= max_replan:
+            return False
     max_steps = int(
         run_budget.get("max_plan_steps", getattr(config, "max_plan_steps", 0) or 0)
     )

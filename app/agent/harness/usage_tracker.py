@@ -28,6 +28,9 @@ _current_budget_manager: ContextVar[Any | None] = ContextVar(
     "harness_budget_manager", default=None
 )
 _current_worker_task: ContextVar[str] = ContextVar("harness_worker_task", default="")
+_current_llm_reservation: ContextVar[str] = ContextVar(
+    "harness_llm_reservation", default=""
+)
 
 
 def set_llm_phase(phase: str) -> None:
@@ -78,6 +81,24 @@ def reset_current_budget_manager(token: Any) -> None:
 
 def get_current_worker_task_id() -> str:
     return _current_worker_task.get()
+
+
+def set_current_llm_reservation(reservation_id: str) -> Any:
+    return _current_llm_reservation.set(str(reservation_id or ""))
+
+
+def take_current_llm_reservation() -> str:
+    value = _current_llm_reservation.get()
+    _current_llm_reservation.set("")
+    return value
+
+
+def get_current_llm_reservation() -> str:
+    return _current_llm_reservation.get()
+
+
+def reset_current_llm_reservation(token: Any) -> None:
+    _current_llm_reservation.reset(token)
 
 
 def estimate_llm_tokens(prompt: Any, *, output_reserve: int = 4096) -> int:
@@ -347,6 +368,7 @@ class UsageTrackingCallback(BaseCallbackHandler):
 
     def on_llm_start(self, serialized: Any, prompts: Any, **kwargs: Any) -> None:
         run_id = str(kwargs.get("run_id") or "default")
+        pre_reserved = take_current_llm_reservation()
         self._starts[run_id] = time.perf_counter()
         from app.research.runtime.activity import get_current_worker_activity
 
@@ -359,7 +381,9 @@ class UsageTrackingCallback(BaseCallbackHandler):
             "prompt_bytes": len(str(prompt_blob or "")),
         }
         manager = get_current_budget_manager()
-        if manager is not None:
+        if pre_reserved:
+            self._budget_reservations[run_id] = pre_reserved
+        elif manager is not None:
             from app.agent.harness.run_budget import BudgetReservationError
 
             reservation_id, reason = manager.reserve_llm_call(
@@ -370,7 +394,6 @@ class UsageTrackingCallback(BaseCallbackHandler):
             if not reservation_id:
                 raise BudgetReservationError(reason or "budget_tokens")
             self._budget_reservations[run_id] = reservation_id
-
     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
         from app.research.runtime.activity import get_current_worker_activity
 
@@ -565,6 +588,107 @@ class UsageTrackingCallback(BaseCallbackHandler):
                     total_tokens or (prompt_tokens + completion_tokens),
                 )
         get_usage_tracker().record(rec)
+
+
+def _begin_llm_reservation(prompt: Any) -> tuple[Any, str, int, Any] | None:
+    manager = get_current_budget_manager()
+    if manager is None:
+        return None
+    estimated_tokens = estimate_llm_tokens(prompt)
+    reservation_id, reason = manager.reserve_llm_call(
+        estimated_tokens=estimated_tokens,
+        worker_task_id=get_current_worker_task_id(),
+        phase=get_llm_phase(),
+    )
+    if not reservation_id:
+        from app.agent.harness.run_budget import BudgetReservationError
+
+        raise BudgetReservationError(reason or "budget_tokens")
+    token = set_current_llm_reservation(reservation_id)
+    return manager, reservation_id, estimated_tokens, token
+
+
+def _finish_llm_reservation(state: tuple[Any, str, int, Any]) -> None:
+    manager, reservation_id, estimated_tokens, token = state
+    if get_current_llm_reservation() == reservation_id:
+        manager.commit_llm_usage(reservation_id, estimated_tokens)
+    reset_current_llm_reservation(token)
+
+
+def _fail_llm_reservation(state: tuple[Any, str, int, Any]) -> None:
+    manager, reservation_id, _estimated_tokens, token = state
+    if get_current_llm_reservation() == reservation_id:
+        manager.release_llm_reservation(reservation_id)
+    reset_current_llm_reservation(token)
+
+
+def wrap_model_with_budget(model: Any) -> Any:
+    """Authorize a model call before LangChain invokes the provider."""
+    if model is None:
+        return model
+    model_state = getattr(model, "__dict__", None)
+    if isinstance(model_state, dict) and model_state.get("_harness_budget_aware"):
+        return model
+
+    original_invoke = getattr(model, "invoke", None)
+    original_ainvoke = getattr(model, "ainvoke", None)
+    original_astream = getattr(model, "astream", None)
+
+    def budgeted_invoke(*args: Any, **kwargs: Any) -> Any:
+        prompt = args[0] if args else kwargs.get("input") or kwargs.get("messages")
+        state = _begin_llm_reservation(prompt)
+        if state is None:
+            return original_invoke(*args, **kwargs)
+        try:
+            result = original_invoke(*args, **kwargs)
+        except BaseException:
+            _fail_llm_reservation(state)
+            raise
+        _finish_llm_reservation(state)
+        return result
+
+    async def budgeted_ainvoke(*args: Any, **kwargs: Any) -> Any:
+        prompt = args[0] if args else kwargs.get("input") or kwargs.get("messages")
+        state = _begin_llm_reservation(prompt)
+        if state is None:
+            return await original_ainvoke(*args, **kwargs)
+        try:
+            result = await original_ainvoke(*args, **kwargs)
+        except BaseException:
+            _fail_llm_reservation(state)
+            raise
+        _finish_llm_reservation(state)
+        return result
+
+    async def budgeted_astream(*args: Any, **kwargs: Any) -> Any:
+        prompt = args[0] if args else kwargs.get("input") or kwargs.get("messages")
+        state = _begin_llm_reservation(prompt)
+        if state is None:
+            async for chunk in original_astream(*args, **kwargs):
+                yield chunk
+            return
+        completed = False
+        try:
+            async for chunk in original_astream(*args, **kwargs):
+                yield chunk
+            completed = True
+        finally:
+            if completed:
+                _finish_llm_reservation(state)
+            else:
+                _fail_llm_reservation(state)
+
+    try:
+        if callable(original_invoke):
+            object.__setattr__(model, "invoke", budgeted_invoke)
+        if callable(original_ainvoke):
+            object.__setattr__(model, "ainvoke", budgeted_ainvoke)
+        if callable(original_astream):
+            object.__setattr__(model, "astream", budgeted_astream)
+        object.__setattr__(model, "_harness_budget_aware", True)
+    except (AttributeError, TypeError, ValueError):
+        return model
+    return model
 
 
 def build_usage_callback(session_id: str, phase: str = "") -> Optional[UsageTrackingCallback]:

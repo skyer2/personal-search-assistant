@@ -202,6 +202,7 @@ class ArtifactStore:
         step_index: int = -1,
         locator: str = "",
         title: str = "",
+        worker_task_id: str = "",
     ) -> Artifact:
         if isinstance(raw, str):
             content = raw
@@ -214,6 +215,8 @@ class ArtifactStore:
         loc = locator or (urls[0].rstrip(".,;") if urls else f"tool:{tool_name}")
         kind = infer_kind(step_type, loc)
         metadata = {"tool_name": tool_name}
+        if worker_task_id:
+            metadata["task_id"] = worker_task_id
         if kind in {
             ARTIFACT_KIND_WEB,
             ARTIFACT_KIND_FILE,

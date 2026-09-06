@@ -10,6 +10,8 @@ import os
 from dotenv import find_dotenv, load_dotenv
 from langchain.chat_models import init_chat_model
 
+from app.agent.harness.usage_tracker import wrap_model_with_budget
+
 load_dotenv(find_dotenv())
 
 _llm_timeout = float(os.getenv("LLM_TIMEOUT_SEC", "120"))
@@ -17,14 +19,14 @@ _supervisor_temperature = float(os.getenv("HARNESS_SUPERVISOR_TEMPERATURE", "0.1
 _openai_base_url = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
 _openai_api_key = (os.getenv("OPENAI_API_KEY") or "").strip() or None
 
-model = init_chat_model(
+model = wrap_model_with_budget(init_chat_model(
     model=os.getenv("LLM_QWEN_MAX"),
     model_provider="openai",
     timeout=_llm_timeout,
     temperature=_supervisor_temperature,
     base_url=_openai_base_url,
     api_key=_openai_api_key,
-)
+))
 
 # Research Worker 可用更快模型（Planner/Synthesis 仍用主模型）
 _worker_model_name = (
@@ -35,14 +37,14 @@ _worker_model_name = (
 worker_model = model
 if _worker_model_name and _worker_model_name != os.getenv("LLM_QWEN_MAX"):
     try:
-        worker_model = init_chat_model(
+        worker_model = wrap_model_with_budget(init_chat_model(
             model=_worker_model_name,
             model_provider="openai",
             timeout=min(_llm_timeout, float(os.getenv("LLM_WORKER_TIMEOUT_SEC", "60"))),
             temperature=_supervisor_temperature,
             base_url=_openai_base_url,
             api_key=_openai_api_key,
-        )
+        ))
     except Exception as exc:
         print(f"[LLM] worker_model init failed, fallback to main model: {exc}")
         worker_model = model
@@ -53,13 +55,13 @@ _compression_enabled = os.getenv("HARNESS_LLM_COMPRESSION", "true").lower() != "
 compression_model = None
 if _compression_enabled:
     try:
-        compression_model = init_chat_model(
+        compression_model = wrap_model_with_budget(init_chat_model(
             model=_compression_model_name,
             model_provider="openai",
             timeout=_llm_timeout,
             base_url=_openai_base_url,
             api_key=_openai_api_key,
-        )
+        ))
     except Exception as exc:
         print(f"[LLM] compression_model init failed, will use truncate: {exc}")
 
