@@ -212,11 +212,20 @@ def wrap_tool_with_contract(tool: Any, *, tool_name: str = "", step_type: str = 
     args_schema = getattr(tool, "args_schema", None)
 
     def _run(**kwargs: Any) -> Any:
-        if hasattr(tool, "invoke"):
-            raw = tool.invoke(kwargs)
-        else:
-            func = getattr(tool, "func", None)
-            raw = func(**kwargs) if callable(func) else tool(**kwargs)
+        from app.research.runtime.activity import (
+            get_current_worker_activity,
+            tracked_worker_operation,
+        )
+
+        with tracked_worker_operation(f"tool.{name}"):
+            if hasattr(tool, "invoke"):
+                raw = tool.invoke(kwargs)
+            else:
+                func = getattr(tool, "func", None)
+                raw = func(**kwargs) if callable(func) else tool(**kwargs)
+        tracker = get_current_worker_activity()
+        if tracker is not None:
+            tracker.artifact_written()
         return apply_tool_output_contract(raw, tool_name=name, step_type=step_type)
 
     wrapped = StructuredTool.from_function(

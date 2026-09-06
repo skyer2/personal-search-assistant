@@ -64,10 +64,12 @@ def intent_node(state: ResearchState) -> dict[str, Any]:
 def plan_node(state: ResearchState) -> dict[str, Any]:
     from app.agent.harness.planner import finalize_plan
     from app.agent.harness.state import TaskIntent
+    from app.research.planning.candidate import annotate_candidate_dependencies
 
     raw = state.get("intent") or {}
     intent = TaskIntent.from_dict(raw) if raw else understand_task(state["task_query"])
     plan = annotate_plan_tasks(finalize_plan(build_plan(intent)))
+    annotate_candidate_dependencies(plan)
     status = {
         step.resolved_task_id(i): str(step.metadata.get("status") or "pending")
         for i, step in enumerate(plan.steps)
@@ -143,6 +145,9 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
     if plan is None:
         return "finalize"
     status = dict(state.get("task_status") or {})
+    from app.research.planning.candidate import candidate_artifact_status
+
+    status.update(candidate_artifact_status(state.get("candidate_set")))
     assessment = dict(state.get("progress_assessment") or {})
     early_stop = (
         str(assessment.get("verdict") or "") == "enough"
@@ -174,6 +179,10 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
                         "description": step.description,
                         "subagent": step.subagent or "",
                         "task_query": state["task_query"],
+                        "candidate_context": str(
+                            (state.get("candidate_set") or {}).get("context") or ""
+                        ),
+                        "candidate_set": dict(state.get("candidate_set") or {}),
                     },
                 )
             )
@@ -183,6 +192,10 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
 
 def progress_node(state: ResearchState) -> dict[str, Any]:
     from app.research.planning.progress import assess_progress
+    from app.research.planning.candidate import (
+        build_candidate_set,
+        candidate_artifact_status,
+    )
 
     plan = _plan_from_state(state)
     worker_rows = list(state.get("worker_results") or [])
@@ -193,9 +206,18 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
         reconciliation = reconcile_worker_results(worker_rows)
     except Exception:
         reconciliation = None
+    candidate_set = build_candidate_set(
+        plan,
+        worker_rows=worker_rows,
+        task_status=dict(state.get("task_status") or {}),
+        query=str(state.get("resolved_query") or state.get("task_query") or ""),
+        brief=state.get("brief"),
+    )
+    progress_status = dict(state.get("task_status") or {})
+    progress_status.update(candidate_artifact_status(candidate_set))
     assessment = assess_progress(
         plan,
-        task_status=dict(state.get("task_status") or {}),
+        task_status=progress_status,
         worker_results=worker_rows,
         query=str(state.get("resolved_query") or state.get("task_query") or ""),
         aborted=bool(state.get("status") == "aborted" or state.get("abort_reason")),
@@ -204,6 +226,7 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
     )
     payload = {
         "progress_assessment": assessment.to_dict(),
+        "candidate_set": candidate_set,
         "progress": "progress_eval",
         "abort_reason": state.get("abort_reason")
         or (assessment.reason if assessment.verdict == "abort" else ""),
@@ -215,6 +238,7 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
 
 def route_progress(state: ResearchState) -> str:
     from app.research.runtime.scheduler import skip_optional_pending
+    from app.research.planning.candidate import candidate_artifact_status
 
     if state.get("status") == "aborted" or state.get("abort_reason"):
         return "abort"
@@ -224,6 +248,7 @@ def route_progress(state: ResearchState) -> str:
     verdict = str(assessment.get("verdict") or "enough")
     plan = _plan_from_state(state)
     status = dict(state.get("task_status") or {})
+    status.update(candidate_artifact_status(state.get("candidate_set")))
     replan_count = int(state.get("replan_count") or 0)
     exhausted = bool(state.get("replan_exhausted"))
     force_synth = str(assessment.get("reason") or "") == "force_synthesis_budget"
@@ -265,9 +290,10 @@ def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
     if callable(invoke):
         return invoke(state)
     task_id = str(state.get("task_id") or "")
+    objective = str(state.get("description") or state.get("objective") or "placeholder")[:400]
     finding = {
         "task_id": task_id,
-        "summary": str(state.get("description") or state.get("objective") or "placeholder")[:400],
+        "summary": objective,
     }
     return {
         "worker_results": [

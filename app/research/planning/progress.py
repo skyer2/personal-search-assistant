@@ -64,6 +64,9 @@ class ProgressAssessment:
     progress_id: str = ""
     coverage_matrix: list[dict[str, Any]] = field(default_factory=list)
     coverage_ratio: float = 0.0
+    execution_failed_tasks: list[str] = field(default_factory=list)
+    execution_blocked_tasks: list[str] = field(default_factory=list)
+    execution_failure_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -104,6 +107,21 @@ class ProgressAssessment:
                 if isinstance(item, dict)
             ],
             coverage_ratio=float(data.get("coverage_ratio") or 0.0),
+            execution_failed_tasks=[
+                str(x)
+                for x in (data.get("execution_failed_tasks") or [])
+                if str(x).strip()
+            ],
+            execution_blocked_tasks=[
+                str(x)
+                for x in (data.get("execution_blocked_tasks") or [])
+                if str(x).strip()
+            ],
+            execution_failure_reasons=[
+                str(x)
+                for x in (data.get("execution_failure_reasons") or [])
+                if str(x).strip()
+            ],
         )
 
     def materialize_gaps(self, *, previous_gap_ids: list[str] | None = None) -> "ProgressAssessment":
@@ -258,17 +276,17 @@ def assess_progress(
         and status.get(step.resolved_task_id(index), "pending") in {"pending", "running"}
     ]
     if pending_research:
-        # 无 READY 仍 pending：通常是上游失败挡住依赖，按缺口处理以免 dispatch 空转。
-        return _finalize(
-            ProgressAssessment(
-                verdict="gap",
-                coverage_gaps=[
-                    f"blocked:{step.task_id}:{step.objective or step.description}"
-                    for step in pending_research
-                ][:8],
-                reason="blocked_pending_research",
-            )
+        # Execution health，不是 semantic coverage gap。
+        blocked_ids = [step.task_id or "" for step in pending_research][:12]
+        blocked_ids = [task_id for task_id in blocked_ids if task_id]
+        assessment = ProgressAssessment(
+            verdict="gap",
+            reason="blocked_pending_research",
+            execution_blocked_tasks=blocked_ids,
+            execution_failure_reasons=["dependency_not_available"] * len(blocked_ids),
         )
+    else:
+        assessment = ProgressAssessment(verdict="enough", reason="coverage_ok")
 
     failed_research = [
         step
@@ -277,7 +295,6 @@ def assess_progress(
         and not (step.metadata or {}).get("optional")
         and status.get(step.resolved_task_id(index), "pending") == "failed"
     ]
-    assessment = ProgressAssessment(verdict="enough", reason="coverage_ok")
     latest_rows = latest_worker_results(worker_results)
     rows_by_task = {
         str(row.get("task_id") or ""): row
@@ -285,7 +302,7 @@ def assess_progress(
         if isinstance(row, dict)
     }
     for step in failed_research:
-        row = rows_by_task.get(step.task_id or "")
+        row = rows_by_task.get(step.task_id or "") or {}
         payload = row.get("payload") if isinstance(row, dict) and isinstance(row.get("payload"), dict) else {}
         has_partial_evidence = bool(
             payload.get("findings")
@@ -293,11 +310,28 @@ def assess_progress(
             or payload.get("sources")
         )
         if not has_partial_evidence:
-            assessment.coverage_gaps.append(
-                f"failed:{step.task_id}:{step.objective or step.description}"
-            )
+            if step.task_id:
+                assessment.execution_failed_tasks.append(step.task_id)
+                assessment.execution_failure_reasons.append(
+                    str(row.get("fail_reason") or "worker_failed")
+                )
+                assessment.gaps.append(
+                    {
+                        "type": "execution_failure",
+                        "task_id": step.task_id,
+                        "description": f"{step.task_id} 执行失败，未能产出可回收证据",
+                        "blocking": True,
+                        "actionable": True,
+                        "severity": "high",
+                    }
+                )
         elif assessment.reason == "coverage_ok":
             assessment.reason = "partial_evidence_available"
+        if step.task_id and step.task_id not in assessment.execution_failed_tasks:
+            assessment.execution_failed_tasks.append(step.task_id)
+            assessment.execution_failure_reasons.append(
+                str(row.get("fail_reason") or "worker_failed_with_partial_evidence")
+            )
 
     rows = latest_rows
     if not rows and state is not None:
@@ -386,7 +420,30 @@ def assess_progress(
         assessment.reason = "ready_for_synthesis"
     elif assessment.verdict == "gap":
         assessment.reason = assessment.reason if assessment.reason != "coverage_ok" else "semantic_gap"
-    return _finalize(assessment)
+    finalized = _finalize(assessment)
+    if finalized.execution_blocked_tasks:
+        existing = {
+            str(item.get("task_id") or "")
+            for item in finalized.gaps
+            if isinstance(item, dict)
+        }
+        for task_id in finalized.execution_blocked_tasks:
+            if task_id in existing:
+                continue
+            finalized.gaps.append(
+                {
+                    "type": "execution_blocker",
+                    "task_id": task_id,
+                    "description": f"{task_id} 被上游执行失败阻塞",
+                    "blocking": True,
+                    "actionable": True,
+                    "severity": "high",
+                }
+            )
+        if not finalized.coverage_gaps and not finalized.unresolved_conflicts:
+            finalized.verdict = "gap"
+            finalized.reason = "blocked_pending_research"
+    return finalized
 
 
 def evaluate_progress(

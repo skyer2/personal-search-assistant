@@ -61,6 +61,7 @@ class ResearchState(TypedDict):
     progress: str
     quality_passed: bool
     progress_assessment: dict[str, Any]
+    candidate_set: Annotated[dict[str, Any], merge_dicts]
     replan_exhausted: bool
     marginal_gain: dict[str, Any]
 
@@ -75,6 +76,8 @@ class WorkerTaskState(TypedDict):
     description: str
     subagent: str
     task_query: str
+    candidate_context: NotRequired[str]
+    candidate_set: NotRequired[dict[str, Any]]
     user_id: NotRequired[str]
     tenant_id: NotRequired[str]
     project_id: NotRequired[str]
@@ -132,6 +135,7 @@ def empty_research_state(
         "progress": "run",
         "quality_passed": False,
         "progress_assessment": {},
+        "candidate_set": {},
         "replan_exhausted": False,
         "marginal_gain": {},
     }

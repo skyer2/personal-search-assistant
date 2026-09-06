@@ -181,11 +181,11 @@ def load_summary_projection(session_id: str, *, run_id: str) -> dict[str, Any]:
     from app.observability.projection_store import get_projection_store
 
     store = get_projection_store()
-    cached = store.get_projection(run_id, "summary")
-    if cached is not None:
-        return cached
     events = load_events(session_id, run_id=run_id)
     records = [event.to_jsonl_record() for event in events]
+    cached = store.get_projection(run_id, "summary")
+    if cached is not None and _projection_event_count(cached) == len(records):
+        return cached
     summary = summarize_trace(
         records, include_lineage=False, include_tree_integrity=False
     )
@@ -194,6 +194,7 @@ def load_summary_projection(session_id: str, *, run_id: str) -> dict[str, Any]:
         "run_id": run_id,
         "summary": summary,
         "total": len(records),
+        "event_count": len(records),
     }
     store.put_projection(run_id, "summary", payload)
     return payload
@@ -204,13 +205,13 @@ def load_lineage_projection(session_id: str, *, run_id: str) -> list[dict[str, A
     from app.observability.projection_store import get_projection_store
 
     store = get_projection_store()
+    events = load_events(session_id, run_id=run_id)
+    records = [event.to_jsonl_record() for event in events]
     cached = store.get_projection(run_id, "lineage")
-    if cached is not None:
+    if cached is not None and _projection_event_count(cached) == len(records):
         return list(cached.get("items") or [])
-    rows = build_lineage_edges(
-        [event.to_jsonl_record() for event in load_events(session_id, run_id=run_id)]
-    )
-    store.put_projection(run_id, "lineage", {"items": rows})
+    rows = build_lineage_edges(records)
+    store.put_projection(run_id, "lineage", {"items": rows, "event_count": len(records)})
     return rows
 
 
@@ -218,11 +219,28 @@ def load_tree_projection(session_id: str, *, run_id: str) -> dict[str, Any]:
     from app.observability.projection_store import get_projection_store
 
     store = get_projection_store()
+    events = load_events(session_id, run_id=run_id)
+    records = [event.to_jsonl_record() for event in events]
     cached = store.get_projection(run_id, "tree")
-    if cached is not None:
+    if (
+        cached is not None
+        and _projection_event_count(cached) == len(records)
+        and (not records or int(cached.get("span_count") or 0) > 0)
+    ):
         return cached
-    tree = build_span_tree(
-        [event.to_jsonl_record() for event in load_events(session_id, run_id=run_id)]
-    )
-    store.put_projection(run_id, "tree", tree)
+    tree = build_span_tree(records)
+    payload = {**tree, "event_count": len(records)}
+    store.put_projection(run_id, "tree", payload)
+    return payload
+
+
+def _projection_event_count(payload: dict[str, Any]) -> int | None:
+    for key in ("event_count", "total"):
+        try:
+            value = payload.get(key)
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
     return tree

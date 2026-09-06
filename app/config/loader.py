@@ -113,6 +113,14 @@ class HarnessConfig:
     max_step_tool_calls: int = 8
     max_run_sec: int = 600
     synthesis_reserve_sec: float = 210.0
+    understand_wall_budget_sec: float = 30.0
+    planner_wall_budget_sec: float = 45.0
+    context_build_budget_sec: float = 30.0
+    fast_synthesis_threshold_sec: float = 45.0
+    emergency_context_budget_sec: float = 10.0
+    worker_idle_timeout_sec: float = 75.0
+    replan_context_overhead_sec: float = 30.0
+    replan_checkpoint_overhead_sec: float = 2.0
     max_replan_count: int = 3
     max_plan_steps: int = 12
     max_llm_calls_per_run: int = 30
@@ -479,6 +487,54 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             os.getenv(
                 "HARNESS_SYNTHESIS_RESERVE_SEC",
                 budget.get("synthesis_reserve_sec", 210),
+            )
+        ),
+        understand_wall_budget_sec=float(
+            os.getenv(
+                "HARNESS_UNDERSTAND_WALL_BUDGET_SEC",
+                budget.get("understand_wall_budget_sec", 30),
+            )
+        ),
+        planner_wall_budget_sec=float(
+            os.getenv(
+                "HARNESS_PLANNER_WALL_BUDGET_SEC",
+                budget.get("planner_wall_budget_sec", 45),
+            )
+        ),
+        context_build_budget_sec=float(
+            os.getenv(
+                "HARNESS_CONTEXT_BUILD_BUDGET_SEC",
+                budget.get("context_build_budget_sec", 30),
+            )
+        ),
+        fast_synthesis_threshold_sec=float(
+            os.getenv(
+                "HARNESS_FAST_SYNTHESIS_THRESHOLD_SEC",
+                budget.get("fast_synthesis_threshold_sec", 45),
+            )
+        ),
+        emergency_context_budget_sec=float(
+            os.getenv(
+                "HARNESS_EMERGENCY_CONTEXT_BUDGET_SEC",
+                budget.get("emergency_context_budget_sec", 10),
+            )
+        ),
+        worker_idle_timeout_sec=float(
+            os.getenv(
+                "HARNESS_WORKER_IDLE_TIMEOUT_SEC",
+                budget.get("worker_idle_timeout_sec", 75),
+            )
+        ),
+        replan_context_overhead_sec=float(
+            os.getenv(
+                "HARNESS_REPLAN_CONTEXT_OVERHEAD_SEC",
+                budget.get("replan_context_overhead_sec", 30),
+            )
+        ),
+        replan_checkpoint_overhead_sec=float(
+            os.getenv(
+                "HARNESS_REPLAN_CHECKPOINT_OVERHEAD_SEC",
+                budget.get("replan_checkpoint_overhead_sec", 2),
             )
         ),
         max_replan_count=int(budget.get("max_replan_count", 3)),

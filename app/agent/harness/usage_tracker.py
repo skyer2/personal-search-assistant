@@ -285,21 +285,57 @@ class UsageTrackingCallback(BaseCallbackHandler):
         self.phase = phase
         self._starts: dict[str, float] = {}
         self._prompt_meta: dict[str, dict[str, Any]] = {}
+        self._activity_operations: dict[str, str] = {}
 
     def on_llm_start(self, serialized: Any, prompts: Any, **kwargs: Any) -> None:
         run_id = str(kwargs.get("run_id") or "default")
         self._starts[run_id] = time.perf_counter()
+        from app.research.runtime.activity import get_current_worker_activity
+
+        tracker = get_current_worker_activity()
+        if tracker is not None:
+            self._activity_operations[run_id] = tracker.begin_operation("llm.request")
         prompt_blob = prompts if prompts is not None else kwargs.get("messages")
         self._prompt_meta[run_id] = {
             "input_hash": _hash_text(prompt_blob) if prompt_blob is not None else "",
             "prompt_bytes": len(str(prompt_blob or "")),
         }
 
+    def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+        from app.research.runtime.activity import get_current_worker_activity
+
+        tracker = get_current_worker_activity()
+        if tracker is not None:
+            tracker.heartbeat(
+                event="LLM_STREAM_DELTA",
+                current_operation="llm.request",
+            )
+
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        run_id = str(kwargs.get("run_id") or "default")
+        operation_id = self._activity_operations.pop(run_id, "")
+        if operation_id:
+            from app.research.runtime.activity import get_current_worker_activity
+
+            tracker = get_current_worker_activity()
+            if tracker is not None:
+                tracker.end_operation(operation_id)
         try:
             self._handle_llm_end(response, **kwargs)
         except Exception as exc:
             print(f"[UsageTracker] on_llm_end failed: {exc}")
+
+    def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+        run_id = str(kwargs.get("run_id") or "default")
+        self._starts.pop(run_id, None)
+        self._prompt_meta.pop(run_id, None)
+        operation_id = self._activity_operations.pop(run_id, "")
+        if operation_id:
+            from app.research.runtime.activity import get_current_worker_activity
+
+            tracker = get_current_worker_activity()
+            if tracker is not None:
+                tracker.end_operation(operation_id, status="error")
 
     def _handle_llm_end(self, response: Any, **kwargs: Any) -> None:
         prompt_tokens = 0
@@ -477,7 +513,10 @@ async def tracked_ainvoke(
         if callback is not None:
             callbacks.append(callback)
             run_config["callbacks"] = callbacks
-        return await model.ainvoke(input_value, config=run_config, **kwargs)
+        from app.research.runtime.activity import tracked_worker_operation
+
+        with tracked_worker_operation("llm.request"):
+            return await model.ainvoke(input_value, config=run_config, **kwargs)
     finally:
         _current_phase.reset(phase_token)
         _current_session.reset(session_token)

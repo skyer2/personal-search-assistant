@@ -90,6 +90,10 @@ def _deps_satisfied(
     *,
     allow_failed_deps: bool = False,
 ) -> bool:
+    meta = step.metadata if isinstance(step.metadata, dict) else {}
+    for artifact in meta.get("requires_artifacts") or []:
+        if status.get(f"artifact:{artifact}") != "available":
+            return False
     for dep in step.depends_on or []:
         current = status.get(dep)
         if current == "done":

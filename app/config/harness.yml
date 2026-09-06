@@ -107,6 +107,14 @@ harness:
     max_step_tool_calls: 24
     max_run_sec: 1800
     synthesis_reserve_sec: 180
+    understand_wall_budget_sec: 30
+    planner_wall_budget_sec: 45
+    context_build_budget_sec: 30
+    fast_synthesis_threshold_sec: 45
+    emergency_context_budget_sec: 10
+    worker_idle_timeout_sec: 75
+    replan_context_overhead_sec: 30
+    replan_checkpoint_overhead_sec: 2
     max_replan_count: 3
     max_plan_steps: 12
     max_llm_calls_per_run: 80

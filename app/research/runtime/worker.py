@@ -11,6 +11,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from app.research.runtime.activity import (
+    WorkerActivityTracker,
+    reset_current_worker_activity,
+    set_current_worker_activity,
+)
+
 WorkerResultStatus = Literal["done", "failed", "skipped", "blocked"]
 
 
@@ -25,53 +31,70 @@ async def _run_worker_step_with_lease(
     wall_timeout_sec: float,
     idle_timeout_sec: float,
 ) -> Any:
-    task = asyncio.create_task(awaitable)
-    started = time.perf_counter()
-    last_progress = started
+    previous_tracker_token = None
+    task: Any = None
+    try:
+        started = time.perf_counter()
+        tracker = WorkerActivityTracker(worker_id=str(getattr(child, "task_id", "") or ""))
+        previous_tracker_token = set_current_worker_activity(tracker)
+        task = asyncio.create_task(awaitable)
+        last_progress = tracker.last_progress_at
 
-    def signature() -> tuple[int, ...]:
-        try:
-            from app.agent.harness.artifacts import get_artifact_store
-
-            artifact_count = len(get_artifact_store())
-        except Exception:
-            artifact_count = 0
-        return (
-            int(getattr(child, "tool_calls_count", 0) or 0),
-            len(getattr(child, "trace", None) or []),
-            len(getattr(child, "step_results", None) or []),
-            artifact_count,
-        )
-
-    last_signature = signature()
-    while not task.done():
-        now = time.perf_counter()
-        remaining_wall = wall_timeout_sec - (now - started)
-        remaining_idle = idle_timeout_sec - (now - last_progress)
-        delay = min(1.0, max(0.05, min(remaining_wall, remaining_idle)))
-        done, _pending = await asyncio.wait({task}, timeout=delay)
-        if done:
-            return task.result()
-        now = time.perf_counter()
-        current_signature = signature()
-        if current_signature != last_signature:
-            last_signature = current_signature
-            last_progress = now
-        if now - last_progress >= idle_timeout_sec:
-            task.cancel()
+        def signature() -> tuple[int, ...]:
             try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-            raise WorkerIdleTimeoutError("worker idle timeout")
-        if now - started >= wall_timeout_sec:
+                from app.agent.harness.artifacts import get_artifact_store
+
+                artifact_count = len(get_artifact_store())
+            except Exception:
+                artifact_count = 0
+            return (
+                int(getattr(child, "tool_calls_count", 0) or 0),
+                len(getattr(child, "trace", None) or []),
+                len(getattr(child, "step_results", None) or []),
+                artifact_count,
+            )
+
+        last_signature = signature()
+        while not task.done():
+            now = time.perf_counter()
+            remaining_wall = wall_timeout_sec - (now - started)
+            remaining_idle = (
+                idle_timeout_sec
+                if tracker.has_in_flight_operations()
+                else idle_timeout_sec - (now - last_progress)
+            )
+            delay = min(1.0, max(0.05, min(remaining_wall, remaining_idle)))
+            done, _pending = await asyncio.wait({task}, timeout=delay)
+            if done:
+                return task.result()
+            now = time.perf_counter()
+            current_signature = signature()
+            current_in_flight = tracker.has_in_flight_operations()
+            if current_signature != last_signature:
+                tracker.heartbeat(event="STATE_PROGRESS", current_operation="worker")
+                last_signature = current_signature
+                if not current_in_flight:
+                    last_progress = now
+            if not current_in_flight and now - last_progress >= idle_timeout_sec:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise WorkerIdleTimeoutError("worker idle timeout")
+            if now - started >= wall_timeout_sec:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise asyncio.TimeoutError()
+        return task.result()
+    finally:
+        if task is not None and not task.done():
             task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-            raise asyncio.TimeoutError()
-    return task.result()
+        if previous_tracker_token is not None:
+            reset_current_worker_activity(previous_tracker_token)
 
 
 def salvage_worker_evidence(
@@ -420,9 +443,9 @@ class LangChainWorkerRuntime:
                                         getattr(
                                             self.harness.harness_config,
                                             "worker_idle_timeout_sec",
-                                            30,
+                                            75,
                                         )
-                                        or 30
+                                        or 75
                                     ),
                                 ),
                             )

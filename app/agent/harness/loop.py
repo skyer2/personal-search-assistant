@@ -2949,6 +2949,58 @@ class AgentHarness:
 
         set_llm_phase(Phase.FINALIZE.value)
 
+        abort_reason = str(state.abort_reason or "")
+        metadata = state.metadata if isinstance(state.metadata, dict) else {}
+        raw_termination = metadata.get("termination")
+        termination: dict[str, Any] | None = (
+            dict(raw_termination) if isinstance(raw_termination, dict) else None
+        )
+        if termination is None:
+            synthesis_attempted = bool(
+                metadata.get("synthesis_attempted")
+                or metadata.get("emergency_synthesis")
+            )
+            synthesis_status = str(
+                metadata.get("synthesis_status")
+                or ("ok" if synthesis_attempted else "not_started")
+            )
+            failure_stage = str(
+                metadata.get("failure.origin_stage")
+                or metadata.get("failure_stage")
+                or ""
+            )
+            termination = {
+                "status": (
+                    "completed"
+                    if success
+                    else ("interrupted" if abort_reason == "cancelled" else "partial")
+                ),
+                "reason": abort_reason or ("success" if success else "incomplete"),
+                "stage": (
+                    "quality"
+                    if metadata.get("quality_attempted")
+                    else ("finalize" if success else (failure_stage or "synthesis"))
+                ),
+                "research_completed": bool(
+                    metadata.get("research_completed", success and not abort_reason)
+                ),
+                "synthesis_attempted": synthesis_attempted,
+                "synthesis_status": synthesis_status,
+                "quality_attempted": bool(metadata.get("quality_attempted")),
+            }
+        else:
+            termination.setdefault(
+                "status",
+                "completed" if success else "partial",
+            )
+            termination.setdefault("reason", abort_reason or "incomplete")
+            termination.setdefault("stage", "finalize" if success else "synthesis")
+            termination["quality_attempted"] = bool(
+                metadata.get("quality_attempted", termination.get("quality_attempted"))
+            )
+        if isinstance(state.metadata, dict):
+            state.metadata["termination"] = termination
+
         from app.agent.harness.deliverables import (
             ensure_requested_deliverables,
             session_artifact_names,
@@ -2999,7 +3051,6 @@ class AgentHarness:
                 )
         except Exception as exc:
             logger.debug("run summary save skipped: %s", exc)
-        abort_reason = str(state.abort_reason or "")
         if abort_reason:
             pdf_path = written.get("pdf")
             md_path = written.get("md")
@@ -3098,8 +3149,7 @@ class AgentHarness:
             state.final_content,
             status=persist_status if persist_status != "success" else "completed",
             run_id=str(state.run_id or ""),
-            termination_reason=abort_reason,
-            termination_stage="research" if abort_reason else "finalize",
+            termination=termination,
         )
 
         duration = int((time.perf_counter() - phase_started) * 1000)
@@ -3192,6 +3242,7 @@ class AgentHarness:
                 "completed_step_keys": state.completed_step_keys,
                 "abort_reason": state.abort_reason,
                 "abort_message": state.abort_message,
+                "termination": termination,
                 "observability": obs_snapshot.to_dict(),
                 "usage": usage_summary,
                 "trace_id": self._current_trace_id,

@@ -77,6 +77,39 @@ def check_trace_integrity(
                 or failure_origin_stage
             )
 
+    terminal_event = next(
+        (
+            event
+            for event in reversed(events)
+            if str(event.get("type") or event.get("event")) in {"run.completed", "run.failed", "run_summary"}
+        ),
+        {},
+    )
+    terminal_attrs = (
+        terminal_event.get("attributes")
+        if isinstance(terminal_event.get("attributes"), dict)
+        else {}
+    )
+    terminal_metadata_value = terminal_attrs.get("metadata")
+    terminal_metadata = (
+        terminal_metadata_value
+        if isinstance(terminal_metadata_value, dict)
+        else terminal_event.get("metadata")
+        if isinstance(terminal_event.get("metadata"), dict)
+        else {}
+    )
+    raw_termination = terminal_metadata.get("termination") or terminal_attrs.get("termination")
+    termination = raw_termination if isinstance(raw_termination, dict) else {}
+    termination_reason = str(
+        termination.get("reason")
+        or terminal_metadata.get("abort_reason")
+        or terminal_attrs.get("abort_reason")
+        or ""
+    )
+    termination_stage = str(termination.get("stage") or "")
+    if not failure_origin_stage and termination_stage:
+        failure_origin_stage = termination_stage
+
     brief_count = counts.get("brief.compiled", 0)
     plan_count = counts.get("plan.created", 0)
     worker_started = counts.get("worker.started", 0)
@@ -100,19 +133,36 @@ def check_trace_integrity(
     if is_terminal and is_agent_mode:
         if worker_done == 0 and _stage_required("worker", failure_origin_stage):
             issues.append("missing_worker_terminal_event")
-        if progress_count == 0 and _stage_required("progress", failure_origin_stage):
+        if (
+            progress_count == 0
+            and worker_started > 0
+            and _stage_required("progress", failure_origin_stage)
+        ):
             issues.append("missing_progress_event")
-        termination_count = counts.get("termination.reason", 0) + counts.get("run.failed", 0)
+        termination_count = (
+            counts.get("termination.reason", 0)
+            + counts.get("run.failed", 0)
+            + (1 if termination else 0)
+        )
         if (
             synthesis_count == 0
             and termination_count == 0
             and _stage_required("synthesis", failure_origin_stage)
         ):
             issues.append("missing_synthesis_or_termination_event")
-        quality_required = run_status in {"success", "completed", "partial", "ok", "done"} or (
-            _STAGE_ALIAS.get(failure_origin_stage.lower(), failure_origin_stage.lower()) == "quality"
+        quality_attempted = (
+            termination.get("quality_attempted") is True
+            or terminal_metadata.get("quality_attempted") is True
         )
-        if quality_count == 0 and quality_required and _stage_required("quality", failure_origin_stage):
+        quality_required = (
+            run_status in {"success", "completed", "ok", "done"}
+            or quality_attempted
+            or termination_stage in {"quality", "finalize"}
+            or _STAGE_ALIAS.get(failure_origin_stage.lower(), failure_origin_stage.lower()) == "quality"
+        )
+        if quality_count == 0 and quality_required and (
+            quality_attempted or _stage_required("quality", failure_origin_stage)
+        ):
             issues.append("missing_quality_event")
 
     if worker_started > 0 and worker_done < worker_started:
@@ -120,10 +170,12 @@ def check_trace_integrity(
     if is_agent_mode and evidence_count > 0 and worker_done == 0:
         issues.append("evidence_without_worker_terminal")
     if run_status == "partial":
-        terminal = next((e for e in reversed(events) if str(e.get("type") or e.get("event")) in {"run.completed", "run.failed", "run_summary"}), {})
-        attrs = terminal.get("attributes") if isinstance(terminal.get("attributes"), dict) else {}
-        metadata = attrs.get("metadata") if isinstance(attrs.get("metadata"), dict) else terminal.get("metadata") or {}
-        if not (metadata.get("termination") or metadata.get("abort_reason")):
+        if not (
+            termination
+            or termination_reason
+            or terminal_metadata.get("abort_reason")
+            or terminal_attrs.get("abort_reason")
+        ):
             issues.append("partial_without_termination_reason")
 
     # Seq uniqueness

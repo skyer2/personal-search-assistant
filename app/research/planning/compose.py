@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
 from app.agent.harness.planner import build_plan, finalize_plan
+from app.agent.harness.research_brief import brief_of
 from app.agent.harness.state import ExecutionPlan, TaskIntent
 from app.research.planning.effort import (
     EffectiveBudget,
@@ -13,6 +15,8 @@ from app.research.planning.effort import (
     stamp_effort_on_plan,
 )
 from app.research.planning.lead_planner import heuristic_dynamic_plan, lead_plan_with_llm
+from app.research.planning.granularity import normalize_plan_granularity
+from app.research.planning.candidate import annotate_candidate_dependencies
 from app.research.planning.policy import apply_source_policy, parse_source_policy, select_planning_mode
 from app.research.planning.validator import validate_hybrid_plan
 
@@ -72,6 +76,21 @@ def _stamp(
     return plan
 
 
+def _normalize_granularity(
+    plan: ExecutionPlan,
+    intent: TaskIntent,
+    *,
+    max_research_tasks: int,
+) -> ExecutionPlan:
+    plan.steps = normalize_plan_granularity(
+        plan.steps,
+        brief_of(intent, query=intent.raw_query),
+        max_research_tasks=max_research_tasks,
+    )
+    annotate_candidate_dependencies(plan)
+    return plan
+
+
 def _compose_execution_plan_strict(
     intent: TaskIntent,
     *,
@@ -87,6 +106,11 @@ def _compose_execution_plan_strict(
     mode = select_planning_mode(intent, hybrid_enabled=limits.hybrid_enabled)
     if mode == "dynamic":
         plan = heuristic_dynamic_plan(intent, policy)
+        plan = _normalize_granularity(
+            plan,
+            intent,
+            max_research_tasks=limits.max_research_tasks,
+        )
         plan = finalize_plan(plan)
         issues = validate_hybrid_plan(
             intent,
@@ -152,15 +176,29 @@ async def compose_execution_plan(
     policy = parse_source_policy(intent.raw_query)
     mode = select_planning_mode(intent, hybrid_enabled=limits.hybrid_enabled)
     if mode == "dynamic" and limits.dynamic_lead_enabled and llm_enabled and model is not None:
-        llm_plan = await lead_plan_with_llm(
-            intent,
-            policy,
-            model=model,
-            session_id=session_id,
-            max_tasks=limits.max_research_tasks,
-            effort=effective,
-        )
+        try:
+            llm_plan = await asyncio.wait_for(
+                lead_plan_with_llm(
+                    intent,
+                    policy,
+                    model=model,
+                    session_id=session_id,
+                    max_tasks=limits.max_research_tasks,
+                    effort=effective,
+                ),
+                timeout=max(
+                    5.0,
+                    float(getattr(config, "planner_wall_budget_sec", 45) or 45),
+                ),
+            )
+        except asyncio.TimeoutError:
+            llm_plan = None
         if llm_plan is not None:
+            llm_plan = _normalize_granularity(
+                llm_plan,
+                intent,
+                max_research_tasks=limits.max_research_tasks,
+            )
             llm_plan = finalize_plan(
                 _stamp(llm_plan, intent, "dynamic", llm_plan.research_brief, effective=effective)
             )
