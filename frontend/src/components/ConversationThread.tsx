@@ -179,6 +179,11 @@ function ThinkingTimeline({
   );
 }
 
+function qualityFromEvents(events: MonitorMessage[]): Record<string, unknown> | undefined {
+  const event = [...events].reverse().find((item) => item.event === "quality");
+  return event?.data;
+}
+
 function ProcessDock({
   elapsedClock,
   events,
@@ -220,6 +225,7 @@ function ProcessDock({
       <div className="process-dock-progress">
         <RunProgress
           durationLabel={<ElapsedTimer clock={elapsedClock} />}
+          quality={qualityFromEvents(events)}
           progress={phaseProgress}
           runStatus={runStatus}
         />

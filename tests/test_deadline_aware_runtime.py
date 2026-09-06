@@ -339,15 +339,17 @@ def test_emergency_synthesis_uses_minimal_evidence_pack_fast_path():
 
     assert projected["status"] == "partial"
     assert "partial evidence summary" in state.final_content
-    assert state.metadata["termination"] == {
-        "status": "partial",
-        "reason": "deadline_exceeded",
-        "stage": "synthesis",
-        "research_completed": False,
-        "synthesis_attempted": True,
-        "synthesis_status": "partial_fast_path",
-        "quality_attempted": False,
-    }
+    termination = state.metadata["termination"]
+    assert termination["status"] == "partial"
+    assert termination["reason"] == "synthesis_time_reserve"
+    assert termination["stage"] == "synthesis"
+    assert termination["research_completed"] is False
+    assert termination["synthesis_attempted"] is True
+    assert termination["synthesis_status"] == "partial_fast_path"
+    assert termination["quality_attempted"] is False
+    assert termination["origin_stage"] == "research"
+    assert termination["detected_stage"] == "dispatch"
+    assert "force_synthesis" in termination["causal_chain"]
 
 
 def test_emergency_zero_evidence_skips_llm_and_returns_partial():

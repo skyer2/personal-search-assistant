@@ -55,5 +55,12 @@ def consume_n_retrieval_or_block(n: int, tool_name: str = "") -> str | None:
         return None
     if remaining <= 0 or remaining < count:
         return STOP_JSON_MESSAGE
+    from app.agent.harness.usage_tracker import get_current_budget_manager
+
+    manager = get_current_budget_manager()
+    if manager is not None:
+        allowed, reason = manager.reserve_tool_calls(count)
+        if not allowed:
+            return STOP_JSON_MESSAGE
     _retrieval_remaining.set(remaining - count)
     return None

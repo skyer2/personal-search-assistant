@@ -80,6 +80,10 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
         EventType.CONTEXT_BUILT: ("context", "[context] built"),
         EventType.CONTEXT_COMPRESSED: ("context", "[context] compressed"),
         EventType.RETRIEVAL_SEARCH: ("retrieval", "[retrieval] search"),
+        EventType.QUALITY_EVALUATED: (
+            "quality",
+            f"[quality] {event.status or ''} {attrs.get('reason') or ''}".strip(),
+        ),
         EventType.EVIDENCE_REGISTERED: (
             "evidence",
             f"[evidence] {attrs.get('evidence_id') or attrs.get('source_id') or ''}",

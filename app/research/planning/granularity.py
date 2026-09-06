@@ -56,6 +56,19 @@ def _entities(step: PlanStep, brief: dict[str, Any]) -> list[str]:
     metadata_entities = step.metadata.get("entities")
     candidates = [str(x).strip() for x in (metadata_entities or []) if str(x).strip()]
     if not candidates:
+        subjects = brief.get("subjects") or []
+        for subject in subjects:
+            if not isinstance(subject, dict):
+                continue
+            canonical = str(subject.get("canonical") or "").strip()
+            if canonical:
+                candidates.append(canonical)
+            candidates.extend(
+                str(alias).strip()
+                for alias in (subject.get("aliases") or [])
+                if str(alias).strip()
+            )
+    if not candidates:
         candidates = [str(x).strip() for x in (brief.get("entities") or []) if str(x).strip()]
     if not candidates:
         candidates = [str(x).strip() for x in (step.metadata.get("entity") or []) if str(x).strip()]
@@ -74,6 +87,8 @@ def _dimensions(step: PlanStep, brief: dict[str, Any]) -> list[str]:
 
 def _task_kind(step: PlanStep) -> TaskKind:
     metadata_kind = str((step.metadata or {}).get("task_kind") or "").strip().lower()
+    if metadata_kind == "landscape_discovery":
+        metadata_kind = "discovery"
     if metadata_kind in {"discovery", "deep_dive", "verification", "gap_fill"}:
         return metadata_kind  # type: ignore[return-value]
     objective = f"{step.objective or ''} {step.description or ''}".lower()

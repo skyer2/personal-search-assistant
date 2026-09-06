@@ -60,6 +60,10 @@ class ResearchState(TypedDict):
     needs_plan_review: bool
     progress: str
     quality_passed: bool
+    quality_reason: str
+    quality_repairable: bool
+    quality_repair_action: str
+    quality_attempts: int
     progress_assessment: dict[str, Any]
     candidate_set: Annotated[dict[str, Any], merge_dicts]
     replan_exhausted: bool
@@ -140,6 +144,10 @@ def empty_research_state(
         "needs_plan_review": False,
         "progress": "run",
         "quality_passed": False,
+        "quality_reason": "",
+        "quality_repairable": False,
+        "quality_repair_action": "",
+        "quality_attempts": 0,
         "progress_assessment": {},
         "candidate_set": {},
         "replan_exhausted": False,

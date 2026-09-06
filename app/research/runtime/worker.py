@@ -246,6 +246,7 @@ class LangChainWorkerRuntime:
         queue_ms = 0
         exec_ms = 0
         child = None
+        lease_id = ""
         salvaged: dict[str, list[Any]] = {
             "findings": [],
             "evidence_refs": [],
@@ -311,19 +312,29 @@ class LangChainWorkerRuntime:
                         session_id=session.session_id,
                         tool_calls=session.state.tool_calls_count,
                     )
-                    allowed, why = mgr.research_allowed()
+                    if callable(getattr(mgr, "reserve_worker_lease", None)):
+                        lease_id, why = mgr.reserve_worker_lease(
+                            task.task_id,
+                            parallel_workers=session._resolve_max_workers(),
+                        )
+                    else:
+                        allowed, why = mgr.research_allowed()
+                        lease_id = "legacy_budget_contract" if allowed else ""
                     # Research 不得侵占 synthesis 时间储备
                     remaining = mgr.remaining_for_research_sec()
                 except Exception:
-                    allowed, why = True, ""
+                    lease_id, why = "", ""
                     remaining = float(self.harness.harness_config.step_timeout_sec)
-                if not allowed:
+                if not lease_id:
                     duration_ms = int((time.perf_counter() - worker_started) * 1000)
                     async with session.lock:
                         session.state.plan.steps[step_index].metadata[
                             "status"
                         ] = StepStatus.FAILED.value
                         session.state.metadata["force_synthesis"] = True
+                        session.state.metadata["budget_degrade_reason"] = (
+                            why or "budget_blocked"
+                        )
                     if recorder.is_active:
                         recorder.emit(
                             EventType.WORKER_FAILED,
@@ -421,34 +432,39 @@ class LangChainWorkerRuntime:
                     ok = False
                     while True:
                         try:
-                            ok = await _run_worker_step_with_lease(
-                                self.harness._run_single_step(
-                                    child,
-                                    child_step,
-                                    step_index,
-                                    session.ctx.task_query,
-                                    session.ctx.relative_session_dir,
-                                    session.ctx.uploaded_prompt,
-                                    session.session_id,
-                                    session.ctx.session_dir,
-                                    None,
-                                    session.ctx.idempotency,
-                                    None,
-                                ),
-                                child=child,
-                                wall_timeout_sec=worker_timeout,
-                                idle_timeout_sec=max(
-                                    0.05,
-                                    float(
-                                        getattr(
-                                            self.harness.harness_config,
-                                            "worker_idle_timeout_sec",
-                                            75,
-                                        )
-                                        or 75
-                                    ),
-                                ),
+                            from app.agent.harness.usage_tracker import (
+                                bind_worker_budget_scope,
                             )
+
+                            with bind_worker_budget_scope(task.task_id):
+                                ok = await _run_worker_step_with_lease(
+                                    self.harness._run_single_step(
+                                        child,
+                                        child_step,
+                                        step_index,
+                                        session.ctx.task_query,
+                                        session.ctx.relative_session_dir,
+                                        session.ctx.uploaded_prompt,
+                                        session.session_id,
+                                        session.ctx.session_dir,
+                                        None,
+                                        session.ctx.idempotency,
+                                        None,
+                                    ),
+                                    child=child,
+                                    wall_timeout_sec=worker_timeout,
+                                    idle_timeout_sec=max(
+                                        0.05,
+                                        float(
+                                            getattr(
+                                                self.harness.harness_config,
+                                                "worker_idle_timeout_sec",
+                                                75,
+                                            )
+                                            or 75
+                                        )
+                                    ),
+                                )
                             break
                         except Exception as exc:
                             from app.agent.llm_errors import (
@@ -692,6 +708,45 @@ class LangChainWorkerRuntime:
             )
         except Exception as exc:
             duration_ms = int((time.perf_counter() - worker_started) * 1000)
+            from app.agent.harness.run_budget import BudgetReservationError
+
+            if isinstance(exc, BudgetReservationError):
+                reason = str(exc.reason or "budget_tokens")
+                async with session.lock:
+                    session.state.metadata["force_synthesis"] = True
+                    session.state.metadata["budget_degrade_reason"] = reason
+                if recorder.is_active:
+                    recorder.emit(
+                        EventType.WORKER_FAILED,
+                        phase="execute",
+                        status="blocked",
+                        duration_ms=duration_ms,
+                        task_id=task.task_id,
+                        attempt=attempt,
+                        plan_version=int(task.plan_version or 1),
+                        attributes={
+                            "objective": task.objective,
+                            "step_type": task.step_type,
+                            "worker_status": "blocked",
+                            "fail_reason": reason,
+                            "queue_ms": queue_ms,
+                        },
+                        run_id=session.run_id,
+                        session_id=session.session_id,
+                        trace_id=str(getattr(session.state, "trace_id", "") or ""),
+                    )
+                    if span_key:
+                        recorder.end_span(span_key, status="blocked", duration_ms=duration_ms)
+                return WorkerResult(
+                    ok=False,
+                    task_id=task.task_id,
+                    status="blocked",
+                    summary=f"budget_blocked:{reason}",
+                    fail_reason=reason,
+                    queue_ms=queue_ms,
+                    execution_ms=exec_ms,
+                    duration_ms=duration_ms,
+                )
             from app.agent.llm_errors import LLMFailureKind, classify_llm_exception
 
             provider_failure = classify_llm_exception(exc)
@@ -762,6 +817,11 @@ class LangChainWorkerRuntime:
                 )
             raise
         finally:
+            if lease_id and lease_id != "legacy_budget_contract":
+                try:
+                    session.budget_manager.release_worker_lease(lease_id)
+                except Exception:
+                    pass
             if parent_ctx is not None:
                 from app.observability.context import set_context
 

@@ -83,6 +83,43 @@ def drop_session(run_id: str) -> None:
     _SESSIONS.pop(run_id, None)
 
 
+def _resolve_emergency_reason(
+    session: RunSession, *, deadline_near: bool = False
+) -> str:
+    """Resolve degradation cause without defaulting to a wall deadline."""
+    metadata = session.state.metadata if isinstance(session.state.metadata, dict) else {}
+    assessment = metadata.get("progress_assessment")
+    candidates = [
+        str(metadata.get("budget_degrade_reason") or ""),
+        str(assessment.get("budget_degrade_reason") or "")
+        if isinstance(assessment, dict)
+        else "",
+        session.budget_manager.exhaustion_reason()
+        if callable(getattr(session.budget_manager, "exhaustion_reason", None))
+        else "",
+    ]
+    for candidate in candidates:
+        if candidate.strip():
+            return candidate.strip()
+    if session.state.abort_reason:
+        return str(session.state.abort_reason)
+    if session.budget_manager.remaining_run_sec() <= 0:
+        return "deadline_exceeded"
+    if deadline_near:
+        return "synthesis_time_reserve"
+    return "budget_exhausted"
+
+
+def _termination_causal_chain(reason: str, *, quality_attempted: bool) -> list[str]:
+    chain = [f"budget_exhausted:{reason}", "force_synthesis"]
+    if quality_attempted:
+        chain.extend(["emergency_synthesis", "quality_evaluated"])
+    else:
+        chain.append("emergency_synthesis")
+    chain.append("partial_finalize")
+    return chain
+
+
 class ResearchGraphRunner:
     """compiled graph.ainvoke + HITL interrupt 桥接到现有 HTTP coordinator。"""
 
@@ -141,6 +178,12 @@ class ResearchGraphRunner:
             search_mode=profile,
         )
         payload["budget"]["max_parallel_workers"] = session._resolve_max_workers()
+        from app.agent.harness.usage_tracker import (
+            reset_current_budget_manager,
+            set_current_budget_manager,
+        )
+
+        budget_context_token = set_current_budget_manager(session.budget_manager)
         try:
             graph = self.compile(
                 checkpointer=checkpointer or await _default_checkpointer(),
@@ -173,6 +216,7 @@ class ResearchGraphRunner:
                 return session.result
             return await self._complete_from_graph(session, result)
         finally:
+            reset_current_budget_manager(budget_context_token)
             drop_session(session.run_id)
 
     async def _bridge_interrupts(
@@ -224,7 +268,7 @@ class ResearchGraphRunner:
         return decisions
 
     async def _force_synthesis_then_finalize(
-        self, session: RunSession, *, reason: str
+        self, session: RunSession, *, reason: str = ""
     ) -> Any:
         """Hard deadline hit mid-graph: skip remaining research and try synthesis."""
         from app.research.runtime.scheduler import (
@@ -233,11 +277,10 @@ class ResearchGraphRunner:
         )
 
         state = session.state
+        reason = str(reason or _resolve_emergency_reason(session))
         if isinstance(state.metadata, dict):
             state.metadata["force_synthesis"] = True
-        if not state.abort_reason:
-            state.abort_reason = reason
-            state.abort_message = state.abort_message or f"{reason}: hard wall-clock"
+            state.metadata["budget_degrade_reason"] = reason
         if state.plan is not None:
             skip_pending_research(
                 state.plan,
@@ -300,6 +343,14 @@ class ResearchGraphRunner:
             "synthesis_attempted": synthesis_status != "not_started",
             "synthesis_status": synthesis_status,
             "quality_attempted": quality_attempted,
+            "origin_stage": "research",
+            "detected_stage": "dispatch",
+            "cause_event_id": str(
+                (state.metadata or {}).get("budget_exhausted_event_id") or ""
+            ),
+            "causal_chain": _termination_causal_chain(
+                reason, quality_attempted=quality_attempted
+            ),
         }
         try:
             gstate["status"] = "partial"
@@ -805,12 +856,18 @@ class ResearchGraphRunner:
             if isinstance(session.state.metadata, dict) and session.state.metadata.get(
                 "force_synthesis"
             ):
+                budget_reason = str(
+                    session.state.metadata.get("budget_degrade_reason")
+                    or session.budget_manager.exhaustion_reason()
+                    or "budget_exhausted"
+                )
                 return {
                     "replan_exhausted": True,
                     "progress": "enough",
                     "progress_assessment": {
                         "verdict": "enough",
                         "reason": "force_synthesis_budget",
+                        "budget_degrade_reason": budget_reason,
                     },
                     "status": "running",
                 }
@@ -823,12 +880,18 @@ class ResearchGraphRunner:
         if isinstance(session.state.metadata, dict) and session.state.metadata.get(
             "force_synthesis"
         ):
+            budget_reason = str(
+                session.state.metadata.get("budget_degrade_reason")
+                or session.budget_manager.exhaustion_reason()
+                or "budget_exhausted"
+            )
             return {
                 "replan_exhausted": True,
                 "progress": "enough",
                 "progress_assessment": {
                         "verdict": "enough",
                         "reason": "force_synthesis_budget",
+                        "budget_degrade_reason": budget_reason,
                     },
             }
         dispatch_status = task_status_map(session.state.plan)
@@ -961,6 +1024,17 @@ class ResearchGraphRunner:
             raw_row_payload if isinstance(raw_row_payload, dict) else {}
         )
         row_payload["evidence_ids"] = list(result.evidence_refs or [])
+        from app.research.runtime.findings import normalize_findings
+
+        normalized_findings, finding_rejections = normalize_findings(
+            list(result.findings or []),
+            task_id=tid,
+            subject_id=str(step.metadata.get("subject_id") or "general"),
+            dimension=str((step.metadata.get("coverage_keys") or ["general"])[0]),
+        )
+        row_payload["findings"] = normalized_findings
+        if finding_rejections:
+            row_payload["finding_rejections"] = finding_rejections
         row["payload"] = row_payload
         if not result.ok:
             row["summary"] = result.summary or row.get("summary", "")
@@ -974,7 +1048,7 @@ class ResearchGraphRunner:
             "worker_results": [row],
             "task_status": {tid: graph_task_status},
             "evidence_refs": result.evidence_refs or ([tid] if result.ok else []),
-            "findings": result.findings,
+            "findings": normalized_findings,
         }
         if result.status == "blocked":
             projected_state.update(
@@ -1435,10 +1509,7 @@ class ResearchGraphRunner:
                         "coverage_gaps": [],
                     }
                 fast_context_duration_ms = int((time.perf_counter() - context_started) * 1000)
-                reason = str(
-                    session.state.abort_reason
-                    or "deadline_exceeded"
-                )
+                reason = _resolve_emergency_reason(session, deadline_near=deadline)
                 session.state.final_content = render_fast_partial_report(pack, reason=reason)
                 ok = True
                 if isinstance(session.state.metadata, dict):
@@ -1455,6 +1526,17 @@ class ResearchGraphRunner:
                         "synthesis_attempted": True,
                         "synthesis_status": "partial_fast_path",
                         "quality_attempted": False,
+                        "origin_stage": "research",
+                        "detected_stage": "dispatch",
+                        "cause_event_id": str(
+                            (session.state.metadata or {}).get(
+                                "budget_exhausted_event_id"
+                            )
+                            or ""
+                        ),
+                        "causal_chain": _termination_causal_chain(
+                            reason, quality_attempted=False
+                        ),
                     }
             else:
                 try:
@@ -2027,6 +2109,41 @@ class ResearchGraphRunner:
             scope="finalize",
         )
         passed = bool(outcome.passed or outcome.severity == "warning")
+        reason = str(getattr(outcome, "reason", "") or "")
+        quality_attempts = int(gstate.get("quality_attempts") or 0)
+        repairable_reasons = {
+            "citation_coverage_low",
+            "conflict_not_disclosed",
+            "unsupported_reconciled_value",
+            "no_file_generated",
+        }
+        research_gap_reasons = {
+            "no_content",
+            "wrong_subagent",
+            "step_validation_failed",
+        }
+        repairable = bool(not passed and reason in repairable_reasons)
+        repair_action = ""
+        if not passed:
+            if repairable and quality_attempts < 1:
+                repair_action = "repair"
+            elif reason in research_gap_reasons:
+                allowed, _why = session.budget_manager.research_allowed()
+                max_replans = int(
+                    (gstate.get("budget") or {}).get("max_replan_count") or 3
+                )
+                if allowed and int(gstate.get("replan_count") or 0) < max_replans:
+                    repair_action = "replan"
+            if not repair_action:
+                repair_action = "partial"
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata["quality"] = {
+                "passed": passed,
+                "reason": reason,
+                "repairable": repairable,
+                "repair_action": repair_action,
+                "attempts": quality_attempts + 1,
+            }
         try:
             from app.observability import EventType, get_recorder
 
@@ -2038,6 +2155,10 @@ class ResearchGraphRunner:
                     status="pass" if passed else "fail",
                     attributes={
                         "passed": passed,
+                        "reason": reason,
+                        "repairable": repairable,
+                        "repair_action": repair_action,
+                        "attempt": quality_attempts + 1,
                         "severity": getattr(outcome, "severity", ""),
                         "citation_coverage_rate": getattr(
                             state, "citation_coverage_rate", None
@@ -2082,8 +2203,40 @@ class ResearchGraphRunner:
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
         return {
             "quality_passed": passed,
+            "quality_reason": reason,
+            "quality_repairable": repairable,
+            "quality_repair_action": repair_action,
+            "quality_attempts": quality_attempts + 1,
             "final_content": state.final_content,
             "progress": "quality",
+        }
+
+    async def node_repair_synthesis(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.project import apply_graph_to_loop
+
+        session = _require_session(gstate)
+        apply_graph_to_loop(session.state, gstate)
+        if session.state.plan is None:
+            return {"progress": "repair_synthesis"}
+        status = dict(gstate.get("task_status") or {})
+        for index, step in enumerate(session.state.plan.steps):
+            if step.step_type not in {"generate_markdown", "summarize", "convert_pdf"}:
+                continue
+            task_id = step.resolved_task_id(index)
+            if status.get(task_id) in {"done", "failed", "skipped"}:
+                status[task_id] = "pending"
+                step.metadata["status"] = "pending"
+                step.metadata["quality_repair_attempt"] = int(
+                    gstate.get("quality_attempts") or 0
+                )
+        session.state.final_content = ""
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata["partial_delivered"] = False
+        return {
+            "task_status": status,
+            "status": "running",
+            "final_content": "",
+            "progress": "repair_synthesis",
         }
 
     async def node_finalize(self, gstate: dict[str, Any]) -> dict[str, Any]:
@@ -2128,6 +2281,25 @@ class ResearchGraphRunner:
             and not session.state.abort_reason
             and gstate.get("status") != "partial"
         )
+        if not success and isinstance(session.state.metadata, dict):
+            session.state.metadata.setdefault(
+                "termination",
+                {
+                    "status": "partial",
+                    "reason": str(
+                        gstate.get("quality_reason")
+                        or session.state.abort_reason
+                        or "incomplete"
+                    ),
+                    "stage": "quality" if gstate.get("quality_attempts") else "finalize",
+                    "origin_stage": "synthesis" if gstate.get("quality_reason") else "run",
+                    "detected_stage": "quality" if gstate.get("quality_reason") else "finalize",
+                    "research_completed": False,
+                    "synthesis_attempted": True,
+                    "synthesis_status": "ok",
+                    "quality_attempted": bool(gstate.get("quality_attempts")),
+                },
+            )
         result = await self.harness._phase_finalize(
             session.state,
             session.ctx.session_dir,
@@ -2136,8 +2308,14 @@ class ResearchGraphRunner:
             deliverable_dir=session.ctx.deliverable_dir,
         )
         session.result = result
+        if result.status in {"partial", "cancelled"}:
+            graph_status = result.status
+        elif result.status == "failed":
+            graph_status = "aborted"
+        else:
+            graph_status = "completed"
         return {
-            "status": "completed" if result.status != "failed" else "aborted",
+            "status": graph_status,
             "final_content": session.state.final_content,
             "artifacts": list(result.artifacts),
             "progress": "done",

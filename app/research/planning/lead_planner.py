@@ -27,7 +27,7 @@ LEAD_PLANNER_PROMPT = """你是 Lead Research Planner，不是运行时。
 {brief}
 
 规则：
-1. 按「要研究什么问题」拆任务，优先覆盖 Brief.entities 与 Brief.dimensions；不要按数据源拆（禁止 task=只搜网页）。
+1. 按「要研究什么问题」拆任务，优先覆盖 Brief.subjects（canonical subject_id）与 Brief.dimensions；不要按数据源拆（禁止 task=只搜网页）。
 2. 每个 task 必须标注 coverage_keys（对应 Brief.dimensions 或 supporting_context）。
 3. 覆盖 Brief.dimensions 的任务 priority=P0、required=true；仅作背景/历史辅助的任务 priority=P1、required=false。
 4. 禁止把 Brief 里的核心维度标成 optional。
@@ -47,6 +47,8 @@ LEAD_PLANNER_PROMPT = """你是 Lead Research Planner，不是运行时。
   "tasks": [
     {{
       "task_id": "t_capability",
+      "task_kind": "deep_dive",
+      "subject_id": "deepseek",
       "objective": "…",
       "depends_on": [],
       "allowed_sources": ["web"],
@@ -106,8 +108,16 @@ def research_step_from_task(
     priority: str | int | None = None,
     evidence_target: dict | None = None,
     extra_metadata: dict | None = None,
+    task_kind: str = "deep_dive",
+    subject_id: str = "",
 ) -> PlanStep:
-    meta: dict = {"allowed_sources": list(sources), "kind": "research_task"}
+    meta: dict = {
+        "allowed_sources": list(sources),
+        "kind": "research_task",
+        "task_kind": task_kind,
+    }
+    if subject_id:
+        meta["subject_id"] = subject_id
     if coverage_keys:
         meta["coverage_keys"] = [str(x) for x in coverage_keys if str(x).strip()]
     if required is not None:
@@ -171,15 +181,90 @@ def append_synthesis(intent: TaskIntent, steps: list[PlanStep]) -> list[PlanStep
     return steps
 
 
+def _dedupe_research_steps(
+    steps: list[PlanStep], brief: Any
+) -> list[PlanStep]:
+    """Fan out by canonical subject, not lexical aliases."""
+    subjects = [
+        {
+            "id": str(getattr(subject, "subject_id", "") or subject.canonical),
+            "canonical": str(subject.canonical),
+            "aliases": [str(x) for x in (subject.aliases or [])],
+        }
+        for subject in (getattr(brief, "subjects", None) or [])
+    ]
+    brief_kind = str(getattr(brief, "task_kind", "") or "")
+    output: list[PlanStep] = []
+    owners: dict[tuple[str, str, tuple[str, ...], tuple[int, int] | None], str] = {}
+    replacements: dict[str, str] = {}
+
+    for step in steps:
+        metadata = dict(step.metadata or {})
+        if str(metadata.get("task_kind") or "deep_dive") == "comparison":
+            if step.task_id:
+                replacements[step.task_id] = ""
+            continue
+        if brief_kind == "landscape_discovery":
+            metadata["task_kind"] = "discovery"
+        else:
+            metadata.setdefault("task_kind", "deep_dive")
+
+        objective = f"{step.objective or ''} {step.description or ''}"
+        subject_id = str(metadata.get("subject_id") or "")
+        if not subject_id:
+            matched = next(
+                (
+                    item["id"]
+                    for item in subjects
+                    if item["canonical"].lower() in objective.lower()
+                    or any(alias.lower() in objective.lower() for alias in item["aliases"])
+                ),
+                None,
+            )
+            subject_id = matched or (subjects[0]["id"] if len(subjects) == 1 else "general")
+        metadata["subject_id"] = subject_id
+        step.metadata = metadata
+
+        raw_range = metadata.get("target_item_range")
+        item_range = (
+            (int(raw_range[0]), int(raw_range[1]))
+            if isinstance(raw_range, list)
+            and len(raw_range) == 2
+            and all(isinstance(x, int) for x in raw_range)
+            else None
+        )
+        coverage = tuple(str(x) for x in (metadata.get("coverage_keys") or []))
+        key = (subject_id, str(metadata["task_kind"]), coverage, item_range)
+        owner = owners.get(key)
+        if owner is not None:
+            if step.task_id:
+                replacements[step.task_id] = owner
+            continue
+        if step.task_id:
+            owners[key] = step.task_id
+        output.append(step)
+
+    for step in output:
+        rewritten = []
+        for dependency in step.depends_on or []:
+            replacement = replacements.get(dependency, dependency)
+            if replacement:
+                rewritten.append(replacement)
+        step.depends_on = rewritten
+    return output
+
+
 def heuristic_dynamic_plan(intent: TaskIntent, policy: SourcePolicy) -> ExecutionPlan:
     """无 LLM 时的确定性拆解：按 Brief 实体/维度作为 P0 研究目标。"""
     from app.agent.harness.research_brief import brief_of
+    from app.research.planning.granularity import normalize_plan_granularity
     from app.research.planning.priority import stamp_semantic_priority
 
     sources = intent_allowed_sources(intent)
     sources = [s for s in sources if policy.allows(s)] or list(policy.allowed_sources)
     brief = brief_of(intent, query=intent.raw_query)
-    entities = [e for e in (brief.entities or []) if e][:5]
+    subjects = list(brief.subjects or [])
+    entities = [subject.canonical for subject in subjects][:5]
     if len(entities) < 2:
         entities = extract_compare_entities(intent.raw_query)
     dimensions = [d for d in (brief.dimensions or []) if d and d != "关键事实"]
@@ -191,9 +276,36 @@ def heuristic_dynamic_plan(intent: TaskIntent, policy: SourcePolicy) -> Executio
         "prefer_primary": bool(brief.prefer_primary),
     }
     steps: list[PlanStep] = []
-    if len(entities) >= 2:
+    if brief.task_kind == "landscape_discovery":
+        subject = subjects[0] if subjects else None
+        discovery_dimensions = ["候选池"]
+        steps.append(
+            research_step_from_task(
+                task_id="t_landscape",
+                objective=(
+                    f"Landscape Discovery：发现 6-8 家高潜力候选，"
+                    f"覆盖 {'、'.join(discovery_dimensions)}{primary_hint}"
+                ),
+                depends_on=[],
+                sources=sources,
+                coverage_keys=discovery_dimensions,
+                required=True,
+                priority="P0",
+                evidence_target=evidence_target,
+                task_kind="discovery",
+                subject_id=str(getattr(subject, "subject_id", "") or "general"),
+                extra_metadata={
+                    "target_items": 8,
+                    "produces_artifact": "candidate_set",
+                },
+            )
+        )
+        brief_text = brief.objective or intent.raw_query
+    elif len(entities) >= 2:
         entity_ids: list[str] = []
-        for index, name in enumerate(entities[:5], start=1):
+        for index, (name, subject) in enumerate(
+            zip(entities[:5], subjects[:5]), start=1
+        ):
             tid = f"t_entity_{index}"
             entity_ids.append(tid)
             steps.append(
@@ -206,20 +318,10 @@ def heuristic_dynamic_plan(intent: TaskIntent, policy: SourcePolicy) -> Executio
                     required=True,
                     priority="P0",
                     evidence_target=evidence_target,
+                    task_kind="deep_dive",
+                    subject_id=str(getattr(subject, "subject_id", "") or name),
                 )
             )
-        steps.append(
-            research_step_from_task(
-                task_id="t_compare",
-                objective=f"基于各实体证据做横向比较（{dim_hint}），不引入新的未授权来源",
-                depends_on=list(entity_ids),
-                sources=sources,
-                coverage_keys=["横向比较"] if "横向比较" in dimensions else list(dimensions[:2]),
-                required=True,
-                priority="P0",
-                evidence_target=evidence_target,
-            )
-        )
         brief_text = brief.objective or f"比较 {' / '.join(entities[:5])}"
     elif dimensions:
         for index, dim in enumerate(dimensions[:6], start=1):
@@ -233,6 +335,9 @@ def heuristic_dynamic_plan(intent: TaskIntent, policy: SourcePolicy) -> Executio
                     required=True,
                     priority="P0",
                     evidence_target=evidence_target,
+                    task_kind="deep_dive",
+                    subject_id=str(getattr(subjects[0], "subject_id", "") or "general")
+                    if subjects else "general",
                 )
             )
         brief_text = brief.objective or intent.raw_query
@@ -245,11 +350,15 @@ def heuristic_dynamic_plan(intent: TaskIntent, policy: SourcePolicy) -> Executio
                 sources=sources,
                 coverage_keys=[],
                 required=True,
-                priority="P0",
-                evidence_target=evidence_target,
-            )
+                    priority="P0",
+                    evidence_target=evidence_target,
+                    task_kind="deep_dive",
+                    subject_id=str(getattr(subjects[0], "subject_id", "") or "general")
+                    if subjects else "general",
+                )
         )
         brief_text = brief.objective or intent.summary or intent.raw_query
+    steps = normalize_plan_granularity(steps, brief, max_research_tasks=6)
     append_synthesis(intent, steps)
     plan = ExecutionPlan(
         steps=steps,
@@ -291,6 +400,9 @@ def plan_from_lead_payload(
                 "sources": sources,
                 "effort": str(raw.get("effort") or "").strip().lower(),
                 "coverage_keys": [str(x) for x in (raw.get("coverage_keys") or []) if str(x).strip()],
+                "task_kind": str(raw.get("task_kind") or "").strip().lower(),
+                "subject_id": str(raw.get("subject_id") or "").strip(),
+                "target_items": raw.get("target_items"),
                 "required": raw.get("required"),
                 "priority": raw.get("priority"),
                 "evidence_target": raw.get("evidence_target")
@@ -313,6 +425,17 @@ def plan_from_lead_payload(
             required=required,
             priority=item["priority"],
             evidence_target=item["evidence_target"],
+            task_kind=(
+                "discovery"
+                if item["task_kind"] in {"discovery", "landscape_discovery"}
+                else "deep_dive"
+            ),
+            subject_id=item["subject_id"],
+            extra_metadata=(
+                {"target_items": int(item["target_items"])}
+                if item["target_items"] is not None
+                else None
+            ),
         )
         if item["effort"] in {"low", "medium", "high"}:
             meta = dict(getattr(step, "metadata", None) or {})
@@ -330,6 +453,7 @@ def plan_from_lead_payload(
         brief,
         max_research_tasks=max_tasks,
     )
+    steps = _dedupe_research_steps(steps, brief)
     append_synthesis(intent, steps)
     from app.research.planning.priority import stamp_semantic_priority
 

@@ -94,6 +94,15 @@ def findings_from_worker_row(row: dict[str, Any]) -> list[dict[str, Any]]:
                 "summary": str(payload.get("summary") or row.get("summary") or "")[:400],
                 "facts": list(payload.get("facts") or [])[:8],
                 "sources": list(payload.get("sources") or [])[:8],
+                "evidence_ids": list(payload.get("evidence_ids") or [])[:8],
             }
         )
-    return findings
+    from app.research.runtime.findings import normalize_findings
+
+    normalized, _rejected = normalize_findings(
+        findings,
+        task_id=str(row.get("task_id") or ""),
+        subject_id=str(payload.get("subject_id") or row.get("subject_id") or "general"),
+        dimension=str(payload.get("dimension") or row.get("dimension") or "general"),
+    )
+    return normalized

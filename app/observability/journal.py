@@ -445,6 +445,9 @@ def summarize_trace(
                     "replan_count": attrs.get("replan_count"),
                     "latency_ms": attrs.get("latency_ms") or event.get("duration_ms"),
                     "passed": attrs.get("passed"),
+                    "reason": attrs.get("reason"),
+                    "repairable": attrs.get("repairable"),
+                    "repair_action": attrs.get("repair_action"),
                     "severity": attrs.get("severity"),
                     "status": event.get("status"),
                     "type": event_type,
@@ -497,11 +500,45 @@ def summarize_trace(
     eval_matrix = _eval_variant_matrix(evals)
     gap_closure = compute_replan_gap_closure(events)
     failure_origin = earliest_failure_origin(events)
+    if termination and str(termination.get("reason") or "") not in {"", "success"}:
+        failure_origin = {
+            "origin_stage": termination.get("origin_stage") or "research",
+            "detected_stage": termination.get("detected_stage") or "dispatch",
+            "type": termination.get("reason"),
+            "cause_event_id": termination.get("cause_event_id"),
+            "cause_artifact_id": "",
+            "reason": termination.get("reason"),
+            "timestamp": termination.get("timestamp"),
+        }
     lineage = build_lineage_edges(events) if include_lineage else []
     quality = {
         "gap_closure": gap_closure,
         "failure_origin": failure_origin,
         "termination": termination,
+        "reason": next(
+            (
+                row.get("reason")
+                for row in reversed(evals)
+                if row.get("metric") == "quality_gate" and row.get("reason")
+            ),
+            None,
+        ),
+        "repairable": next(
+            (
+                row.get("repairable")
+                for row in reversed(evals)
+                if row.get("metric") == "quality_gate"
+            ),
+            None,
+        ),
+        "repair_action": next(
+            (
+                row.get("repair_action")
+                for row in reversed(evals)
+                if row.get("metric") == "quality_gate"
+            ),
+            None,
+        ),
         "brief_coverage": (plans[-1].get("brief_coverage") if plans else None),
     }
     return {
@@ -514,6 +551,7 @@ def summarize_trace(
         "evidence": evidence,
         "synthesis": synthesis,
         "recoveries": recoveries,
+        "termination": termination,
         "quality": quality,
         "lineage": lineage,
         "evals": evals,

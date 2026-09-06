@@ -383,6 +383,11 @@ def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
         "task_id": task_id,
         "summary": objective,
     }
+    from app.research.runtime.findings import normalize_findings
+
+    findings, _rejected = normalize_findings(
+        [finding], task_id=task_id, subject_id="general", dimension="general"
+    )
     return {
         "worker_results": [
             {
@@ -394,7 +399,7 @@ def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
         ],
         "task_status": {task_id: "done"},
         "evidence_refs": [task_id] if task_id else [],
-        "findings": [finding],
+        "findings": findings,
     }
 
 
@@ -464,13 +469,54 @@ def replan_node(state: ResearchState) -> dict[str, Any]:
     }
 
 
+def route_after_quality(state: ResearchState) -> str:
+    if state.get("quality_passed", True):
+        return "finalize"
+    action = str(state.get("quality_repair_action") or "partial")
+    attempts = int(state.get("quality_attempts") or 0)
+    if action == "repair" and attempts <= 1:
+        return "repair_synthesis"
+    if action == "replan":
+        replan_count = int(state.get("replan_count") or 0)
+        max_replan = _max_replan(state)
+        if replan_count < max_replan:
+            return "replan"
+    return "finalize"
+
+
 def quality_gate_node(state: ResearchState) -> dict[str, Any]:
-    return {"quality_passed": True, "progress": "quality"}
+    return {
+        "quality_passed": True,
+        "quality_reason": "",
+        "quality_repairable": False,
+        "quality_repair_action": "",
+        "quality_attempts": int(state.get("quality_attempts") or 0),
+        "progress": "quality",
+    }
+
+
+def repair_synthesis_node(state: ResearchState) -> dict[str, Any]:
+    plan = _plan_from_state(state)
+    if plan is None:
+        return {"progress": "repair_synthesis"}
+    status = dict(state.get("task_status") or {})
+    for index, step in enumerate(plan.steps):
+        if step.step_type in {"generate_markdown", "summarize", "convert_pdf"}:
+            status[step.resolved_task_id(index)] = "pending"
+    return {
+        "task_status": status,
+        "status": "running",
+        "final_content": "",
+        "progress": "repair_synthesis",
+    }
 
 
 def finalize_node(state: ResearchState) -> dict[str, Any]:
+    status = str(state.get("status") or "")
+    if status not in {"completed", "partial", "aborted", "interrupted"}:
+        status = "completed"
     return {
-        "status": state.get("status") or "completed",
+        "status": status,
         "final_content": state.get("final_content") or "",
         "progress": "done",
     }
@@ -516,6 +562,9 @@ def compile_research_graph(
         synthesize = runtime.node_synthesize
         replan = runtime.node_replan
         quality_gate = runtime.node_quality_gate
+        repair_synthesis = getattr(
+            runtime, "node_repair_synthesis", repair_synthesis_node
+        )
         finalize = runtime.node_finalize
         abort = runtime.node_abort
     else:
@@ -531,6 +580,7 @@ def compile_research_graph(
         synthesize = synthesize_node
         replan = replan_node
         quality_gate = quality_gate_node
+        repair_synthesis = repair_synthesis_node
         finalize = finalize_node
         abort = abort_node
 
@@ -558,6 +608,7 @@ def compile_research_graph(
     builder.add_node("synthesize", synthesize)
     builder.add_node("replan", replan)
     builder.add_node("quality_gate", quality_gate)
+    builder.add_node("repair_synthesis", repair_synthesis)
     builder.add_edge(START, "intent")
     builder.add_conditional_edges(
         "intent",
@@ -582,7 +633,12 @@ def compile_research_graph(
     builder.add_edge("prepare_synthesis", "synthesize")
     builder.add_edge("synthesize", "quality_gate")
     builder.add_edge("replan", "plan_validate")
-    builder.add_edge("quality_gate", "finalize")
+    builder.add_edge("repair_synthesis", "synthesize")
+    builder.add_conditional_edges(
+        "quality_gate",
+        route_after_quality,
+        ["finalize", "repair_synthesis", "replan"],
+    )
     builder.add_edge("finalize", END)
     builder.add_edge("abort", END)
 

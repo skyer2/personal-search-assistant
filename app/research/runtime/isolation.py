@@ -86,6 +86,10 @@ def worker_row(task_id: str, step: PlanStep, ok: bool, result: StepResult | None
         "duration_ms": int(step.metadata.get("duration_ms") or step.metadata.get("execution_ms") or 0),
         "payload": {
             "summary": summary,
+            "subject_id": str(step.metadata.get("subject_id") or "general"),
+            "dimension": str(
+                (step.metadata.get("coverage_keys") or ["general"])[0]
+            ),
             "facts": list(payload.get("facts") or [])[:20],
             "sources": list(payload.get("sources") or [])[:20],
             "gaps": list(payload.get("gaps") or [])[:8],

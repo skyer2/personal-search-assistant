@@ -5,11 +5,21 @@ import { type RunStatus } from "../lib/runStatus";
 
 interface RunProgressProps {
   durationLabel: ReactNode;
+  quality?: Record<string, unknown>;
   progress: PhaseProgress;
   runStatus: RunStatus;
 }
 
-export function RunProgress({ durationLabel, progress, runStatus }: RunProgressProps) {
+function asText(value: unknown): string {
+  return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+export function RunProgress({
+  durationLabel,
+  progress,
+  quality,
+  runStatus,
+}: RunProgressProps) {
   const paused = runStatus === "awaiting_approval";
   const cancelling = runStatus === "cancelling";
   const live = runStatus === "running";
@@ -21,6 +31,8 @@ export function RunProgress({ durationLabel, progress, runStatus }: RunProgressP
   const qualityFailed =
     progress.items.some((item) => item.phase === "validate" && item.tone === "failed") ||
     progress.hasFailed;
+  const qualityReason = asText(quality?.reason);
+  const qualityRepairable = quality?.repairable === true;
 
   const title = paused
     ? "已暂停 · 等待人工审批"
@@ -43,7 +55,10 @@ export function RunProgress({ durationLabel, progress, runStatus }: RunProgressP
       : runStatus === "partial"
         ? [
             "未达到完整交付标准",
-            qualityFailed ? "Quality Failed" : "",
+            qualityFailed
+              ? `Quality Failed${qualityReason ? ` · ${qualityReason}` : ""}`
+              : "",
+            qualityFailed && qualityRepairable ? "可修复" : "",
             researchSkipped ? "Research Skipped / 未执行" : "",
             progress.stepHint || "",
           ]

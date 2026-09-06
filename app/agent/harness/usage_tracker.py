@@ -17,11 +17,17 @@ from pathlib import Path
 from typing import Any, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
+from contextlib import contextmanager
+from typing import Iterator
 
 from app.config.loader import get_harness_config
 
 _current_phase: ContextVar[str] = ContextVar("harness_llm_phase", default="unknown")
 _current_session: ContextVar[str] = ContextVar("harness_llm_session", default="unknown")
+_current_budget_manager: ContextVar[Any | None] = ContextVar(
+    "harness_budget_manager", default=None
+)
+_current_worker_task: ContextVar[str] = ContextVar("harness_worker_task", default="")
 
 
 def set_llm_phase(phase: str) -> None:
@@ -38,6 +44,57 @@ def set_llm_session(session_id: str) -> None:
 
 def get_llm_session() -> str:
     return _current_session.get()
+
+
+@contextmanager
+def bind_budget_manager(manager: Any | None) -> Iterator[None]:
+    token = _current_budget_manager.set(manager)
+    try:
+        yield
+    finally:
+        _current_budget_manager.reset(token)
+
+
+@contextmanager
+def bind_worker_budget_scope(task_id: str) -> Iterator[None]:
+    token = _current_worker_task.set(task_id)
+    try:
+        yield
+    finally:
+        _current_worker_task.reset(token)
+
+
+def get_current_budget_manager() -> Any | None:
+    return _current_budget_manager.get()
+
+
+def set_current_budget_manager(manager: Any | None) -> Any:
+    return _current_budget_manager.set(manager)
+
+
+def reset_current_budget_manager(token: Any) -> None:
+    _current_budget_manager.reset(token)
+
+
+def get_current_worker_task_id() -> str:
+    return _current_worker_task.get()
+
+
+def estimate_llm_tokens(prompt: Any, *, output_reserve: int = 4096) -> int:
+    """Conservative CJK-aware estimate used before provider usage exists."""
+    if prompt is None:
+        text = ""
+    elif isinstance(prompt, str):
+        text = prompt
+    elif isinstance(prompt, (list, tuple)):
+        text = " ".join(
+            item if isinstance(item, str) else repr(item) for item in prompt
+        )
+    else:
+        text = repr(prompt)
+    cjk = sum(1 for char in text if ord(char) >= 0x2E80)
+    other = len(text) - cjk
+    return max(1, cjk + (other + 3) // 4 + int(output_reserve or 0))
 
 
 _PHASE_PROMPT_TEMPLATES: dict[str, tuple[str, str]] = {
@@ -286,6 +343,7 @@ class UsageTrackingCallback(BaseCallbackHandler):
         self._starts: dict[str, float] = {}
         self._prompt_meta: dict[str, dict[str, Any]] = {}
         self._activity_operations: dict[str, str] = {}
+        self._budget_reservations: dict[str, str] = {}
 
     def on_llm_start(self, serialized: Any, prompts: Any, **kwargs: Any) -> None:
         run_id = str(kwargs.get("run_id") or "default")
@@ -300,6 +358,18 @@ class UsageTrackingCallback(BaseCallbackHandler):
             "input_hash": _hash_text(prompt_blob) if prompt_blob is not None else "",
             "prompt_bytes": len(str(prompt_blob or "")),
         }
+        manager = get_current_budget_manager()
+        if manager is not None:
+            from app.agent.harness.run_budget import BudgetReservationError
+
+            reservation_id, reason = manager.reserve_llm_call(
+                estimated_tokens=estimate_llm_tokens(prompt_blob),
+                worker_task_id=get_current_worker_task_id(),
+                phase=self.phase or get_llm_phase(),
+            )
+            if not reservation_id:
+                raise BudgetReservationError(reason or "budget_tokens")
+            self._budget_reservations[run_id] = reservation_id
 
     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
         from app.research.runtime.activity import get_current_worker_activity
@@ -314,6 +384,7 @@ class UsageTrackingCallback(BaseCallbackHandler):
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         run_id = str(kwargs.get("run_id") or "default")
         operation_id = self._activity_operations.pop(run_id, "")
+        reservation_id = self._budget_reservations.pop(run_id, "")
         if operation_id:
             from app.research.runtime.activity import get_current_worker_activity
 
@@ -321,14 +392,22 @@ class UsageTrackingCallback(BaseCallbackHandler):
             if tracker is not None:
                 tracker.end_operation(operation_id)
         try:
-            self._handle_llm_end(response, **kwargs)
+            self._handle_llm_end(response, reservation_id=reservation_id, **kwargs)
         except Exception as exc:
             print(f"[UsageTracker] on_llm_end failed: {exc}")
+            manager = get_current_budget_manager()
+            if reservation_id and manager is not None:
+                manager.release_llm_reservation(reservation_id)
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
         run_id = str(kwargs.get("run_id") or "default")
         self._starts.pop(run_id, None)
         self._prompt_meta.pop(run_id, None)
+        reservation_id = self._budget_reservations.pop(run_id, "")
+        if reservation_id:
+            manager = get_current_budget_manager()
+            if manager is not None:
+                manager.release_llm_reservation(reservation_id)
         operation_id = self._activity_operations.pop(run_id, "")
         if operation_id:
             from app.research.runtime.activity import get_current_worker_activity
@@ -337,7 +416,9 @@ class UsageTrackingCallback(BaseCallbackHandler):
             if tracker is not None:
                 tracker.end_operation(operation_id, status="error")
 
-    def _handle_llm_end(self, response: Any, **kwargs: Any) -> None:
+    def _handle_llm_end(
+        self, response: Any, *, reservation_id: str = "", **kwargs: Any
+    ) -> None:
         prompt_tokens = 0
         completion_tokens = 0
         total_tokens = 0
@@ -476,6 +557,13 @@ class UsageTrackingCallback(BaseCallbackHandler):
                 "response_format": response_format,
             },
         )
+        if reservation_id:
+            manager = get_current_budget_manager()
+            if manager is not None:
+                manager.commit_llm_usage(
+                    reservation_id,
+                    total_tokens or (prompt_tokens + completion_tokens),
+                )
         get_usage_tracker().record(rec)
 
 

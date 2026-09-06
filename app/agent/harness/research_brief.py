@@ -19,6 +19,7 @@ Quick / direct 路径可不编译完整 Brief。
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
@@ -69,7 +70,18 @@ class ResearchSubject:
     """One independent research subject and its lexical aliases."""
 
     canonical: str
+    subject_id: str = ""
     aliases: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.canonical = str(self.canonical or "").strip()
+        self.aliases = [
+            str(alias).strip()
+            for alias in self.aliases or []
+            if str(alias).strip() and str(alias).strip() != self.canonical
+        ]
+        if not self.subject_id:
+            self.subject_id = canonical_subject_id(self.canonical)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,6 +92,7 @@ class ResearchBrief:
     """Research Spec / Task Understanding IR（语义合同）。"""
 
     objective: str = ""
+    task_kind: str = "named_entity_deep_dive"
     entities: list[str] = field(default_factory=list)
     subjects: list[ResearchSubject] = field(default_factory=list)
     dimensions: list[str] = field(default_factory=list)
@@ -171,8 +184,9 @@ class ResearchBrief:
                 ))
         return cls(
             objective=str(data.get("objective") or ""),
+            task_kind=_normalize_task_kind(str(data.get("task_kind") or "")),
             entities=[str(x) for x in (data.get("entities") or []) if x],
-            subjects=subjects,
+            subjects=_merge_subjects(subjects),
             dimensions=[str(x) for x in (data.get("dimensions") or []) if x],
             time_range=str(data.get("time_range") or ""),
             source_policy=str(data.get("source_policy") or ""),
@@ -188,6 +202,68 @@ class ResearchBrief:
             prefer_primary=bool(data.get("prefer_primary", False)),
             preferred_domains=[str(x) for x in (data.get("preferred_domains") or []) if x],
         )
+
+
+_TASK_KINDS = frozenset(
+    {"named_entity_deep_dive", "landscape_discovery", "comparison"}
+)
+_SUBJECT_SEPARATORS = set(" \t\r\n·.,，。:：;；/\\|()[]{}<>-_+*&%$#@!~`\"'“”")
+
+
+def _normalize_task_kind(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"deep_dive", "entity", "named_entity"}:
+        return "named_entity_deep_dive"
+    if normalized in {"discovery", "landscape"}:
+        return "landscape_discovery"
+    return normalized if normalized in _TASK_KINDS else "named_entity_deep_dive"
+
+
+def _subject_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return "".join(char for char in normalized if not char.isspace() and char not in _SUBJECT_SEPARATORS)
+
+
+def canonical_subject_id(value: str) -> str:
+    key = _subject_key(value)
+    if (
+        any(marker in key for marker in ("国内", "中国"))
+        and ("ai" in key or "人工智能" in key)
+        and any(marker in key for marker in ("初创", "创业公司"))
+    ):
+        return "china_ai_startups"
+    if (
+        any(marker in key for marker in ("国内", "中国"))
+        and ("ai" in key or "人工智能" in key)
+        and "公司" in key
+    ):
+        return "china_ai_companies"
+    return key or "unknown_subject"
+
+
+def _merge_subjects(subjects: list[ResearchSubject]) -> list[ResearchSubject]:
+    merged: dict[str, ResearchSubject] = {}
+    for subject in subjects:
+        canonical = str(subject.canonical or "").strip()
+        if not canonical:
+            continue
+        key = canonical_subject_id(canonical)
+        aliases = list(subject.aliases or [])
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = ResearchSubject(
+                canonical=canonical,
+                subject_id=canonical_subject_id(canonical),
+                aliases=aliases,
+            )
+        else:
+            existing.aliases.extend(
+                alias
+                for alias in (canonical, *aliases)
+                if _subject_key(alias) != _subject_key(existing.canonical)
+                and alias not in existing.aliases
+            )
+    return list(merged.values())
 
 
 def _split_entities(text: str) -> list[str]:
@@ -243,6 +319,7 @@ def compile_research_brief(
     summary = ""
     deliverable = "text"
     time_range = ""
+    task_kind = "named_entity_deep_dive"
     constraints: list[str] = []
     entities: list[str] = []
     subjects: list[ResearchSubject] = []
@@ -255,8 +332,9 @@ def compile_research_brief(
     existing = getattr(intent, "brief", None) if intent is not None else None
     if isinstance(existing, ResearchBrief) and not existing.is_empty() and existing.entities:
         entities = list(existing.entities)
-        subjects = list(existing.subjects)
+        subjects = _merge_subjects(list(existing.subjects))
         dimensions = list(existing.dimensions)
+        task_kind = _normalize_task_kind(existing.task_kind)
     if intent is not None:
         summary = str(getattr(intent, "summary", "") or "")
         deliverable = str(getattr(intent, "deliverable", "text") or "text")
@@ -304,14 +382,31 @@ def compile_research_brief(
         right_name = right.strip().split()[0] if right.strip() else ""
         if left_name and right_name:
             compared = [left_name, right_name]
+    if not compared and any(marker in query for marker in ("谁更", "哪个更", "哪家更", "更值得")):
+        comparison_entities = []
+        for part in _ENTITY_SPLIT.split(query):
+            cleaned = re.split(r"谁更|哪个更|哪家更|更值得", part)[0]
+            cleaned = cleaned.strip(" 的了吗呢？?，,。")
+            if 1 < len(cleaned) <= 40:
+                comparison_entities.append(cleaned)
+        if len(comparison_entities) >= 2:
+            compared = comparison_entities
     if compared:
         entities = compared
 
-    career_recommendation = (
+    category_query = not compared and (
         "值得加入" in query
-        and ("公司" in query or "企业" in query)
-        and not compared
+        or "有哪些" in query
+        or any(
+            marker in f"{query} {summary}".lower()
+            for marker in ("候选", "全景", "扫描", "landscape")
+        )
     )
+    if category_query:
+        query_entities = _split_entities(query)
+        if len(query_entities) >= 1:
+            entities = query_entities
+    career_recommendation = category_query and ("公司" in query or "企业" in query)
     if career_recommendation:
         domain_parts = []
         if "国内" in query or "中国" in query:
@@ -320,8 +415,12 @@ def compile_research_brief(
             domain_parts.append("AI")
         if "初创" in query or "创业公司" in query:
             domain_parts.append("初创公司")
-        entities = [" ".join(domain_parts) if domain_parts else "候选公司"]
-        subjects = [ResearchSubject(canonical=entities[0])]
+        canonical = " ".join(domain_parts) if domain_parts else "候选公司"
+        aliases = [item for item in entities if _subject_key(item) != _subject_key(canonical)]
+        entities = [canonical]
+        subjects = _merge_subjects(
+            [ResearchSubject(canonical=canonical, aliases=aliases), *subjects]
+        )
         for dimension in (
             "技术实力",
             "团队背景",
@@ -358,6 +457,13 @@ def compile_research_brief(
             subjects = [ResearchSubject(canonical=item) for item in entities]
         elif entities:
             subjects = [ResearchSubject(canonical=entities[0], aliases=entities[1:])]
+    subjects = _merge_subjects(subjects)
+    if compared or len(subjects) >= 2:
+        task_kind = "comparison"
+    elif category_query:
+        task_kind = "landscape_discovery"
+    else:
+        task_kind = "named_entity_deep_dive"
 
     prefer_primary = _infer_prefer_primary(query)
     if prefer_primary:
@@ -412,6 +518,7 @@ def compile_research_brief(
 
     return ResearchBrief(
         objective=objective[:500],
+        task_kind=task_kind,
         entities=entities,
         subjects=subjects,
         dimensions=dimensions or ["关键事实"],

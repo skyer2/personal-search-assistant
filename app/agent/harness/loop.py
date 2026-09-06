@@ -3325,6 +3325,10 @@ class AgentHarness:
             elapsed_sec=time.perf_counter() - run_started,
             estimated_tokens=self._estimate_run_tokens(state),
         )
+        exact_reason = mgr.exhaustion_reason()
+        if snap.force_synthesis and exact_reason:
+            decision.reason = exact_reason
+            decision.message = f"预算触顶：{exact_reason}"
         if decision.action == GuardrailAction.DEGRADE:
             # 资源耗尽 ≠ 系统失败：停止研究、保留合成交付能力
             if isinstance(state.metadata, dict):
@@ -3347,7 +3351,7 @@ class AgentHarness:
 
                 recorder = get_recorder()
                 if recorder.is_active:
-                    recorder.emit(
+                    budget_event = recorder.emit(
                         EventType.BUDGET_EXHAUSTED,
                         phase="run",
                         status="degrade",
@@ -3358,6 +3362,9 @@ class AgentHarness:
                             "remaining_budget": self.remaining_budget(state),
                             "budget_snapshot": snap.to_dict(),
                         },
+                    )
+                    state.metadata["budget_exhausted_event_id"] = str(
+                        getattr(budget_event, "event_id", "") or ""
                     )
             except Exception:
                 import logging as _log

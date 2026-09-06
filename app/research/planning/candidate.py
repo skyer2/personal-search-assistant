@@ -14,7 +14,10 @@ _ITEM_SPLIT = re.compile(r"[、,，;；\n]")
 
 
 def _is_discovery(step: PlanStep) -> bool:
-    if str((step.metadata or {}).get("task_kind") or "") == "discovery":
+    if str((step.metadata or {}).get("task_kind") or "") in {
+        "discovery",
+        "landscape_discovery",
+    }:
         return True
     if str((step.metadata or {}).get("produces_artifact") or "") == "candidate_set":
         return True
@@ -31,7 +34,8 @@ def annotate_candidate_dependencies(plan: ExecutionPlan) -> ExecutionPlan:
         for step in plan.steps
         if step.task_id
         and (
-            str((step.metadata or {}).get("task_kind") or "") == "discovery"
+            str((step.metadata or {}).get("task_kind") or "")
+            in {"discovery", "landscape_discovery"}
             or bool((step.metadata or {}).get("produces_artifact"))
         )
     }

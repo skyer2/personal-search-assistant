@@ -104,6 +104,12 @@ def validate_required_research_contract(
         return issues
 
     brief = getattr(intent, "brief", None)
+    if _brief_task_kind(brief) == "landscape_discovery" and any(
+        str((step.metadata or {}).get("task_kind") or "")
+        in {"discovery", "landscape_discovery"}
+        for step in required_research
+    ):
+        return issues
     dimensions = [
         str(item)
         for item in (getattr(brief, "dimensions", None) or [])
@@ -150,6 +156,38 @@ def validate_required_research_contract(
     return issues
 
 
+def _brief_task_kind(brief: Any) -> str:
+    value = getattr(brief, "task_kind", "")
+    if isinstance(brief, dict):
+        value = brief.get("task_kind")
+    return str(value or "")
+
+
+def _step_subject_id(step: PlanStep, brief: Any) -> str:
+    explicit = str((step.metadata or {}).get("subject_id") or "").strip()
+    if explicit:
+        return explicit
+    subjects = getattr(brief, "subjects", None)
+    if isinstance(brief, dict):
+        subjects = brief.get("subjects")
+    objective = f"{step.objective or ''} {step.description or ''}".lower()
+    for subject in subjects or []:
+        if isinstance(subject, dict):
+            canonical = str(subject.get("canonical") or "").lower()
+            aliases = [str(x).lower() for x in (subject.get("aliases") or [])]
+        else:
+            canonical = str(getattr(subject, "canonical", "") or "").lower()
+            aliases = [str(x).lower() for x in (getattr(subject, "aliases", None) or [])]
+        if canonical and canonical in objective or any(alias and alias in objective for alias in aliases):
+            subject_id = (
+                subject.get("subject_id")
+                if isinstance(subject, dict)
+                else getattr(subject, "subject_id", "")
+            )
+            return str(subject_id or canonical)
+    return "general"
+
+
 def validate_hybrid_plan(
     intent: TaskIntent,
     plan: ExecutionPlan,
@@ -187,9 +225,33 @@ def validate_hybrid_plan(
     issues.extend(validate_required_research_contract(intent, plan))
 
     brief = getattr(intent, "brief", None)
+    brief_kind = _brief_task_kind(brief)
+    seen_research: set[tuple[str, str, tuple[str, ...]]] = set()
     for step in plan.steps:
         if step.step_type not in RESEARCH_TYPES:
             continue
+        metadata = step.metadata or {}
+        task_kind = str(metadata.get("task_kind") or "deep_dive")
+        subject_id = _step_subject_id(step, brief)
+        if brief_kind == "landscape_discovery" and task_kind not in {
+            "discovery",
+            "landscape_discovery",
+        }:
+            issues.append(f"category_requires_discovery:{step.task_id}")
+        if (
+            task_kind == "comparison"
+            or step.task_id == "t_compare"
+            or (
+                "横向比较" in f"{step.objective or ''} {step.description or ''}"
+                and len(step.depends_on or []) >= 2
+            )
+        ):
+            issues.append(f"comparison_is_synthesis:{step.task_id}")
+        coverage = tuple(str(x) for x in (metadata.get("coverage_keys") or []))
+        research_key = (subject_id, task_kind, coverage)
+        if research_key in seen_research:
+            issues.append(f"duplicate_subject_task:{step.task_id}:{subject_id}")
+        seen_research.add(research_key)
         complexity = analyze_task_granularity(step, brief)
         if complexity.oversized:
             issues.append(
