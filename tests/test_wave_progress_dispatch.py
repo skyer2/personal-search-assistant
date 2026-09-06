@@ -12,6 +12,7 @@ from app.agent.harness.planner import understand_task
 from app.agent.harness.state import ExecutionPlan, PlanStep, TaskIntent
 from app.agent.harness.research_brief import ResearchBrief
 from app.observability.semantic import compute_replan_gap_closure
+from app.research.domain.contracts import task_status_projection, tasks_from_status
 from app.research.planning.lead_planner import plan_from_lead_payload
 from app.research.planning.policy import parse_source_policy
 from app.research.planning.priority import stamp_semantic_priority
@@ -131,7 +132,7 @@ def test_first_dispatch_is_p0_wave_capped():
     plan = _ai_coding_plan()
     state = empty_research_state(run_id="r1", session_id="s1", task_query="q")
     state["plan"] = plan.to_dict()
-    state["task_status"] = _fixture_task_status(plan)
+    state["tasks"] = tasks_from_status(_fixture_task_status(plan))
     state["budget"]["max_parallel_workers"] = 3
     routed = route_dispatch(state)
     assert isinstance(routed, list)
@@ -184,7 +185,7 @@ def test_route_progress_enough_prepares_synthesis_not_optional_dispatch():
             step.metadata["status"] = "done"
     state = empty_research_state(run_id="r2", session_id="s2", task_query="q")
     state["plan"] = plan.to_dict()
-    state["task_status"] = _fixture_task_status(plan)
+    state["tasks"] = tasks_from_status(_fixture_task_status(plan))
     state["progress_assessment"] = {"verdict": "enough", "reason": "coverage_ok"}
     assert route_progress(state) == "quality_gate"
     state["evidence_refs"] = ["external:preexisting"]

@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 from app.agent.harness.citations import CitationManager
 from app.agent.harness.planner import understand_task
 from app.agent.harness.state import ExecutionPlan, PlanStep
+from app.research.domain.contracts import task_status_projection, tasks_from_status
 from app.research.planning.progress import assess_progress
 from app.research.planning.validator import validate_required_research_contract
 from app.research.runtime.graph import GraphInvariantViolation, prepare_synthesis_node
@@ -58,14 +59,15 @@ def _state(plan: ExecutionPlan, **overrides: Any) -> dict[str, Any]:
     )
     state.update(
         {
+            "phase": "progress_eval",
             "plan": plan.to_dict(),
             "plan_version": plan.plan_version,
-            "task_status": {
+            "tasks": tasks_from_status({
                 step.resolved_task_id(index): str(
                     step.metadata.get("status") or "pending"
                 )
                 for index, step in enumerate(plan.steps)
-            },
+            }),
         }
     )
     state.update(overrides)
@@ -158,13 +160,13 @@ def test_zero_trusted_evidence_blocks_normal_synthesis() -> None:
     _, plan = _intent_and_plan(required=True)
     state = _state(
         plan,
-        task_status={"t_research": "done", "t_summary": "pending"},
+        tasks=tasks_from_status({"t_research": "done", "t_summary": "pending"}),
         progress_assessment={"verdict": "enough", "reason": "coverage_ok", "gaps": []},
     )
     admission = evaluate_synthesis_admission(
         state,
         plan,
-        dict(state["task_status"]),
+        task_status_projection(state["tasks"]),
     )
 
     assert admission.allowed is False
@@ -176,7 +178,7 @@ def test_emergency_without_evidence_returns_deterministic_partial() -> None:
     _, plan = _intent_and_plan(required=True)
     state = _state(
         plan,
-        task_status={"t_research": "pending", "t_summary": "pending"},
+        tasks=tasks_from_status({"t_research": "pending", "t_summary": "pending"}),
         progress_assessment={
             "verdict": "enough",
             "reason": "force_synthesis_budget",
@@ -189,8 +191,9 @@ def test_emergency_without_evidence_returns_deterministic_partial() -> None:
     assert update["status"] == "partial"
     assert update["progress"] == "no_evidence_partial"
     assert update["synthesis_mode"] == "no_evidence_partial"
-    assert update["task_status"]["t_research"] == "skipped"
-    assert update["task_status"]["t_summary"] == "skipped"
+    projected = task_status_projection(update["tasks"])
+    assert projected["t_research"] == "skipped"
+    assert projected["t_summary"] == "skipped"
     assert "没有可核实的外部证据" in update["final_content"]
 
 
@@ -210,14 +213,14 @@ def test_preexisting_external_evidence_is_legal_with_zero_workers() -> None:
     _, plan = _intent_and_plan(required=True)
     state = _state(
         plan,
-        task_status={"t_research": "done", "t_summary": "pending"},
+        tasks=tasks_from_status({"t_research": "done", "t_summary": "pending"}),
         progress_assessment={"verdict": "enough", "reason": "coverage_ok", "gaps": []},
         evidence_refs=["preexisting:external"],
     )
     admission = evaluate_synthesis_admission(
         state,
         plan,
-        dict(state["task_status"]),
+        task_status_projection(state["tasks"]),
     )
 
     assert admission.allowed is True

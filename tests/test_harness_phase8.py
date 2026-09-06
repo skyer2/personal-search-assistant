@@ -130,7 +130,7 @@ def test_phase8_config():
     cfg = get_harness_config()
     assert cfg.structured_output_retry is True
     assert cfg.synthesis_use_evidence_digest is True
-    assert cfg.planner_llm_confirm_enabled is False
+    assert cfg.planner_llm_confirm_enabled is True
     print("[OK] phase8 config defaults")
 
 

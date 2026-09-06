@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep
 from app.research.runtime import runner as runner_module
+from app.research.domain.contracts import task_status_projection
 from app.research.runtime import worker as worker_module
 from app.research.runtime.isolation import IsolatedWorkerOutcome
 from app.research.runtime.worker import (
@@ -202,6 +203,7 @@ def test_node_research_worker_handles_timeout_without_crashing(monkeypatch):
             graph_runner.node_research_worker(
                 {
                     "run_id": session.run_id,
+                    "phase": "dispatch",
                     "step_index": 0,
                     "task_id": "t_node",
                     "step_type": "research",
@@ -212,7 +214,7 @@ def test_node_research_worker_handles_timeout_without_crashing(monkeypatch):
     finally:
         runner_module.drop_session(session.run_id)
 
-    assert projected["task_status"]["t_node"] == "failed"
+    assert task_status_projection(projected["tasks"])["t_node"] == "failed"
     assert projected["worker_results"][0]["status"] == "failed"
     assert projected["worker_results"][0]["fail_reason"] == "step_timeout"
     print("[OK] node handles timeout WorkerResult")
@@ -238,6 +240,7 @@ def test_node_research_worker_rejects_dict_contract(monkeypatch):
                 graph_runner.node_research_worker(
                     {
                         "run_id": session.run_id,
+                        "phase": "dispatch",
                         "step_index": 0,
                         "task_id": "t_dict",
                         "step_type": "research",

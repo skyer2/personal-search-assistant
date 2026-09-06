@@ -59,10 +59,10 @@ def test_trajectory_diff():
 
 
 def test_planner_multi_intent_and_replan():
-    intent = understand_task("结合公开资料和数据库，整理机器人行业报告并生成PDF")
+    intent = understand_task("结合公开资料和上传附件，整理机器人行业报告并生成PDF")
     assert detect_multi_intent(intent) is True
     plan = build_plan(intent)
-    replanned = dynamic_replan(plan, 1, "sql_empty")
+    replanned = dynamic_replan(plan, 1, "search_empty")
     assert len(replanned.steps) > len(plan.steps)
     edited = apply_plan_edits(
         plan,
@@ -116,7 +116,7 @@ def test_hitl_edit_decision_flow():
 def test_phase6_config():
     config = reload_harness_config()
     assert config.citations_enabled is True
-    assert config.hitl_plan_review_enabled is True
+    assert config.hitl_plan_review_enabled is False
     assert config.hitl_allow_edit is True
     assert config.eval_trajectory_min_similarity == 0.6
     print("[OK] phase6 config")

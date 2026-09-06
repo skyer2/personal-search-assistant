@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.artifacts import ArtifactStore, reset_artifact_store, set_artifact_store
 from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep, StepStatus
+from app.research.domain.contracts import tasks_from_status
 from app.research.planning.granularity import (
     analyze_task_granularity,
     normalize_plan_granularity,
@@ -34,6 +35,10 @@ class FakeConfig:
     step_timeout_sec: int = 10
     max_retries: int = 0
     worker_executor_v2: bool = False
+    direct_worker_invoke: bool = True
+    enforce_subagent_binding: bool = False
+    synthesis_use_evidence_digest: bool = False
+    synthesis_step_timeout_sec: int = 10
 
 
 class FakeHarness:
@@ -48,6 +53,23 @@ class FakeHarness:
 
     def _refresh_working_memory(self, *args: Any, **kwargs: Any) -> None:
         return None
+
+    def _enrich_worker_result(self, _step: Any, result: Any, _state: Any) -> Any:
+        return result
+
+
+class FakeContextBuilder:
+    def build_step_message(self, *args: Any, **kwargs: Any) -> str:
+        return "synthesize from stored evidence"
+
+
+class FailingSynthesisAgent:
+    def __init__(self, error: Exception):
+        self.error = error
+
+    async def astream(self, *args: Any, **kwargs: Any):
+        raise self.error
+        yield {}
 
 
 class FakeIdleHarness(FakeHarness):
@@ -529,6 +551,8 @@ def test_all_workers_failed_with_evidence_still_delivers_partial_report():
             "Error code: 400 - SensitiveContentDetected: input may contain sensitive information"
         )
     )
+    harness.workers = {"summarize": FailingSynthesisAgent(harness._step_error)}
+    harness.context_builder = FakeContextBuilder()
     session = FakeSession(state, harness)
     runner_module.bind_session(session)
     try:
@@ -537,8 +561,11 @@ def test_all_workers_failed_with_evidence_still_delivers_partial_report():
             graph_runner.node_synthesize(
                 {
                     "run_id": session.run_id,
+                    "phase": "prepare_synthesis",
                     "plan": state.plan.to_dict(),
-                    "task_status": {"t_research": "failed", "t_summary": "pending"},
+                    "tasks": tasks_from_status(
+                        {"t_research": "failed", "t_summary": "pending"}
+                    ),
                     "evidence_refs": ["art-web-1"],
                     "findings": [
                         {

@@ -206,7 +206,7 @@ def prepare_synthesis_update(
     admission = evaluate_synthesis_admission(
         state,
         plan,
-        task_status_projection(state.get("tasks")) or dict(state.get("task_status") or {}),
+        task_status_projection(state.get("tasks")),
         forced=forced,
         deadline=deadline,
         trusted_evidence_count_override=trusted_evidence_count_override,
@@ -216,9 +216,7 @@ def prepare_synthesis_update(
             f"synthesis admission rejected: {admission.reason}"
         )
 
-    runtime_status = task_status_projection(state.get("tasks")) or dict(
-        state.get("task_status") or {}
-    )
+    runtime_status = task_status_projection(state.get("tasks"))
     status = skip_optional_pending(
         plan,
         runtime_status,
@@ -246,7 +244,6 @@ def prepare_synthesis_update(
     common = {
         "plan": plan.to_dict(),
         "tasks": tasks_from_status(status),
-        "task_status": status,
         "synthesis_admission": True,
         "synthesis_mode": admission.mode,
         "synthesis_admission_reason": admission.reason,
@@ -271,7 +268,6 @@ def prepare_synthesis_update(
             {
                 "plan": plan.to_dict(),
                 "tasks": tasks_from_status(status),
-                "task_status": status,
                 "status": "partial",
                 "final_content": render_no_evidence_partial_report(
                     objective=str(

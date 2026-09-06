@@ -45,8 +45,6 @@ class ResearchState(TypedDict):
     plan_version: int
 
     tasks: Annotated[dict[str, dict[str, Any]], merge_dicts]
-    task_status: Annotated[dict[str, str], merge_dicts]
-
     worker_results: Annotated[list[dict[str, Any]], operator.add]
     findings: Annotated[list[dict[str, Any]], operator.add]
     evidence_refs: Annotated[list[str], operator.add]
@@ -55,6 +53,7 @@ class ResearchState(TypedDict):
     replan_count: int
     replan_attempts: int
     replan_applied_count: int
+    rejected_patch_hashes: Annotated[list[str], operator.add]
 
     draft_ref: str | None
     final_ref: str | None
@@ -134,7 +133,6 @@ def empty_research_state(
         "plan": None,
         "plan_version": 1,
         "tasks": {},
-        "task_status": {},
         "worker_results": [],
         "findings": [],
         "evidence_refs": [],
@@ -148,6 +146,7 @@ def empty_research_state(
         "replan_count": 0,
         "replan_attempts": 0,
         "replan_applied_count": 0,
+        "rejected_patch_hashes": [],
         "draft_ref": None,
         "final_ref": None,
         "final_content": "",

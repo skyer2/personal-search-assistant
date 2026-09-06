@@ -10,6 +10,7 @@ from app.agent.harness.planner import understand_task
 from app.research.planning.compose import compose_execution_plan_sync
 from app.research.planning.plan_patch import apply_plan_patch, build_progress_patch
 from app.research.planning.progress import assess_progress, evaluate_progress
+from app.research.domain.contracts import tasks_from_status
 from app.research.runtime.graph import route_dispatch, route_progress
 from app.research.runtime.scheduler import annotate_plan_tasks, task_status_map
 from app.research.runtime.state import empty_research_state
@@ -127,11 +128,11 @@ def test_dispatch_routes_to_progress_not_synthesize():
         task_query=intent.raw_query,
     )
     state["plan"] = plan.to_dict()
-    state["task_status"] = _done_status(plan)
+    state["tasks"] = tasks_from_status(_done_status(plan))
     assert route_dispatch(state) == "progress"
     state["progress_assessment"] = assess_progress(
         plan,
-        task_status=state["task_status"],
+        task_status=_done_status(plan),
         worker_results=[
             {
                 "task_id": plan.steps[0].task_id,

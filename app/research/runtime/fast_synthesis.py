@@ -109,7 +109,8 @@ def _sources_from_findings(findings: list[dict[str, Any]]) -> list[str]:
 def _sources_from_worker_rows(rows: list[dict[str, Any]]) -> list[str]:
     sources: list[str] = []
     for row in rows:
-        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        raw_payload = row.get("payload")
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
         sources.extend(str(item) for item in payload.get("sources") or [])
     return sources
 

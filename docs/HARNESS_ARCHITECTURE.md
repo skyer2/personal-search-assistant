@@ -14,11 +14,11 @@
 API / UI（实验台，不是搜索产品）
    → Research Domain (Brief / Planner / Progress / QualityGate)
    → Agent Runtime (StateGraph + SQLite checkpointer)
-   → WorkerRuntime (LangChain now; DeepSeek later)
+   → WorkerExecutorV2 / SynthesisExecutor
    → Environment: search / fetch / file  +  Artifact / Evidence
 ```
 
-`AgentHarness._run_legacy_loop()` 已弃用，仅在显式关闭 graph 时回退。
+`AgentHarness._run_legacy_loop()` 已弃用，仅在显式关闭 graph 时回退。研究 Worker 默认走 `WorkerExecutorV2`；综合固定走 `SynthesisExecutor`，综合阶段禁止新增检索。
 
 ---
 
@@ -32,11 +32,15 @@ Artifact/Evidence Store → 原文
 
 不要再画「Graph SQLite + LoopState checkpoint.json」双恢复。
 
+任务运行态只存 `ResearchState["tasks"]`。`task_status` 只能通过 `task_status_projection(tasks)` 在 API/UI 输出时动态生成，不再是持久化字段。
+
+控制面阶段迁移必须经过 `transition_update()`；终止必须经过 `FINALIZE/ABORT → TERMINATED`。终止原因采用 first-cause-wins，后续 Quality/Finalize 不得覆盖首个真实原因。详见 [control-plane-convergence-implementation-2026-09.md](./control-plane-convergence-implementation-2026-09.md)。
+
 Harness 路径：
 
 ```text
 intent → clarify → plan → validate → dispatch
-Send(isolated workers via WorkerRuntime) → Progress Evaluator
+Send(isolated workers via WorkerExecutorV2) → Progress Evaluator
 GAP → replan；ENOUGH → synthesis → Quality Gate → finalize
 ```
 

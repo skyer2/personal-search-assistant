@@ -17,7 +17,7 @@ from app.research.runtime.activity import (
     set_current_worker_activity,
 )
 
-WorkerResultStatus = Literal["done", "failed", "skipped", "blocked"]
+WorkerResultStatus = Literal["done", "failed", "skipped", "blocked", "partial"]
 
 
 class WorkerIdleTimeoutError(Exception):

@@ -28,10 +28,10 @@ def test_slots_cross_border_list_citations():
     intent = understand_task(query)
     assert intent.slots.item_count == 5
     assert intent.slots.require_citations is True
-    assert intent.deliverable == "md"
+    assert intent.deliverable == "text"
     plan = build_plan(intent)
     steps = [s.step_type for s in plan.steps]
-    assert steps == ["network_search", "generate_markdown"]
+    assert steps == ["network_search", "summarize"]
     ok, issues = validate_plan_against_intent(intent, plan)
     assert ok and not issues
     print("[OK] cross-border slots -> md plan")
@@ -67,7 +67,7 @@ def test_hitl_clarification_edit_deliverable():
 
 
 def test_plan_review_triggers():
-    multi = understand_task("结合网络和数据库研究生成报告")
+    multi = understand_task("结合公开资料和上传附件，整理机器人行业报告")
     assert should_request_plan_review(multi) is True
     low = understand_task("列出趋势并附来源")
     low.intent_confidence = 0.5
@@ -79,7 +79,7 @@ def test_planner_config_phase14():
     reset_harness_config()
     cfg = load_harness_config()
     assert cfg.planner_llm_enabled is True
-    assert cfg.planner_clarification_enabled is True
+    assert cfg.planner_clarification_enabled is False
     assert cfg.planner_clarification_auto_resolve is True
     print("[OK] planner config phase14")
 

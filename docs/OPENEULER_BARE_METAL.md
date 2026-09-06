@@ -18,7 +18,7 @@
 | FastAPI / Uvicorn | `0.0.0.0:8000` | Harness：任务、上传、WebSocket、health |
 | Vite 开发服务 **或** Nginx 静态页 | `0.0.0.0:5173` 或 `:80` | 实验台 UI |
 
-浏览器 → 前端 → `/api` 与 `/ws` → 后端 → LLM（默认阿里云百炼兼容接口）+ Tavily search。
+浏览器 → 前端 → `/api` 与 `/ws` → 后端 → LLM（OpenAI 兼容接口）+ 已配置的 Web Search Provider。
 
 **不需要：** MySQL、PostgreSQL、Redis、Elasticsearch、RAGFlow、MCP Server。
 
@@ -27,7 +27,7 @@
 | 目标 | 用途 |
 |------|------|
 | 百炼 / OpenAI 兼容 `OPENAI_BASE_URL` | 规划、工人、综合 |
-| `api.tavily.com` | environment `search` |
+| `api.bocha.cn` 或 `api.tavily.com` | environment `search`（按 `SEARCH_PROVIDER` 选择） |
 | 被 fetch 的公开网页 | `fetch_url` |
 | （安装阶段）GitHub / PyPI / npm 或对应国内镜像 | 拉代码和依赖 |
 
@@ -233,14 +233,19 @@ LLM_COMPRESSION_MODEL=qwen-turbo
 LLM_TIMEOUT_SEC=120
 
 # Search 环境工具（不是产品搜索引擎）
-TAVILY_API_KEY=tvly-替换成你的密钥
-TAVILY_TIMEOUT_SEC=120
+SEARCH_PROVIDER=bocha
+BOCHA_API_KEY=sk-替换成你的密钥
+BOCHA_TIMEOUT_SEC=20
+# 可选回退：SEARCH_PROVIDER=tavily
+# TAVILY_API_KEY=tvly-替换成你的密钥
+# TAVILY_TIMEOUT_SEC=20
 ```
 
 密钥来源：
 
 - 百炼：https://bailian.console.aliyun.com/ （兼容模式 Base URL 即上面这一条）
-- Tavily：https://app.tavily.com/
+- Bocha：https://open.bochaai.com/
+- Tavily（可选回退）：https://app.tavily.com/
 
 改用 OpenAI 官方时：
 
@@ -269,7 +274,7 @@ LLM_TIMEOUT_SEC=180
 
 `LLM_QWEN_MAX` / `LLM_COMPRESSION_MODEL` 填网关模型列表中的 ID（例如豆包、DeepSeek 等），不要再写 `qwen-max`，除非网关确实挂了同名模型。
 
-Tavily 仍要单独配：`search` 不走火山网关。
+Web Search Provider 仍要单独配置：`search` 不走火山网关。
 
 改完 `.env` 后必须重启 uvicorn。若 `GET /v1/models` 网关未实现，新版 `/health` 会改打一条极短 chat；仍 `llm=down` 则检查蓝区网络、XGate、Key、模型 ID。
 
@@ -297,7 +302,7 @@ HARNESS_HITL_ENABLED=false
 | `HARNESS_MAX_RUN_SEC` | 单次任务墙钟上限，yaml 默认 600 |
 | `HARNESS_MAX_PARALLEL_WORKERS` | 默认 3 |
 | `HARNESS_STEP_TIMEOUT_SEC` | 单步超时，默认 120 |
-| `BROWSECOMP_PLUS_*` | 固定语料评测，见 [BROWSECOMP_PLUS_EVAL.md](./BROWSECOMP_PLUS_EVAL.md)；开启后 **search 不再打 Tavily** |
+| `BROWSECOMP_PLUS_*` | 固定语料评测，见 [BROWSECOMP_PLUS_EVAL.md](./BROWSECOMP_PLUS_EVAL.md)；开启后 **search 不再访问外部 Provider** |
 
 更细的开关在 `app/config/harness.yml`，环境变量可覆盖其中一部分（见 `app/config/loader.py`）。
 
@@ -402,7 +407,7 @@ pnpm dev
 # 进程
 ss -lntp | grep -E '8000|5173'
 
-# 健康：llm 与 tavily 应为 ok
+# 健康：llm 与 search 应为 ok
 curl -sS http://127.0.0.1:8000/health | python3.12 -m json.tool
 
 # 能力清单
@@ -414,7 +419,7 @@ curl -sS http://127.0.0.1:8000/api/harness/capabilities | python3.12 -m json.too
 | 字段 | ok | down |
 |------|----|------|
 | `dependencies.llm` | Key + Base URL 能列出模型 | 缺 Key、URL 错、出网被墙 |
-| `dependencies.tavily` | 配了 `TAVILY_API_KEY` | 没配（此探针不真发搜索） |
+| `dependencies.tavily` | 配了当前 Provider 的 Key（字段名保留历史兼容） | 没配（此探针不真发搜索） |
 | `dependencies.langfuse` | 未开则为 `disabled` | 正常 |
 
 不跑 UI 的冒烟：
@@ -497,7 +502,7 @@ cd frontend && pnpm install
 | `requires-python` / 装包失败 | `python -V` 必须 3.12.x |
 | `ModuleNotFoundError: app` | 在仓库根启动，并带 `--app-dir .` |
 | `llm=down` | `.env` 路径、Key、`OPENAI_BASE_URL`、机器能否访问百炼 |
-| 能规划不能搜 | `TAVILY_API_KEY`；公司网关是否拦 `api.tavily.com` |
+| 能规划不能搜 | `SEARCH_PROVIDER` 与对应 Key；公司网关是否拦截 `api.bocha.cn` / `api.tavily.com` |
 | 页面一直转圈、WS 失败 | 8000 没起来；或远程访问却配了 localhost |
 | `Address already in use` | `ss -lntp \| grep 8000` 杀掉旧进程 |
 | TLS / certificate verify failed | 系统时间、`ca-certificates` |
@@ -515,7 +520,7 @@ cd frontend && pnpm install
 - RAGFlow、MCP、Postgres（Memory 默认关）
 - 把本项目当「搜索引擎」去接内部检索中台
 
-Search 只是 Worker 可调用的 Tavily + `fetch_url` + 本地读文件。
+Search 只是 Worker 可调用的配置化 Web Search Provider + `fetch_url` + 本地读文件。
 
 ---
 
@@ -635,10 +640,10 @@ HTTPS 则用 `https://` / `wss://`。改 IP 后必须重新 `pnpm build`。
 [ ] python 3.12.x（不是系统 python3）
 [ ] node 20.x + pnpm 10.33.x
 [ ] 仓库在 /opt/research-agent-harness，分支 main
-[ ] .env 权限 600，含 OPENAI_* 与 TAVILY_API_KEY
+[ ] .env 权限 600，含 OPENAI_*、SEARCH_PROVIDER 与对应搜索 Key
 [ ] uv sync 或 pip install -r requirements.txt 成功
 [ ] frontend && pnpm install 成功
-[ ] :8000 health → llm=ok, tavily=ok
+[ ] :8000 health → llm=ok, search=ok
 [ ] 浏览器能开 UI，WebSocket 已连接
 [ ] 防火墙仅对需要的网段开放
 [ ] 不把 .env / output 拷进 git 或网盘明文

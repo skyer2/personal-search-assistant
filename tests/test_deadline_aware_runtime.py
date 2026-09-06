@@ -29,6 +29,7 @@ from app.research.planning.granularity import (
     normalize_plan_granularity,
 )
 from app.research.planning.progress import assess_progress
+from app.research.domain.contracts import task_status_projection, tasks_from_status
 from app.research.runtime import runner as runner_module
 from app.research.runtime.fast_synthesis import build_minimal_evidence_pack
 from app.research.runtime.worker import (
@@ -326,7 +327,10 @@ def test_emergency_synthesis_uses_minimal_evidence_pack_fast_path():
             graph_runner.node_synthesize(
                 {
                     "run_id": session.run_id,
-                    "task_status": {"t_research": "done", "t_summary": "pending"},
+                    "phase": "prepare_synthesis",
+                    "tasks": tasks_from_status(
+                        {"t_research": "done", "t_summary": "pending"}
+                    ),
                     "evidence_refs": ["art-web-1"],
                     "findings": [
                         {"task_id": "t_research", "summary": "partial evidence summary"}
@@ -385,7 +389,10 @@ def test_emergency_zero_evidence_skips_llm_and_returns_partial():
             graph_runner.node_synthesize(
                 {
                     "run_id": session.run_id,
-                    "task_status": {"t_research": "pending", "t_summary": "pending"},
+                    "phase": "prepare_synthesis",
+                    "tasks": tasks_from_status(
+                        {"t_research": "pending", "t_summary": "pending"}
+                    ),
                 }
             )
         )
@@ -452,7 +459,10 @@ def test_emergency_context_budget_timeout_degrades_to_fallback_pack(monkeypatch)
             graph_runner.node_synthesize(
                 {
                     "run_id": session.run_id,
-                    "task_status": {"t_research": "done", "t_summary": "pending"},
+                    "phase": "prepare_synthesis",
+                    "tasks": tasks_from_status(
+                        {"t_research": "done", "t_summary": "pending"}
+                    ),
                     "evidence_refs": ["art-web-1"],
                     "findings": [
                         {"task_id": "t_research", "summary": "fallback evidence"}
@@ -498,7 +508,11 @@ def test_quality_gate_marks_attempt_and_updates_termination_stage():
     runner_module.bind_session(session)
     try:
         graph_runner = runner_module.ResearchGraphRunner(session.harness)
-        asyncio.run(graph_runner.node_quality_gate({"run_id": session.run_id}))
+        asyncio.run(
+            graph_runner.node_quality_gate(
+                {"run_id": session.run_id, "phase": "synthesized"}
+            )
+        )
     finally:
         runner_module.drop_session(session.run_id)
 
@@ -592,6 +606,9 @@ def test_replan_affordability_includes_complete_wave_overhead():
             graph_runner.node_replan(
                 {
                     "run_id": session.run_id,
+                    "phase": "progress_eval",
+                    "plan": state.plan.to_dict(),
+                    "budget": {"max_replan_count": 2},
                     "progress_assessment": {
                         "verdict": "gap",
                         "reason": "execution_failure",

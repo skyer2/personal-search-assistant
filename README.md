@@ -22,6 +22,7 @@ Search is only a tool environment used to study:
 
 补充文档：
 
+- [docs/control-plane-convergence-implementation-2026-09.md](docs/control-plane-convergence-implementation-2026-09.md) — 控制面、FSM、终止原因与执行边界（当前权威）
 - [docs/HARD_CEILING_ADAPTIVE_EFFORT.md](docs/HARD_CEILING_ADAPTIVE_EFFORT.md) — Hard Ceiling + Adaptive Effort（全局确定性控制 / 局部自治）
 - [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) — Agent Flight Recorder（统一 Trace / Replan / Eval）
 - [docs/EVALUATION.md](docs/EVALUATION.md) — 五层 Eval（Component / Scenario / BrowseComp / Ablation）

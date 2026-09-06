@@ -16,6 +16,7 @@ from app.research.control.policy import decide_after_quality, decide_progress
 from app.research.control.transitions import (
     InvalidTransition,
     assert_transition,
+    terminal_update,
     transition_allowed,
 )
 from app.research.domain.contracts import (
@@ -52,6 +53,36 @@ def test_transition_table_rejects_invalid_and_terminal_transitions() -> None:
     assert not transition_allowed(WorkflowPhase.TERMINATED, WorkflowPhase.DISPATCH)
     with pytest.raises(InvalidTransition):
         assert_transition(WorkflowPhase.QUALITY, WorkflowPhase.DISPATCH)
+
+
+def test_terminal_update_enforces_pre_terminal_transition() -> None:
+    completed = terminal_update(
+        {"phase": WorkflowPhase.QUALITY.value},
+        outcome=OutcomeStatus.SUCCESS,
+        reason="completed",
+        stage="finalize",
+        detected_stage="finalize",
+    )
+    assert completed["phase"] == WorkflowPhase.TERMINATED.value
+    assert completed["termination"]["reason"] == TerminationReason.COMPLETED.value
+
+    aborted = terminal_update(
+        {"phase": WorkflowPhase.DISPATCH.value},
+        outcome=OutcomeStatus.ABORTED,
+        reason="guardrail",
+        stage="abort",
+        detected_stage="dispatch",
+    )
+    assert aborted["termination"]["reason"] == TerminationReason.ABORTED.value
+
+    with pytest.raises(InvalidTransition):
+        terminal_update(
+            {"phase": WorkflowPhase.DISPATCH.value},
+            outcome=OutcomeStatus.PARTIAL,
+            reason="partial",
+            stage="finalize",
+            detected_stage="finalize",
+        )
 
 
 def test_typed_outcome_and_termination_reasons_stay_canonical() -> None:
@@ -318,7 +349,7 @@ def test_worker_executor_v2_recovers_evidence_and_tool_usage_after_budget_interr
         )
     )
     assert result.ok is True
-    assert result.status == "done"
+    assert result.status == "partial"
     assert result.evidence_refs == ["art-web-1"]
     assert result.sources == ["https://example.com/recovered"]
     assert state.tool_calls_count == 1

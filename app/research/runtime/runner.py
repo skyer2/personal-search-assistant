@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from typing import Any
@@ -13,13 +15,15 @@ from app.agent.harness.planner import (
     should_request_plan_review,
 )
 from app.agent.harness.state import LoopState, Phase, StepStatus
-from app.research.control.policy import workflow_task_status
+from app.research.control.policy import decide_replan, workflow_task_status
+from app.research.control.transitions import terminal_update, transition_update
 from app.research.domain.contracts import (
     OutcomeStatus,
     TaskStatus,
     WorkflowPhase,
     initialize_tasks,
     merge_task_state,
+    merge_termination,
     normalize_tasks,
     task_status_projection,
     tasks_from_status,
@@ -35,7 +39,7 @@ _SESSIONS: dict[str, "RunSession"] = {}
 class RunSession:
     """进程内 handles：LoopState 不是 workflow checkpoint。
 
-    resume / interrupt / plan / task_status 只存在 ResearchState（SQLite）。
+    resume / interrupt / plan / tasks 只存在 ResearchState（SQLite）。
     本对象只在一次 ainvoke 期间给 WorkerRuntime 和领域服务提供锁、stores、tracer。
     """
 
@@ -173,7 +177,7 @@ class ResearchGraphRunner:
                 )
         config = {
             "configurable": {"thread_id": session.run_id},
-            "recursion_limit": 80,
+            "recursion_limit": 20,
         }
         profile = canonicalize_mode(getattr(ctx, "search_mode", "agent") or "agent")
         personal = getattr(self.harness.harness_config, "personal_search", None) or {}
@@ -293,20 +297,28 @@ class ResearchGraphRunner:
             state.metadata["force_synthesis"] = True
             state.metadata["budget_degrade_reason"] = reason
         if state.plan is not None:
-            skip_pending_research(
+            skipped = skip_pending_research(
                 state.plan,
-                task_status_projection(self.tasks),
+                task_status_projection(session.tasks),
                 reason=reason,
                 include_required=True,
                 include_running=True,
             )
+            session.tasks = tasks_from_status(skipped)
         # 尝试用剩余时间写终稿，而不是直接 partial dump
         gstate = {
             "run_id": session.run_id,
+            "plan": state.plan.to_dict() if state.plan is not None else None,
+            "tasks": dict(session.tasks or {}),
+            "phase": WorkflowPhase.PREPARE_SYNTHESIS.value,
+            "findings": [
+                dict(item)
+                for item in list((state.metadata or {}).get("partial_findings") or [])
+                if isinstance(item, dict)
+            ][:24],
             "progress_assessment": dict(
                 (state.metadata or {}).get("progress_assessment") or {}
             ),
-            "findings": [],
         }
         synthesis_status = "not_started"
         try:
@@ -346,7 +358,9 @@ class ResearchGraphRunner:
                 gstate.update(update or {})
             except Exception as exc:
                 self._record_emergency_failure(session, "quality", exc)
-        state.metadata["termination"] = {
+        state.metadata["termination"] = merge_termination(
+            state.metadata.get("termination"),
+            {
             "status": "partial",
             "reason": reason,
             "stage": "quality" if quality_attempted else "synthesis",
@@ -362,7 +376,8 @@ class ResearchGraphRunner:
             "causal_chain": _termination_causal_chain(
                 reason, quality_attempted=quality_attempted
             ),
-        }
+            },
+        )
         try:
             gstate["status"] = "partial"
             return await self.node_finalize(gstate)
@@ -370,10 +385,14 @@ class ResearchGraphRunner:
             from app.agent.harness.partial_report import render_partial_report
 
             if not str(state.final_content or "").strip():
+                raw_assessment = gstate.get("progress_assessment")
+                assessment = (
+                    dict(raw_assessment) if isinstance(raw_assessment, dict) else {}
+                )
                 state.final_content = render_partial_report(
                     state=state,
                     abort_reason=reason,
-                    assessment=dict(gstate.get("progress_assessment") or {}),
+                    assessment=assessment,
                 )
             return await self._finalize_run(session, success=False)
 
@@ -696,7 +715,10 @@ class ResearchGraphRunner:
             import logging as _log
 
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
-        return {
+        return transition_update(
+            gstate,
+            WorkflowPhase.UNDERSTAND,
+            {
             "intent": intent_payload,
             "brief": brief,
             "needs_clarification": needs,
@@ -704,9 +726,9 @@ class ResearchGraphRunner:
             "route_signals": [f"task_shape:{shape.shape.value}"],
             "budget": budget,
             "progress": "intent",
-            "phase": WorkflowPhase.UNDERSTAND.value,
             "outcome": OutcomeStatus.RUNNING.value,
-        }
+            },
+        )
 
     async def node_clarify(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from langgraph.types import interrupt
@@ -777,18 +799,20 @@ class ResearchGraphRunner:
                 min_confidence=self.harness.harness_config.planner_plan_review_min_confidence,
             )
         )
-        tasks = initialize_tasks(plan)
-        session.tasks = dict(tasks)
-        return {
+        tasks = normalize_tasks(initialize_tasks(plan))
+        session.tasks = tasks
+        return transition_update(
+            gstate,
+            WorkflowPhase.PLAN,
+            {
             "plan": plan.to_dict(),
             "plan_version": int(getattr(plan, "plan_version", 1) or 1),
             "tasks": tasks,
-            "task_status": task_status_projection(tasks),
             "needs_plan_review": needs_review,
             "progress": "planned",
-            "phase": WorkflowPhase.PLAN.value,
             "outcome": OutcomeStatus.RUNNING.value,
-        }
+            },
+        )
 
     async def node_plan_validate(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from langgraph.types import interrupt
@@ -843,22 +867,24 @@ class ResearchGraphRunner:
             ctx.context_built = True
         plan = session.state.plan
         tasks = (
-            dict(gstate.get("tasks") or {})
+            normalize_tasks(gstate.get("tasks"))
             if gstate.get("plan")
-            else initialize_tasks(plan)
+            else normalize_tasks(initialize_tasks(plan))
             if plan is not None
             else {}
         )
-        session.tasks = dict(tasks)
-        return {
+        session.tasks = tasks
+        return transition_update(
+            gstate,
+            WorkflowPhase.PLAN_VALIDATED,
+            {
             "plan": plan.to_dict() if plan is not None else None,
             "plan_version": int(getattr(plan, "plan_version", 1) or 1) if plan else 1,
             "tasks": tasks,
-            "task_status": task_status_projection(tasks),
             "needs_plan_review": False,
             "progress": "plan_validated",
-            "phase": WorkflowPhase.PLAN_VALIDATED.value,
-        }
+            },
+        )
 
     async def node_dispatch(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.project import sync_legacy_execution_scratch
@@ -871,10 +897,18 @@ class ResearchGraphRunner:
 
         session = get_session(str(gstate.get("run_id") or ""))
         if session is None:
-            return {"progress": "dispatch", "phase": WorkflowPhase.DISPATCH.value}
+            return transition_update(
+                gstate,
+                WorkflowPhase.DISPATCH,
+                {"progress": "dispatch"},
+            )
         sync_legacy_execution_scratch(session.state, gstate)
         if session.state.plan is None:
-            return {"progress": "dispatch", "phase": WorkflowPhase.DISPATCH.value}
+            return transition_update(
+                gstate,
+                WorkflowPhase.DISPATCH,
+                {"progress": "dispatch"},
+            )
         artifact_status = candidate_artifact_status(gstate.get("candidate_set"))
         if self.harness._apply_run_guardrails(
             session.state,
@@ -899,10 +933,12 @@ class ResearchGraphRunner:
                 )
                 tasks = tasks_from_status(skipped)
                 session.tasks = dict(tasks)
-                return {
+                return transition_update(
+                    gstate,
+                    WorkflowPhase.DISPATCH,
+                    {
                     "replan_exhausted": True,
                     "tasks": tasks,
-                    "task_status": task_status_projection(tasks),
                     "progress": "enough",
                     "progress_assessment": {
                         "verdict": "enough",
@@ -910,24 +946,19 @@ class ResearchGraphRunner:
                         "budget_degrade_reason": budget_reason,
                     },
                     "status": "running",
-                    "phase": WorkflowPhase.DISPATCH.value,
                     "outcome": OutcomeStatus.RUNNING.value,
-                }
-            return {
+                    },
+                )
+            return transition_update(
+                gstate,
+                WorkflowPhase.ABORT,
+                {
                 "status": "aborted",
                 "outcome": OutcomeStatus.ABORTED.value,
-                "phase": WorkflowPhase.TERMINATED.value,
-                "termination": {
-                    "outcome": OutcomeStatus.ABORTED.value,
-                    "reason": str(session.state.abort_reason or "guardrail"),
-                    "stage": "dispatch",
-                    "detected_stage": "dispatch",
-                    "research_completed": False,
-                    "synthesis_attempted": False,
-                },
                 "abort_reason": session.state.abort_reason or "guardrail",
                 "progress": "abort",
-            }
+                },
+            )
         # Research 触顶但未超 hard：阻止再开 research，推进 synthesis
         if isinstance(session.state.metadata, dict) and session.state.metadata.get(
             "force_synthesis"
@@ -946,19 +977,21 @@ class ResearchGraphRunner:
             )
             tasks = tasks_from_status(skipped)
             session.tasks = dict(tasks)
-            return {
+            return transition_update(
+                gstate,
+                WorkflowPhase.DISPATCH,
+                {
                 "replan_exhausted": True,
-                "phase": WorkflowPhase.DISPATCH.value,
                 "outcome": OutcomeStatus.RUNNING.value,
                 "tasks": tasks,
-                "task_status": task_status_projection(tasks),
                 "progress": "enough",
                 "progress_assessment": {
                         "verdict": "enough",
                         "reason": "force_synthesis_budget",
                         "budget_degrade_reason": budget_reason,
                     },
-            }
+                },
+            )
         dispatch_status = workflow_task_status(gstate)
         dispatch_status.update(artifact_status)
         ready = select_dispatch_wave(
@@ -973,14 +1006,17 @@ class ResearchGraphRunner:
                 task_ids=[s.resolved_task_id(i) for i, s in ready],
                 include_optional=False,
             )
-        return {
+        return transition_update(
+            gstate,
+            WorkflowPhase.DISPATCH,
+            {
             "replan_count": int(
                 gstate.get("replan_count") or session.state.replan_count
             ),
             "progress": "dispatch",
-            "phase": WorkflowPhase.DISPATCH.value,
             "outcome": OutcomeStatus.RUNNING.value,
-        }
+            },
+        )
 
     async def node_research_worker(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from langgraph.types import interrupt
@@ -1016,18 +1052,12 @@ class ResearchGraphRunner:
             resume = interrupt({"kind": "step_gate", "coordinator_payload": payload})
             if _is_timeout(resume) or _rejected(resume):
                 session.state.abort_reason = "step_rejected"
-                return {
+                return transition_update(
+                    gstate,
+                    WorkflowPhase.ABORT,
+                    {
                     "status": "aborted",
                     "outcome": OutcomeStatus.ABORTED.value,
-                    "phase": WorkflowPhase.TERMINATED.value,
-                    "termination": {
-                        "outcome": OutcomeStatus.ABORTED.value,
-                        "reason": "step_rejected",
-                        "stage": "execute",
-                        "detected_stage": "execute",
-                        "research_completed": False,
-                        "synthesis_attempted": False,
-                    },
                     "abort_reason": "step_rejected",
                     "tasks": merge_task_state(
                         gstate.get("tasks"),
@@ -1035,7 +1065,6 @@ class ResearchGraphRunner:
                         TaskStatus.FAILED,
                         failure_reason="step_rejected",
                     ),
-                    "task_status": {step.resolved_task_id(step_index): "failed"},
                     "worker_results": [
                         {
                             "task_id": task_id,
@@ -1044,7 +1073,8 @@ class ResearchGraphRunner:
                             "step_type": step.step_type,
                         }
                     ],
-                }
+                    },
+                )
             session.state = self.harness._apply_hitl_decisions(
                 session.state, _as_decisions(resume), step, step_index
             )
@@ -1123,8 +1153,6 @@ class ResearchGraphRunner:
             str(item) for item in list(result.sources or []) if str(item).strip()
         ]
         for finding in list(result.findings or []):
-            if not isinstance(finding, dict):
-                continue
             result_facts.extend(
                 str(item)
                 for item in list(finding.get("facts") or [])
@@ -1152,25 +1180,22 @@ class ResearchGraphRunner:
         row["payload"] = row_payload
         if not result.ok:
             row["summary"] = result.summary or row.get("summary", "")
-        graph_task_status = {
-            "done": "done",
-            "failed": "failed",
-            "skipped": "skipped",
-            "blocked": "failed",
-        }[result.status]
         next_tasks = merge_task_state(
             gstate.get("tasks"),
             tid,
-            TaskStatus(graph_task_status),
+            TaskStatus(result.status),
             failure_reason=result.fail_reason,
         )
-        projected_state: dict[str, Any] = {
-            "worker_results": [row],
-            "tasks": next_tasks,
-            "task_status": {tid: graph_task_status},
-            "evidence_refs": result.evidence_refs or ([tid] if result.ok else []),
-            "findings": normalized_findings,
-        }
+        projected_state: dict[str, Any] = transition_update(
+            gstate,
+            WorkflowPhase.EXECUTE,
+            {
+                "worker_results": [row],
+                "tasks": next_tasks,
+                "evidence_refs": result.evidence_refs or ([tid] if result.ok else []),
+                "findings": normalized_findings,
+            },
+        )
         if result.status == "blocked":
             projected_state.update(
                 {
@@ -1189,11 +1214,7 @@ class ResearchGraphRunner:
             build_candidate_set,
             candidate_artifact_status,
         )
-        from app.research.runtime.project import sync_legacy_execution_scratch
-
         session = get_session(str(gstate.get("run_id") or ""))
-        if session is not None:
-            sync_legacy_execution_scratch(session.state, gstate)
         plan = session.state.plan if session is not None else None
         enabled = True
         query = str(gstate.get("task_query") or "")
@@ -1359,15 +1380,18 @@ class ResearchGraphRunner:
             import logging as _log
 
             _log.getLogger("observability").debug("obs emit failed", exc_info=True)
-        payload = {
+        payload = transition_update(
+            gstate,
+            WorkflowPhase.PROGRESS,
+            {
             "progress_assessment": assessment.to_dict(),
             "candidate_set": candidate_set,
             "marginal_gain": marginal_state.to_dict(),
             "progress": "progress_eval",
-            "phase": WorkflowPhase.PROGRESS.value,
             "control_fingerprint": fingerprint,
             "stagnant_cycles": stagnant_cycles,
-        }
+            },
+        )
         if stagnant_cycles >= 2:
             payload["progress_assessment"] = assessment_payload
             payload["replan_exhausted"] = True
@@ -1380,14 +1404,12 @@ class ResearchGraphRunner:
 
     async def node_prepare_synthesis(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.graph import GraphInvariantViolation
-        from app.research.runtime.project import sync_legacy_execution_scratch
         from app.research.runtime.synthesis_admission import (
             prepare_synthesis_update,
             trusted_evidence_count as state_trusted_evidence_count,
         )
 
         session = _require_session(gstate)
-        sync_legacy_execution_scratch(session.state, gstate)
         plan = session.state.plan
         if plan is None:
             raise GraphInvariantViolation("prepare_synthesis routed without a plan")
@@ -1430,14 +1452,16 @@ class ResearchGraphRunner:
             )
         except ValueError as exc:
             raise GraphInvariantViolation(str(exc)) from exc
-        sync_legacy_execution_scratch(session.state, update)
-        return update
+        return transition_update(
+            gstate,
+            WorkflowPhase.PREPARE_SYNTHESIS,
+            update,
+        )
 
     async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.graph import GraphInvariantViolation
         from app.research.runtime.scheduler import next_synthesis_step
-        from app.research.runtime.project import sync_legacy_execution_scratch
-        from app.research.execution.worker_executor import WorkerExecutorV2
+        from app.research.execution.synthesis_executor import SynthesisExecutor
         from app.research.runtime.worker import ResearchContext, ResearchTask
         from app.research.runtime.synthesis_admission import (
             evaluate_synthesis_admission,
@@ -1445,7 +1469,6 @@ class ResearchGraphRunner:
         )
 
         session = _require_session(gstate)
-        sync_legacy_execution_scratch(session.state, gstate)
         plan = session.state.plan
         if plan is None:
             raise GraphInvariantViolation("synthesize routed without a plan")
@@ -1490,17 +1513,30 @@ class ResearchGraphRunner:
             trusted_evidence_count_override=trusted_count,
         )
         if admission.mode == "no_evidence_partial":
-            return {
+            return transition_update(
+                gstate,
+                WorkflowPhase.SYNTHESIS,
+                {
                 "status": "partial",
                 "outcome": OutcomeStatus.PARTIAL.value,
                 "progress": "no_evidence_partial",
-                "phase": WorkflowPhase.SYNTHESIS.value,
                 "tasks": tasks_from_status(status),
-                "task_status": status,
                 "synthesis_mode": "no_evidence_partial",
                 "synthesis_admission_reason": admission.reason,
                 "trusted_evidence_count": 0,
-            }
+                "termination": {
+                    "outcome": OutcomeStatus.PARTIAL.value,
+                    "reason": "no_trusted_evidence",
+                    "stage": "synthesis",
+                    "detected_stage": "synthesis",
+                    "origin_stage": "research",
+                    "cause_event_id": "",
+                    "research_completed": False,
+                    "synthesis_attempted": False,
+                    "quality_attempted": False,
+                },
+                },
+            )
         if not admission.allowed:
             raise GraphInvariantViolation(
                 f"synthesize routed but admission rejected: {admission.reason}"
@@ -1522,14 +1558,16 @@ class ResearchGraphRunner:
                 status.get(task_id) in {"done", "failed", "skipped"}
                 for task_id in synthesis_steps
             ):
-                return {
+                return transition_update(
+                    gstate,
+                    WorkflowPhase.SYNTHESIS,
+                    {
                     "status": "synthesized",
                     "outcome": OutcomeStatus.RUNNING.value,
                     "progress": "synthesized",
-                    "phase": WorkflowPhase.SYNTHESIS.value,
-                    "task_status": status,
                     "tasks": tasks_from_status(status),
-                }
+                    },
+                )
             raise GraphInvariantViolation(
                 "synthesize routed but no synthesis step is runnable"
             )
@@ -1650,7 +1688,9 @@ class ResearchGraphRunner:
                     session.state.metadata["emergency_context_timeout"] = (
                         emergency_context_timeout
                     )
-                    session.state.metadata["termination"] = {
+                    session.state.metadata["termination"] = merge_termination(
+                        session.state.metadata.get("termination"),
+                        {
                         "status": "partial",
                         "reason": reason,
                         "stage": "synthesis",
@@ -1669,89 +1709,42 @@ class ResearchGraphRunner:
                         "causal_chain": _termination_causal_chain(
                             reason, quality_attempted=False
                         ),
-                    }
-            else:
-                if bool(getattr(self.harness.harness_config, "worker_executor_v2", True)):
-                    worker_result = await WorkerExecutorV2(self.harness, session).execute(
-                        ResearchTask(
-                            task_id=tid,
-                            objective=str(step.objective or step.description or ""),
-                            step_type=step.step_type,
-                            step_index=index,
-                            description=step.description,
-                            subagent=step.subagent or "",
-                            allowed_tools=list(step.allowed_tools or []),
-                            plan_version=int(gstate.get("plan_version") or 1),
-                        ),
-                        ResearchContext(
-                            run_id=str(gstate.get("run_id") or session.run_id),
-                            query=session.ctx.task_query,
-                            user_id=session.ctx.user_id,
-                            tenant_id=session.ctx.tenant_id,
-                            project_id=session.ctx.project_id,
-                            session_id=session.session_id,
-                        ),
+                        },
                     )
-                    ok = bool(worker_result.ok)
-                    raw = worker_result.raw
-                    if raw is not None:
-                        session.state.step_results.append(raw)
-                        session.state.final_content = raw.content
-                    else:
-                        session.state.final_content = worker_result.summary
-                    if not ok:
-                        session.state.abort_reason = (
-                            session.state.abort_reason
-                            or worker_result.fail_reason
-                            or "synthesis_failed"
-                        )
+            else:
+                worker_result = await SynthesisExecutor(self.harness, session).execute(
+                    ResearchTask(
+                        task_id=tid,
+                        objective=str(step.objective or step.description or ""),
+                        step_type=step.step_type,
+                        step_index=index,
+                        description=step.description,
+                        subagent=step.subagent or "",
+                        allowed_tools=[],
+                        plan_version=int(gstate.get("plan_version") or 1),
+                    ),
+                    ResearchContext(
+                        run_id=str(gstate.get("run_id") or session.run_id),
+                        query=session.ctx.task_query,
+                        user_id=session.ctx.user_id,
+                        tenant_id=session.ctx.tenant_id,
+                        project_id=session.ctx.project_id,
+                        session_id=session.session_id,
+                    ),
+                )
+                ok = bool(worker_result.ok)
+                raw = worker_result.raw
+                if raw is not None:
+                    session.state.step_results.append(raw)
+                    session.state.final_content = raw.content
                 else:
-                    try:
-                        mgr = session.budget_manager
-                        mgr.sync_from_usage(
-                            session_id=session.session_id,
-                            tool_calls=session.state.tool_calls_count,
-                        )
-                        timeout_sec = min(
-                            max(10, int(self.harness.harness_config.step_timeout_sec)),
-                            max(5.0, mgr.remaining_run_sec()),
-                        )
-                    except Exception:
-                        timeout_sec = max(10, int(self.harness.harness_config.step_timeout_sec))
-                    try:
-                        ok = await asyncio.wait_for(
-                            self.harness._run_single_step(
-                                session.state,
-                                step,
-                                index,
-                                session.ctx.task_query,
-                                session.ctx.relative_session_dir,
-                                session.ctx.uploaded_prompt,
-                                session.session_id,
-                                session.ctx.session_dir,
-                                session.ctx.citation_manager,
-                                session.ctx.idempotency,
-                                session.ctx.checkpoint_store,
-                            ),
-                            timeout=timeout_sec,
-                        )
-                    except asyncio.TimeoutError:
-                        ok = False
-                        session.state.abort_reason = (
-                            session.state.abort_reason or "deadline_exceeded"
-                        )
-                    except Exception as exc:
-                        from app.agent.llm_errors import classify_llm_exception
-
-                        provider_failure = classify_llm_exception(exc)
-                        ok = False
-                        session.state.abort_reason = (
-                            session.state.abort_reason
-                            or f"provider_{provider_failure.kind.value}"
-                        )
-                        session.state.abort_message = (
-                            session.state.abort_message or provider_failure.message[:500]
-                        )
+                    session.state.final_content = worker_result.summary
+                if not ok:
+                    session.state.abort_reason = (
+                        session.state.abort_reason
+                        or worker_result.fail_reason
+                        or "synthesis_failed"
+                    )
             session.state.step_validation_results.append(
                 {
                     "step_index": index,
@@ -1763,6 +1756,12 @@ class ResearchGraphRunner:
             from app.agent.harness.partial_report import render_partial_report
 
             assessment = dict(gstate.get("progress_assessment") or {})
+            if isinstance(session.state.metadata, dict):
+                session.state.metadata["partial_findings"] = [
+                    dict(item)
+                    for item in list(gstate.get("findings") or [])
+                    if isinstance(item, dict)
+                ]
             partial = render_partial_report(
                 state=session.state,
                 abort_reason=str(session.state.abort_reason or "synthesis_failed"),
@@ -1873,31 +1872,30 @@ class ResearchGraphRunner:
             session.state.metadata["synthesis_status"] = (
                 "partial_fast_path" if fast_path else ("ok" if ok else "failed")
             )
-        return {
+        return transition_update(
+            gstate,
+            WorkflowPhase.SYNTHESIS,
+            {
             "tasks": merge_task_state(
                 gstate.get("tasks"), tid, TaskStatus.DONE if ok else TaskStatus.FAILED
             ),
-            "task_status": {tid: "done" if ok else "failed"},
             "status": "partial" if fast_path else ("synthesized" if ok else "partial"),
             "outcome": OutcomeStatus.PARTIAL.value
             if fast_path or not ok
             else OutcomeStatus.RUNNING.value,
             "progress": "synthesized",
-            "phase": WorkflowPhase.SYNTHESIS.value,
             "replan_exhausted": True if not ok else gstate.get("replan_exhausted"),
-        }
+            },
+        )
 
     async def node_replan(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.agent.harness.guardrails import can_replan
         from app.research.planning.plan_patch import (
             apply_plan_patch,
             build_progress_patch,
         )
         from app.research.planning.policy import parse_source_policy
-        from app.research.runtime.project import sync_legacy_execution_scratch
 
         session = _require_session(gstate)
-        sync_legacy_execution_scratch(session.state, gstate)
         state = session.state
         assessment = dict(gstate.get("progress_assessment") or {})
         replan_attempts = int(gstate.get("replan_attempts") or 0) + 1
@@ -1925,11 +1923,11 @@ class ResearchGraphRunner:
             "replan_applied_count": replan_applied,
         }
         if bool(gstate.get("control_no_progress")) or replan_attempts > max_replan_attempts:
-            return exhausted
+            return transition_update(gstate, WorkflowPhase.REPLAN, exhausted)
         if state.plan is None or state.intent is None:
-            return exhausted
-        if not can_replan(state, self.harness.harness_config):
-            return exhausted
+            return transition_update(gstate, WorkflowPhase.REPLAN, exhausted)
+        if not decide_replan(gstate):
+            return transition_update(gstate, WorkflowPhase.REPLAN, exhausted)
         # Do not start a wave that cannot finish before the synthesis reserve.
         # Affordability must cover the complete wave, not only worker execution.
         try:
@@ -1999,14 +1997,18 @@ class ResearchGraphRunner:
                         "insufficient_research_time"
                     )
                     state.metadata["estimated_wave_cost_sec"] = round(estimated_wave, 3)
-                return {
+                return transition_update(
+                    gstate,
+                    WorkflowPhase.REPLAN,
+                    {
                     **exhausted,
                     "progress_assessment": {
                         **assessment,
                         "verdict": "enough",
                         "reason": "replan_unaffordable_force_synthesis",
                     },
-                }
+                    },
+                )
         except Exception:
             pass
         policy = parse_source_policy(state.intent.raw_query)
@@ -2060,6 +2062,28 @@ class ResearchGraphRunner:
             max_new_tasks=max_new,
             candidate_set=dict(gstate.get("candidate_set") or {}),
         )
+        patch_hash = hashlib.sha256(
+            json.dumps(
+                patch,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        if patch_hash in set(gstate.get("rejected_patch_hashes") or []):
+            return transition_update(
+                gstate,
+                WorkflowPhase.REPLAN,
+                {
+                    **exhausted,
+                    "rejected_patch_hashes": [patch_hash],
+                    "progress_assessment": {
+                        **assessment,
+                        "verdict": "enough",
+                        "reason": "replan_patch_duplicate",
+                    },
+                },
+            )
         for item in list(patch.get("add_tasks") or []):
             if isinstance(item, dict):
                 meta = dict(item.get("metadata") or {})
@@ -2138,7 +2162,14 @@ class ResearchGraphRunner:
                     )
             except Exception:
                 pass
-            return exhausted
+            return transition_update(
+                gstate,
+                WorkflowPhase.REPLAN,
+                {
+                    **exhausted,
+                    "rejected_patch_hashes": [patch_hash],
+                },
+            )
         from_version = int(getattr(state.plan, "plan_version", 1) or 1)
         added = [
             str(item.get("task_id") or "")
@@ -2245,28 +2276,28 @@ class ResearchGraphRunner:
             import logging as _log
 
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
-        tasks = initialize_tasks(state.plan)
+        tasks = normalize_tasks(initialize_tasks(state.plan))
         for task_id, task_state in normalize_tasks(gstate.get("tasks")).items():
             if task_id in tasks:
                 tasks[task_id] = task_state
-        return {
+        return transition_update(
+            gstate,
+            WorkflowPhase.REPLAN,
+            {
             "plan": state.plan.to_dict(),
             "plan_version": int(getattr(state.plan, "plan_version", 1) or 1),
             "tasks": tasks,
-            "task_status": task_status_projection(tasks),
             "replan_count": replan_applied,
             "replan_attempts": replan_attempts,
             "replan_applied_count": replan_applied,
             "replan_exhausted": replan_attempts >= max_replan_attempts,
             "progress": "run",
             "progress_assessment": {**assessment, "verdict": "run"},
-        }
+            },
+        )
 
     async def node_quality_gate(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.project import sync_legacy_execution_scratch
-
         session = _require_session(gstate)
-        sync_legacy_execution_scratch(session.state, gstate)
         if isinstance(session.state.metadata, dict):
             session.state.metadata["quality_attempted"] = True
             termination = session.state.metadata.get("termination")
@@ -2420,7 +2451,10 @@ class ResearchGraphRunner:
             import logging as _log
 
             _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
-        return {
+        return transition_update(
+            gstate,
+            WorkflowPhase.QUALITY,
+            {
             "quality_passed": passed,
             "quality_reason": reason,
             "quality_repairable": repairable,
@@ -2434,47 +2468,45 @@ class ResearchGraphRunner:
             ),
             "final_content": state.final_content,
             "progress": "quality",
-            "phase": WorkflowPhase.QUALITY.value,
-        }
+            },
+        )
 
     async def node_repair_synthesis(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.project import sync_legacy_execution_scratch
-
         session = _require_session(gstate)
-        sync_legacy_execution_scratch(session.state, gstate)
         if session.state.plan is None:
-            return {"progress": "repair_synthesis"}
-        status = dict(gstate.get("task_status") or {})
+            return transition_update(
+                gstate,
+                WorkflowPhase.REPAIR_SYNTHESIS,
+                {"progress": "repair_synthesis"},
+            )
         tasks = dict(gstate.get("tasks") or {})
         for index, step in enumerate(session.state.plan.steps):
             if step.step_type not in {"generate_markdown", "summarize", "convert_pdf"}:
                 continue
             task_id = step.resolved_task_id(index)
-            if status.get(task_id) in {"done", "failed", "skipped"}:
-                status[task_id] = "pending"
-                tasks = merge_task_state(tasks, task_id, TaskStatus.PENDING)
+            tasks = merge_task_state(tasks, task_id, TaskStatus.PENDING)
         session.state.final_content = ""
         if isinstance(session.state.metadata, dict):
             session.state.metadata["partial_delivered"] = False
-        return {
+        return transition_update(
+            gstate,
+            WorkflowPhase.REPAIR_SYNTHESIS,
+            {
             "tasks": tasks,
-            "task_status": status,
             "status": "running",
             "outcome": OutcomeStatus.RUNNING.value,
             "final_content": "",
             "progress": "repair_synthesis",
-            "phase": WorkflowPhase.REPAIR_SYNTHESIS.value,
-        }
+            },
+        )
 
     async def node_finalize(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.project import sync_legacy_execution_scratch
         from app.research.runtime.latency import (
             critical_path_summary,
             note_final_answer,
         )
 
         session = _require_session(gstate)
-        sync_legacy_execution_scratch(session.state, gstate)
         try:
             note_final_answer(session.state)
             if isinstance(session.state.metadata, dict):
@@ -2544,23 +2576,30 @@ class ResearchGraphRunner:
             graph_status = "aborted"
         else:
             graph_status = "completed"
+        fallback_reason = (
+            "control_plane_no_progress"
+            if gstate.get("control_no_progress")
+            else str(gstate.get("quality_reason") or "")
+            or str(session.state.abort_reason or "")
+            or ("incomplete" if not success else "completed")
+        )
+        terminal = terminal_update(
+            gstate,
+            outcome=OutcomeStatus(graph_status),
+            reason=fallback_reason,
+            stage="finalize",
+            detected_stage="finalize",
+            origin_stage="quality" if gstate.get("quality_reason") else "run",
+            research_completed=bool(gstate.get("trusted_evidence_count")),
+            synthesis_attempted=True,
+            quality_attempted=bool(gstate.get("quality_attempts")),
+        )
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata["termination"] = terminal["termination"]
         return {
             "status": graph_status,
             "outcome": graph_status,
-            "phase": WorkflowPhase.TERMINATED.value,
-            "termination": {
-                "outcome": graph_status,
-                "reason": str(
-                    session.state.abort_reason
-                    or "quality_failed"
-                    if not success
-                    else "completed"
-                ),
-                "stage": "finalize",
-                "detected_stage": "finalize",
-                "research_completed": bool(gstate.get("trusted_evidence_count")),
-                "synthesis_attempted": True,
-            },
+            **terminal,
             "final_content": session.state.final_content,
             "artifacts": list(result.artifacts),
             "progress": "done",
@@ -2569,18 +2608,17 @@ class ResearchGraphRunner:
     async def node_abort(self, gstate: dict[str, Any]) -> dict[str, Any]:
         session = get_session(str(gstate.get("run_id") or ""))
         if session is None:
+            terminal = terminal_update(
+                gstate,
+                outcome=OutcomeStatus.ABORTED,
+                reason=str(gstate.get("abort_reason") or "aborted"),
+                stage="abort",
+                detected_stage="abort",
+            )
             return {
                 "status": "aborted",
                 "outcome": OutcomeStatus.ABORTED.value,
-                "phase": WorkflowPhase.TERMINATED.value,
-                "termination": {
-                    "outcome": OutcomeStatus.ABORTED.value,
-                    "reason": str(gstate.get("abort_reason") or "aborted"),
-                    "stage": "abort",
-                    "detected_stage": "abort",
-                    "research_completed": False,
-                    "synthesis_attempted": False,
-                },
+                **terminal,
                 "abort_reason": str(gstate.get("abort_reason") or "aborted"),
                 "progress": "abort",
             }
@@ -2593,14 +2631,17 @@ class ResearchGraphRunner:
         )
         if isinstance(session.state.metadata, dict):
             session.state.metadata["partial_delivered"] = True
-            session.state.metadata["termination"] = {
-                "outcome": OutcomeStatus.PARTIAL.value,
-                "reason": str(session.state.abort_reason or "aborted"),
-                "stage": "abort",
-                "detected_stage": "abort",
-                "research_completed": False,
-                "synthesis_attempted": True,
-            }
+            session.state.metadata["termination"] = merge_termination(
+                session.state.metadata.get("termination"),
+                {
+                    "outcome": OutcomeStatus.ABORTED.value,
+                    "reason": str(session.state.abort_reason or "aborted"),
+                    "stage": "abort",
+                    "detected_stage": "abort",
+                    "research_completed": False,
+                    "synthesis_attempted": True,
+                },
+            )
         self.harness._report_phase(
             Phase.ABORT,
             session.state.abort_reason or "guardrail",
@@ -2617,18 +2658,21 @@ class ResearchGraphRunner:
             deliverable_dir=session.ctx.deliverable_dir,
         )
         session.result = result
+        terminal = terminal_update(
+            gstate,
+            outcome=OutcomeStatus.ABORTED,
+            reason=str(session.state.abort_reason or "aborted"),
+            stage="abort",
+            detected_stage="abort",
+            research_completed=False,
+            synthesis_attempted=True,
+        )
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata["termination"] = terminal["termination"]
         return {
             "status": "aborted",
             "outcome": OutcomeStatus.ABORTED.value,
-            "phase": WorkflowPhase.TERMINATED.value,
-            "termination": {
-                "outcome": OutcomeStatus.ABORTED.value,
-                "reason": str(session.state.abort_reason or "aborted"),
-                "stage": "abort",
-                "detected_stage": "abort",
-                "research_completed": False,
-                "synthesis_attempted": True,
-            },
+            **terminal,
             "abort_reason": session.state.abort_reason or "aborted",
             "artifacts": list(result.artifacts),
             "final_content": session.state.final_content,
@@ -2655,7 +2699,6 @@ def _failed_worker(task_id: str, step_type: str, reason: str) -> dict[str, Any]:
             }
         ],
         "tasks": tasks,
-        "task_status": task_status_projection(tasks),
     }
 
 

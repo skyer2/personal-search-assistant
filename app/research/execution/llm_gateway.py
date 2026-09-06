@@ -33,10 +33,19 @@ class LLMGateway:
             set_llm_phase(previous)
 
     async def astream(self, target: Any, payload: Any, config: dict[str, Any] | None = None):
+        if self.budget_manager is None:
+            raise RuntimeError("LLM request rejected: budget manager unavailable")
         async for chunk in target.astream(payload, config=config or {}):
             yield chunk
 
+    def invoke(self, target: Any, payload: Any, config: dict[str, Any] | None = None) -> Any:
+        if self.budget_manager is None:
+            raise RuntimeError("LLM request rejected: budget manager unavailable")
+        return target.invoke(payload, config=config or {})
+
     async def ainvoke(self, target: Any, payload: Any, config: dict[str, Any] | None = None) -> Any:
+        if self.budget_manager is None:
+            raise RuntimeError("LLM request rejected: budget manager unavailable")
         return await target.ainvoke(payload, config=config or {})
 
 

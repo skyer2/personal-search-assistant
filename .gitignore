@@ -3,6 +3,9 @@
 # compiled output
 /dist
 /tmp
+.tmp/
+*.sqlite-shm
+*.sqlite-wal
 app/output
 app/updated
 app/logs/

@@ -19,7 +19,9 @@ from app.agent.harness.state import ExecutionPlan, PlanStep
 from app.research.domain.contracts import initialize_tasks, task_status_projection
 from app.research.planning.priority import stamp_semantic_priority
 
-TERMINAL_STATUS = frozenset({"done", "failed", "skipped"})
+TERMINAL_STATUS = frozenset(
+    {"done", "failed", "skipped", "partial", "blocked", "cancelled"}
+)
 
 
 def _stamp_research_priority(plan: ExecutionPlan, intent: Any | None = None) -> None:

@@ -22,6 +22,7 @@ from app.research.runtime.worker import (
     ResearchContext,
     ResearchTask,
     WorkerResult,
+    WorkerResultStatus,
     salvage_worker_evidence,
 )
 
@@ -74,7 +75,7 @@ class WorkerExecutorV2:
                 task,
                 started,
                 ok=False,
-                status="blocked",
+            status="blocked",
                 summary="budget_blocked:budget_manager_unavailable",
                 fail_reason="budget_manager_unavailable",
             )
@@ -415,7 +416,7 @@ class WorkerExecutorV2:
         *,
         cause: str,
         fail_reason: str,
-        status: str,
+        status: WorkerResultStatus,
         ok: bool,
     ) -> WorkerResult:
         salvaged = salvage_worker_evidence(task_id=task.task_id, step_index=step_index)
@@ -461,7 +462,7 @@ class WorkerExecutorV2:
             task,
             started,
             ok=True,
-            status="done",
+            status="partial",
             summary=payload["summary"],
             findings=findings,
             evidence_refs=evidence_refs,
@@ -477,7 +478,7 @@ class WorkerExecutorV2:
         started: float,
         *,
         ok: bool,
-        status: str,
+        status: WorkerResultStatus,
         summary: str = "",
         findings: list[dict[str, Any]] | None = None,
         evidence_refs: list[str] | None = None,

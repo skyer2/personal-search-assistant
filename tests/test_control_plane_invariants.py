@@ -255,7 +255,16 @@ def test_quality_failure_routes_conditionally_and_partial_is_preserved() -> None
         )
         == "finalize"
     )
-    assert finalize_node({"status": "partial", "final_content": "partial answer"})["status"] == "partial"
+    assert (
+        finalize_node(
+            {
+                "phase": "quality",
+                "status": "partial",
+                "final_content": "partial answer",
+            }
+        )["status"]
+        == "partial"
+    )
 
 
 def test_trace_summary_exposes_quality_and_termination_attribution() -> None:

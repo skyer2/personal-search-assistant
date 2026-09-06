@@ -8,6 +8,7 @@ from typing import Any, TypedDict
 
 class WorkflowPhase(StrEnum):
     BOOTSTRAP = "bootstrap"
+    DIRECT = "direct"
     UNDERSTAND = "understand"
     CLARIFY = "clarify"
     PLAN = "plan"
@@ -39,6 +40,9 @@ class TaskStatus(StrEnum):
     DONE = "done"
     FAILED = "failed"
     SKIPPED = "skipped"
+    PARTIAL = "partial"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
 
 
 class ProgressDecision(StrEnum):
@@ -67,8 +71,17 @@ class TerminationReason(StrEnum):
     COMPLETED = "completed"
     PARTIAL_DELIVERED = "partial_delivered"
     CONTROL_NO_PROGRESS = "control_plane_no_progress"
+    NO_TRUSTED_EVIDENCE = "no_trusted_evidence"
+    BUDGET_TOKENS = "budget_tokens"
+    RESEARCH_TOKEN_CAP = "research_token_cap"
+    BUDGET_LLM_CALLS = "budget_llm_calls"
+    BUDGET_TOOL_CALLS = "budget_tool_calls"
     BUDGET_EXHAUSTED = "budget_exhausted"
     DEADLINE_EXCEEDED = "deadline_exceeded"
+    SYNTHESIS_TIME_RESERVE = "synthesis_time_reserve"
+    REPLAN_EXHAUSTED = "replan_exhausted"
+    PROVIDER_POLICY = "provider_policy"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
     QUALITY_FAILED = "quality_failed"
     EMPTY_PLAN = "empty_plan"
     ABORTED = "aborted"
@@ -89,8 +102,11 @@ class Termination(TypedDict):
     reason: str
     stage: str
     detected_stage: str
+    origin_stage: str
+    cause_event_id: str
     research_completed: bool
     synthesis_attempted: bool
+    quality_attempted: bool
 
 
 def new_task_state(task_id: str, *, status: TaskStatus = TaskStatus.PENDING) -> TaskRuntimeState:
@@ -166,6 +182,19 @@ def tasks_from_status(status: dict[str, str]) -> dict[str, dict[str, Any]]:
     return tasks
 
 
+def merge_termination(existing: Any, update: Any) -> dict[str, Any]:
+    """Keep the first terminal cause and only append later lifecycle facts."""
+    old = dict(existing) if isinstance(existing, dict) else {}
+    new = dict(update) if isinstance(update, dict) else {}
+    if not old:
+        return new
+    merged = dict(old)
+    for key in ("detected_stage", "quality_attempted", "synthesis_attempted"):
+        if new.get(key) is not None and merged.get(key) in (None, ""):
+            merged[key] = new[key]
+    return merged
+
+
 def merge_task_state(
     tasks: Any,
     task_id: str,
@@ -202,6 +231,7 @@ __all__ = [
     "WorkflowPhase",
     "initialize_tasks",
     "merge_task_state",
+    "merge_termination",
     "new_task_state",
     "normalize_tasks",
     "outcome_from_status",

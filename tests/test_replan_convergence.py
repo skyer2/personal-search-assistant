@@ -16,6 +16,7 @@ from app.research.planning.lead_planner import heuristic_dynamic_plan
 from app.research.planning.plan_patch import apply_plan_patch, build_progress_patch
 from app.research.planning.policy import parse_source_policy
 from app.research.planning.candidate import build_candidate_set
+from app.research.domain.contracts import task_status_projection, tasks_from_status
 from app.research.runtime.graph import (
     compile_research_graph,
     control_plane_fingerprint,
@@ -84,7 +85,7 @@ def test_rejected_replan_cannot_loop_from_quality() -> None:
 def test_control_fingerprint_ignores_transient_quality_attempts() -> None:
     base = {
         "plan_version": 1,
-        "task_status": {"t_landscape": "done"},
+        "tasks": tasks_from_status({"t_landscape": "done"}),
         "progress_assessment": {"open_gap_ids": ["gap_hiring"]},
         "replan_exhausted": False,
         "replan_attempts": 1,
@@ -95,7 +96,10 @@ def test_control_fingerprint_ignores_transient_quality_attempts() -> None:
     assert control_plane_fingerprint(base) == control_plane_fingerprint(
         {**base, "quality_attempts": 9}
     )
-    changed = {**base, "task_status": {"t_landscape": "done", "t_gap_deepseek": "done"}}
+    changed = {
+        **base,
+        "tasks": tasks_from_status({"t_landscape": "done", "t_gap_deepseek": "done"}),
+    }
     assert control_plane_fingerprint(base) != control_plane_fingerprint(changed)
 
 
@@ -204,6 +208,7 @@ def test_runner_counts_rejected_replan_attempt(monkeypatch) -> None:
         runner.node_replan(
             {
                 "run_id": "run-replan-reject",
+                "phase": "progress_eval",
                 "budget": {"max_replan_count": 1},
                 "replan_count": 0,
                 "replan_attempts": 0,
@@ -260,6 +265,8 @@ def test_runner_applies_candidate_gap_patch_once(monkeypatch) -> None:
         runner.node_replan(
             {
                 "run_id": "run-replan-apply",
+                "phase": "progress_eval",
+                "plan": plan.to_dict(),
                 "budget": {"max_replan_count": 1},
                 "replan_count": 0,
                 "replan_attempts": 0,
@@ -291,7 +298,7 @@ def test_runner_applies_candidate_gap_patch_once(monkeypatch) -> None:
     assert update["replan_applied_count"] == 1
     assert update["replan_count"] == 1
     assert update["replan_exhausted"] is True
-    assert "t_gap_deepseek" in update["task_status"]
+    assert "t_gap_deepseek" in task_status_projection(update["tasks"])
 
 
 class FakeBudgetedModel:
@@ -511,6 +518,7 @@ def test_budget_blocked_worker_evidence_reaches_candidate_and_synthesis(monkeypa
         runner.node_research_worker(
             {
                 "run_id": "run-budget-projection",
+                "phase": "dispatch",
                 "step_index": 0,
                 "task_id": "t_landscape",
                 "step_type": "research",

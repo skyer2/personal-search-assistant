@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from app.agent.harness.state import ExecutionPlan
-from app.research.domain.contracts import OutcomeStatus, ProgressDecision, QualityDecision
+from app.research.domain.contracts import (
+    OutcomeStatus,
+    ProgressDecision,
+    QualityDecision,
+    task_status_projection,
+)
 from app.research.runtime.scheduler import ready_research_steps
 
 
@@ -17,17 +22,7 @@ def plan_from_state(state: dict[str, Any]) -> ExecutionPlan | None:
 
 
 def workflow_task_status(state: dict[str, Any]) -> dict[str, str]:
-    tasks = state.get("tasks")
-    if isinstance(tasks, dict) and tasks:
-        projected = {
-            str(task_id): str((value or {}).get("status") or "pending")
-            if isinstance(value, dict)
-            else "pending"
-            for task_id, value in tasks.items()
-        }
-        if projected:
-            return projected
-    return dict(state.get("task_status") or {})
+    return task_status_projection(state.get("tasks"))
 
 
 def max_replan_attempts(state: dict[str, Any]) -> int:
@@ -156,9 +151,25 @@ def decide_after_quality(state: dict[str, Any]) -> QualityDecision:
     return QualityDecision.FINALIZE
 
 
+def decide_replan(state: dict[str, Any]) -> bool:
+    """Single admission point for every proposed replan."""
+    if bool(state.get("replan_exhausted")) or bool(state.get("control_no_progress")):
+        return False
+    if int(state.get("replan_attempts") or 0) >= max_replan_attempts(state):
+        return False
+    if plan_from_state(state) is None:
+        return False
+    assessment = dict(state.get("progress_assessment") or {})
+    return (
+        str(assessment.get("verdict") or "") == "gap"
+        or str(state.get("quality_repair_action") or "") == "replan"
+    )
+
+
 __all__ = [
     "decide_after_quality",
     "decide_dispatch",
+    "decide_replan",
     "decide_progress",
     "has_pending_synthesis",
     "lifecycle_is_terminal",

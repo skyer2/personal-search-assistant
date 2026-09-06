@@ -138,7 +138,9 @@ def test_compile_research_graph():
     try:
         from langgraph.checkpoint.memory import InMemorySaver
 
+        from app.research.domain.contracts import task_status_projection
         from app.research.runtime.graph import compile_research_graph, initial_graph_state
+
     except ModuleNotFoundError:
         print("[SKIP] compile_research_graph (langgraph not installed)")
         return
@@ -156,10 +158,11 @@ def test_compile_research_graph():
     )
     assert result["search_mode"] == "agent"
     assert result["plan"]
-    assert result["task_status"]
-    assert any(v == "done" for v in result["task_status"].values())
+    task_status = task_status_projection(result["tasks"])
+    assert task_status
+    assert any(v == "done" for v in task_status.values())
     assert result.get("progress_assessment") is not None
-    print(f"[OK] graph invoke status={result.get('status')} tasks={result['task_status']} progress={result.get('progress_assessment')}")
+    print(f"[OK] graph invoke status={result.get('status')} tasks={task_status} progress={result.get('progress_assessment')}")
 
 
 def test_compile_fact_query_still_uses_harness():

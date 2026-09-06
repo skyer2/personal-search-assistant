@@ -13,6 +13,13 @@ sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.research_brief import compile_research_brief
 from app.agent.harness.state import ExecutionPlan, PlanStep
+from app.research.domain.contracts import (
+    TaskStatus,
+    WorkflowPhase,
+    initialize_tasks,
+    merge_task_state,
+    task_status_projection,
+)
 from app.research.planning.candidate import annotate_candidate_dependencies
 from app.research.planning.validator import validate_artifact_dependencies
 from app.research.runtime.state import empty_research_state
@@ -48,14 +55,17 @@ def _state(plan: ExecutionPlan, **overrides: Any) -> dict[str, Any]:
         {
             "plan": plan.to_dict(),
             "plan_version": plan.plan_version,
-            "task_status": {
-                step.resolved_task_id(index): str(
-                    step.metadata.get("status") or "pending"
-                )
-                for index, step in enumerate(plan.steps)
-            },
+            "tasks": initialize_tasks(plan),
         }
     )
+    for index, step in enumerate(plan.steps):
+        raw_status = str(step.metadata.get("status") or "pending")
+        if raw_status != "pending":
+            state["tasks"] = merge_task_state(
+                state["tasks"],
+                step.resolved_task_id(index),
+                TaskStatus(raw_status),
+            )
     state.update(overrides)
     return state
 
@@ -65,65 +75,74 @@ class _ConvergenceRuntime:
         return {}
 
     async def node_intent(self, state: dict[str, Any]) -> dict[str, Any]:
-        return {}
+        return {"phase": WorkflowPhase.UNDERSTAND.value}
 
     async def node_clarify(self, state: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     async def node_plan(self, state: dict[str, Any]) -> dict[str, Any]:
-        return {}
+        return {"phase": WorkflowPhase.PLAN.value}
 
     async def node_plan_validate(self, state: dict[str, Any]) -> dict[str, Any]:
-        return {}
+        return {"phase": WorkflowPhase.PLAN_VALIDATED.value}
 
     async def node_dispatch(self, state: dict[str, Any]) -> dict[str, Any]:
-        return {}
+        return {"phase": WorkflowPhase.DISPATCH.value}
 
     async def node_research_worker(self, state: dict[str, Any]) -> dict[str, Any]:
         raise AssertionError("early-stop graph must not dispatch research workers")
 
     async def node_progress(self, state: dict[str, Any]) -> dict[str, Any]:
-        return {"progress_assessment": {"verdict": "enough", "reason": "test"}}
+        return {
+            "progress_assessment": {"verdict": "enough", "reason": "test"},
+            "phase": WorkflowPhase.PROGRESS.value,
+        }
 
     async def node_prepare_synthesis(self, state: dict[str, Any]) -> dict[str, Any]:
         plan = ExecutionPlan.from_dict(state["plan"])
-        status = dict(state["task_status"])
+        tasks = dict(state["tasks"])
         for index, step in enumerate(plan.steps):
             if step.step_type == "research" and step.metadata.get("optional"):
                 task_id = step.resolved_task_id(index)
-                status[task_id] = "skipped"
+                tasks = merge_task_state(tasks, task_id, TaskStatus.SKIPPED)
                 metadata = dict(step.metadata)
                 metadata["status"] = "skipped"
                 metadata["skip_reason"] = "early_stop_enough"
                 step.metadata = metadata
         return {
             "plan": plan.to_dict(),
-            "task_status": status,
+            "tasks": tasks,
             "synthesis_admission": True,
             "replan_exhausted": True,
             "progress": "ready_for_synthesis",
+            "phase": WorkflowPhase.PREPARE_SYNTHESIS.value,
         }
 
     async def node_synthesize(self, state: dict[str, Any]) -> dict[str, Any]:
-        status = dict(state["task_status"])
-        status["t_summary"] = "done"
+        tasks = merge_task_state(state["tasks"], "t_summary", TaskStatus.DONE)
         return {
             "status": "synthesized",
             "progress": "synthesized",
-            "task_status": status,
+            "tasks": tasks,
+            "phase": WorkflowPhase.SYNTHESIS.value,
         }
 
     async def node_replan(self, state: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     async def node_quality_gate(self, state: dict[str, Any]) -> dict[str, Any]:
-        return {"quality_passed": True, "progress": "quality"}
+        return {
+            "quality_passed": True,
+            "progress": "quality",
+            "phase": WorkflowPhase.QUALITY.value,
+        }
 
     async def node_finalize(self, state: dict[str, Any]) -> dict[str, Any]:
         return {
             "status": "completed",
             "final_content": "partial answer",
             "progress": "done",
+            "phase": WorkflowPhase.TERMINATED.value,
         }
 
     async def node_abort(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -141,14 +160,16 @@ async def test_early_stop_graph_converges_through_prepare_synthesis() -> None:
             progress_assessment={"verdict": "enough", "reason": "test"},
             evidence_refs=["external:preexisting"],
         ),
-        config={"recursion_limit": 30},
+        config={"recursion_limit": 20},
     )
 
     assert result["status"] == "completed"
     assert result["progress"] == "done"
     assert result["quality_passed"] is True
-    assert result["task_status"]["t_optional"] == "skipped"
-    assert result["task_status"]["t_summary"] == "done"
+    assert task_status_projection(result["tasks"]) == {
+        "t_optional": "skipped",
+        "t_summary": "done",
+    }
     assert result["synthesis_admission"] is True
 
 
@@ -166,7 +187,9 @@ def test_routers_do_not_mutate_pending_optional_research(
         _plan_with_optional_and_synthesis(),
         progress_assessment={"verdict": "enough", "reason": "test"},
     )
-    state["task_status"]["t_summary"] = "skipped"
+    state["tasks"] = merge_task_state(
+        state["tasks"], "t_summary", TaskStatus.SKIPPED
+    )
 
     assert route_dispatch(state) == "progress"
     assert route_progress(state) == "quality_gate"
@@ -177,10 +200,14 @@ def test_prepare_synthesis_persists_optional_skip_and_admission() -> None:
 
     plan = _plan_with_optional_and_synthesis()
     update = prepare_synthesis_node(
-        _state(plan, evidence_refs=["external:preexisting"])
+        _state(
+            plan,
+            phase=WorkflowPhase.PROGRESS.value,
+            evidence_refs=["external:preexisting"],
+        )
     )
 
-    assert update["task_status"]["t_optional"] == "skipped"
+    assert task_status_projection(update["tasks"])["t_optional"] == "skipped"
     assert update["tasks"]["t_optional"]["status"] == "skipped"
     assert update["synthesis_admission"] is True
     assert "replan_exhausted" not in update
@@ -208,7 +235,7 @@ def test_synthesis_routed_but_not_runnable_fails_closed() -> None:
     )
 
     with pytest.raises(GraphInvariantViolation):
-        synthesize_node(_state(plan))
+        synthesize_node(_state(plan, phase=WorkflowPhase.PREPARE_SYNTHESIS.value))
 
 
 def test_admitted_synthesis_allows_failed_research_dependency() -> None:
@@ -230,11 +257,16 @@ def test_admitted_synthesis_allows_failed_research_dependency() -> None:
             ),
         ]
     )
-    state = _state(plan, synthesis_admission=True, replan_exhausted=True)
+    state = _state(
+        plan,
+        phase=WorkflowPhase.PREPARE_SYNTHESIS.value,
+        synthesis_admission=True,
+        replan_exhausted=True,
+    )
     update = synthesize_node(state)
 
     assert update["status"] == "synthesized"
-    assert update["task_status"]["t_summary"] == "done"
+    assert task_status_projection(update["tasks"])["t_summary"] == "done"
 
 
 @pytest.mark.parametrize("status", ["synthesized", "partial", "completed"])
@@ -310,9 +342,10 @@ def test_stagnant_cycle_guard_forces_synthesis_admission() -> None:
     from app.research.runtime.graph import progress_node
 
     plan = _plan_with_optional_and_synthesis()
-    state = _state(plan)
+    state = _state(plan, phase=WorkflowPhase.EXECUTE.value)
     updates = []
     for _ in range(3):
+        state["phase"] = WorkflowPhase.EXECUTE.value
         update = progress_node(state)
         updates.append(update)
         state.update(update)
