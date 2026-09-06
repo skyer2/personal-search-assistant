@@ -505,7 +505,7 @@ def test_budget_blocked_worker_evidence_reaches_candidate_and_synthesis(monkeypa
     monkeypatch.setattr(worker_module, "LangChainWorkerRuntime", BlockedRuntime)
     runner = runner_module.ResearchGraphRunner.__new__(runner_module.ResearchGraphRunner)
     runner.harness = SimpleNamespace(
-        harness_config=SimpleNamespace(hitl_enabled=False),
+        harness_config=SimpleNamespace(hitl_enabled=False, worker_executor_v2=False),
     )
     update = asyncio.run(
         runner.node_research_worker(

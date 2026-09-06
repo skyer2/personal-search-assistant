@@ -33,6 +33,7 @@ from app.research.runtime import runner as runner_module
 class FakeConfig:
     step_timeout_sec: int = 10
     max_retries: int = 0
+    worker_executor_v2: bool = False
 
 
 class FakeHarness:

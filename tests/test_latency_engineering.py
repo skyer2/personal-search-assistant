@@ -151,7 +151,11 @@ def test_optional_tasks_and_early_skip():
     for s in plan.steps:
         if s.step_type == "research" and s.metadata.get("required"):
             s.metadata["status"] = "done"
-    status = skip_optional_pending(plan, reason="early_stop_enough")
+    runtime_status = {
+        s.resolved_task_id(i): str(s.metadata.get("status") or "pending")
+        for i, s in enumerate(plan.steps)
+    }
+    status = skip_optional_pending(plan, runtime_status, reason="early_stop_enough")
     for s in optional:
         assert status[s.task_id] == "skipped"
     ready = ready_research_steps(plan, status, include_optional=True)

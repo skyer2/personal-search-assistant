@@ -181,11 +181,11 @@ def test_prepare_synthesis_persists_optional_skip_and_admission() -> None:
     )
 
     assert update["task_status"]["t_optional"] == "skipped"
+    assert update["tasks"]["t_optional"]["status"] == "skipped"
     assert update["synthesis_admission"] is True
     assert "replan_exhausted" not in update
     restored = ExecutionPlan.from_dict(update["plan"])
-    assert restored.steps[0].metadata["status"] == "skipped"
-    assert restored.steps[0].metadata["skip_reason"] == "early_stop_enough"
+    assert restored.steps[0].metadata["status"] == "pending"
 
 
 def test_synthesis_routed_but_not_runnable_fails_closed() -> None:

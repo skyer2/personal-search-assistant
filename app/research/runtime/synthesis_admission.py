@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.agent.harness.state import ExecutionPlan, PlanStep
+from app.research.domain.contracts import task_status_projection, tasks_from_status
 from app.research.runtime.scheduler import (
     RETRIEVAL_STEP_TYPES,
     SYNTHESIS_STEP_TYPES,
@@ -191,10 +192,6 @@ def _mark_pending_synthesis_skipped(
         if status.get(task_id, "pending") not in {"pending", "running"}:
             continue
         status[task_id] = "skipped"
-        metadata = dict(step.metadata or {})
-        metadata["status"] = "skipped"
-        metadata["skip_reason"] = reason
-        step.metadata = metadata
     return status
 
 
@@ -209,7 +206,7 @@ def prepare_synthesis_update(
     admission = evaluate_synthesis_admission(
         state,
         plan,
-        dict(state.get("task_status") or {}),
+        task_status_projection(state.get("tasks")) or dict(state.get("task_status") or {}),
         forced=forced,
         deadline=deadline,
         trusted_evidence_count_override=trusted_evidence_count_override,
@@ -219,9 +216,12 @@ def prepare_synthesis_update(
             f"synthesis admission rejected: {admission.reason}"
         )
 
+    runtime_status = task_status_projection(state.get("tasks")) or dict(
+        state.get("task_status") or {}
+    )
     status = skip_optional_pending(
         plan,
-        dict(state.get("task_status") or {}),
+        runtime_status,
         reason=(
             "emergency_synthesis"
             if admission.mode != "normal"
@@ -245,6 +245,7 @@ def prepare_synthesis_update(
 
     common = {
         "plan": plan.to_dict(),
+        "tasks": tasks_from_status(status),
         "task_status": status,
         "synthesis_admission": True,
         "synthesis_mode": admission.mode,
@@ -269,6 +270,7 @@ def prepare_synthesis_update(
         common.update(
             {
                 "plan": plan.to_dict(),
+                "tasks": tasks_from_status(status),
                 "task_status": status,
                 "status": "partial",
                 "final_content": render_no_evidence_partial_report(

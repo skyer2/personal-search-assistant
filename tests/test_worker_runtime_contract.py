@@ -29,6 +29,7 @@ class FakeConfig:
     step_timeout_sec: int = 10
     max_retries: int = 0
     hitl_enabled: bool = False
+    worker_executor_v2: bool = False
 
 
 class FakeHarness:

@@ -14,6 +14,13 @@ from app.research.planning.progress import assess_progress
 from app.research.runtime.scheduler import annotate_plan_tasks, task_status_map
 
 
+def _fixture_task_status(plan):
+    return {
+        step.resolved_task_id(index): str(step.metadata.get("status") or "pending")
+        for index, step in enumerate(plan.steps)
+    }
+
+
 def test_brief_default_chat_and_web():
     intent = understand_task("2026 年 AI 电商趋势有哪些？附来源")
     assert intent.deliverable == "text"
@@ -88,7 +95,7 @@ def test_progress_uses_brief_dimensions_not_hardcoded_revenue():
         )
     assessment = assess_progress(
         plan,
-        task_status=task_status_map(plan),
+        task_status=_fixture_task_status(plan),
         worker_results=rows,
         query=intent.raw_query,
         intent=intent,
@@ -124,7 +131,7 @@ def test_progress_prefer_primary_gap():
         )
     assessment = assess_progress(
         plan,
-        task_status=task_status_map(plan),
+        task_status=_fixture_task_status(plan),
         worker_results=rows,
         query=intent.raw_query,
         intent=intent,

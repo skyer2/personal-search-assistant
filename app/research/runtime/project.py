@@ -1,7 +1,7 @@
-"""Graph → Loop 单向投影。
+"""Graph → legacy execution scratch projection.
 
-ResearchState 是唯一 workflow truth。LoopState 只是进程内 handles：
-领域函数（_phase_*、工人）仍吃 LoopState，但不得反向成为 resume 来源。
+ResearchState 是唯一 workflow truth。LoopState 只是 legacy execution scratch：
+领域函数仍可读取它，但 plan/task runtime 状态不得写回或反向成为 resume 来源。
 """
 
 from __future__ import annotations
@@ -12,18 +12,18 @@ from app.agent.harness.state import ExecutionPlan, LoopState, TaskIntent
 
 
 def apply_graph_to_loop(loop: LoopState, gstate: dict[str, Any]) -> LoopState:
-    """把 Graph 上的 workflow 字段投影到 LoopState，供领域服务读取。"""
+    """Legacy alias kept for old tests and the non-graph fallback."""
+    return sync_legacy_execution_scratch(loop, gstate)
+
+
+def sync_legacy_execution_scratch(loop: LoopState, gstate: dict[str, Any]) -> LoopState:
+    """Project graph-owned inputs to read-only legacy execution scratch."""
     intent = gstate.get("intent")
     if isinstance(intent, dict) and intent:
         loop.intent = TaskIntent.from_dict(intent)
     plan = gstate.get("plan")
     if isinstance(plan, dict) and plan:
         loop.plan = ExecutionPlan.from_dict(plan)
-        status = dict(gstate.get("task_status") or {})
-        for i, step in enumerate(loop.plan.steps):
-            tid = step.resolved_task_id(i)
-            if tid in status:
-                step.metadata["status"] = status[tid]
     if "replan_count" in gstate:
         loop.replan_count = int(gstate.get("replan_count") or 0)
     if isinstance(loop.metadata, dict):

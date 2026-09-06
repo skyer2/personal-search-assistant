@@ -18,9 +18,26 @@ from app.research.runtime.project import brief_from_intent
 from app.research.runtime.scheduler import (
     annotate_plan_tasks,
     next_synthesis_step,
-    ready_research_steps,
 )
 from app.research.runtime.state import ResearchState, empty_research_state
+from app.research.control.policy import (
+    decide_after_quality,
+    decide_dispatch,
+    decide_progress,
+    max_replan_attempts,
+    wave_parallel,
+    workflow_task_status,
+)
+from app.research.domain.contracts import (
+    OutcomeStatus,
+    ProgressDecision,
+    QualityDecision,
+    TaskStatus,
+    WorkflowPhase,
+    initialize_tasks,
+    merge_task_state,
+    task_status_projection,
+)
 
 
 class GraphInvariantViolation(RuntimeError):
@@ -64,6 +81,7 @@ def intent_node(state: ResearchState) -> dict[str, Any]:
         "route_signals": [f"task_shape:{shape.shape.value}"],
         "budget": budget,
         "progress": "intent",
+        "phase": WorkflowPhase.UNDERSTAND.value,
     }
 
 
@@ -76,16 +94,16 @@ def plan_node(state: ResearchState) -> dict[str, Any]:
     intent = TaskIntent.from_dict(raw) if raw else understand_task(state["task_query"])
     plan = annotate_plan_tasks(finalize_plan(build_plan(intent)))
     annotate_candidate_dependencies(plan)
-    status = {
-        step.resolved_task_id(i): str(step.metadata.get("status") or "pending")
-        for i, step in enumerate(plan.steps)
-    }
+    tasks = initialize_tasks(plan)
     return {
         "plan": plan.to_dict(),
         "plan_version": plan.plan_version,
-        "task_status": status,
+        "tasks": tasks,
+        "task_status": task_status_projection(tasks),
         "needs_plan_review": False,
         "progress": "planned",
+        "phase": WorkflowPhase.PLAN.value,
+        "outcome": OutcomeStatus.RUNNING.value,
     }
 
 
@@ -115,41 +133,24 @@ def clarify_node(state: ResearchState) -> dict[str, Any]:
 
     intent = TaskIntent.from_dict(state.get("intent") or {})
     resolved = auto_resolve_clarification(intent)
-    return {"intent": resolved.to_dict(), "needs_clarification": False, "progress": "clarified"}
+    return {
+        "intent": resolved.to_dict(),
+        "needs_clarification": False,
+        "progress": "clarified",
+        "phase": WorkflowPhase.CLARIFY.value,
+    }
 
 
 def plan_validate_node(state: ResearchState) -> dict[str, Any]:
-    return {"needs_plan_review": False, "progress": "plan_validated"}
+    return {
+        "needs_plan_review": False,
+        "progress": "plan_validated",
+        "phase": WorkflowPhase.PLAN_VALIDATED.value,
+    }
 
 
 def dispatch_node(state: ResearchState) -> dict[str, Any]:
-    return {"progress": "dispatch"}
-
-
-def _max_replan(state: ResearchState) -> int:
-    budget = state["budget"]
-    return int(budget.get("max_replan_count") or 3)
-
-
-def _max_replan_attempts(state: ResearchState) -> int:
-    return _max_replan(state)
-
-
-def _wave_parallel(state: ResearchState) -> int:
-    budget = state["budget"]
-    try:
-        n = int(budget.get("max_parallel_workers") or 3)
-    except (TypeError, ValueError):
-        n = 3
-    return max(1, n)
-
-
-def _has_pending_synthesis(plan: ExecutionPlan, status: dict[str, str]) -> bool:
-    return any(
-        step.step_type in {"generate_markdown", "summarize", "convert_pdf"}
-        and status.get(step.resolved_task_id(index), "pending") in {"pending", "running"}
-        for index, step in enumerate(plan.steps)
-    )
+    return {"progress": "dispatch", "phase": WorkflowPhase.DISPATCH.value}
 
 
 def control_fingerprint(
@@ -159,7 +160,9 @@ def control_fingerprint(
 ) -> str:
     payload = {
         "plan_version": int(state.get("plan_version") or 1),
-        "task_status": dict(sorted((state.get("task_status") or {}).items())),
+        "task_status": dict(
+            sorted(workflow_task_status(cast(dict[str, Any], state)).items())
+        ),
         "progress_verdict": str(assessment.get("verdict") or ""),
         "progress_reason": str(assessment.get("reason") or ""),
         "replan_count": int(state.get("replan_count") or 0),
@@ -177,7 +180,9 @@ def control_plane_fingerprint(state: dict[str, Any]) -> str:
     assessment = dict(state.get("progress_assessment") or {})
     payload = {
         "plan_version": int(state.get("plan_version") or 1),
-        "task_status": dict(sorted((state.get("task_status") or {}).items())),
+        "task_status": dict(
+            sorted(workflow_task_status(cast(dict[str, Any], state)).items())
+        ),
         "open_gap_ids": [str(x) for x in assessment.get("open_gap_ids") or []],
         "replan_exhausted": bool(state.get("replan_exhausted")),
         "replan_attempts": int(state.get("replan_attempts") or 0),
@@ -194,14 +199,17 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
 
     from app.research.runtime.scheduler import select_dispatch_wave
 
-    if state.get("status") == "aborted" or state.get("abort_reason"):
+    control = decide_dispatch(cast(dict[str, Any], state))
+    if control == "abort":
         return "abort"
-    if state.get("status") in {"synthesized", "partial", "completed"}:
+    if control == "quality_gate":
         return "quality_gate"
+    if control == "finalize":
+        return "finalize"
     plan = _plan_from_state(state)
     if plan is None:
         return "finalize"
-    status = dict(state.get("task_status") or {})
+    status = workflow_task_status(cast(dict[str, Any], state))
     from app.research.planning.candidate import candidate_artifact_status
 
     status.update(candidate_artifact_status(state.get("candidate_set")))
@@ -218,7 +226,7 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
         plan,
         status,
         include_optional=False,
-        max_parallel=_wave_parallel(state),
+        max_parallel=wave_parallel(cast(dict[str, Any], state)),
     )
     if ready:
         sends: list[Any] = []
@@ -266,11 +274,11 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
     candidate_set = build_candidate_set(
         plan,
         worker_rows=worker_rows,
-        task_status=dict(state.get("task_status") or {}),
+        task_status=workflow_task_status(cast(dict[str, Any], state)),
         query=str(state.get("resolved_query") or state.get("task_query") or ""),
         brief=state.get("brief"),
     )
-    progress_status = dict(state.get("task_status") or {})
+    progress_status = workflow_task_status(cast(dict[str, Any], state))
     progress_status.update(candidate_artifact_status(candidate_set))
     assessment = assess_progress(
         plan,
@@ -298,6 +306,7 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
         "progress_assessment": assessment.to_dict(),
         "candidate_set": candidate_set,
         "progress": "progress_eval",
+        "phase": WorkflowPhase.PROGRESS.value,
         "control_fingerprint": fingerprint,
         "stagnant_cycles": stagnant_cycles,
         "abort_reason": state.get("abort_reason")
@@ -331,68 +340,19 @@ def prepare_synthesis_node(state: ResearchState) -> dict[str, Any]:
 
 
 def route_progress(state: ResearchState) -> str:
-    from app.research.planning.candidate import candidate_artifact_status
-    from app.research.runtime.synthesis_admission import (
-        evaluate_synthesis_admission,
-    )
-
-    if state.get("status") == "aborted" or state.get("abort_reason"):
+    decision = decide_progress(cast(dict[str, Any], state))
+    if decision is ProgressDecision.ABORT:
         return "abort"
-    if state.get("status") in {"synthesized", "partial", "completed"}:
+    if decision is ProgressDecision.QUALITY:
         return "quality_gate"
-    assessment = dict(state.get("progress_assessment") or {})
-    verdict = str(assessment.get("verdict") or "enough")
-    plan = _plan_from_state(state)
-    status = dict(state.get("task_status") or {})
-    status.update(candidate_artifact_status(state.get("candidate_set")))
-    replan_attempts = int(state.get("replan_attempts") or 0)
-    exhausted = bool(state.get("replan_exhausted"))
-    control_no_progress = bool(state.get("control_no_progress"))
-    force_synth = str(assessment.get("reason") or "") == "force_synthesis_budget"
-    if verdict == "abort":
-        return "abort"
-    if force_synth or exhausted or verdict == "enough":
-        admission = evaluate_synthesis_admission(
-            cast(dict[str, Any], state),
-            plan,
-            status,
-            forced=force_synth,
-        ) if plan is not None else None
-        if plan is not None and _has_pending_synthesis(plan, status):
-            if admission is not None and admission.allowed:
-                return "prepare_synthesis"
-            if ready_research_steps(plan, status, include_optional=False):
-                return "dispatch"
-            if (
-                not exhausted
-                and not control_no_progress
-                and verdict == "gap"
-                and replan_attempts < _max_replan_attempts(state)
-            ):
-                return "replan"
-        return "quality_gate"
-    if verdict == "run" and plan is not None and ready_research_steps(
-        plan, status, include_optional=False
-    ):
-        return "dispatch"
-    can_replan = (
-        verdict == "gap"
-        and not exhausted
-        and not control_no_progress
-        and not force_synth
-        and replan_attempts < _max_replan_attempts(state)
-    )
-    if can_replan:
+    if decision is ProgressDecision.REPLAN:
         return "replan"
-    if plan is not None and _has_pending_synthesis(plan, status):
-        admission = evaluate_synthesis_admission(
-            cast(dict[str, Any], state),
-            plan,
-            status,
-        )
-        if admission.allowed:
-            return "prepare_synthesis"
-    return "quality_gate"
+    if decision is ProgressDecision.PREPARE_SYNTHESIS:
+        return "prepare_synthesis"
+    if decision is ProgressDecision.DISPATCH:
+        return "dispatch"
+
+    raise GraphInvariantViolation(f"unhandled progress decision: {decision}")
 
 
 def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -414,6 +374,7 @@ def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
     findings, _rejected = normalize_findings(
         [finding], task_id=task_id, subject_id="general", dimension="general"
     )
+    tasks = merge_task_state({}, task_id, TaskStatus.DONE)
     return {
         "worker_results": [
             {
@@ -423,7 +384,8 @@ def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
                 "payload": {"summary": "placeholder", "facts": [], "sources": [], "findings": [finding]},
             }
         ],
-        "task_status": {task_id: "done"},
+        "tasks": tasks,
+        "task_status": task_status_projection(tasks),
         "evidence_refs": [task_id] if task_id else [],
         "findings": findings,
     }
@@ -435,7 +397,7 @@ def synthesize_node(state: ResearchState) -> dict[str, Any]:
     )
 
     plan = _plan_from_state(state)
-    status = dict(state.get("task_status") or {})
+    status = workflow_task_status(cast(dict[str, Any], state))
     if plan is None:
         raise GraphInvariantViolation("synthesize routed without a plan")
     assessment = dict(state.get("progress_assessment") or {})
@@ -455,6 +417,10 @@ def synthesize_node(state: ResearchState) -> dict[str, Any]:
     ):
         return {
             "status": "partial",
+            "outcome": OutcomeStatus.PARTIAL.value,
+            "phase": WorkflowPhase.SYNTHESIS.value,
+            "tasks": dict(state.get("tasks") or {}),
+            "task_status": status,
             "progress": "no_evidence_partial",
             "synthesis_mode": "no_evidence_partial",
             "synthesis_admission_reason": admission.reason,
@@ -478,14 +444,29 @@ def synthesize_node(state: ResearchState) -> dict[str, Any]:
             status.get(task_id) in {"done", "failed", "skipped"}
             for task_id in synthesis_steps
         ):
-            return {"status": "synthesized", "progress": "synthesized"}
+            return {
+                "status": "synthesized",
+                "outcome": OutcomeStatus.RUNNING.value,
+                "phase": WorkflowPhase.SYNTHESIS.value,
+                "tasks": dict(state.get("tasks") or {}),
+                "task_status": status,
+                "progress": "synthesized",
+            }
         raise GraphInvariantViolation(
             "synthesize routed but no synthesis step is runnable"
         )
     index, step = nxt
     tid = step.resolved_task_id(index)
     status[tid] = "done"
-    return {"task_status": status, "status": "synthesized", "progress": "synthesized"}
+    tasks = merge_task_state(state.get("tasks"), tid, TaskStatus.DONE)
+    return {
+        "tasks": tasks,
+        "task_status": status,
+        "status": "synthesized",
+        "outcome": OutcomeStatus.RUNNING.value,
+        "progress": "synthesized",
+        "phase": WorkflowPhase.SYNTHESIS.value,
+    }
 
 
 def replan_node(state: ResearchState) -> dict[str, Any]:
@@ -495,27 +476,19 @@ def replan_node(state: ResearchState) -> dict[str, Any]:
         "replan_attempts": attempts,
         "replan_applied_count": applied,
         "replan_count": applied,
-        "replan_exhausted": attempts >= _max_replan_attempts(state),
+        "replan_exhausted": attempts
+        >= max_replan_attempts(cast(dict[str, Any], state)),
         "progress": "run",
+        "phase": WorkflowPhase.REPLAN.value,
     }
 
 
 def route_after_quality(state: ResearchState) -> str:
-    if state.get("quality_passed", True):
-        return "finalize"
-    if state.get("replan_exhausted") or state.get("control_no_progress"):
-        return "finalize"
-    action = str(state.get("quality_repair_action") or "partial")
-    attempts = int(state.get("quality_attempts") or 0)
-    if action == "repair" and attempts <= 1:
+    decision = decide_after_quality(cast(dict[str, Any], state))
+    if decision is QualityDecision.REPAIR_SYNTHESIS:
         return "repair_synthesis"
-    if action == "replan":
-        if int(state.get("replan_attempts") or 0) >= _max_replan_attempts(state):
-            return "finalize"
-        replan_count = int(state.get("replan_count") or 0)
-        max_replan = _max_replan(state)
-        if replan_count < max_replan:
-            return "replan"
+    if decision is QualityDecision.REPLAN:
+        return "replan"
     return "finalize"
 
 
@@ -527,22 +500,29 @@ def quality_gate_node(state: ResearchState) -> dict[str, Any]:
         "quality_repair_action": "",
         "quality_attempts": int(state.get("quality_attempts") or 0),
         "progress": "quality",
+        "phase": WorkflowPhase.QUALITY.value,
     }
 
 
 def repair_synthesis_node(state: ResearchState) -> dict[str, Any]:
     plan = _plan_from_state(state)
     if plan is None:
-        return {"progress": "repair_synthesis"}
-    status = dict(state.get("task_status") or {})
+        return {"progress": "repair_synthesis", "phase": WorkflowPhase.REPAIR_SYNTHESIS.value}
+    tasks = dict(state.get("tasks") or {})
+    status = task_status_projection(tasks)
     for index, step in enumerate(plan.steps):
         if step.step_type in {"generate_markdown", "summarize", "convert_pdf"}:
-            status[step.resolved_task_id(index)] = "pending"
+            task_id = step.resolved_task_id(index)
+            tasks = merge_task_state(tasks, task_id, TaskStatus.PENDING)
+            status[task_id] = TaskStatus.PENDING.value
     return {
+        "tasks": tasks,
         "task_status": status,
         "status": "running",
+        "outcome": OutcomeStatus.RUNNING.value,
         "final_content": "",
         "progress": "repair_synthesis",
+        "phase": WorkflowPhase.REPAIR_SYNTHESIS.value,
     }
 
 
@@ -552,6 +532,16 @@ def finalize_node(state: ResearchState) -> dict[str, Any]:
         status = "completed"
     return {
         "status": status,
+        "outcome": status,
+        "phase": WorkflowPhase.TERMINATED.value,
+        "termination": {
+            "outcome": status,
+            "reason": state.get("abort_reason") or "completed",
+            "stage": "finalize",
+            "detected_stage": "finalize",
+            "research_completed": bool(state.get("trusted_evidence_count")),
+            "synthesis_attempted": bool(state.get("final_content")),
+        },
         "final_content": state.get("final_content") or "",
         "progress": "done",
     }
@@ -560,6 +550,16 @@ def finalize_node(state: ResearchState) -> dict[str, Any]:
 def abort_node(state: ResearchState) -> dict[str, Any]:
     return {
         "status": "aborted",
+        "outcome": OutcomeStatus.ABORTED.value,
+        "phase": WorkflowPhase.TERMINATED.value,
+        "termination": {
+            "outcome": OutcomeStatus.ABORTED.value,
+            "reason": state.get("abort_reason") or "aborted",
+            "stage": "abort",
+            "detected_stage": "abort",
+            "research_completed": False,
+            "synthesis_attempted": False,
+        },
         "abort_reason": state.get("abort_reason") or "aborted",
         "progress": "abort",
     }

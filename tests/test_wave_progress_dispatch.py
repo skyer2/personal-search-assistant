@@ -26,6 +26,13 @@ from app.research.runtime.scheduler import (
 from app.research.runtime.state import empty_research_state
 
 
+def _fixture_task_status(plan):
+    return {
+        step.resolved_task_id(index): str(step.metadata.get("status") or "pending")
+        for index, step in enumerate(plan.steps)
+    }
+
+
 def _ai_coding_plan() -> ExecutionPlan:
     intent = TaskIntent(
         raw_query="AI coding 能不能彻底解决编程？",
@@ -124,7 +131,7 @@ def test_first_dispatch_is_p0_wave_capped():
     plan = _ai_coding_plan()
     state = empty_research_state(run_id="r1", session_id="s1", task_query="q")
     state["plan"] = plan.to_dict()
-    state["task_status"] = task_status_map(plan)
+    state["task_status"] = _fixture_task_status(plan)
     state["budget"]["max_parallel_workers"] = 3
     routed = route_dispatch(state)
     assert isinstance(routed, list)
@@ -160,7 +167,7 @@ def test_progress_ignores_pending_optional():
         )
     assessment = assess_progress(
         plan,
-        task_status=task_status_map(plan),
+        task_status=_fixture_task_status(plan),
         worker_results=rows,
         query="AI coding",
         current_year=2026,
@@ -177,7 +184,7 @@ def test_route_progress_enough_prepares_synthesis_not_optional_dispatch():
             step.metadata["status"] = "done"
     state = empty_research_state(run_id="r2", session_id="s2", task_query="q")
     state["plan"] = plan.to_dict()
-    state["task_status"] = task_status_map(plan)
+    state["task_status"] = _fixture_task_status(plan)
     state["progress_assessment"] = {"verdict": "enough", "reason": "coverage_ok"}
     assert route_progress(state) == "quality_gate"
     state["evidence_refs"] = ["external:preexisting"]

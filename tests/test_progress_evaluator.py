@@ -26,7 +26,10 @@ def _dynamic_plan():
 
 
 def _done_status(plan):
-    return task_status_map(plan)
+    return {
+        step.resolved_task_id(index): str(step.metadata.get("status") or "pending")
+        for index, step in enumerate(plan.steps)
+    }
 
 
 def test_empty_and_gap_signals_block_synthesis():

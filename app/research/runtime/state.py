@@ -10,6 +10,10 @@ import operator
 from typing import Annotated, Any, NotRequired, TypedDict
 
 from app.research.runtime.reducers import merge_dicts
+from app.research.domain.contracts import (
+    OutcomeStatus,
+    WorkflowPhase,
+)
 
 
 class BudgetState(TypedDict):
@@ -40,6 +44,7 @@ class ResearchState(TypedDict):
     plan: dict[str, Any] | None
     plan_version: int
 
+    tasks: Annotated[dict[str, dict[str, Any]], merge_dicts]
     task_status: Annotated[dict[str, str], merge_dicts]
 
     worker_results: Annotated[list[dict[str, Any]], operator.add]
@@ -55,8 +60,11 @@ class ResearchState(TypedDict):
     final_ref: str | None
     final_content: str
     artifacts: list[str]
+    phase: str
+    outcome: str
     status: str
     abort_reason: str
+    termination: dict[str, Any] | None
 
     needs_clarification: bool
     needs_plan_review: bool
@@ -125,6 +133,7 @@ def empty_research_state(
         "intent": None,
         "plan": None,
         "plan_version": 1,
+        "tasks": {},
         "task_status": {},
         "worker_results": [],
         "findings": [],
@@ -143,8 +152,11 @@ def empty_research_state(
         "final_ref": None,
         "final_content": "",
         "artifacts": [],
+        "phase": WorkflowPhase.BOOTSTRAP.value,
+        "outcome": OutcomeStatus.RUNNING.value,
         "status": "running",
         "abort_reason": "",
+        "termination": None,
         "needs_clarification": False,
         "needs_plan_review": False,
         "progress": "run",

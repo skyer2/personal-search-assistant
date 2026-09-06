@@ -166,6 +166,8 @@ class HarnessConfig:
     require_structured_worker_output: bool = True
     synthesis_use_evidence_digest: bool = True
     direct_worker_invoke: bool = True
+    worker_executor_v2: bool = True
+    synthesis_step_timeout_sec: int = 240
     persist_loop_state: bool = False
     graph_runtime_enabled: bool = True
     progress_eval_enabled: bool = True
@@ -657,6 +659,16 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         direct_worker_invoke=_env_bool(
             "HARNESS_DIRECT_WORKER_INVOKE",
             bool(orch.get("direct_worker_invoke", True)),
+        ),
+        worker_executor_v2=_env_bool(
+            "WORKER_EXECUTOR_V2",
+            bool(orch.get("worker_executor_v2", True)),
+        ),
+        synthesis_step_timeout_sec=int(
+            os.getenv(
+                "HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC",
+                orch.get("synthesis_step_timeout_sec", 240),
+            )
         ),
         persist_loop_state=_env_bool(
             "HARNESS_PERSIST_LOOP_STATE",

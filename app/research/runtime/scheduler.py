@@ -16,6 +16,7 @@ from typing import Any, Iterable
 
 from app.agent.harness.orchestration import RETRIEVAL_STEP_TYPES, SYNTHESIS_STEP_TYPES
 from app.agent.harness.state import ExecutionPlan, PlanStep
+from app.research.domain.contracts import initialize_tasks, task_status_projection
 from app.research.planning.priority import stamp_semantic_priority
 
 TERMINAL_STATUS = frozenset({"done", "failed", "skipped"})
@@ -77,11 +78,12 @@ def annotate_plan_tasks(plan: ExecutionPlan, intent: Any | None = None) -> Execu
 
 
 def task_status_map(plan: ExecutionPlan) -> dict[str, str]:
-    status: dict[str, str] = {}
-    for index, step in enumerate(plan.steps):
-        tid = step.resolved_task_id(index)
-        status[tid] = str(step.metadata.get("status") or "pending")
-    return status
+    """Project immutable plan tasks to their initial runtime state.
+
+    Runtime status is not stored on the plan. Callers pass the current
+    ``ResearchState["tasks"]`` projection into the scheduling functions.
+    """
+    return task_status_projection(initialize_tasks(plan))
 
 
 def _deps_satisfied(
@@ -183,7 +185,7 @@ def skip_optional_pending(
     *,
     reason: str = "early_stop_enough",
 ) -> dict[str, str]:
-    """把尚未开始的 optional research 标为 skipped；返回更新后的 status map。"""
+    """Mark pending optional research skipped without mutating the immutable plan."""
     status = dict(status or task_status_map(plan))
     for index, step in enumerate(plan.steps):
         if step.step_type not in RETRIEVAL_STEP_TYPES:
@@ -195,9 +197,6 @@ def skip_optional_pending(
         if status.get(tid, "pending") != "pending":
             continue
         status[tid] = "skipped"
-        meta["status"] = "skipped"
-        meta["skip_reason"] = reason
-        step.metadata = meta
     return status
 
 
@@ -209,7 +208,7 @@ def skip_pending_research(
     include_required: bool = False,
     include_running: bool = False,
 ) -> dict[str, str]:
-    """Skip pending optional (and optionally remaining required) so synthesis can start."""
+    """Skip pending optional/remaining tasks without mutating the immutable plan."""
     status = skip_optional_pending(plan, status, reason=reason)
     if not include_required:
         return status
@@ -220,13 +219,7 @@ def skip_pending_research(
         current = status.get(tid, "pending")
         if current != "pending" and not (include_running and current == "running"):
             continue
-        meta = step.metadata if isinstance(step.metadata, dict) else {}
         status[tid] = "skipped"
-        meta["status"] = "skipped"
-        meta["skip_reason"] = reason
-        if current == "running":
-            meta["cancelled_by_deadline"] = True
-        step.metadata = meta
     return status
 
 
