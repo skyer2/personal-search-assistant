@@ -36,6 +36,19 @@ class RunJournal:
 _TREE_OMIT_TYPES = {"llm_usage", "gen_ai.chat"}
 
 
+def expected_span_count(events: list[dict[str, Any]]) -> int:
+    """Count span identities that the causal tree is required to project."""
+    return len(
+        {
+            str(event.get("span_id") or event.get("event_id") or "")
+            for event in events
+            if str(event.get("type") or event.get("event") or "")
+            not in _TREE_OMIT_TYPES
+            and str(event.get("span_id") or event.get("event_id") or "").strip()
+        }
+    )
+
+
 def build_span_tree(events: list[dict[str, Any]]) -> dict[str, Any]:
     """把扁平 event 列表收成 span 因果树，供 TraceViewer 使用。
 

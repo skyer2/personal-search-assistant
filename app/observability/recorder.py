@@ -152,10 +152,23 @@ class AgentTelemetry:
     ) -> None:
         ctx = current_context()
         event_type = EventType.RUN_COMPLETED if status in {"success", "partial", "ok"} else EventType.RUN_FAILED
+        raw_termination = (metadata or {}).get("termination")
+        termination = (
+            dict(raw_termination)
+            if isinstance(raw_termination, dict)
+            else {}
+        )
+        termination_fields = {
+            "termination": termination,
+            "termination_status": termination.get("status"),
+            "termination_reason": termination.get("reason"),
+            "termination_stage": termination.get("stage"),
+        }
         attributes = {
             "metadata": metadata or {},
             "result_preview": result_preview[:240],
             "error": error,
+            **termination_fields,
         }
         origin_stage = str((metadata or {}).get("failure.origin_stage") or "")
         detected_stage = str(
@@ -180,6 +193,7 @@ class AgentTelemetry:
             attributes={
                 "event": "run_summary",
                 "metadata": metadata or {},
+                **termination_fields,
                 **(
                     {
                         "failure.origin_stage": origin_stage,

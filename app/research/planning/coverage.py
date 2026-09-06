@@ -100,6 +100,7 @@ def build_coverage_matrix(
         payload = _payload(row)
         explicit_dimensions = bool((getattr(step, "metadata", None) or {}).get("coverage_keys"))
         findings = [item for item in (payload.get("findings") or []) if isinstance(item, dict)]
+        facts = [str(x) for x in (payload.get("facts") or []) if str(x).strip()]
         evidence_ids = [str(x) for x in (payload.get("evidence_ids") or []) if str(x).strip()]
         sources = [str(x) for x in (payload.get("sources") or []) if str(x).strip()]
         try:
@@ -115,10 +116,10 @@ def build_coverage_matrix(
                 seen.add(key)
                 cell_findings = [
                     finding
-                    for finding in findings
+                    for finding in findings + [{"summary": fact} for fact in facts]
                     if _dimension_matches(finding, dimension)
                 ]
-                if cell_findings and evidence_ids:
+                if cell_findings and (evidence_ids or sources):
                     status = "covered"
                 elif cell_findings or (
                     not explicit_dimensions and (sources or evidence_ids)

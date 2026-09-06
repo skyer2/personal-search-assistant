@@ -216,16 +216,18 @@ def load_lineage_projection(session_id: str, *, run_id: str) -> list[dict[str, A
 
 
 def load_tree_projection(session_id: str, *, run_id: str) -> dict[str, Any]:
+    from app.observability.journal import expected_span_count
     from app.observability.projection_store import get_projection_store
 
     store = get_projection_store()
     events = load_events(session_id, run_id=run_id)
     records = [event.to_jsonl_record() for event in events]
     cached = store.get_projection(run_id, "tree")
+    expected_spans = expected_span_count(records)
     if (
         cached is not None
         and _projection_event_count(cached) == len(records)
-        and (not records or int(cached.get("span_count") or 0) > 0)
+        and int(cached.get("span_count") or 0) == expected_spans
     ):
         return cached
     tree = build_span_tree(records)

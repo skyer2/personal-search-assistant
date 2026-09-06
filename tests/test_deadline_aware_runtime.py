@@ -327,6 +327,7 @@ def test_emergency_synthesis_uses_minimal_evidence_pack_fast_path():
                 {
                     "run_id": session.run_id,
                     "task_status": {"t_research": "done", "t_summary": "pending"},
+                    "evidence_refs": ["art-web-1"],
                     "findings": [
                         {"task_id": "t_research", "summary": "partial evidence summary"}
                     ],
@@ -347,6 +348,52 @@ def test_emergency_synthesis_uses_minimal_evidence_pack_fast_path():
         "synthesis_status": "partial_fast_path",
         "quality_attempted": False,
     }
+
+
+def test_emergency_zero_evidence_skips_llm_and_returns_partial():
+    class NoLLMHarness(FakeHarness):
+        async def _run_single_step(self, *args: Any, **kwargs: Any) -> bool:
+            raise AssertionError("zero-evidence emergency synthesis must not call LLM")
+
+    state = LoopState(session_id="s_emergency_no_evidence")
+    state.intent = understand_task("研究国内 AI 初创公司")
+    state.plan = ExecutionPlan(
+        steps=[
+            PlanStep(
+                step_type="research",
+                task_id="t_research",
+                description="research",
+                metadata={"status": StepStatus.PENDING.value},
+            ),
+            PlanStep(
+                step_type="summarize",
+                task_id="t_summary",
+                description="summarize",
+                depends_on=["t_research"],
+            ),
+        ],
+        summary="emergency no evidence",
+    )
+    harness = NoLLMHarness()
+    session = FakeSession(state, harness=harness, budget=FakeBudget(remaining_run_sec=1.0))
+    runner_module.bind_session(session)
+    try:
+        graph_runner = runner_module.ResearchGraphRunner(harness)
+        projected = asyncio.run(
+            graph_runner.node_synthesize(
+                {
+                    "run_id": session.run_id,
+                    "task_status": {"t_research": "pending", "t_summary": "pending"},
+                }
+            )
+        )
+    finally:
+        runner_module.drop_session(session.run_id)
+
+    assert projected["status"] == "partial"
+    assert projected["progress"] == "no_evidence_partial"
+    assert projected["synthesis_mode"] == "no_evidence_partial"
+    assert projected["trusted_evidence_count"] == 0
 
 
 def test_minimal_evidence_pack_builds_under_emergency_budget():
@@ -404,6 +451,7 @@ def test_emergency_context_budget_timeout_degrades_to_fallback_pack(monkeypatch)
                 {
                     "run_id": session.run_id,
                     "task_status": {"t_research": "done", "t_summary": "pending"},
+                    "evidence_refs": ["art-web-1"],
                     "findings": [
                         {"task_id": "t_research", "summary": "fallback evidence"}
                     ],

@@ -13,6 +13,14 @@ export function RunProgress({ durationLabel, progress, runStatus }: RunProgressP
   const paused = runStatus === "awaiting_approval";
   const cancelling = runStatus === "cancelling";
   const live = runStatus === "running";
+  const executePhase = progress.items.find((item) => item.phase === "execute");
+  const researchSkipped =
+    !executePhase ||
+    executePhase.tone === "idle" ||
+    ["skipped", "not_started"].includes(executePhase.status);
+  const qualityFailed =
+    progress.items.some((item) => item.phase === "validate" && item.tone === "failed") ||
+    progress.hasFailed;
 
   const title = paused
     ? "已暂停 · 等待人工审批"
@@ -33,7 +41,14 @@ export function RunProgress({ durationLabel, progress, runStatus }: RunProgressP
     : runStatus === "completed"
       ? "全部阶段已完成"
       : runStatus === "partial"
-        ? `未达到完整交付标准 · ${progress.stepHint || "research_budget_exhausted"}`
+        ? [
+            "未达到完整交付标准",
+            qualityFailed ? "Quality Failed" : "",
+            researchSkipped ? "Research Skipped / 未执行" : "",
+            progress.stepHint || "",
+          ]
+            .filter(Boolean)
+            .join(" · ")
       : progress.stepHint
         ? `${progress.currentLabel} · ${progress.stepHint}`
         : progress.currentLabel;

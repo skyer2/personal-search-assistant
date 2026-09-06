@@ -68,6 +68,57 @@ class ProgressAssessment:
     execution_blocked_tasks: list[str] = field(default_factory=list)
     execution_failure_reasons: list[str] = field(default_factory=list)
 
+    def sync_gap_views(self) -> None:
+        """Keep legacy views derived from the canonical gaps list."""
+        coverage_descriptions: list[str] = []
+        seen_coverage_descriptions: set[str] = set()
+        for item in self.gaps:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "") not in {"coverage", "coverage_gap"}:
+                continue
+            description = str(item.get("description") or "").strip()
+            if not description or description in seen_coverage_descriptions:
+                continue
+            coverage_descriptions.append(description)
+            seen_coverage_descriptions.add(description)
+        for item in self.coverage_gaps:
+            description = str(item).strip()
+            if description and description not in seen_coverage_descriptions:
+                coverage_descriptions.append(description)
+                seen_coverage_descriptions.add(description)
+        self.coverage_gaps = coverage_descriptions
+
+        missing_dimensions: list[str] = []
+        seen_missing_dimensions: set[str] = set()
+        for item in self.gaps:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "") not in {"coverage_gap", "missing_dimension"}:
+                continue
+            dimension = str(item.get("dimension") or "").strip()
+            if not dimension or dimension in seen_missing_dimensions:
+                continue
+            missing_dimensions.append(dimension)
+            seen_missing_dimensions.add(dimension)
+        for item in self.missing_dimensions:
+            dimension = str(item).strip()
+            if dimension and dimension not in seen_missing_dimensions:
+                missing_dimensions.append(dimension)
+                seen_missing_dimensions.add(dimension)
+        self.missing_dimensions = missing_dimensions
+
+    def blocking_gaps(self) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in self.gaps
+            if isinstance(item, dict)
+            and item.get("blocking", item.get("actionable", True)) is not False
+            and item.get("actionable", True) is not False
+            and str(item.get("severity") or "high")
+            in {"high", "medium", "blocking", "important"}
+        ]
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -130,14 +181,37 @@ class ProgressAssessment:
 
         if not self.gaps:
             self.gaps = materialize_gap_items(
-                coverage_gaps=self.coverage_gaps
-                + [f"criteria:{c}" for c in self.unmet_success_criteria]
-                + [f"constraint:{c}" for c in self.unmet_constraints],
+                coverage_gaps=self.coverage_gaps,
                 missing_dimensions=self.missing_dimensions,
                 conflicts=self.unresolved_conflicts,
                 expected_disagreements=self.expected_disagreements,
                 stale_evidence=self.stale_evidence,
             )
+            existing_gap_ids = {
+                str(item.get("gap_id") or "") for item in self.gaps
+            }
+            advisory_contracts = (
+                ("criteria", self.unmet_success_criteria),
+                ("constraint", self.unmet_constraints),
+            )
+            for gap_type, contracts in advisory_contracts:
+                for contract in contracts:
+                    description = f"{gap_type}:{contract}"[:240]
+                    gap_id = stable_gap_id(gap_type, description)
+                    if gap_id in existing_gap_ids:
+                        continue
+                    self.gaps.append(
+                        {
+                            "gap_id": gap_id,
+                            "type": gap_type,
+                            "dimension": description,
+                            "severity": "advisory",
+                            "description": description,
+                            "blocking": False,
+                            "actionable": False,
+                        }
+                    )
+                    existing_gap_ids.add(gap_id)
         for item in self.gaps:
             if not item.get("gap_id"):
                 item["gap_id"] = stable_gap_id(
@@ -148,12 +222,15 @@ class ProgressAssessment:
         # only blocking/important gaps may trigger another research wave.
         actionable_types = {
             "coverage",
+            "coverage_gap",
             "missing_dimension",
             "unresolved_conflict",
             "conflict",
             "stale",
             "criteria",
             "constraint",
+            "execution_failure",
+            "execution_blocker",
         }
         self.open_gap_ids = [
             str(item.get("gap_id") or "")
@@ -166,6 +243,7 @@ class ProgressAssessment:
         prev = {str(x) for x in (previous_gap_ids or []) if x}
         curr = set(self.open_gap_ids)
         self.resolved_gap_ids = sorted(prev - curr)
+        self.sync_gap_views()
         if not self.progress_id:
             self.progress_id = f"progress_{new_id(8)}"
         return self
@@ -246,6 +324,7 @@ def assess_progress(
     reconciliation: Any | None = None,
 ) -> ProgressAssessment:
     def _finalize(assessment: ProgressAssessment) -> ProgressAssessment:
+        assessment.sync_gap_views()
         return assessment.materialize_gaps(previous_gap_ids=previous_gap_ids)
 
     if aborted or (state is not None and state.abort_reason):
@@ -391,11 +470,15 @@ def assess_progress(
                 # expected_disagreements 保留，供 Synthesis 解释；不因它们清掉 conflicts 列表
 
     if not enabled:
-        assessment.verdict = "enough" if not failed_research else "gap"
+        assessment.sync_gap_views()
+        assessment.verdict = (
+            "gap" if failed_research or assessment.blocking_gaps() else "enough"
+        )
         assessment.reason = "progress_eval_disabled"
         return _finalize(assessment)
 
-    if assessment.coverage_gaps or assessment.unresolved_conflicts:
+    assessment.sync_gap_views()
+    if assessment.blocking_gaps() or assessment.unresolved_conflicts:
         assessment.verdict = "gap"
     elif mode == "dynamic" and (
         assessment.missing_dimensions

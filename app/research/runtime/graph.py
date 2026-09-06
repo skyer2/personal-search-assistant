@@ -295,42 +295,27 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
 
 
 def prepare_synthesis_node(state: ResearchState) -> dict[str, Any]:
-    from app.research.runtime.scheduler import (
-        next_synthesis_step,
-        skip_optional_pending,
-        skip_pending_research,
-    )
+    from app.research.runtime.synthesis_admission import prepare_synthesis_update
 
     plan = _plan_from_state(state)
     if plan is None:
         raise GraphInvariantViolation("prepare_synthesis routed without a plan")
-    status = skip_optional_pending(
-        plan,
-        dict(state.get("task_status") or {}),
-        reason="early_stop_enough",
-    )
-    if next_synthesis_step(plan, status, allow_failed_deps=True) is None:
-        status = skip_pending_research(
+    assessment = dict(state.get("progress_assessment") or {})
+    try:
+        return prepare_synthesis_update(
+            cast(dict[str, Any], state),
             plan,
-            status,
-            reason="early_stop_synthesis",
-            include_required=True,
-            include_running=True,
+            forced=str(assessment.get("reason") or "") == "force_synthesis_budget",
         )
-    if next_synthesis_step(plan, status, allow_failed_deps=True) is None:
-        raise GraphInvariantViolation("prepare_synthesis cannot make synthesis runnable")
-    return {
-        "plan": plan.to_dict(),
-        "task_status": status,
-        "synthesis_admission": True,
-        "replan_exhausted": True,
-        "status": state.get("status") or "running",
-        "progress": "ready_for_synthesis",
-    }
+    except ValueError as exc:
+        raise GraphInvariantViolation(str(exc)) from exc
 
 
 def route_progress(state: ResearchState) -> str:
     from app.research.planning.candidate import candidate_artifact_status
+    from app.research.runtime.synthesis_admission import (
+        evaluate_synthesis_admission,
+    )
 
     if state.get("status") == "aborted" or state.get("abort_reason"):
         return "abort"
@@ -347,8 +332,19 @@ def route_progress(state: ResearchState) -> str:
     if verdict == "abort":
         return "abort"
     if force_synth or exhausted or verdict == "enough":
+        admission = evaluate_synthesis_admission(
+            cast(dict[str, Any], state),
+            plan,
+            status,
+            forced=force_synth,
+        ) if plan is not None else None
         if plan is not None and _has_pending_synthesis(plan, status):
-            return "prepare_synthesis"
+            if admission is not None and admission.allowed:
+                return "prepare_synthesis"
+            if ready_research_steps(plan, status, include_optional=False):
+                return "dispatch"
+            if not exhausted and verdict == "gap" and replan_count < _max_replan(state):
+                return "replan"
         return "quality_gate"
     if verdict == "run" and plan is not None and ready_research_steps(
         plan, status, include_optional=False
@@ -363,7 +359,13 @@ def route_progress(state: ResearchState) -> str:
     if can_replan:
         return "replan"
     if plan is not None and _has_pending_synthesis(plan, status):
-        return "prepare_synthesis"
+        admission = evaluate_synthesis_admission(
+            cast(dict[str, Any], state),
+            plan,
+            status,
+        )
+        if admission.allowed:
+            return "prepare_synthesis"
     return "quality_gate"
 
 
@@ -397,17 +399,38 @@ def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def synthesize_node(state: ResearchState) -> dict[str, Any]:
+    from app.research.runtime.synthesis_admission import (
+        evaluate_synthesis_admission,
+    )
+
     plan = _plan_from_state(state)
     status = dict(state.get("task_status") or {})
     if plan is None:
         raise GraphInvariantViolation("synthesize routed without a plan")
     assessment = dict(state.get("progress_assessment") or {})
+    admission = evaluate_synthesis_admission(
+        cast(dict[str, Any], state),
+        plan,
+        status,
+        forced=str(assessment.get("reason") or "") == "force_synthesis_budget",
+    )
+    if not admission.allowed and state.get("status") != "partial":
+        raise GraphInvariantViolation(
+            f"synthesize routed but admission rejected: {admission.reason}"
+        )
+    if (
+        state.get("status") == "partial"
+        and str(state.get("synthesis_mode") or "") == "no_evidence_partial"
+    ):
+        return {
+            "status": "partial",
+            "progress": "no_evidence_partial",
+            "synthesis_mode": "no_evidence_partial",
+            "synthesis_admission_reason": admission.reason,
+        }
     allow_failed_deps = bool(
         state.get("synthesis_admission")
-        or state.get("replan_exhausted")
-        or str(assessment.get("verdict") or "") == "enough"
-        or str(assessment.get("reason") or "")
-        in {"force_synthesis_budget", "graph_no_progress"}
+        or admission.mode != "normal"
     )
     nxt = next_synthesis_step(
         plan,

@@ -1182,10 +1182,9 @@ class ResearchGraphRunner:
     async def node_prepare_synthesis(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.graph import GraphInvariantViolation
         from app.research.runtime.project import apply_graph_to_loop
-        from app.research.runtime.scheduler import (
-            next_synthesis_step,
-            skip_optional_pending,
-            skip_pending_research,
+        from app.research.runtime.synthesis_admission import (
+            prepare_synthesis_update,
+            trusted_evidence_count as state_trusted_evidence_count,
         )
 
         session = _require_session(gstate)
@@ -1193,34 +1192,56 @@ class ResearchGraphRunner:
         plan = session.state.plan
         if plan is None:
             raise GraphInvariantViolation("prepare_synthesis routed without a plan")
-        status = skip_optional_pending(
-            plan,
-            dict(gstate.get("task_status") or {}),
-            reason="early_stop_enough",
+        citation_sources = (
+            list(session.ctx.citation_manager.sources or [])
+            if session.ctx.citation_manager is not None
+            else []
         )
-        if next_synthesis_step(plan, status, allow_failed_deps=True) is None:
-            status = skip_pending_research(
-                plan,
-                status,
-                reason="early_stop_synthesis",
-                include_required=True,
-                include_running=True,
+        citation_count = sum(
+            1
+            for source in citation_sources
+            if str(getattr(source, "source_kind", "") or "")
+            in {"url", "file", "sql", "kb", "extracted"}
+            and not str(getattr(source, "locator", "") or "").startswith("step:")
+        )
+        trusted_count = max(citation_count, state_trusted_evidence_count(gstate))
+        try:
+            remaining_run_sec = session.budget_manager.remaining_run_sec()
+        except Exception:
+            remaining_run_sec = float("inf")
+        deadline = remaining_run_sec < float(
+            getattr(
+                self.harness.harness_config,
+                "fast_synthesis_threshold_sec",
+                45,
             )
-        if next_synthesis_step(plan, status, allow_failed_deps=True) is None:
-            raise GraphInvariantViolation("prepare_synthesis cannot make synthesis runnable")
-        return {
-            "plan": plan.to_dict(),
-            "task_status": status,
-            "synthesis_admission": True,
-            "replan_exhausted": True,
-            "status": gstate.get("status") or "running",
-            "progress": "ready_for_synthesis",
-        }
+            or 45
+        )
+        forced = bool(
+            isinstance(session.state.metadata, dict)
+            and session.state.metadata.get("force_synthesis")
+        )
+        try:
+            update = prepare_synthesis_update(
+                gstate,
+                plan,
+                forced=forced,
+                deadline=deadline,
+                trusted_evidence_count_override=trusted_count,
+            )
+        except ValueError as exc:
+            raise GraphInvariantViolation(str(exc)) from exc
+        apply_graph_to_loop(session.state, update)
+        return update
 
     async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.graph import GraphInvariantViolation
         from app.research.runtime.scheduler import next_synthesis_step
         from app.research.runtime.project import apply_graph_to_loop
+        from app.research.runtime.synthesis_admission import (
+            evaluate_synthesis_admission,
+            trusted_evidence_count as state_trusted_evidence_count,
+        )
 
         session = _require_session(gstate)
         apply_graph_to_loop(session.state, gstate)
@@ -1228,48 +1249,64 @@ class ResearchGraphRunner:
         if plan is None:
             raise GraphInvariantViolation("synthesize routed without a plan")
         status = task_status_map(plan)
-        evidence_refs = list(gstate.get("evidence_refs") or [])
-        findings = [item for item in list(gstate.get("findings") or []) if isinstance(item, dict)]
-        raw_progress_assessment: Any = gstate.get("progress_assessment")
-        progress_assessment: dict[str, Any] = (
-            dict(raw_progress_assessment)
-            if isinstance(raw_progress_assessment, dict)
-            else {}
+        citation_sources = (
+            list(session.ctx.citation_manager.sources or [])
+            if session.ctx.citation_manager is not None
+            else []
         )
-        allow_failed_deps = bool(
-            bool(gstate.get("synthesis_admission"))
-            or (
-                isinstance(session.state.metadata, dict)
-                and session.state.metadata.get("force_synthesis")
-            )
-            or session.state.abort_reason
-            or str(progress_assessment.get("verdict") or "") == "enough"
-            or str(progress_assessment.get("reason") or "")
-            in {"force_synthesis_budget", "graph_no_progress"}
-            or bool(gstate.get("replan_exhausted"))
-            or evidence_refs
-            or findings
+        citation_count = sum(
+            1
+            for source in citation_sources
+            if str(getattr(source, "source_kind", "") or "")
+            in {"url", "file", "sql", "kb", "extracted"}
+            and not str(getattr(source, "locator", "") or "").startswith("step:")
         )
+        trusted_count = max(citation_count, state_trusted_evidence_count(gstate))
         try:
             remaining_run_sec = session.budget_manager.remaining_run_sec()
         except Exception:
             remaining_run_sec = float("inf")
-        emergency_synthesis = bool(
+        deadline = remaining_run_sec < float(
+            getattr(
+                self.harness.harness_config,
+                "fast_synthesis_threshold_sec",
+                45,
+            )
+            or 45
+        )
+        forced = bool(
             (
                 isinstance(session.state.metadata, dict)
                 and session.state.metadata.get("force_synthesis")
             )
-            or session.state.abort_reason
-            or remaining_run_sec
-            < float(
-                getattr(
-                    self.harness.harness_config,
-                    "fast_synthesis_threshold_sec",
-                    45,
-                )
-                or 45
-            )
         )
+        admission = evaluate_synthesis_admission(
+            gstate,
+            plan,
+            status,
+            forced=forced,
+            deadline=deadline,
+            trusted_evidence_count_override=trusted_count,
+        )
+        if admission.mode == "no_evidence_partial":
+            return {
+                "status": "partial",
+                "progress": "no_evidence_partial",
+                "task_status": status,
+                "synthesis_mode": "no_evidence_partial",
+                "synthesis_admission_reason": admission.reason,
+                "trusted_evidence_count": 0,
+            }
+        if not admission.allowed:
+            raise GraphInvariantViolation(
+                f"synthesize routed but admission rejected: {admission.reason}"
+            )
+        allow_failed_deps = bool(
+            gstate.get("synthesis_admission")
+            or admission.mode != "normal"
+            or admission.trusted_evidence_count > 0
+        )
+        emergency_synthesis = admission.mode == "emergency"
         nxt = next_synthesis_step(plan, status, allow_failed_deps=allow_failed_deps)
         if nxt is None:
             synthesis_steps = [

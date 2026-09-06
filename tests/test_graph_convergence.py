@@ -136,7 +136,11 @@ async def test_early_stop_graph_converges_through_prepare_synthesis() -> None:
     plan = _plan_with_optional_and_synthesis()
     graph = compile_research_graph(runtime=_ConvergenceRuntime(), profile="agent")
     result = await graph.ainvoke(
-        _state(plan, progress_assessment={"verdict": "enough", "reason": "test"}),
+        _state(
+            plan,
+            progress_assessment={"verdict": "enough", "reason": "test"},
+            evidence_refs=["external:preexisting"],
+        ),
         config={"recursion_limit": 30},
     )
 
@@ -172,11 +176,13 @@ def test_prepare_synthesis_persists_optional_skip_and_admission() -> None:
     from app.research.runtime.graph import prepare_synthesis_node
 
     plan = _plan_with_optional_and_synthesis()
-    update = prepare_synthesis_node(_state(plan))
+    update = prepare_synthesis_node(
+        _state(plan, evidence_refs=["external:preexisting"])
+    )
 
     assert update["task_status"]["t_optional"] == "skipped"
     assert update["synthesis_admission"] is True
-    assert update["replan_exhausted"] is True
+    assert "replan_exhausted" not in update
     restored = ExecutionPlan.from_dict(update["plan"])
     assert restored.steps[0].metadata["status"] == "skipped"
     assert restored.steps[0].metadata["skip_reason"] == "early_stop_enough"

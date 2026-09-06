@@ -19,6 +19,9 @@ URL_PATTERN = re.compile(r"https?://[^\s\]\)\"'<>]+", re.IGNORECASE)
 CITATION_MARKER_PATTERN = re.compile(r"\[(\d+)\]")
 SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[。！？.!?])\s+")
 CITATION_ONLY_PATTERN = re.compile(r"^(?:\[\d+\])+\s*$")
+DERIVED_OUTPUT_STEP_TYPES = frozenset(
+    {"summarize", "generate_markdown", "convert_pdf", "finalize"}
+)
 
 
 @dataclass
@@ -109,6 +112,8 @@ class CitationManager:
         metadata: dict[str, Any] | None = None,
     ) -> list[EvidenceSource]:
         """从 step 产出中提取并注册证据源。"""
+        if step_type in DERIVED_OUTPUT_STEP_TYPES:
+            return []
         if not content or not content.strip():
             return []
 
@@ -142,13 +147,19 @@ class CitationManager:
             if self._admit(src):
                 registered.append(src)
 
-        if not registered and len(content.strip()) >= 80:
+        explicit_kind = str(meta.get("source_kind") or "").lower()
+        explicit_locator = str(meta.get("locator") or "").strip()
+        if (
+            not registered
+            and explicit_locator
+            and explicit_kind in {"url", "sql", "kb", "extracted"}
+        ):
             src = EvidenceSource(
                 source_id=self._next_id(),
                 step_index=step_index,
                 step_type=step_type,
-                source_kind="text",
-                locator=f"step:{step_index}:{step_type}",
+                source_kind=explicit_kind,
+                locator=explicit_locator,
                 excerpt=content[:800].replace("\n", " "),
                 artifact_id=str(meta.get("artifact_id") or ""),
             )
@@ -220,20 +231,14 @@ class CitationManager:
         """把工人 JSON 的 fact 与 source 绑成可回读证据，避免只靠段落序号贴 [n]。"""
         registered: list[EvidenceSource] = []
         locators = [str(s).strip() for s in (sources or []) if str(s).strip()][:10]
-        kind = (
-            "url"
-            if step_type == "network_search"
-            else ("file" if step_type == "file_read" else "text")
-        )
+        if not locators:
+            return registered
         for i, fact in enumerate((facts or [])[:10]):
             text = str(fact).strip()
             if not text:
                 continue
-            locator = (
-                locators[i]
-                if i < len(locators)
-                else (locators[0] if locators else f"step:{step_index}:{step_type}")
-            )
+            locator = locators[i] if i < len(locators) else locators[0]
+            kind = "url" if locator.lower().startswith(("http://", "https://")) else "file"
             src = EvidenceSource(
                 source_id=self._next_id(),
                 step_index=step_index,

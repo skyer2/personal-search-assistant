@@ -114,6 +114,40 @@ def render_partial_report(
     return "\n".join(lines).strip() + "\n"
 
 
+def render_no_evidence_partial_report(
+    *,
+    objective: str,
+    missing_dimensions: list[str] | None = None,
+) -> str:
+    """Render a deterministic partial answer without invoking an LLM."""
+    lines = [
+        "# 本次研究未获得可信证据",
+        "",
+        "本轮运行已进入终止路径，但没有可核实的外部证据。为避免模型凭参数知识编造结论，本次不生成事实性推荐或评价。",
+        "",
+        "## 研究目标",
+        "",
+        objective or "（未记录）",
+        "",
+    ]
+    dimensions = [str(item) for item in (missing_dimensions or []) if str(item).strip()]
+    if dimensions:
+        lines.extend(["## 需要补充的证据维度", ""])
+        lines.extend(f"- {item}" for item in dimensions[:12])
+        lines.append("")
+    lines.extend(
+        [
+            "## 建议",
+            "",
+            "- 检查搜索 Provider 配置与额度。",
+            "- 确认 required research task 已被执行且返回可引用来源。",
+            "- 重新运行任务以补齐上述维度。",
+            "",
+        ]
+    )
+    return "\n".join(lines).strip() + "\n"
+
+
 def _collect_findings(state: Any) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     seen: set[str] = set()

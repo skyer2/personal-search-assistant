@@ -65,6 +65,9 @@ class ResearchState(TypedDict):
     replan_exhausted: bool
     marginal_gain: dict[str, Any]
     synthesis_admission: bool
+    synthesis_mode: str
+    synthesis_admission_reason: str
+    trusted_evidence_count: int
     control_fingerprint: str
     stagnant_cycles: int
 
@@ -142,6 +145,9 @@ def empty_research_state(
         "replan_exhausted": False,
         "marginal_gain": {},
         "synthesis_admission": False,
+        "synthesis_mode": "",
+        "synthesis_admission_reason": "",
+        "trusted_evidence_count": 0,
         "control_fingerprint": "",
         "stagnant_cycles": 0,
     }

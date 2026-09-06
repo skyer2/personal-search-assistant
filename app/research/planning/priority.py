@@ -123,7 +123,7 @@ def normalize_priority_meta(
     elif step.depends_on:
         required = True
     elif dims:
-        required = covers_brief
+        required = covers_brief or not keys
     else:
         # 没有 Brief 维度时不要猜 optional：全部 required
         required = True

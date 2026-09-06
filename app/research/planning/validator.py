@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.agent.harness.state import ExecutionPlan, PlanStep, TaskIntent
 from app.research.planning.granularity import analyze_task_granularity
+from app.research.planning.priority import match_coverage_keys
 from app.research.planning.policy import SOURCE_TOOLS, SourcePolicy, parse_source_policy
 
 SYNTHESIS_TYPES = frozenset({"generate_markdown", "summarize", "convert_pdf"})
@@ -76,6 +77,79 @@ def validate_artifact_dependencies(plan: ExecutionPlan) -> list[str]:
     return issues
 
 
+def validate_required_research_contract(
+    intent: TaskIntent,
+    plan: ExecutionPlan,
+) -> list[str]:
+    """Evidence research needs required workers, not optional enrichment only."""
+    research_steps = [
+        step for step in plan.steps if step.step_type in RESEARCH_TYPES
+    ]
+    evidence_research = bool(
+        intent.needs_network
+        or intent.needs_file_read
+        or research_steps
+    )
+    if not evidence_research:
+        return []
+
+    required_research = [
+        step
+        for step in research_steps
+        if not bool((step.metadata or {}).get("optional"))
+    ]
+    issues: list[str] = []
+    if not required_research:
+        issues.append("no_required_research_task")
+        return issues
+
+    brief = getattr(intent, "brief", None)
+    dimensions = [
+        str(item)
+        for item in (getattr(brief, "dimensions", None) or [])
+        if str(item).strip()
+    ]
+    for dimension in dimensions:
+        required_covered = any(
+            match_coverage_keys(
+                " ".join(
+                    [
+                        str(step.objective or ""),
+                        str(step.description or ""),
+                        " ".join(
+                            str(item)
+                            for item in (step.metadata or {}).get("coverage_keys")
+                            or []
+                        ),
+                    ]
+                ),
+                [dimension],
+            )
+            for step in required_research
+        )
+        optional_covered = any(
+            match_coverage_keys(
+                " ".join(
+                    [
+                        str(step.objective or ""),
+                        str(step.description or ""),
+                        " ".join(
+                            str(item)
+                            for item in (step.metadata or {}).get("coverage_keys")
+                            or []
+                        ),
+                    ]
+                ),
+                [dimension],
+            )
+            for step in research_steps
+            if bool((step.metadata or {}).get("optional"))
+        )
+        if optional_covered and not required_covered:
+            issues.append(f"core_dimension_only_optional:{dimension}")
+    return issues
+
+
 def validate_hybrid_plan(
     intent: TaskIntent,
     plan: ExecutionPlan,
@@ -110,6 +184,7 @@ def validate_hybrid_plan(
         issues.append("cycle_in_dependencies")
 
     issues.extend(validate_artifact_dependencies(plan))
+    issues.extend(validate_required_research_contract(intent, plan))
 
     brief = getattr(intent, "brief", None)
     for step in plan.steps:

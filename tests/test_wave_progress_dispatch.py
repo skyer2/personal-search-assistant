@@ -179,6 +179,8 @@ def test_route_progress_enough_prepares_synthesis_not_optional_dispatch():
     state["plan"] = plan.to_dict()
     state["task_status"] = task_status_map(plan)
     state["progress_assessment"] = {"verdict": "enough", "reason": "coverage_ok"}
+    assert route_progress(state) == "quality_gate"
+    state["evidence_refs"] = ["external:preexisting"]
     assert route_progress(state) == "prepare_synthesis"
     print("[OK] enough → prepare synthesis")
 

@@ -138,6 +138,10 @@ _KEEP_KEYS = {
     "missing_dimensions",
     "conflict_count",
     "metadata",
+    "termination",
+    "termination_status",
+    "termination_reason",
+    "termination_stage",
     "issues",
 }
 
