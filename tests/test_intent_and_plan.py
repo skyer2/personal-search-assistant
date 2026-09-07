@@ -10,15 +10,7 @@ from app.agent.harness.planner import build_plan, understand_task
 from app.agent.harness.research_brief import compile_research_brief
 from app.research.planning.compose import compose_execution_plan_sync
 from app.research.planning.policy import select_planning_mode
-from app.research.planning.progress import assess_progress
-from app.research.runtime.scheduler import annotate_plan_tasks, task_status_map
-
-
-def _fixture_task_status(plan):
-    return {
-        step.resolved_task_id(index): str(step.metadata.get("status") or "pending")
-        for index, step in enumerate(plan.steps)
-    }
+from app.research.runtime.scheduler import task_status_map
 
 
 def test_brief_default_chat_and_web():
@@ -47,7 +39,7 @@ def test_brief_compare_entities_and_dynamic_plan():
     research = [s for s in plan.steps if s.step_type == "research" and not s.depends_on]
     assert len(research) >= 3
     assert any("Tesla" in (s.objective or s.description) for s in research)
-    assert plan.steps[-1].step_type == "summarize"
+    assert all(step.step_type in {"research", "network_search", "file_read"} for step in plan.steps)
     print("[OK] brief compare → dynamic DAG")
 
 
@@ -71,76 +63,6 @@ def test_brief_forbids_web():
     print("[OK] brief respects no-web policy")
 
 
-def test_progress_uses_brief_dimensions_not_hardcoded_revenue():
-    intent = understand_task("比较 A 公司和 B 公司的监管牌照差异")
-    plan, _ = compose_execution_plan_sync(intent)
-    plan = annotate_plan_tasks(plan)
-    for step in plan.steps:
-        if step.step_type == "research":
-            step.metadata["status"] = "done"
-    leaves = [s for s in plan.steps if s.step_type == "research" and not s.depends_on]
-    rows = []
-    for step in leaves:
-        rows.append(
-            {
-                "task_id": step.task_id,
-                "ok": True,
-                "summary": "该公司发布了消费级产品宣传稿，媒体只转述了外观",
-                "payload": {
-                    "facts": ["官网介绍了产品外观"],
-                    "sources": ["https://example.com/blog"],
-                    "confidence": 0.8,
-                },
-            }
-        )
-    assessment = assess_progress(
-        plan,
-        task_status=_fixture_task_status(plan),
-        worker_results=rows,
-        query=intent.raw_query,
-        intent=intent,
-        current_year=2026,
-    )
-    assert assessment.verdict == "gap"
-    assert assessment.missing_dimensions
-    print("[OK] progress missing Brief dimensions (监管)")
-
-
-def test_progress_prefer_primary_gap():
-    intent = understand_task("比较 Tesla 和 Figure 的官方白皮书差异")
-    assert intent.brief.prefer_primary is True
-    plan, _ = compose_execution_plan_sync(intent)
-    plan = annotate_plan_tasks(plan)
-    for step in plan.steps:
-        if step.step_type == "research":
-            step.metadata["status"] = "done"
-    leaves = [s for s in plan.steps if s.step_type == "research" and not s.depends_on]
-    rows = []
-    for step in leaves:
-        rows.append(
-            {
-                "task_id": step.task_id,
-                "ok": True,
-                "summary": "2026 已量产，媒体转述了订单数字",
-                "payload": {
-                    "facts": ["2026 已量产，订单来自行业媒体转述"],
-                    "sources": ["https://blog.example.com/post"],
-                    "confidence": 0.85,
-                },
-            }
-        )
-    assessment = assess_progress(
-        plan,
-        task_status=_fixture_task_status(plan),
-        worker_results=rows,
-        query=intent.raw_query,
-        intent=intent,
-        current_year=2026,
-    )
-    assert "missing_primary_source" in assessment.coverage_gaps
-    print("[OK] prefer_primary gap")
-
-
 def test_intent_roundtrip_keeps_brief():
     intent = understand_task("比较 Tesla / Figure 2026 监管进展")
     restored = intent.from_dict(intent.to_dict())
@@ -157,7 +79,5 @@ if __name__ == "__main__":
     test_brief_compare_entities_and_dynamic_plan()
     test_brief_prefer_primary_and_markdown()
     test_brief_forbids_web()
-    test_progress_uses_brief_dimensions_not_hardcoded_revenue()
-    test_progress_prefer_primary_gap()
     test_intent_roundtrip_keeps_brief()
     print("\n=== Intent & Plan tests passed ===")

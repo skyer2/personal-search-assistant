@@ -30,7 +30,7 @@ def grade_replan_case(case: dict[str, Any]) -> dict[str, Any]:
     issues: list[str] = []
     if expect.get("must_add_tasks") and not added:
         issues.append("no_tasks_added")
-    if expect.get("empty_or_reject_ok") and assessment.get("verdict") == "enough":
+    if expect.get("empty_or_reject_ok") and assessment.get("status") == "sufficient":
         added = []
     elif expect.get("must_add_tasks") is False and added:
         issues.append("unexpected_tasks")
@@ -63,7 +63,7 @@ def grade_replan_case(case: dict[str, Any]) -> dict[str, Any]:
     if needle and needle not in reason and not added:
         issues.append("reason_mismatch")
 
-    useful = bool(added) and assessment.get("verdict") == "gap" and not apply_issues
+    useful = bool(added) and assessment.get("status") == "gap" and not apply_issues
     return {
         "ok": not issues and not compose_issues,
         "issues": issues + compose_issues,

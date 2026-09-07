@@ -66,7 +66,10 @@ def test_research_state_has_brief_and_findings():
 def test_sync_execution_projection_is_one_way():
     loop = LoopState(session_id="s")
     loop.replan_count = 9
-    sync_execution_projection(loop, {"replan_count": 1, "final_content": "hi", "progress": "planned"})
+    sync_execution_projection(
+        loop,
+        {"replan_budget": {"attempted": 1, "applied": 1, "max_attempts": 2}, "final_content": "hi"},
+    )
     assert loop.replan_count == 1
     assert loop.final_content == "hi"
     assert loop.metadata["workflow_authority"] == "research_state"

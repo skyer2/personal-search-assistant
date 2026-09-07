@@ -12,7 +12,7 @@
 ```text
 API / UI（实验台，不是搜索产品）
    → Product Route (TaskShape: fast_path / harness)
-   → Research Domain (Brief / Planner / Progress / QualityGate)
+   → Research Domain (Brief / Planner / Assessments / ControlPolicy)
    → Agent Runtime (StateGraph + SQLite checkpointer)
    → WorkerExecutorV2 / SynthesisExecutor
    → Environment: search / fetch / file  +  Artifact / Evidence
@@ -29,9 +29,10 @@ API / UI（实验台，不是搜索产品）
 | 用户可见终态 | 判定 | 含义 |
 |--|--|--|
 | 执行失败 | Run status = `failed` | 执行链路异常、超时或崩溃，不是质量结论 |
-| 质量拒绝 | Run status = `partial` 且 `quality.passed=false` / `quality_passed=false` / `quality_reason` 非空 | 已执行但质量门禁拒绝低可信结论 |
-| 部分可确认 | Run status = `partial`，且没有明确质量失败 | 已保留部分可信结论，但未达到完整交付标准 |
-| 无法找到可靠来源 | Run status = `partial` 且 reason = `insufficient_trusted_evidence` / `no_evidence` / `no_content` | 检索完成但证据等级不足，不是执行错误 |
+| 执行失败 | `termination.outcome=failed` 且失败来自 runtime / programming / budget 事实 | 执行链路异常、超时或崩溃 |
+| 质量拒绝 | `termination.outcome=failed` 且 `quality_assessment.verdict=fail` | 已执行但质量门禁拒绝低可信结论 |
+| 部分可确认 | `termination.outcome=partial` 且 evidence 为 `partial/sufficient` | 已保留部分可信结论，但未达到完整交付标准 |
+| 无法找到可靠来源 | `termination.outcome=failed` 且 evidence = `insufficient` / `unknown` | 检索完成但证据等级不足，不是执行错误 |
 
 ```text
 ResearchState  →  LangGraph SQLite checkpointer
@@ -41,7 +42,7 @@ Artifact/Evidence Store → 原文
 
 不要再画「Graph SQLite + LoopState checkpoint.json」双恢复。
 
-任务运行态只存 `ResearchState["tasks"]`。`task_status` 只能通过 `task_status_projection(tasks)` 在 API/UI 输出时动态生成，不再是持久化字段。
+任务运行态只存 `ResearchState["tasks"]`。每个 Task 同时保存 `execution_status` 与 `result_status`；`BLOCKED` 不是执行状态，而是由 `TaskReadiness` 推导。API/UI 输出只做 `task_execution_projection(tasks)`，不反写任务事实。
 
 控制面阶段迁移必须经过 `transition_update()`；终止必须经过 `FINALIZE/ABORT → TERMINATED`。终止原因采用 first-cause-wins，后续 Quality/Finalize 不得覆盖首个真实原因。
 
@@ -52,8 +53,10 @@ TaskShape
   ├── SIMPLE_FACT → single WorkerExecutorV2 search → deterministic answer
   └── other shapes
         → intent → clarify → plan → validate → dispatch
-Send(isolated workers via WorkerExecutorV2) → Progress Evaluator
-GAP → replan；ENOUGH → synthesis → Quality Gate → finalize
+Send(isolated workers via WorkerExecutorV2) → Assessments
+    → ControlPolicy → dispatch / retry / replan / synthesize
+    → SynthesisExecutor → Quality Assessment
+    → TerminalPolicy → success / partial / failed / cancelled
 ```
 
 `direct` 仅对照实验：single worker + search tool，不进上述节点。
@@ -98,7 +101,7 @@ DELETE /api/runs/{run_id}
 | 进度 | 无任务级 checkpoint | **只有**图内 SQLite checkpointer |
 | Search | 产品能力 | **Environment tool only** |
 
-相关代码：`app/research/runtime/graph.py`、`app/research/runtime/worker.py`、`app/research/planning/progress.py`、`app/agent/harness/artifacts.py`、`evidence_store.py`。
+相关代码：`app/research/runtime/graph.py`、`app/research/control/policy.py`、`app/research/control/terminal_policy.py`、`app/research/assessment/`、`app/research/runtime/worker.py`、`app/research/execution/synthesis_executor.py`。
 
 权威设计：[ARCHITECTURE.md](./ARCHITECTURE.md)。
 

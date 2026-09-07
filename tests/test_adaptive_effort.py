@@ -25,7 +25,6 @@ from app.research.planning.effort import (
     stamp_effort_on_plan,
 )
 from app.research.planning.lead_planner import LEAD_PLANNER_PROMPT
-from app.research.planning.progress import assess_progress
 
 
 def test_simple_query_gets_narrow_effort():
@@ -210,63 +209,6 @@ def test_subject_aliases_do_not_create_independent_entities():
     brief = intent.brief
     assert len(brief.subjects) == 1
     assert len(brief.subjects) <= max(1, len(brief.entities))
-
-
-def test_progress_scores_brief_success_criteria():
-    intent = understand_task("比较 Tesla / Figure 2026 商业化，优先官方来源")
-    plan, _ = compose_execution_plan_sync(intent, config=get_harness_config())
-    for step in plan.steps:
-        if step.step_type == "research":
-            step.metadata["status"] = "done"
-    research = [s for s in plan.steps if s.step_type == "research" and not s.depends_on]
-    rows = [
-        {
-            "task_id": research[0].task_id,
-            "ok": True,
-            "summary": "Tesla 有一些二手媒体传闻",
-            "payload": {
-                "facts": ["Tesla 传闻量产"],
-                "sources": ["https://random-blog.example/post"],
-                "confidence": 0.6,
-            },
-        }
-    ]
-    for step in research[1:]:
-        rows.append(
-            {
-                "task_id": step.task_id,
-                "ok": True,
-                "summary": "二手媒体传闻，无一手引用",
-                "payload": {
-                    "facts": ["传闻量产"],
-                    "sources": ["https://blog.example/x"],
-                    "confidence": 0.5,
-                },
-            }
-        )
-    assessment = assess_progress(
-        plan,
-        task_status={s.resolved_task_id(i): "done" for i, s in enumerate(plan.steps)},
-        worker_results=rows,
-        query=intent.raw_query,
-        intent=intent,
-        current_year=2026,
-    )
-    # 优先官方但来源无 primary hint → gap / unmet
-    assert assessment.verdict == "gap"
-    assert (
-        assessment.coverage_gaps
-        or assessment.unmet_success_criteria
-        or assessment.unmet_constraints
-        or assessment.missing_dimensions
-    )
-    print(
-        "[OK] progress scores brief contract",
-        "unmet_criteria=",
-        assessment.unmet_success_criteria,
-        "unmet_constraints=",
-        assessment.unmet_constraints,
-    )
 
 
 def test_brief_is_ir_with_ambiguities_field():

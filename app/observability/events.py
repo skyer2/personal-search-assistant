@@ -25,7 +25,13 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "gen_ai.chat",
     "retrieval.search",
     "evidence.registered",
+    "progress.assessed",
+    "evidence.assessed",
+    "execution_health.assessed",
+    "delivery.assessed",
+    "control.decided",
     "progress.evaluated",
+    "task.transitioned",
     "replan.proposed",
     "replan.applied",
     "replan.rejected",
@@ -41,6 +47,8 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "budget.decided",
     "budget.exhausted",
     "quality.evaluated",
+    "quality.assessed",
+    "run.terminated",
     "eval.scored",
     "phase",
     "hitl.interrupt",
@@ -65,7 +73,13 @@ class EventType:
     GEN_AI_CHAT = "gen_ai.chat"
     RETRIEVAL_SEARCH = "retrieval.search"
     EVIDENCE_REGISTERED = "evidence.registered"
+    PROGRESS_ASSESSED = "progress.assessed"
+    EVIDENCE_ASSESSED = "evidence.assessed"
+    EXECUTION_HEALTH_ASSESSED = "execution_health.assessed"
+    DELIVERY_ASSESSED = "delivery.assessed"
+    CONTROL_DECIDED = "control.decided"
     PROGRESS_EVALUATED = "progress.evaluated"
+    TASK_TRANSITIONED = "task.transitioned"
     REPLAN_PROPOSED = "replan.proposed"
     REPLAN_APPLIED = "replan.applied"
     REPLAN_REJECTED = "replan.rejected"
@@ -81,6 +95,8 @@ class EventType:
     BUDGET_DECIDED = "budget.decided"
     BUDGET_EXHAUSTED = "budget.exhausted"
     QUALITY_EVALUATED = "quality.evaluated"
+    QUALITY_ASSESSED = "quality.assessed"
+    RUN_TERMINATED = "run.terminated"
     EVAL_SCORED = "eval.scored"
     PHASE = "phase"
     HITL_INTERRUPT = "hitl.interrupt"

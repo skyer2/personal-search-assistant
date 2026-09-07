@@ -248,7 +248,8 @@ def test_synthesis_failure_cannot_quality_pass():
             graph_runner.node_quality_gate(
                 {
                     "run_id": "terminal-quality",
-                    "phase": "synthesized",
+                    "phase": "synthesis",
+                    "final_content": "已有答案 [1]",
                     "quality_attempts": 0,
                     "budget": {"max_replan_count": 0},
                 }
@@ -256,8 +257,8 @@ def test_synthesis_failure_cannot_quality_pass():
         )
     finally:
         runner_module._SESSIONS.pop("terminal-quality", None)
-    assert update["quality_passed"] is False
-    assert update["quality_reason"] == "synthesis_failed"
+    assert update["quality_assessment"]["verdict"] == "fail"
+    assert update["quality_assessment"]["issues"] == ["synthesis_failed"]
 
 
 def test_workflow_termination_is_not_task_success_when_partial():
@@ -291,14 +292,14 @@ def test_workflow_termination_is_not_task_success_when_partial():
                 {
                     "run_id": "terminal-finalize",
                     "phase": "quality",
-                    "status": "partial",
-                    "quality_passed": True,
+                    "final_content": "partial content",
+                    "quality_assessment": {"verdict": "fail"},
+                    "evidence_assessment": {"status": "partial"},
                     "quality_attempts": 1,
                 }
             )
         )
     finally:
         runner_module._SESSIONS.pop("terminal-finalize", None)
-    assert update["status"] == "partial"
-    assert update["outcome"] == "partial"
+    assert update["lifecycle"]["status"] == "terminated"
     assert update["termination"]["outcome"] == "partial"

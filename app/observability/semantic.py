@@ -5,6 +5,16 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+_DIM_ALIASES = {
+    "商业化": ("商业化", "量产", "交付", "营收", "订单", "收入", "客户", "revenue", "order", "production"),
+    "横向比较": ("比较", "对比", "vs", "差异", "横向"),
+    "技术路线": ("技术", "方案", "架构"),
+    "竞争格局": ("竞争", "对手", "格局"),
+    "风险": ("风险", "监管", "合规"),
+    "监管": ("监管", "合规", "牌照"),
+    "市场规模": ("市场规模", "市场空间", "cagr"),
+}
+
 
 def stable_gap_id(gap_type: str, key: str) -> str:
     digest = hashlib.sha1(f"{str(gap_type)}:{str(key).strip().lower()}".encode("utf-8")).hexdigest()[:10]
@@ -61,8 +71,6 @@ def plan_brief_coverage(brief: dict[str, Any] | None, plan: Any) -> dict[str, An
     Prefer explicit `covers_dimension_ids` / `covers_dimensions` on steps;
     fall back to alias-aware keyword matching (not fragile dim[:4] alone).
     """
-    from app.research.planning.progress import _DIM_ALIASES
-
     dimensions = [str(x) for x in ((brief or {}).get("dimensions") or []) if str(x).strip()]
     # support [{id,name}] form
     dim_specs: list[tuple[str, str]] = []
@@ -217,7 +225,7 @@ def compute_replan_gap_closure(events: list[dict[str, Any]]) -> dict[str, Any]:
             for gap_id in attrs.get("target_gap_ids") or []:
                 if gap_id:
                     targeted.append(str(gap_id))
-        if event_type == "progress.evaluated":
+        if event_type in {"progress.evaluated", "progress.assessed"}:
             progress_n += 1
             for gap_id in attrs.get("resolved_gap_ids") or []:
                 if gap_id:

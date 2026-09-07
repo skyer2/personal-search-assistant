@@ -4,24 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import asdict
+from dataclasses import dataclass, field
 from typing import Any
 
-from app.agent.harness.orchestration import (
-    attach_structured_payload,
-    parse_worker_payload,
-)
-from app.agent.harness.state import StepResult
-from app.agent.harness.worker_runtime import resolve_execute_target
 from app.api.tracing import build_run_config
 from app.research.execution.llm_gateway import LLMGateway
 from app.research.execution.tool_gateway import ToolGateway
-from app.research.runtime.worker import (
-    ResearchContext,
-    ResearchTask,
-    WorkerResult,
-    WorkerResultStatus,
-)
+from app.research.runtime.worker import ResearchContext, WorkerResult
 
 
 def _failure_reason(exc: Exception) -> str:
@@ -41,6 +30,17 @@ def _failure_reason(exc: Exception) -> str:
     return type(exc).__name__
 
 
+@dataclass(frozen=True)
+class SynthesisRequest:
+    """The only input contract for the fixed synthesis pipeline."""
+
+    mode: str
+    evidence_refs: list[str] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=list)
+    unresolved_conflicts: list[str] = field(default_factory=list)
+    research_summary: str = ""
+
+
 class SynthesisExecutor:
     """Execute synthesis from stored evidence; retrieval is structurally denied."""
 
@@ -48,169 +48,128 @@ class SynthesisExecutor:
         self.harness = harness
         self.session = session
 
-    async def execute(
-        self,
-        task: ResearchTask,
-        context: ResearchContext,
-    ) -> WorkerResult:
+    async def execute(self, request: SynthesisRequest, context: ResearchContext) -> WorkerResult:
         started = time.perf_counter()
-        plan = getattr(self.session.state, "plan", None)
-        step_index = int(task.step_index)
-        if plan is None or step_index >= len(plan.steps):
+        if request.mode not in {"normal", "degraded"}:
             return self._result(
-                task,
                 started,
                 ok=False,
-                status="failed",
-                summary="missing_step",
-                fail_reason="missing_step",
+                summary="invalid_synthesis_mode",
+                fail_reason="invalid_synthesis_mode",
+                evidence_refs=request.evidence_refs,
             )
-        step = plan.steps[step_index]
-        try:
-            execute_agent, dispatch_mode = resolve_execute_target(
-                task.step_type,
-                workers=getattr(self.harness, "workers", None),
-                main_agent=getattr(self.harness, "agent", None),
-                direct_invoke=bool(
-                    getattr(self.harness.harness_config, "direct_worker_invoke", True)
-                ),
-                profile=step.subagent or "",
-            )
-        except Exception as exc:
+        agent = getattr(self.harness, "agent", None)
+        if agent is None:
             return self._result(
-                task,
                 started,
                 ok=False,
-                status="failed",
-                summary=f"synthesis_worker_unavailable:{type(exc).__name__}",
-                fail_reason=type(exc).__name__,
+                summary="synthesis_worker_unavailable",
+                fail_reason="synthesis_worker_unavailable",
+                evidence_refs=request.evidence_refs,
             )
 
-        timeout_sec = self._timeout_for(step)
         try:
-            result = await asyncio.wait_for(
-                self._invoke(
-                    task=task,
-                    context=context,
-                    step=step,
-                    step_index=step_index,
-                    execute_agent=execute_agent,
-                    dispatch_mode=dispatch_mode,
-                ),
-                timeout=timeout_sec,
+            content = await asyncio.wait_for(
+                self._invoke(agent=agent, request=request, context=context),
+                timeout=self._timeout_sec(),
             )
         except asyncio.TimeoutError:
             return self._result(
-                task,
                 started,
                 ok=False,
-                status="failed",
                 summary="synthesis_timeout",
                 fail_reason="synthesis_timeout",
+                evidence_refs=request.evidence_refs,
             )
         except Exception as exc:
             fail_reason = _failure_reason(exc)
             return self._result(
-                task,
                 started,
                 ok=False,
-                status="failed",
                 summary=f"synthesis_failed:{fail_reason}",
                 fail_reason=fail_reason,
+                evidence_refs=request.evidence_refs,
             )
 
-        result = self.harness._enrich_worker_result(step, result, self.session.state)
-        payload = result.metadata.get("worker_payload")
-        if not isinstance(payload, dict):
-            structured = parse_worker_payload(
-                result.content,
-                step_type=step.step_type,
-                subagent=step.subagent or "",
+        if not content.strip():
+            return self._result(
+                started,
+                ok=False,
+                summary="synthesis_empty_content",
+                fail_reason="synthesis_empty_content",
+                evidence_refs=request.evidence_refs,
             )
-            attach_structured_payload(result, structured)
-            payload = asdict(structured)
-        ok = bool(payload.get("ok", True))
-        evidence_refs = list(payload.get("evidence_ids") or []) + list(
-            payload.get("artifact_ids") or []
-        )
         return self._result(
-            task,
             started,
-            ok=ok,
-            status="done" if ok else "failed",
-            summary=str(payload.get("summary") or result.content)[:4000],
-            findings=list(payload.get("findings") or []),
-            evidence_refs=list(dict.fromkeys(evidence_refs)),
-            facts=list(payload.get("facts") or []),
-            sources=list(payload.get("sources") or []),
-            raw=result,
-            fail_reason="" if ok else str(payload.get("error_code") or "synthesis_failed"),
+            ok=True,
+            summary=content[:4000],
+            evidence_refs=request.evidence_refs,
         )
 
     async def _invoke(
         self,
         *,
-        task: ResearchTask,
+        agent: Any,
+        request: SynthesisRequest,
         context: ResearchContext,
-        step: Any,
-        step_index: int,
-        execute_agent: Any,
-        dispatch_mode: str,
-    ) -> StepResult:
-        user_message = self.harness.context_builder.build_step_message(
-            context.query,
-            self.session.state,
-            step,
-            step_index,
-            self.session.ctx.relative_session_dir,
-            self.session.ctx.uploaded_prompt,
-            enforce_binding=self.harness.harness_config.enforce_subagent_binding,
-            use_evidence_digest=self.harness.harness_config.synthesis_use_evidence_digest,
-            dispatch_mode=dispatch_mode,
-        )
+    ) -> str:
         config = build_run_config(
-            f"{context.session_id}:synthesis:{task.task_id}",
+            f"{context.session_id}:synthesis:{context.run_id}",
             metadata={
                 "phase": "synthesis",
-                "step_index": step_index,
-                "step_type": step.step_type,
+                "mode": request.mode,
                 "usage_session_id": context.session_id,
             },
         )
         gateway = LLMGateway(self.session.budget_manager)
         messages: list[Any] = []
         with ToolGateway(0).execution_scope():
-            with gateway.execution_scope(
-                phase="synthesis",
-            ):
+            with gateway.execution_scope(phase="synthesis"):
                 async for chunk in gateway.astream(
-                    execute_agent,
-                    {"messages": [{"role": "user", "content": user_message}]},
+                    agent,
+                    {"messages": [{"role": "user", "content": self._prompt(request, context)}]},
                     config,
                 ):
                     for node_state in chunk.values():
                         if not isinstance(node_state, dict):
                             continue
                         messages.extend(node_state.get("messages") or [])
-        content = ""
         for message in reversed(messages):
             content = str(getattr(message, "content", "") or "")
             if content.strip():
-                break
-        return StepResult(
-            step_type=step.step_type,
-            content=content,
-            metadata={
-                "step_index": step_index,
-                "task_id": task.task_id,
-                "worker_dispatch": "synthesis",
-                "tools_invoked": [],
-                "tool_calls": 0,
-                "step_assistants_called": [step.subagent] if step.subagent else [],
-            },
+                return content
+        return ""
+
+    def _prompt(self, request: SynthesisRequest, context: ResearchContext) -> str:
+        evidence = "\n".join(f"- {item}" for item in request.evidence_refs[:80])
+        limitations = "\n".join(f"- {item}" for item in request.limitations[:20])
+        conflicts = "\n".join(f"- {item}" for item in request.unresolved_conflicts[:20])
+        mode_instruction = (
+            "基于完整证据输出可靠结论。"
+            if request.mode == "normal"
+            else "基于现有证据输出降级结论，明确说明覆盖不足和无法确认的部分，不得补写未证实内容。"
+        )
+        return "\n".join(
+            part
+            for part in (
+                f"任务：{context.query}",
+                f"合成模式：{request.mode}",
+                f"要求：{mode_instruction}",
+                "硬性约束：只允许使用下方研究摘要和证据引用；禁止联网、读取文件或发明新证据。",
+                "研究摘要：",
+                request.research_summary[:80000],
+                "证据引用：",
+                evidence or "- 无",
+                "覆盖限制：",
+                limitations or "- 无",
+                "未解决冲突：",
+                conflicts or "- 无",
+                "输出要求：直接输出面向用户的报告正文；引用证据对应的原始来源；不要输出 JSON。",
+            )
+            if str(part).strip()
         )
 
-    def _timeout_for(self, step: Any) -> float:
+    def _timeout_sec(self) -> float:
         config = self.harness.harness_config
         timeout_sec = max(
             10,
@@ -228,34 +187,24 @@ class SynthesisExecutor:
 
     def _result(
         self,
-        task: ResearchTask,
         started: float,
         *,
         ok: bool,
-        status: WorkerResultStatus,
-        summary: str = "",
-        findings: list[dict[str, Any]] | None = None,
+        summary: str,
         evidence_refs: list[str] | None = None,
-        facts: list[str] | None = None,
-        sources: list[str] | None = None,
-        raw: Any = None,
         fail_reason: str = "",
     ) -> WorkerResult:
         duration_ms = int((time.perf_counter() - started) * 1000)
         return WorkerResult(
             ok=ok,
-            task_id=task.task_id,
-            status=status,
+            task_id="synthesis",
+            status="done" if ok else "failed",
             summary=summary,
-            findings=findings or [],
-            evidence_refs=evidence_refs or [],
-            facts=facts or [],
-            sources=sources or [],
-            raw=raw,
+            evidence_refs=list(dict.fromkeys(evidence_refs or [])),
             fail_reason=fail_reason,
             duration_ms=duration_ms,
             execution_ms=duration_ms,
         )
 
 
-__all__ = ["SynthesisExecutor"]
+__all__ = ["SynthesisExecutor", "SynthesisRequest"]

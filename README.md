@@ -48,7 +48,7 @@ Search is only a tool environment used to study:
 
 ```text
 Simple Fact → Fast Path → Source Gate → Answer
-Other Task → Brief → Plan → parallel Workers → Progress / Replan → Synthesis → Answer
+Other Task → Brief → research-only Plan → parallel Workers → Assessments → ControlPolicy → Synthesis → TerminalPolicy → Answer
 ```
 
 `direct` 只用于对照实验，不是产品能力：
@@ -98,7 +98,7 @@ python3 tests/test_architecture_p0.py
 python3 tests/test_research_harness.py
 python3 tests/test_environment_tools.py
 python3 tests/test_intent_and_plan.py
-python3 tests/test_progress_evaluator.py
+python3 tests/test_control_policy.py
 python3 tests/test_research_checkpoint.py
 python3 tests/test_hybrid_planning.py
 python3 tests/eval/test_eval_dry_run.py

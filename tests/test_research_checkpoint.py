@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 def test_sqlite_checkpointer_roundtrip_plan_and_progress(tmp_path: Path):
     from langgraph.checkpoint.sqlite import SqliteSaver
 
-    from app.research.domain.contracts import task_status_projection
+    from app.research.domain.task_state import task_execution_projection
     from app.research.runtime.checkpointer import reset_checkpointer_cache
     from app.research.runtime.graph import compile_research_graph, initial_graph_state
 
@@ -35,7 +35,7 @@ def test_sqlite_checkpointer_roundtrip_plan_and_progress(tmp_path: Path):
         assert result.get("plan")
         assert result.get("progress_assessment") is not None
         snapshot = graph.get_state(config)
-        task_status = task_status_projection(snapshot.values.get("tasks"))
+        task_status = task_execution_projection(snapshot.values.get("tasks"))
         assert task_status
     finally:
         conn.close()
@@ -48,9 +48,9 @@ def test_sqlite_checkpointer_roundtrip_plan_and_progress(tmp_path: Path):
     try:
         restored = graph2.get_state(config)
         assert restored.values.get("plan")
-        assert task_status_projection(restored.values.get("tasks")) == task_status
+        assert task_execution_projection(restored.values.get("tasks")) == task_status
         assessment = restored.values.get("progress_assessment") or {}
-        assert assessment.get("verdict") in {"enough", "gap", "abort", "run"}
+        assert assessment.get("status") in {"sufficient", "gap", "unknown"}
     finally:
         conn2.close()
         reset_checkpointer_cache()
@@ -75,7 +75,7 @@ def test_default_checkpointer_sqlite_helper(tmp_path: Path):
 
 
 def test_async_sqlite_checkpointer_ainvoke(tmp_path: Path):
-    from app.research.domain.contracts import task_status_projection
+    from app.research.domain.task_state import task_execution_projection
     from app.research.runtime.checkpointer import (
         async_sqlite_checkpointer,
         reset_async_checkpointer_cache,
@@ -99,7 +99,7 @@ def test_async_sqlite_checkpointer_ainvoke(tmp_path: Path):
             result = await graph.ainvoke(state, config=config)
             assert result.get("plan")
             snapshot = await graph.aget_state(config)
-            assert task_status_projection(snapshot.values.get("tasks"))
+            assert task_execution_projection(snapshot.values.get("tasks"))
         finally:
             await reset_async_checkpointer_cache()
             reset_checkpointer_cache()

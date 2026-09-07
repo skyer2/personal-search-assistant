@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.deliverables import (
+    deliverables_allowed_for_outcome,
     ensure_pdf_from_markdown,
     ensure_requested_deliverables,
     list_pdf_files,
@@ -26,6 +27,13 @@ def test_user_query_locks_pdf_plan():
     assert intent.deliverable == "pdf"
     plan = build_plan(intent)
     assert [s.step_type for s in plan.steps][-2:] == ["generate_markdown", "convert_pdf"]
+
+
+def test_failed_or_cancelled_outcome_does_not_publish_deliverables():
+    assert deliverables_allowed_for_outcome("success") is True
+    assert deliverables_allowed_for_outcome("partial") is True
+    assert deliverables_allowed_for_outcome("failed") is False
+    assert deliverables_allowed_for_outcome("cancelled") is False
 
 
 def test_llm_cannot_downgrade_pdf_to_text():

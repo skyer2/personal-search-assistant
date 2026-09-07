@@ -1,27 +1,27 @@
-"""
-Graph State：只保留影响控制流的字段。
-
-原始网页 / SQL 全文 / PDF 进 Evidence/Artifact Store，不进 checkpoint。
-"""
+"""Canonical ResearchState. Raw content stays in Artifact/Evidence stores."""
 
 from __future__ import annotations
 
 import operator
 from typing import Annotated, Any, NotRequired, TypedDict
 
+from app.research.domain.contracts import LifecycleStatus, WorkflowPhase, new_replan_budget
 from app.research.runtime.reducers import merge_dicts
-from app.research.domain.contracts import (
-    OutcomeStatus,
-    WorkflowPhase,
-)
 
 
 class BudgetState(TypedDict):
     tool_calls: int
     max_tool_calls: int
-    replan_count: int
+    llm_calls: int
+    max_llm_calls: int
+    total_tokens: int
+    max_total_tokens: int
+    deadline_remaining_sec: float
+    synthesis_reserve_sec: float
+    max_parallel_workers: int
     max_replan_count: int
-    max_parallel_workers: NotRequired[int]
+    exhausted: bool
+    low: bool
 
 
 class ResearchState(TypedDict):
@@ -31,6 +31,7 @@ class ResearchState(TypedDict):
     user_id: str
     tenant_id: str
     project_id: str
+    state_version: int
 
     search_mode: str
     search_mode_requested: str
@@ -43,47 +44,37 @@ class ResearchState(TypedDict):
     intent: dict[str, Any] | None
     plan: dict[str, Any] | None
     plan_version: int
-
     tasks: Annotated[dict[str, dict[str, Any]], merge_dicts]
     worker_results: Annotated[list[dict[str, Any]], operator.add]
     findings: Annotated[list[dict[str, Any]], operator.add]
     evidence_refs: Annotated[list[str], operator.add]
+    artifacts: list[str]
 
     budget: BudgetState
-    replan_count: int
-    replan_attempts: int
-    replan_applied_count: int
+    budget_status: str
+    replan_budget: dict[str, int]
     rejected_patch_hashes: Annotated[list[str], operator.add]
 
     draft_ref: str | None
     final_ref: str | None
     final_content: str
-    artifacts: list[str]
     phase: str
-    outcome: str
-    status: str
-    abort_reason: str
+    lifecycle: dict[str, str]
     termination: dict[str, Any] | None
+    cancel_reason: str
+    abort_reason: str
 
     needs_clarification: bool
     needs_plan_review: bool
-    progress: str
-    quality_passed: bool
-    quality_reason: str
-    quality_repairable: bool
-    quality_repair_action: str
-    quality_attempts: int
     progress_assessment: dict[str, Any]
+    evidence_assessment: dict[str, Any]
+    execution_health: dict[str, Any]
+    delivery_readiness: dict[str, Any]
+    quality_assessment: dict[str, Any]
+    control_decision: dict[str, Any]
     candidate_set: Annotated[dict[str, Any], merge_dicts]
-    replan_exhausted: bool
-    control_no_progress: bool
     marginal_gain: dict[str, Any]
-    synthesis_admission: bool
-    synthesis_mode: str
-    synthesis_admission_reason: str
-    trusted_evidence_count: int
-    control_fingerprint: str
-    stagnant_cycles: int
+    stalled_cycles: int
 
 
 class WorkerTaskState(TypedDict):
@@ -122,6 +113,7 @@ def empty_research_state(
         "user_id": user_id,
         "tenant_id": tenant_id,
         "project_id": project_id,
+        "state_version": 1,
         "search_mode": search_mode or "agent",
         "search_mode_requested": search_mode or "agent",
         "route_signals": [],
@@ -136,43 +128,44 @@ def empty_research_state(
         "worker_results": [],
         "findings": [],
         "evidence_refs": [],
+        "artifacts": [],
         "budget": {
             "tool_calls": 0,
             "max_tool_calls": max_tool_calls,
-            "replan_count": 0,
-            "max_replan_count": max_replan_count,
+            "llm_calls": 0,
+            "max_llm_calls": 80,
+            "total_tokens": 0,
+            "max_total_tokens": 300000,
+            "deadline_remaining_sec": 1800.0,
+            "synthesis_reserve_sec": 180.0,
             "max_parallel_workers": 3,
+            "max_replan_count": max_replan_count,
+            "exhausted": False,
+            "low": False,
         },
-        "replan_count": 0,
-        "replan_attempts": 0,
-        "replan_applied_count": 0,
+        "budget_status": "available",
+        "replan_budget": new_replan_budget(max_replan_count),
         "rejected_patch_hashes": [],
         "draft_ref": None,
         "final_ref": None,
         "final_content": "",
-        "artifacts": [],
         "phase": WorkflowPhase.BOOTSTRAP.value,
-        "outcome": OutcomeStatus.RUNNING.value,
-        "status": "running",
-        "abort_reason": "",
+        "lifecycle": {"status": LifecycleStatus.RUNNING.value},
         "termination": None,
+        "cancel_reason": "",
+        "abort_reason": "",
         "needs_clarification": False,
         "needs_plan_review": False,
-        "progress": "run",
-        "quality_passed": False,
-        "quality_reason": "",
-        "quality_repairable": False,
-        "quality_repair_action": "",
-        "quality_attempts": 0,
         "progress_assessment": {},
+        "evidence_assessment": {},
+        "execution_health": {},
+        "delivery_readiness": {},
+        "quality_assessment": {},
+        "control_decision": {},
         "candidate_set": {},
-        "replan_exhausted": False,
-        "control_no_progress": False,
         "marginal_gain": {},
-        "synthesis_admission": False,
-        "synthesis_mode": "",
-        "synthesis_admission_reason": "",
-        "trusted_evidence_count": 0,
-        "control_fingerprint": "",
-        "stagnant_cycles": 0,
+        "stalled_cycles": 0,
     }
+
+
+__all__ = ["BudgetState", "ResearchState", "WorkerTaskState", "empty_research_state"]

@@ -23,7 +23,6 @@ from app.observability.semantic import (
     materialize_gap_items,
     stable_gap_id,
 )
-from app.research.planning.progress import ProgressAssessment
 
 
 def test_brief_event_and_payload_ref():
@@ -135,26 +134,25 @@ def test_plan_links_to_brief_and_worker_lineage():
 
 
 def test_progress_gap_has_stable_gap_id_and_replan_targets():
-    a = ProgressAssessment(
-        verdict="gap",
+    gaps = materialize_gap_items(
         missing_dimensions=["regulation"],
         coverage_gaps=["empty:t1:obj"],
-        reason="semantic_gap",
-    ).materialize_gaps()
-    assert a.gaps
-    assert all(item["gap_id"].startswith("gap_") for item in a.gaps)
+    )
+    open_gap_ids = [str(item["gap_id"]) for item in gaps]
+    assert gaps
+    assert all(item["gap_id"].startswith("gap_") for item in gaps)
     gid = stable_gap_id("missing_dimension", "regulation")
-    assert gid in a.open_gap_ids
+    assert gid in open_gap_ids
 
     events = [
         {
-            "type": "progress.evaluated",
+            "type": "progress.assessed",
             "seq": 1,
             "attributes": {
                 "progress_id": "progress_01",
-                "verdict": "gap",
-                "gaps": a.gaps,
-                "open_gap_ids": a.open_gap_ids,
+                "status": "gap",
+                "gaps": gaps,
+                "open_gap_ids": open_gap_ids,
                 "resolved_gap_ids": [],
             },
         },
@@ -171,11 +169,11 @@ def test_progress_gap_has_stable_gap_id_and_replan_targets():
             },
         },
         {
-            "type": "progress.evaluated",
+            "type": "progress.assessed",
             "seq": 3,
             "attributes": {
                 "progress_id": "progress_02",
-                "verdict": "enough",
+                "status": "sufficient",
                 "gaps": [],
                 "open_gap_ids": [],
                 "resolved_gap_ids": [gid],

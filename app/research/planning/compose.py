@@ -18,6 +18,7 @@ from app.research.planning.lead_planner import heuristic_dynamic_plan, lead_plan
 from app.research.planning.granularity import normalize_plan_granularity
 from app.research.planning.candidate import annotate_candidate_dependencies
 from app.research.planning.policy import apply_source_policy, parse_source_policy, select_planning_mode
+from app.research.runtime.scheduler import research_only_plan
 from app.research.planning.validator import validate_hybrid_plan
 
 
@@ -111,7 +112,7 @@ def _compose_execution_plan_strict(
             intent,
             max_research_tasks=limits.max_research_tasks,
         )
-        plan = finalize_plan(plan)
+        plan = research_only_plan(finalize_plan(plan))
         issues = validate_hybrid_plan(
             intent,
             plan,
@@ -120,7 +121,9 @@ def _compose_execution_plan_strict(
             max_research_tasks=limits.max_research_tasks,
         )
         if issues:
-            plan = finalize_plan(_stamp(build_plan(intent), intent, "template", effective=effective))
+            plan = research_only_plan(
+                finalize_plan(_stamp(build_plan(intent), intent, "template", effective=effective))
+            )
             issues = validate_hybrid_plan(
                 intent,
                 plan,
@@ -130,7 +133,9 @@ def _compose_execution_plan_strict(
             )
             return _stamp(plan, intent, "template", effective=effective), issues
         return _stamp(plan, intent, "dynamic", plan.research_brief, effective=effective), issues
-    plan = finalize_plan(_stamp(build_plan(intent), intent, mode, effective=effective))
+    plan = research_only_plan(
+        finalize_plan(_stamp(build_plan(intent), intent, mode, effective=effective))
+    )
     issues = validate_hybrid_plan(
         intent,
         plan,
@@ -154,7 +159,7 @@ def compose_execution_plan_sync(
     except Exception as exc:
         from app.agent.harness.planner import build_plan, finalize_plan, validate_plan_against_intent
 
-        plan = finalize_plan(build_plan(intent))
+        plan = research_only_plan(finalize_plan(build_plan(intent)))
         plan.planning_mode = "fallback_template"
         _passed, issues = validate_plan_against_intent(intent, plan)
         return plan, [f"planning_fallback:{type(exc).__name__}", *issues]
@@ -199,8 +204,10 @@ async def compose_execution_plan(
                 intent,
                 max_research_tasks=limits.max_research_tasks,
             )
-            llm_plan = finalize_plan(
-                _stamp(llm_plan, intent, "dynamic", llm_plan.research_brief, effective=effective)
+            llm_plan = research_only_plan(
+                finalize_plan(
+                    _stamp(llm_plan, intent, "dynamic", llm_plan.research_brief, effective=effective)
+                )
             )
             issues = validate_hybrid_plan(
                 intent,

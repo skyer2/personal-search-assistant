@@ -2231,65 +2231,30 @@ class AgentHarness:
         abort_reason = str(state.abort_reason or "")
         metadata = state.metadata if isinstance(state.metadata, dict) else {}
         raw_termination = metadata.get("termination")
-        termination: dict[str, Any] | None = (
-            dict(raw_termination) if isinstance(raw_termination, dict) else None
+        if not isinstance(raw_termination, dict):
+            raise RuntimeError("terminal outcome missing from LoopState metadata")
+        termination = dict(raw_termination)
+        outcome = str(termination.get("outcome") or "")
+        if outcome not in {"success", "partial", "failed", "cancelled"}:
+            raise RuntimeError(f"invalid terminal outcome: {outcome}")
+        if success != (outcome == "success"):
+            raise RuntimeError("finalize success flag conflicts with TerminalPolicy outcome")
+        termination["status"] = {
+            "success": "completed",
+            "partial": "partial",
+            "failed": "failed",
+            "cancelled": "interrupted",
+        }[outcome]
+        termination.setdefault("reason", outcome)
+        termination.setdefault("stage", "finalize")
+        termination["quality_attempted"] = bool(
+            metadata.get("quality_attempted", termination.get("quality_attempted"))
         )
-        if termination is None:
-            synthesis_attempted = bool(
-                metadata.get("synthesis_attempted")
-                or metadata.get("emergency_synthesis")
-            )
-            synthesis_status = str(
-                metadata.get("synthesis_status")
-                or ("ok" if synthesis_attempted else "not_started")
-            )
-            failure_stage = str(
-                metadata.get("failure.origin_stage")
-                or metadata.get("failure_stage")
-                or ""
-            )
-            termination = {
-                "status": (
-                    "completed"
-                    if success
-                    else ("interrupted" if abort_reason == "cancelled" else "partial")
-                ),
-                "reason": abort_reason or ("success" if success else "incomplete"),
-                "stage": (
-                    "quality"
-                    if metadata.get("quality_attempted")
-                    else ("finalize" if success else (failure_stage or "synthesis"))
-                ),
-                "research_completed": bool(
-                    metadata.get("research_completed", success and not abort_reason)
-                ),
-                "synthesis_attempted": synthesis_attempted,
-                "synthesis_status": synthesis_status,
-                "quality_attempted": bool(metadata.get("quality_attempted")),
-            }
-        else:
-            termination.setdefault(
-                "status",
-                "completed" if success else "partial",
-            )
-            termination.setdefault("reason", abort_reason or "incomplete")
-            termination.setdefault("stage", "finalize" if success else "synthesis")
-            termination["quality_attempted"] = bool(
-                metadata.get("quality_attempted", termination.get("quality_attempted"))
-            )
-        if success:
-            termination["status"] = "completed"
-        elif abort_reason == "cancelled":
-            termination["status"] = "interrupted"
-        else:
-            termination["status"] = "partial"
-        if success and not str(state.final_content or "").strip():
-            termination["status"] = "partial"
-            termination["reason"] = termination.get("reason") or "no_content"
         if isinstance(state.metadata, dict):
             state.metadata["termination"] = termination
 
         from app.agent.harness.deliverables import (
+            deliverables_allowed_for_outcome,
             ensure_requested_deliverables,
             session_artifact_names,
             usable_report_text,
@@ -2297,7 +2262,11 @@ class AgentHarness:
 
         # Run 隔离：交付物只写/只读当前 runs/{run_id}/deliverables
         deliverable_root = Path(deliverable_dir) if deliverable_dir else Path(session_dir)
-        written = ensure_requested_deliverables(deliverable_root, state)
+        written = (
+            ensure_requested_deliverables(deliverable_root, state)
+            if deliverables_allowed_for_outcome(outcome)
+            else {}
+        )
         artifacts = session_artifact_names(deliverable_root)
         # P1 RunSummary：结构化结论落盘，供后续 Run 显式继承
         try:
@@ -2329,7 +2298,12 @@ class AgentHarness:
                 ][:12],
                 artifact_refs=[str(name) for name in artifacts][:8],
                 unresolved_questions=gaps,
-                status="completed" if success else "partial",
+                status={
+                    "success": "completed",
+                    "partial": "partial",
+                    "failed": "failed",
+                    "cancelled": "interrupted",
+                }[outcome],
                 created_at=utc_now(),
             )
             if state.run_id:
@@ -2427,11 +2401,7 @@ class AgentHarness:
                 )
             else:
                 state.final_content = "任务已结束，但没有可展示的正文。"
-        persist_status = "success" if success else "partial"
-        if abort_reason == "cancelled":
-            persist_status = "interrupted"
-        elif abort_reason and not success:
-            persist_status = "partial"
+        persist_status = outcome
         # Persist-before-publish：先写 RunStore，再推 WS，刷新后才能 hydrate 出结果。
         _project_run_complete(
             state.run_id,
@@ -2447,7 +2417,7 @@ class AgentHarness:
         )
 
         duration = int((time.perf_counter() - phase_started) * 1000)
-        status = "success" if success else "partial"
+        status = outcome
         total_latency_ms = int((time.perf_counter() - started_at) * 1000)
         step_passed = sum(1 for v in state.step_validation_results if v.get("passed"))
         step_total = len(state.step_validation_results)
@@ -2537,6 +2507,8 @@ class AgentHarness:
                 "abort_reason": state.abort_reason,
                 "abort_message": state.abort_message,
                 "termination": termination,
+                "quality": metadata.get("quality", {}),
+                "quality_attempted": bool(metadata.get("quality_attempted", termination.get("quality_attempted"))),
                 "observability": obs_snapshot.to_dict(),
                 "usage": usage_summary,
                 "trace_id": self._current_trace_id,

@@ -1,8 +1,4 @@
-"""Graph → execution projection.
-
-ResearchState 是唯一 workflow truth。LoopState 只是进程内执行投影：
-领域函数仍可读取它，但 plan/task runtime 状态不得写回或反向成为 resume 来源。
-"""
+"""Read-only projection from canonical ResearchState to the process LoopState."""
 
 from __future__ import annotations
 
@@ -12,46 +8,40 @@ from app.agent.harness.state import ExecutionPlan, LoopState, TaskIntent
 
 
 def sync_execution_projection(loop: LoopState, gstate: dict[str, Any]) -> LoopState:
-    """Project graph-owned inputs to the read-only execution view."""
+    """Project graph-owned facts for legacy process-local services.
+
+    This function never reconstructs task state and never writes workflow
+    authority fields. LoopState remains an execution view, not a control plane.
+    """
     intent = gstate.get("intent")
     if isinstance(intent, dict) and intent:
         loop.intent = TaskIntent.from_dict(intent)
+
     plan = gstate.get("plan")
     if isinstance(plan, dict) and plan:
         loop.plan = ExecutionPlan.from_dict(plan)
-    if "replan_count" in gstate:
-        loop.replan_count = int(gstate.get("replan_count") or 0)
-    if isinstance(loop.metadata, dict):
-        if "replan_attempts" in gstate:
-            loop.metadata["replan_attempts"] = int(gstate.get("replan_attempts") or 0)
-        if "replan_applied_count" in gstate:
-            loop.metadata["replan_applied_count"] = int(
-                gstate.get("replan_applied_count") or 0
-            )
-        if "control_no_progress" in gstate:
-            loop.metadata["control_no_progress"] = bool(
-                gstate.get("control_no_progress")
-            )
-        if "replan_exhausted" in gstate:
-            loop.metadata["replan_exhausted"] = bool(gstate.get("replan_exhausted"))
+
     budget = gstate.get("budget")
-    if isinstance(budget, dict) and budget:
-        run_budget = dict(loop.metadata.get("run_budget") or {})
-        for key in ("max_parallel_workers", "max_replan_count"):
-            if budget.get(key) is None:
-                continue
-            value = max(0, int(budget[key]))
-            existing = run_budget.get(key)
-            if existing is not None:
-                value = min(value, int(existing))
-            run_budget[key] = value
-        loop.metadata["run_budget"] = run_budget
+    replan_budget = gstate.get("replan_budget")
+    if isinstance(budget, dict) or isinstance(replan_budget, dict):
+        metadata_budget = dict(loop.metadata.get("run_budget") or {})
+        if isinstance(budget, dict):
+            for key in ("max_parallel_workers", "max_replan_count"):
+                if budget.get(key) is not None:
+                    metadata_budget[key] = max(0, int(budget[key]))
+        if isinstance(replan_budget, dict):
+            metadata_budget["replan_applied"] = max(0, int(replan_budget.get("applied") or 0))
+            loop.replan_count = max(0, int(replan_budget.get("applied") or 0))
+        loop.metadata["run_budget"] = metadata_budget
+
     final = gstate.get("final_content")
-    if isinstance(final, str) and final:
+    if isinstance(final, str):
         loop.final_content = final
+
     abort = gstate.get("abort_reason")
     if abort:
         loop.abort_reason = str(abort)
+
     brief = gstate.get("brief")
     if isinstance(brief, dict) and brief:
         loop.research_brief_obj = brief
@@ -59,16 +49,27 @@ def sync_execution_projection(loop: LoopState, gstate: dict[str, Any]) -> LoopSt
             from app.agent.harness.research_brief import ResearchBrief
 
             loop.intent.brief = ResearchBrief.from_dict(brief)
-    loop.metadata["workflow_authority"] = "research_state"
-    findings = gstate.get("findings")
-    if isinstance(findings, list):
-        loop.metadata["partial_findings"] = [
-            dict(item) for item in findings if isinstance(item, dict)
-        ][:24]
-    if gstate.get("progress"):
-        loop.metadata["graph_progress"] = gstate.get("progress")
-    if gstate.get("search_mode"):
-        loop.metadata["search_mode"] = gstate.get("search_mode")
+
+    metadata: dict[str, Any] = {
+        "workflow_authority": "research_state",
+        "partial_findings": [
+            dict(item) for item in (gstate.get("findings") or []) if isinstance(item, dict)
+        ][:24],
+        "search_mode": str(gstate.get("search_mode") or ""),
+        "termination": dict(gstate.get("termination") or {}),
+    }
+    for key in (
+        "progress_assessment",
+        "evidence_assessment",
+        "execution_health",
+        "delivery_readiness",
+        "quality_assessment",
+        "control_decision",
+    ):
+        value = gstate.get(key)
+        if isinstance(value, dict):
+            metadata[key] = dict(value)
+    loop.metadata.update(metadata)
     return loop
 
 

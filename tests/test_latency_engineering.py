@@ -15,9 +15,9 @@ from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep
 from app.agent.harness.step_budget import retrieval_budget, consume_n_retrieval_or_block
 from app.research.runtime.scheduler import (
     annotate_plan_tasks,
-    ready_research_steps,
-    required_retrieval_ids,
-    skip_optional_pending,
+    readiness_map,
+    required_research_ids,
+    select_dispatch_wave,
 )
 from app.tools.batch_retrieval import run_batch_fetch, run_batch_search
 from app.tools.retrieval_cache import clear_retrieval_cache, cached_call, search_cache_key
@@ -133,34 +133,27 @@ def test_optional_tasks_and_early_skip():
                     "priority": 1,
                 },
             ),
-            PlanStep(step_type="summarize", description="s", task_id="ts", objective="synth"),
         ]
     )
     annotate_plan_tasks(plan)
-    required = required_retrieval_ids(plan)
+    required = required_research_ids(plan)
     assert "t4" not in required
     optional = [
         s for s in plan.steps if s.step_type == "research" and s.metadata.get("optional")
     ]
     assert [s.task_id for s in optional] == ["t4"]
 
-    synth = next(s for s in plan.steps if s.step_type == "summarize")
-    for oid in [s.task_id for s in optional]:
-        assert oid not in (synth.depends_on or [])
-
-    for s in plan.steps:
-        if s.step_type == "research" and s.metadata.get("required"):
-            s.metadata["status"] = "done"
-    runtime_status = {
-        s.resolved_task_id(i): str(s.metadata.get("status") or "pending")
-        for i, s in enumerate(plan.steps)
+    tasks = {
+        step.resolved_task_id(index): {"execution_status": "succeeded", "result_status": "complete"}
+        for index, step in enumerate(plan.steps)
+        if step.task_id != "t4"
     }
-    status = skip_optional_pending(plan, runtime_status, reason="early_stop_enough")
-    for s in optional:
-        assert status[s.task_id] == "skipped"
-    ready = ready_research_steps(plan, status, include_optional=True)
-    assert ready == []
-    print("[OK] optional early skip + synth deps")
+    tasks["t4"] = {"execution_status": "pending", "result_status": "none"}
+    readiness = readiness_map(plan, tasks)
+    assert readiness["t4"] == "runnable"
+    wave = select_dispatch_wave(plan, tasks, task_ids=required, max_parallel=4)
+    assert [step.task_id for _, step in wave] == []
+    print("[OK] optional research does not block control policy")
 
 
 def test_consume_n_retrieval_budget():

@@ -7,12 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.orchestration import check_unauthorized_tools
-from app.agent.harness.planner import build_plan, understand_task, validate_plan_against_intent
+from app.agent.harness.planner import understand_task
 from app.agent.harness.state import PlanStep
 from app.research.planning.compose import compose_execution_plan_sync
 from app.research.planning.policy import parse_source_policy, select_planning_mode, tools_for_sources
-from app.research.planning.progress import evaluate_progress
-from app.research.runtime.scheduler import ready_research_steps
 from app.research.workers.registry import resolve_execute_target
 
 
@@ -33,18 +31,18 @@ def test_direct_chat_deliverable():
     direct = understand_task("2026 年 AI 电商趋势有哪些？附来源")
     assert select_planning_mode(direct) == "direct"
     assert direct.deliverable == "text"
-    plan = build_plan(direct)
-    assert [s.step_type for s in plan.steps] == ["network_search", "summarize"]
-    ok, issues = validate_plan_against_intent(direct, plan)
-    assert ok and not issues
+    plan, issues = compose_execution_plan_sync(direct)
+    assert not issues
+    assert [s.step_type for s in plan.steps] == ["network_search"]
     print("[OK] direct chat deliverable")
 
 
 def test_explicit_markdown_request():
     intent = understand_task("搜索 Tesla 2026 动态，生成 Markdown 报告")
     assert intent.deliverable == "md"
-    plan = build_plan(intent)
-    assert plan.steps[-1].step_type == "generate_markdown"
+    plan, issues = compose_execution_plan_sync(intent)
+    assert not issues
+    assert all(s.step_type in {"research", "network_search", "file_read"} for s in plan.steps)
     print("[OK] explicit markdown request")
 
 
@@ -74,7 +72,7 @@ def test_planner_defect_falls_back_to_template(monkeypatch):
     assert plan.planning_mode == "fallback_template"
     assert plan.steps
     assert issues[0] == "planning_fallback:RuntimeError"
-    assert "generate_markdown" in [step.step_type for step in plan.steps]
+    assert all(step.step_type != "generate_markdown" for step in plan.steps)
     print("[OK] planner defect falls back to template")
 
 
@@ -103,18 +101,10 @@ def test_research_worker_allowlist_and_registry():
     print("[OK] research allowlist + registry")
 
 
-def test_progress_abort():
-    intent = understand_task("比较 A 和 B")
-    plan, _ = compose_execution_plan_sync(intent)
-    assert evaluate_progress(plan, aborted=True) == "abort"
-    print("[OK] progress abort")
-
-
 if __name__ == "__main__":
     test_source_policy_forbids_web()
     test_direct_chat_deliverable()
     test_explicit_markdown_request()
     test_dynamic_compare_builds_objective_dag()
     test_research_worker_allowlist_and_registry()
-    test_progress_abort()
     print("\n=== Hybrid planning tests passed ===")

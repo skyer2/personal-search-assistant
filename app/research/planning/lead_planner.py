@@ -141,46 +141,6 @@ def research_step_from_task(
     )
 
 
-def append_synthesis(intent: TaskIntent, steps: list[PlanStep]) -> list[PlanStep]:
-    research_ids = [s.task_id for s in steps if s.task_id]
-    if intent.deliverable == "md":
-        steps.append(
-            PlanStep(
-                step_type="generate_markdown",
-                description="只消费已有证据，写成 Markdown 报告",
-                task_id="t_synthesize_md",
-                depends_on=list(research_ids),
-            )
-        )
-    elif intent.deliverable == "pdf":
-        steps.append(
-            PlanStep(
-                step_type="generate_markdown",
-                description="只消费已有证据，写成 Markdown 报告",
-                task_id="t_synthesize_md",
-                depends_on=list(research_ids),
-            )
-        )
-        steps.append(
-            PlanStep(
-                step_type="convert_pdf",
-                description="将 Markdown 转换为 PDF",
-                task_id="t_synthesize_pdf",
-                depends_on=["t_synthesize_md"],
-            )
-        )
-    else:
-        steps.append(
-            PlanStep(
-                step_type="summarize",
-                description="只消费已有证据，输出最终回答",
-                task_id="t_synthesize_text",
-                depends_on=list(research_ids),
-            )
-        )
-    return steps
-
-
 def _dedupe_research_steps(
     steps: list[PlanStep], brief: Any
 ) -> list[PlanStep]:
@@ -359,7 +319,6 @@ def heuristic_dynamic_plan(intent: TaskIntent, policy: SourcePolicy) -> Executio
         )
         brief_text = brief.objective or intent.summary or intent.raw_query
     steps = normalize_plan_granularity(steps, brief, max_research_tasks=6)
-    append_synthesis(intent, steps)
     plan = ExecutionPlan(
         steps=steps,
         summary=" → ".join(s.description for s in steps),
@@ -454,7 +413,6 @@ def plan_from_lead_payload(
         max_research_tasks=max_tasks,
     )
     steps = _dedupe_research_steps(steps, brief)
-    append_synthesis(intent, steps)
     from app.research.planning.priority import stamp_semantic_priority
 
     plan = ExecutionPlan(

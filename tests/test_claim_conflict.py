@@ -14,7 +14,6 @@ from app.agent.harness.validator import ResultValidator
 from app.config.loader import get_harness_config
 from app.research.claims import reconcile_worker_results
 from app.research.claims.extract import extract_claims_from_worker_results
-from app.research.planning.progress import assess_progress
 from app.agent.harness.state import ExecutionPlan, PlanStep
 
 
@@ -96,74 +95,6 @@ def test_scope_mismatch_is_expected_disagreement():
     result = reconcile_worker_results(rows)
     assert result.disclosed_labels or not result.unresolved_labels, result.to_dict()
     print("[OK] scope mismatch disclosed", result.disclosed_labels)
-
-
-def test_progress_merges_global_reconciliation():
-    plan = ExecutionPlan(
-        steps=[
-            PlanStep(step_type="research", description="a", task_id="t_worker_a", objective="A"),
-            PlanStep(step_type="research", description="b", task_id="t_worker_b", objective="B"),
-            PlanStep(step_type="summarize", description="s", task_id="t_synth", objective="s"),
-        ],
-        planning_mode="dynamic",
-    )
-    for step in plan.steps:
-        if step.step_type == "research":
-            step.metadata["status"] = "done"
-    # 同等权威二级来源 → 应留下 unresolved，供 Progress 合并
-    rows = [
-        {
-            "task_id": "t_worker_a",
-            "ok": True,
-            "summary": "Tesla FY2026 total revenue 10B",
-            "payload": {
-                "facts": ["Tesla FY2026 total revenue 10亿美元"],
-                "sources": ["https://www.bloomberg.com/a"],
-                "confidence": 0.7,
-                "findings": [
-                    {
-                        "claim": "Tesla FY2026 total revenue 10亿美元",
-                        "confidence": 0.7,
-                        "source_quality": "secondary",
-                        "evidence_ids": ["e1"],
-                    }
-                ],
-            },
-        },
-        {
-            "task_id": "t_worker_b",
-            "ok": True,
-            "summary": "Tesla FY2026 total revenue 8B",
-            "payload": {
-                "facts": ["Tesla FY2026 total revenue 8亿美元"],
-                "sources": ["https://www.reuters.com/b"],
-                "confidence": 0.7,
-                "findings": [
-                    {
-                        "claim": "Tesla FY2026 total revenue 8亿美元",
-                        "confidence": 0.7,
-                        "source_quality": "secondary",
-                        "evidence_ids": ["e2"],
-                    }
-                ],
-            },
-        },
-    ]
-    for row in rows:
-        row["payload"]["facts"].append("2026 已量产交付客户订单充足")
-        row["payload"]["summary"] = row["summary"] + " 商业化进展明确"
-    recon = reconcile_worker_results(rows)
-    assert recon.unresolved_labels, recon.to_dict()
-    assessment = assess_progress(
-        plan,
-        task_status={"t_worker_a": "done", "t_worker_b": "done", "t_synth": "pending"},
-        worker_results=rows,
-        query="比较 Tesla 收入",
-        reconciliation=recon,
-    )
-    assert assessment.unresolved_conflicts, assessment.to_dict()
-    assert assessment.verdict in {"gap", "enough", "run"}
-    print("[OK] progress merges reconciliation", assessment.verdict, assessment.unresolved_conflicts[:2])
 
 
 def test_conflict_disclosure_gate():

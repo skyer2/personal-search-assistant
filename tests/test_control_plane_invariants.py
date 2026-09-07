@@ -26,6 +26,7 @@ from app.research.planning.policy import parse_source_policy
 from app.research.planning.validator import validate_hybrid_plan
 from app.research.runtime.findings import normalize_findings
 from app.research.runtime.graph import finalize_node, route_after_quality
+from app.research.runtime.scheduler import research_only_plan
 
 
 def test_parallel_worker_leases_cannot_overcommit_research_pool() -> None:
@@ -147,7 +148,7 @@ def test_category_aliases_use_one_discovery_worker() -> None:
 def test_landscape_plan_is_discovery_and_comparison_is_synthesis() -> None:
     query = "国内有哪些值得加入的 AI 初创公司？"
     intent = attach_brief(TaskIntent(raw_query=query, summary=query))
-    plan = heuristic_dynamic_plan(intent, parse_source_policy(query))
+    plan = research_only_plan(heuristic_dynamic_plan(intent, parse_source_policy(query)))
     research_steps = [step for step in plan.steps if step.step_type == "research"]
     assert len(research_steps) == 1
     assert research_steps[0].metadata["task_kind"] == "discovery"
@@ -183,12 +184,6 @@ def test_validator_rejects_category_deep_dive_and_comparison_worker() -> None:
     plan = ExecutionPlan(
         steps=[
             deep_dive,
-            PlanStep(
-                step_type="summarize",
-                description="summary",
-                task_id="t_summary",
-                depends_on=["t_deep_dive"],
-            ),
         ]
     )
     issues = validate_hybrid_plan(intent, plan)
@@ -234,11 +229,11 @@ def test_quality_failure_routes_conditionally_and_partial_is_preserved() -> None
     assert (
         route_after_quality(
             {
-                "quality_passed": False,
-                "quality_repair_action": "repair",
-                "quality_attempts": 1,
-                "budget": {"max_replan_count": 2},
-                "replan_count": 0,
+                "quality_assessment": {
+                    "verdict": "fail",
+                    "repairable": True,
+                    "suggested_action": "repair",
+                },
             }
         )
         == "repair_synthesis"
@@ -246,11 +241,12 @@ def test_quality_failure_routes_conditionally_and_partial_is_preserved() -> None
     assert (
         route_after_quality(
             {
-                "quality_passed": False,
-                "quality_repair_action": "partial",
-                "quality_attempts": 2,
-                "budget": {"max_replan_count": 2},
-                "replan_count": 0,
+                "quality_assessment": {
+                    "verdict": "fail",
+                    "repairable": False,
+                    "suggested_action": "",
+                },
+                "final_content": "partial answer",
             }
         )
         == "finalize"
@@ -259,10 +255,11 @@ def test_quality_failure_routes_conditionally_and_partial_is_preserved() -> None
         finalize_node(
             {
                 "phase": "quality",
-                "status": "partial",
+                "quality_assessment": {"verdict": "fail"},
+                "evidence_assessment": {"status": "sufficient"},
                 "final_content": "partial answer",
             }
-        )["status"]
+        )["termination"]["outcome"]
         == "partial"
     )
 

@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from app.agent.harness.state import ExecutionPlan
-from app.research.planning.validator import RESEARCH_TYPES, SYNTHESIS_TYPES, _has_cycle
+from app.research.planning.validator import RESEARCH_TYPES, _has_cycle
+
+FIXED_PIPELINE_STEP_TYPES = frozenset(
+    {"generate_markdown", "summarize", "convert_pdf", "quality", "finalize"}
+)
 
 
 def _research_steps(plan: ExecutionPlan) -> list:
@@ -33,10 +37,8 @@ def grade_plan_invariants(plan: ExecutionPlan, expect: dict[str, Any] | None = N
     max_research = expect.get("max_research_tasks")
     if max_research is not None and len(research) > int(max_research):
         issues.append("too_many_research_tasks")
-    if expect.get("has_synthesis") and not any(s.step_type in SYNTHESIS_TYPES for s in plan.steps):
-        issues.append("missing_synthesis")
-    if expect.get("has_convert_pdf") and "convert_pdf" not in step_types:
-        issues.append("missing_convert_pdf")
+    if FIXED_PIPELINE_STEP_TYPES.intersection(step_types):
+        issues.append("fixed_pipeline_step_in_plan")
     for tool in expect.get("forbidden_tools") or []:
         if tool in tools:
             issues.append(f"forbidden_tool:{tool}")

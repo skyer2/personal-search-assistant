@@ -7,7 +7,6 @@ from app.research.planning.granularity import analyze_task_granularity
 from app.research.planning.priority import match_coverage_keys
 from app.research.planning.policy import SOURCE_TOOLS, SourcePolicy, parse_source_policy
 
-SYNTHESIS_TYPES = frozenset({"generate_markdown", "summarize", "convert_pdf"})
 RESEARCH_TYPES = frozenset({"research", "network_search", "file_read"})
 
 
@@ -200,6 +199,8 @@ def validate_hybrid_plan(
     policy = policy or parse_source_policy(intent.raw_query)
     if not plan.steps:
         return ["empty_plan"]
+    if any(step.step_type not in RESEARCH_TYPES for step in plan.steps):
+        return ["non_research_step_in_plan"]
 
     if len(plan.steps) > max_plan_steps:
         issues.append("too_many_steps")
@@ -242,7 +243,10 @@ def validate_hybrid_plan(
         if step.step_type not in RESEARCH_TYPES:
             continue
         metadata = step.metadata or {}
-        task_kind = str(metadata.get("task_kind") or "deep_dive")
+        task_kind = str(
+            metadata.get("task_kind")
+            or ("discovery" if step.step_type == "network_search" else "deep_dive")
+        )
         subject_id = _step_subject_id(step, brief)
         if brief_kind == "landscape_discovery" and task_kind not in {
             "discovery",
@@ -291,15 +295,5 @@ def validate_hybrid_plan(
     if intent.needs_file_read and "file" not in policy.forbidden_sources:
         if not _covers_source(plan, "file"):
             issues.append("missing_file_read")
-
-    if intent.deliverable == "md" and not any(s.step_type == "generate_markdown" for s in plan.steps):
-        issues.append("missing_generate_markdown")
-    if intent.deliverable == "pdf":
-        if not any(s.step_type == "generate_markdown" for s in plan.steps):
-            issues.append("missing_generate_markdown")
-        if not any(s.step_type == "convert_pdf" for s in plan.steps):
-            issues.append("missing_convert_pdf")
-    if intent.deliverable == "text" and not any(s.step_type == "summarize" for s in plan.steps):
-        issues.append("missing_summarize")
 
     return issues

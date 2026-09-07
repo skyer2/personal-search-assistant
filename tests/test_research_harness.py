@@ -11,11 +11,10 @@ from app.agent.harness.state import ExecutionPlan, PlanStep
 from app.research.idempotency import action_idempotency_key
 from app.research.runtime.reducers import merge_dicts, merge_worker_payloads
 from app.research.runtime.scheduler import (
-    all_retrieval_done,
     annotate_plan_tasks,
     dispatch_sends,
-    next_synthesis_step,
-    ready_retrieval_steps,
+    initialize_tasks,
+    research_only_plan,
 )
 from app.research.workers.registry import resolve_execute_target, worker_tools_for_step
 
@@ -40,33 +39,22 @@ def test_action_idempotency_stable_across_index_shift():
 
 def test_annotate_plan_dag_dependencies():
     intent = understand_task("搜索公开资料，生成Markdown报告")
-    plan = annotate_plan_tasks(finalize_plan(build_plan(intent)))
+    plan = research_only_plan(annotate_plan_tasks(finalize_plan(build_plan(intent))))
     ids = [s.task_id for s in plan.steps]
     assert all(ids)
-    retrieval = [s for s in plan.steps if s.step_type == "network_search"]
-    assert all(s.depends_on == [] for s in retrieval)
-    md = next(s for s in plan.steps if s.step_type == "generate_markdown")
-    assert set(md.depends_on) == {s.task_id for s in retrieval}
-    print(f"[OK] DAG task_ids={ids} md_deps={md.depends_on}")
+    assert all(step.step_type in {"research", "network_search", "file_read"} for step in plan.steps)
+    print(f"[OK] research-only DAG task_ids={ids}")
 
 
 def test_ready_retrieval_can_fan_out():
     intent = understand_task("搜索公开资料并读取附件，生成Markdown")
     intent.needs_file_read = True
-    plan = annotate_plan_tasks(finalize_plan(build_plan(intent)))
-    ready = ready_retrieval_steps(plan)
-    assert len(ready) >= 1
-    sends = dispatch_sends(plan)
+    plan = research_only_plan(annotate_plan_tasks(finalize_plan(build_plan(intent))))
+    tasks = initialize_tasks(plan)
+    sends = dispatch_sends(plan, tasks)
     assert "network_search" in {row["step_type"] for row in sends}
-    assert next_synthesis_step(plan) is None
-    status = {s.resolved_task_id(i): "done" for i, s in enumerate(plan.steps) if s.depends_on == []}
-    for i, s in enumerate(plan.steps):
-        if s.depends_on == []:
-            s.metadata["status"] = "done"
-    assert all_retrieval_done(plan, status)
-    nxt = next_synthesis_step(plan, status)
-    assert nxt is not None and nxt[1].step_type == "generate_markdown"
-    print("[OK] scheduler READY / synthesis gating")
+    assert all(step.step_type != "generate_markdown" for step in plan.steps)
+    print("[OK] scheduler READY fan-out without synthesis gating")
 
 
 def test_merge_worker_payloads_dedup():
@@ -137,7 +125,7 @@ def test_compile_research_graph():
     try:
         from langgraph.checkpoint.memory import InMemorySaver
 
-        from app.research.domain.contracts import task_status_projection
+        from app.research.domain.task_state import task_execution_projection
         from app.research.runtime.graph import compile_research_graph, initial_graph_state
 
     except ModuleNotFoundError:
@@ -157,10 +145,12 @@ def test_compile_research_graph():
     )
     assert result["search_mode"] == "agent"
     assert result["plan"]
-    task_status = task_status_projection(result["tasks"])
+    task_status = task_execution_projection(result["tasks"])
     assert task_status
-    assert any(v == "done" for v in task_status.values())
+    assert any(v == "succeeded" for v in task_status.values())
     assert result.get("progress_assessment") is not None
+    edges = {(edge.source, edge.target) for edge in graph.get_graph().edges}
+    assert ("dispatch", "retry") in edges
     print(f"[OK] graph invoke status={result.get('status')} tasks={task_status} progress={result.get('progress_assessment')}")
 
 

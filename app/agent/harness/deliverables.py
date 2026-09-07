@@ -155,6 +155,10 @@ def ensure_requested_deliverables(session_dir: Path, state: object) -> dict[str,
     )
 
 
+def deliverables_allowed_for_outcome(outcome: str) -> bool:
+    return outcome in {"success", "partial"}
+
+
 def persist_markdown_if_missing(
     session_dir: Path,
     content: str = "",

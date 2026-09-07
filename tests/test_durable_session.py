@@ -171,6 +171,7 @@ def test_session_traces_and_run_trace(tmp_path, monkeypatch):
         assert payload["summary"]["identity"]["run_id"] == "r-trace"
 
     reset_run_store()
+    recorder._listeners = []
     print("[OK] run-centric trace API")
 
 

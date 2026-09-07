@@ -105,19 +105,24 @@ file_read     -> Artifact         # 本地附件
                        │
                        ▼
               Artifact / Evidence
+                      │
+                      ▼
+              Pure Assessments
+               ├── Progress
+               ├── Evidence
+               ├── Execution Health
+               └── Delivery Readiness
                        │
                        ▼
-              ProgressEvaluator
-                /             \
-            ENOUGH             GAP
-              │                │
-              │            PlanPatch
-              │                │
-              └───────◄────────┘
-                       │
+                  ControlPolicy
+          dispatch / retry / replan / synthesize
+          deliver partial / finalize
+                      │
                    Synthesis
-                       │
-                 Quality Gate
+                      │
+                Quality Gate
+                      │
+                 TerminalPolicy
                        │
                     Answer
 ```
@@ -145,7 +150,9 @@ Direct 用来回答：
 | Objective DAG | multi-agent orchestration |
 | Parallel Worker | 并行执行 + 隔离 |
 | WorkerRuntime | Agent framework 解耦 |
-| ProgressEvaluator | semantic stopping |
+| Pure Assessments | 语义进展、证据、执行健康、交付就绪 |
+| ControlPolicy | 唯一 workflow routing authority |
+| TerminalPolicy | 唯一 final outcome authority |
 | Replan / PlanPatch | 动态规划 + 有界自治 |
 | Context Engineering | 长任务核心问题 |
 | Artifact / Evidence | 上下文外置和可追溯 |
@@ -189,6 +196,8 @@ Query → single agent               Brief → Plan →                   关掉
 ## 5. 状态模型（不变）
 
 - **唯一 workflow truth**：`ResearchState` → LangGraph SQLite
+- **Task truth**：`TaskExecutionStatus` 与 `ResultStatus` 分离；`FAILED + PARTIAL` 是合法降级交付输入
+- **Readiness truth**：`TaskReadiness` 是由 Plan dependency 与 resource 推导的临时值，不落成 Task 状态
 - **Run / UI projection truth**：`RunStore` SQLite（`app/run_store/`）。刷新、断线、HITL、计时、文件列表都从这里 hydrate，不从 Trace 反推业务状态
 - **删除语义**：删除 Run 会级联 RunStore 行、run 目录、Trace/Projection/Payload、Graph checkpoint、RunSummary 和 `provenance.run_id` 派生 Memory；删除 Session 会级联全部 Run
 - **Agent history / debug**：Flight Recorder `AgentEvent` journal + JSONL。WebSocket 是 tail：先 `after_seq` replay，再 live
@@ -223,6 +232,11 @@ turn_id                 = 前端一条用户问题（= run_id）
 | Simple-fact deterministic renderer | `app/research/runtime/simple_fact.py` |
 | Source tier classification | `app/agent/harness/citations.py` |
 | StateGraph | `app/research/runtime/graph.py` |
+| Pure assessments | `app/research/assessment/` |
+| ControlPolicy | `app/research/control/policy.py` |
+| TerminalPolicy | `app/research/control/terminal_policy.py` |
+| Task state / readiness | `app/research/domain/task_state.py` |
+| Failure model | `app/research/domain/failure.py` |
 | WorkerRuntime | `app/research/runtime/worker.py` |
 | Brief / Plan / Progress | `research_brief.py` / `planner.py` / `app/research/planning/` |
 | Environment search/fetch | `app/tools/`（`internet_search`、`fetch_url`） |

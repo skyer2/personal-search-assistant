@@ -58,7 +58,7 @@ Evidence component 里的低 grounding 分数是 **unsupported-claim 检测器�
 | 数据集 | 验证什么 |
 | --- | --- |
 | `tests/eval/datasets/planner_v2.jsonl` | 覆盖维度、可并行、无环、来源策略、交付物 |
-| `tests/eval/datasets/progress_v1.jsonl` | ProgressEvaluator 能否判 GAP / ENOUGH / 冲突 |
+| `tests/eval/datasets/progress_v1.jsonl` | Progress assessment 能否判 `sufficient / gap / unknown` 与冲突 |
 | `tests/eval/datasets/replan_v1.jsonl` | 是否针对缺口补 task、不重复、不越权、不超预算 |
 | `tests/eval/datasets/evidence_v1.jsonl` | claim 是否有 evidence，citation 是否支持 |
 

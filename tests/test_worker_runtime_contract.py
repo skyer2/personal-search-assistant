@@ -16,8 +16,9 @@ from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep
 import app.research.execution.worker_executor as worker_executor_module
 from app.research.runtime import runner as runner_module
 from app.research.runtime import worker as worker_module
-from app.research.domain.contracts import task_status_projection
+from app.research.domain.task_state import task_execution_projection
 from app.research.runtime.isolation import IsolatedWorkerOutcome
+from app.research.runtime.state import empty_research_state
 from app.research.runtime.worker import (
     LangChainWorkerRuntime,
     ResearchContext,
@@ -220,10 +221,46 @@ def test_node_research_worker_handles_timeout_without_crashing(monkeypatch):
     finally:
         runner_module.drop_session(session.run_id)
 
-    assert task_status_projection(projected["tasks"])["t_node"] == "failed"
+    assert task_execution_projection(projected["tasks"])["t_node"] == "failed"
+    assert projected["tasks"]["t_node"]["attempt"] == 1
     assert projected["worker_results"][0]["status"] == "failed"
     assert projected["worker_results"][0]["fail_reason"] == "step_timeout"
     print("[OK] node handles timeout WorkerResult")
+
+
+def test_node_dispatch_publishes_fresh_control_decision():
+    state = LoopState(session_id="s_dispatch_contract")
+    state.plan = ExecutionPlan(
+        steps=[PlanStep(step_type="research", description="collect", task_id="t_dispatch")],
+        summary="dispatch contract",
+    )
+    session = FakeSession(state, FakeBudget(True))
+    runner_module.bind_session(session)
+    graph_runner = runner_module.ResearchGraphRunner(FakeHarness())
+    try:
+        update = asyncio.run(
+            graph_runner.node_dispatch(
+                {
+                    "run_id": session.run_id,
+                    "phase": "assess",
+                    "plan": state.plan.to_dict(),
+                    "tasks": {
+                        "t_dispatch": {
+                            "task_id": "t_dispatch",
+                            "execution_status": "pending",
+                            "result_status": "none",
+                            "attempt": 1,
+                        }
+                    },
+                    "control_decision": {"action": "retry", "task_ids": ["t_dispatch"]},
+                }
+            )
+        )
+    finally:
+        runner_module.drop_session(session.run_id)
+    assert update["phase"] == "dispatch"
+    assert update["control_decision"]["action"] == "dispatch"
+    assert update["control_decision"]["task_ids"] == ["t_dispatch"]
 
 
 def test_node_research_worker_rejects_dict_contract(monkeypatch):

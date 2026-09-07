@@ -59,16 +59,18 @@ memory limit / CPU quota / timeout / max retry
                Worker   Worker   Worker
              (local autonomy + step retrieval budget)
                           │
-                  ProgressEvaluator
+                  Pure Assessments
                     /            \
-               ENOUGH             GAP
+             sufficient            gap
                   │            Budget remains?
                   │              /        \
                   │            YES        NO
                   │             │          │
-                  │         PlanPatch   stop / synthesize
+                  │         PlanPatch   degraded / failed
                   │         (+ grant)
                   └─────────────┴──────────┘
+                                │
+                          ControlPolicy
                                 │
                             Synthesis
 ```
@@ -144,13 +146,13 @@ Lead Planner **可以**在 task metadata 里带 `effort: low|medium|high` 提示
 
 ### 3.3 Incremental Grant（GAP 时）
 
-Progress → GAP 且 `can_replan`：
+`assess_progress() → GAP` 且 replan budget 未耗尽：
 
 1. `PlanPatch` 新增任务数 ≤ `min(hard.max_plan_patch_tasks, remaining_plan_patch_tasks, severity)`  
 2. 新任务的 `metadata.max_retrieval_calls` 从 `remaining_reserve_step_tool_calls` 发放  
 3. 成功 patch 后 **扣减** `remaining_*`（`apply_grant_to_run_budget`）  
 4. **不提高**会话 `max_tool_calls` / `max_run_sec` 硬顶  
-5. reserve 耗尽 / 连续无边际收益 / replan 耗尽 → ENOUGH 或 abort（现有路径）
+5. reserve 耗尽 / 连续无边际收益 / replan 耗尽 → 交给 ControlPolicy；有可用证据则 degraded delivery，否则 TerminalPolicy 判失败
 
 `run_budget.max_parallel_workers` 在 Plan 落盘后刷新 `RunSession.worker_sem`，由 StateGraph dispatch 消费。
 
@@ -219,7 +221,7 @@ Lead Planner 仍只输出 **objective DAG**，不调工具、不调度、不定�
 
 ## 8. 面试叙事（推荐）
 
-> 我没有把整个 Research Loop 都交给一个 Supervisor Agent。系统拆成 **semantic control** 与 **operational control**：Lead Planner 只把 Research Brief 分解成 objective DAG；Worker 在独立 context 里自主搜索迭代；全局预算、超时、并发、checkpoint、权限由 **deterministic Harness** 控制。结果进 ProgressEvaluator；有 gap 时产生受约束的 PlanPatch。  
+> 我没有把整个 Research Loop 都交给一个 Supervisor Agent。系统拆成 **facts / assessments / policy / executors**：Lead Planner 只把 Research Brief 分解成 objective DAG；Worker 在独立 context 里自主搜索迭代；结果进入纯评估，ControlPolicy 决定 dispatch / retry / replan / synthesize / degraded delivery。全局预算、超时、并发、checkpoint、权限由 **deterministic Harness** 控制。
 > 因此 `max_tool_calls` / `max_replan` / timeout 是 **hard safety ceiling**，不是 Planner 能力不足的 workaround。其下是 **adaptive effort allocation**：按任务复杂度提出 worker 数与研究深度，Runtime 按 evidence gain / remaining gaps 动态追加（不超过 ceiling）。
 
 卖点一句：
