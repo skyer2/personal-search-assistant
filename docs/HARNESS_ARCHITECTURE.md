@@ -12,6 +12,7 @@
 
 ```text
 API / UI（实验台，不是搜索产品）
+   → Product Route (TaskShape: fast_path / harness)
    → Research Domain (Brief / Planner / Progress / QualityGate)
    → Agent Runtime (StateGraph + SQLite checkpointer)
    → WorkerExecutorV2 / SynthesisExecutor
@@ -39,12 +40,26 @@ Artifact/Evidence Store → 原文
 Harness 路径：
 
 ```text
-intent → clarify → plan → validate → dispatch
+TaskShape
+  ├── SIMPLE_FACT → single WorkerExecutorV2 search → deterministic answer
+  └── other shapes
+        → intent → clarify → plan → validate → dispatch
 Send(isolated workers via WorkerExecutorV2) → Progress Evaluator
 GAP → replan；ENOUGH → synthesis → Quality Gate → finalize
 ```
 
 `direct` 仅对照实验：single worker + search tool，不进上述节点。
+
+### Simple Fact Fast Path
+
+`SIMPLE_FACT` is a product path, not a recommendation from the retired experiment router:
+
+- one worker, at most two authorized provider searches, and at most three tool calls
+- zero planner calls, zero replans, zero progress evaluation, zero compression, and zero synthesis-agent calls
+- `SimpleFactFallbackRenderer` renders the grounded answer deterministically
+- one `PRIMARY` source or two independent `HIGH_QUALITY_SECONDARY` sources are required; community-only evidence returns low confidence instead of success
+
+The fast path still uses the real `RunBudgetManager`, worker lease, `ToolGateway`, `WorkerExecutorV2`, citation manager, validator, and finalizer. It does not create a second control plane.
 
 ---
 
@@ -79,7 +94,22 @@ GAP → replan；ENOUGH → synthesis → Quality Gate → finalize
 - 仍没有 JSON 时，用本步已存 Artifact 卡片 salvage
 - 工人已回 `summary`+`facts` 时压缩不再打 LLM
 
-步内 `budget.max_step_tool_calls`（默认 8）硬限制 `internet_search` / `fetch_url`。会话 `max_tool_calls` 默认 40，给并行研究 + 写报告留余量。工具 start/end 由 Flight Recorder 统一 emit，Monitor 只做 WebSocket exporter，避免双计。
+步内 `budget.max_step_tool_calls`（默认 8）硬限制 `internet_search` / `fetch_url`。会话 `max_tool_calls` 默认 40，给并行研究 + 写报告留余量；简单事实路径被硬收敛到 3。工具 start/end 由 Flight Recorder 统一 emit，Monitor 只做 WebSocket exporter，避免双计。
+
+---
+
+## 证据来源分级
+
+`CitationManager` no longer treats every URL as primary. Evidence is classified as:
+
+| Tier | Examples |
+|------|----------|
+| `PRIMARY` | official docs/site, official GitHub repository, original paper, government/regulator |
+| `HIGH_QUALITY_SECONDARY` | Reuters/Bloomberg/FT/WSJ, major academic or standards bodies |
+| `COMMUNITY` | CSDN, blogs, Zhihu, Xueqiu, Medium |
+| `UNKNOWN` | all other unverified URLs |
+
+Simple-fact completion uses source tier, not URL presence. Community-only evidence cannot be reported as a high-confidence success.
 
 ---
 

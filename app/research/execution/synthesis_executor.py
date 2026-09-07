@@ -182,7 +182,6 @@ class SynthesisExecutor:
         with ToolGateway(0).execution_scope():
             with gateway.execution_scope(
                 phase="synthesis",
-                worker_task_id=task.task_id,
             ):
                 async for chunk in gateway.astream(
                     execute_agent,

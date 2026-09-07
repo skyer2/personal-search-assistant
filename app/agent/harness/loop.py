@@ -2998,6 +2998,15 @@ class AgentHarness:
             termination["quality_attempted"] = bool(
                 metadata.get("quality_attempted", termination.get("quality_attempted"))
             )
+        if success:
+            termination["status"] = "completed"
+        elif abort_reason == "cancelled":
+            termination["status"] = "interrupted"
+        else:
+            termination["status"] = "partial"
+        if success and not str(state.final_content or "").strip():
+            termination["status"] = "partial"
+            termination["reason"] = termination.get("reason") or "no_content"
         if isinstance(state.metadata, dict):
             state.metadata["termination"] = termination
 

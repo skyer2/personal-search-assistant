@@ -216,7 +216,10 @@ turn_id                 = 前端一条用户问题（= run_id）
 
 | 概念 | 代码 |
 |------|------|
-| Experiment mode `agent` / `direct` | `app/research/routing/mode_router.py` |
+| Product route and experiment mode | `app/research/routing/mode_router.py` |
+| Task shape and fast-path budget | `app/research/routing/task_shape.py` |
+| Simple-fact deterministic renderer | `app/research/runtime/simple_fact.py` |
+| Source tier classification | `app/agent/harness/citations.py` |
 | StateGraph | `app/research/runtime/graph.py` |
 | WorkerRuntime | `app/research/runtime/worker.py` |
 | Brief / Plan / Progress | `research_brief.py` / `planner.py` / `app/research/planning/` |

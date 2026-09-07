@@ -23,7 +23,11 @@ class TaskShape(str, Enum):
     HYBRID_CONFLICT = "hybrid_conflict"
 
 
-_FACT_PATTERN = ("谁是", "是谁", "什么是", "什么时候", "哪一年", "多少", "是什么", "who is", "what is", "when did")
+_FACT_PATTERN = (
+    "谁是", "是谁", "什么是", "什么时候", "哪一年", "哪年",
+    "发布时间", "首次发布", "发表", "多少", "是什么",
+    "who is", "what is", "when did", "when was",
+)
 _COMPARE = ("比较", "对比", " vs ", " VS ", "versus", "横向对比", "各自")
 _LANDSCAPE = ("竞争格局", "多维度", "综合对比", "全面", "全景", "有哪些", "分别")
 _CONFLICT = ("冲突", "矛盾", "争议", "分歧", "不一致", "说法不一", "contradict", "dispute")
@@ -89,24 +93,26 @@ def execution_profile_for_shape(shape: TaskShape) -> dict[str, int | bool]:
         return {
             "parallel_workers": 1,
             "max_replan_count": 0,
-            "direct_candidate": True,
+            "max_tool_calls": 3,
+            "max_search_queries": 2,
+            "planner": False,
+            "progress_eval": False,
+            "compression": False,
+            "synthesis_agent": False,
         }
     if shape == TaskShape.SINGLE_TOPIC_DEEP_DIVE:
         return {
             "parallel_workers": 1,
             "max_replan_count": 1,
-            "direct_candidate": False,
         }
     if shape == TaskShape.BREADTH_HEAVY:
         return {
             "parallel_workers": 3,
             "max_replan_count": 1,
-            "direct_candidate": False,
         }
     return {
         "parallel_workers": 3,
         "max_replan_count": 2,
-        "direct_candidate": False,
     }
 
 

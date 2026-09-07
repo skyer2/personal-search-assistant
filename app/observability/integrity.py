@@ -55,21 +55,28 @@ def check_trace_integrity(
     seq_values: list[int] = []
     is_terminal = run_status in {"success", "completed", "partial", "failed", "interrupted", "ok", "done"}
     is_agent_mode = False
+    is_simple_fact_fast_path = False
     failure_origin_stage = ""
 
     for event in events:
         event_type = str(event.get("type") or event.get("event") or "")
         if event_type:
             counts[event_type] = counts.get(event_type, 0) + 1
-        seq = event.get("seq")
-        if seq is not None:
+        raw_seq = event.get("seq")
+        if raw_seq is not None:
             try:
-                seq_values.append(int(seq))
+                seq_values.append(int(raw_seq))
             except (TypeError, ValueError):
                 pass
-        attrs = event.get("attributes") if isinstance(event.get("attributes"), dict) else {}
+        raw_attrs = event.get("attributes")
+        attrs = raw_attrs if isinstance(raw_attrs, dict) else {}
         if attrs.get("search_mode") == "agent" or event_type == "brief.compiled":
             is_agent_mode = True
+        if (
+            attrs.get("task_shape") == "simple_fact"
+            and attrs.get("execution_path") == "fast_path"
+        ):
+            is_simple_fact_fast_path = True
         if event_type in {"run.failed", "run_summary"}:
             failure_origin_stage = str(
                 attrs.get("failure.origin_stage")
@@ -77,7 +84,7 @@ def check_trace_integrity(
                 or failure_origin_stage
             )
 
-    terminal_event = next(
+    terminal_event: dict[str, Any] = next(
         (
             event
             for event in reversed(events)
@@ -85,17 +92,15 @@ def check_trace_integrity(
         ),
         {},
     )
-    terminal_attrs = (
-        terminal_event.get("attributes")
-        if isinstance(terminal_event.get("attributes"), dict)
-        else {}
-    )
+    raw_terminal_attrs = terminal_event.get("attributes")
+    terminal_attrs = raw_terminal_attrs if isinstance(raw_terminal_attrs, dict) else {}
     terminal_metadata_value = terminal_attrs.get("metadata")
+    raw_terminal_metadata = terminal_event.get("metadata")
     terminal_metadata = (
         terminal_metadata_value
         if isinstance(terminal_metadata_value, dict)
-        else terminal_event.get("metadata")
-        if isinstance(terminal_event.get("metadata"), dict)
+        else raw_terminal_metadata
+        if isinstance(raw_terminal_metadata, dict)
         else {}
     )
     raw_termination = terminal_metadata.get("termination") or terminal_attrs.get("termination")
@@ -110,18 +115,24 @@ def check_trace_integrity(
     if not failure_origin_stage and termination_stage:
         failure_origin_stage = termination_stage
 
-    brief_count = counts.get("brief.compiled", 0)
-    plan_count = counts.get("plan.created", 0)
-    worker_started = counts.get("worker.started", 0)
-    worker_done = counts.get("worker.completed", 0) + counts.get("worker.failed", 0)
-    evidence_count = counts.get("evidence.registered", 0)
-    progress_count = counts.get("progress.evaluated", 0)
-    synthesis_count = counts.get("synthesis.completed", 0) + counts.get("synthesis.failed", 0)
-    quality_count = counts.get("quality.evaluated", 0)
-    run_started = counts.get("run.started", 0)
-    run_completed = counts.get("run.completed", 0) + counts.get("run.failed", 0)
+    brief_count = int(counts.get("brief.compiled", 0))
+    plan_count = int(counts.get("plan.created", 0))
+    worker_started = int(counts.get("worker.started", 0))
+    worker_done = int(counts.get("worker.completed", 0)) + int(
+        counts.get("worker.failed", 0)
+    )
+    evidence_count = int(counts.get("evidence.registered", 0))
+    progress_count = int(counts.get("progress.evaluated", 0))
+    synthesis_count = int(counts.get("synthesis.completed", 0)) + int(
+        counts.get("synthesis.failed", 0)
+    )
+    quality_count = int(counts.get("quality.evaluated", 0))
+    run_started = int(counts.get("run.started", 0))
+    run_completed = int(counts.get("run.completed", 0)) + int(
+        counts.get("run.failed", 0)
+    )
 
-    if is_agent_mode:
+    if is_agent_mode and not is_simple_fact_fast_path:
         if brief_count == 0 and _stage_required("brief", failure_origin_stage):
             issues.append("missing_brief_event")
         if plan_count == 0 and _stage_required("plan", failure_origin_stage):
@@ -135,6 +146,7 @@ def check_trace_integrity(
             issues.append("missing_worker_terminal_event")
         if (
             progress_count == 0
+            and not is_simple_fact_fast_path
             and worker_started > 0
             and _stage_required("progress", failure_origin_stage)
         ):
@@ -146,6 +158,7 @@ def check_trace_integrity(
         )
         if (
             synthesis_count == 0
+            and not is_simple_fact_fast_path
             and termination_count == 0
             and _stage_required("synthesis", failure_origin_stage)
         ):
@@ -193,11 +206,14 @@ def check_trace_integrity(
     from app.observability.journal import build_span_tree
 
     tree = build_span_tree(events) if include_tree else {"span_count": 0, "root_count": 0, "cycle_count": 0, "valid": None}
-    if tree.get("span_count", 0) > 0:
-        if tree.get("root_count", 0) == 0:
+    span_count = int(tree.get("span_count") or 0)
+    root_count = int(tree.get("root_count") or 0)
+    cycle_count = int(tree.get("cycle_count") or 0)
+    if span_count > 0:
+        if root_count == 0:
             issues.append("span_tree_no_root")
-        if tree.get("cycle_count", 0) > 0:
-            issues.append(f"span_tree_cycles:{tree['cycle_count']}")
+        if cycle_count > 0:
+            issues.append(f"span_tree_cycles:{cycle_count}")
 
     return {
         "passed": len(issues) == 0,

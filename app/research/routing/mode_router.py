@@ -1,7 +1,8 @@
-"""Experiment mode：agent（默认 Harness）或 direct（对照 baseline）。
+"""Product routing and experiment-mode resolution.
 
-不是产品路由。ANSWER / SEARCH 产品路径已删除。
-Search 仍是 Worker 可调用的 environment tool。
+`agent` remains the production graph mode and `direct` remains the explicit
+experiment baseline. Inside the agent mode, task shape decides whether a
+simple fact takes the deterministic fast path or the full research graph.
 """
 
 from __future__ import annotations
@@ -42,6 +43,8 @@ class RouteDecision:
     confidence: float
     signals: list[str] = field(default_factory=list)
     user_override: bool = False
+    task_shape: str = ""
+    execution_path: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -49,6 +52,8 @@ class RouteDecision:
             "confidence": self.confidence,
             "signals": list(self.signals),
             "user_override": self.user_override,
+            "task_shape": self.task_shape,
+            "execution_path": self.execution_path,
         }
 
 
@@ -69,12 +74,33 @@ def route(
     conversation_summary: str = "",
     attachments: list[str] | None = None,
 ) -> RouteDecision:
-    """显式 direct 才走 baseline；其余全部进 Harness。忽略 query 分类。"""
-    _ = (query, conversation_summary, attachments)
+    """Resolve experiment mode and the production execution path."""
+    _ = (conversation_summary, attachments)
     requested = canonicalize_mode(user_mode)
     if requested == "direct":
-        return RouteDecision(mode="direct", confidence=1.0, signals=["experiment_direct"], user_override=True)
-    return RouteDecision(mode="agent", confidence=1.0, signals=["harness_default"], user_override=False)
+        return RouteDecision(
+            mode="direct",
+            confidence=1.0,
+            signals=["experiment_direct"],
+            user_override=True,
+            execution_path="experiment_direct",
+        )
+
+    from app.research.routing.task_shape import classify_task_shape
+
+    decision = classify_task_shape(query)
+    fast_path = decision.shape.value == "simple_fact"
+    signals = [f"task_shape:{decision.shape.value}"]
+    if fast_path:
+        signals.append("simple_fact_fast_path")
+    return RouteDecision(
+        mode="agent",
+        confidence=decision.confidence,
+        signals=signals,
+        user_override=False,
+        task_shape=decision.shape.value,
+        execution_path="fast_path" if fast_path else "harness",
+    )
 
 
 def classify_auto(query: str, *, attachments: list[str] | None = None) -> RouteDecision:

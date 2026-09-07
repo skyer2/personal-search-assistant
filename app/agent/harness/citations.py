@@ -10,6 +10,7 @@ import json
 import hashlib
 import re
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,65 @@ URL_PATTERN = re.compile(r"https?://[^\s\]\)\"'<>]+", re.IGNORECASE)
 CITATION_MARKER_PATTERN = re.compile(r"\[(\d+)\]")
 SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[。！？.!?])\s+")
 CITATION_ONLY_PATTERN = re.compile(r"^(?:\[\d+\])+\s*$")
+
+
+class SourceTier(str, Enum):
+    PRIMARY = "PRIMARY"
+    HIGH_QUALITY_SECONDARY = "HIGH_QUALITY_SECONDARY"
+    COMMUNITY = "COMMUNITY"
+    UNKNOWN = "UNKNOWN"
+
+
+_PRIMARY_PAPER_HOSTS = {
+    "arxiv.org", "openreview.net", "aclanthology.org", "papers.nips.cc",
+    "proceedings.mlr.press", "jmlr.org", "doi.org",
+}
+_HIGH_QUALITY_SECONDARY_HOSTS = {
+    "reuters.com", "bloomberg.com", "ft.com", "wsj.com", "nytimes.com",
+    "nature.com", "science.org", "acm.org", "ieee.org",
+}
+_COMMUNITY_HOSTS = {
+    "csdn.net", "blog.csdn.net", "zhihu.com", "zhuanlan.zhihu.com",
+    "xueqiu.com", "medium.com", "substack.com", "juejin.cn", "cnblogs.com",
+}
+_OFFICIAL_GITHUB_ORGS = {
+    "deepseek-ai", "langchain-ai", "huggingface", "microsoft", "openai",
+    "google", "pytorch", "tensorflow", "meta-llama", "qwenlm",
+}
+
+
+def classify_source_tier(locator: str) -> str:
+    """Classify evidence provenance without treating every URL as primary."""
+    value = str(locator or "").strip()
+    if not value.lower().startswith(("http://", "https://")):
+        return SourceTier.UNKNOWN.value
+    parts = urlsplit(value)
+    host = parts.netloc.lower()
+    # Strip a port before checking host suffixes.
+    hostname = host.split(":", 1)[0]
+    path_parts = [part for part in parts.path.split("/") if part]
+    if hostname in _PRIMARY_PAPER_HOSTS or hostname.endswith(".gov") or hostname.endswith(".gov.cn"):
+        return SourceTier.PRIMARY.value
+    if hostname == "github.com" and path_parts:
+        owner = path_parts[0].lower()
+        return (
+            SourceTier.PRIMARY.value
+            if owner in _OFFICIAL_GITHUB_ORGS
+            else SourceTier.HIGH_QUALITY_SECONDARY.value
+        )
+    if hostname in _COMMUNITY_HOSTS or any(
+        hostname == item or hostname.endswith(f".{item}")
+        for item in _COMMUNITY_HOSTS
+    ):
+        return SourceTier.COMMUNITY.value
+    if hostname in _HIGH_QUALITY_SECONDARY_HOSTS or any(
+        hostname == item or hostname.endswith(f".{item}")
+        for item in _HIGH_QUALITY_SECONDARY_HOSTS
+    ):
+        return SourceTier.HIGH_QUALITY_SECONDARY.value
+    if hostname.startswith(("docs.", "developer.", "api-docs.")):
+        return SourceTier.PRIMARY.value
+    return SourceTier.UNKNOWN.value
 DERIVED_OUTPUT_STEP_TYPES = frozenset(
     {"summarize", "generate_markdown", "convert_pdf", "finalize"}
 )
@@ -40,6 +100,14 @@ class EvidenceSource:
     evidence_id: str = ""
     start_offset: int = 0
     end_offset: int = 0
+    source_tier: str = SourceTier.UNKNOWN.value
+
+    def __post_init__(self) -> None:
+        if not self.source_tier or (
+            self.source_tier == SourceTier.UNKNOWN.value
+            and self.source_kind == "url"
+        ):
+            self.source_tier = classify_source_tier(self.locator)
 
 
 @dataclass
@@ -119,20 +187,22 @@ class CitationManager:
 
         registered: list[EvidenceSource] = []
         meta = metadata or {}
+        structured_payload = isinstance(meta.get("worker_payload"), dict)
 
-        for url in URL_PATTERN.findall(content)[:20]:
-            excerpt = _excerpt_around(content, url, 400)
-            src = EvidenceSource(
-                source_id=self._next_id(),
-                step_index=step_index,
-                step_type=step_type,
-                source_kind="url",
-                locator=url.rstrip(".,;"),
-                excerpt=excerpt,
-                artifact_id=str(meta.get("artifact_id") or ""),
-            )
-            if self._admit(src):
-                registered.append(src)
+        if not structured_payload:
+            for url in URL_PATTERN.findall(content)[:20]:
+                excerpt = _excerpt_around(content, url, 400)
+                src = EvidenceSource(
+                    source_id=self._next_id(),
+                    step_index=step_index,
+                    step_type=step_type,
+                    source_kind="url",
+                    locator=url.rstrip(".,;"),
+                    excerpt=excerpt,
+                    artifact_id=str(meta.get("artifact_id") or ""),
+                )
+                if self._admit(src):
+                    registered.append(src)
 
         if step_type == "file_read":
             src = EvidenceSource(
@@ -187,11 +257,8 @@ class CitationManager:
                                 "artifact_id": src.artifact_id,
                                 "source_kind": src.source_kind,
                                 "support_type": "direct",
-                                "source_quality": (
-                                    "primary"
-                                    if src.source_kind == "url"
-                                    else "secondary"
-                                ),
+                                "source_quality": src.source_tier,
+                                "source_tier": src.source_tier,
                                 "freshness": "",
                                 "step_index": src.step_index,
                                 "step_type": src.step_type,
@@ -341,6 +408,7 @@ class CitationManager:
             excerpt = (src.bound_fact or src.excerpt or "")[:excerpt_chars]
             lines.append(
                 f"  [{num}] {src.source_id} ({src.source_kind}) {src.locator}"
+                f" tier={src.source_tier}"
                 + (f" artifact={src.artifact_id}" if src.artifact_id else "")
                 + (f" evidence={src.evidence_id}" if src.evidence_id else "")
             )
@@ -376,9 +444,29 @@ class CitationManager:
             excerpt = src.excerpt[:120] + ("…" if len(src.excerpt) > 120 else "")
             lines.append(
                 f"[{num}] ({kind_label}) {src.locator} — "
-                f"Step {src.step_index + 1}/{src.step_type}: {excerpt}"
+                f"{src.source_tier} · Step {src.step_index + 1}/{src.step_type}: {excerpt}"
             )
         return "\n".join(lines)
+
+    def source_counts_by_tier(self) -> dict[str, int]:
+        counts = {tier.value: 0 for tier in SourceTier}
+        for src in self.sources:
+            tier = src.source_tier if src.source_tier in counts else SourceTier.UNKNOWN.value
+            counts[tier] += 1
+        return counts
+
+    def simple_fact_evidence_sufficient(self) -> bool:
+        """One primary source, or two independent high-quality secondary domains."""
+        counts = self.source_counts_by_tier()
+        secondary_domains = {
+            ".".join(urlsplit(src.locator).netloc.lower().split(".")[-2:])
+            for src in self.sources
+            if src.source_tier == SourceTier.HIGH_QUALITY_SECONDARY.value
+        }
+        return (
+            counts[SourceTier.PRIMARY.value] >= 1
+            or len(secondary_domains) >= 2
+        )
 
     def inject_inline_citation_hints(self, content: str) -> str:
         """只在段落命中已绑定 fact 时补 [n]，不再按段落序号盲贴。"""
@@ -531,6 +619,7 @@ class CitationManager:
                     evidence_id=str(row.get("evidence_id") or ""),
                     start_offset=int(row.get("start_offset") or 0),
                     end_offset=int(row.get("end_offset") or 0),
+                    source_tier=str(row.get("source_tier") or SourceTier.UNKNOWN.value),
                 )
             )
         self.fact_bindings = [

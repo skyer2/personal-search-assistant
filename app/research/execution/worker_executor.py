@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import asdict
 from typing import Any
@@ -46,26 +47,30 @@ class WorkerExecutorV2:
             return self._result(task, started, ok=False, status="failed", summary="missing_step")
         step = plan.steps[step_index]
         worker_ok: bool | None = None
-        try:
-            execute_agent, dispatch_mode = resolve_execute_target(
-                task.step_type,
-                workers=getattr(self.harness, "workers", None),
-                main_agent=getattr(self.harness, "agent", None),
-                direct_invoke=bool(
-                    getattr(self.harness.harness_config, "direct_worker_invoke", True)
-                ),
-                profile=step.subagent or "",
-            )
-        except Exception as exc:
-            worker_ok = False
-            return self._result(
-                task,
-                started,
-                ok=False,
-                status="failed",
-                summary=f"worker_unavailable:{type(exc).__name__}",
-                fail_reason=type(exc).__name__,
-            )
+        simple_fact = bool(step.metadata.get("simple_fact_fast_path"))
+        execute_agent = None
+        dispatch_mode = "direct_search"
+        if not simple_fact:
+            try:
+                execute_agent, dispatch_mode = resolve_execute_target(
+                    task.step_type,
+                    workers=getattr(self.harness, "workers", None),
+                    main_agent=getattr(self.harness, "agent", None),
+                    direct_invoke=bool(
+                        getattr(self.harness.harness_config, "direct_worker_invoke", True)
+                    ),
+                    profile=step.subagent or "",
+                )
+            except Exception as exc:
+                worker_ok = False
+                return self._result(
+                    task,
+                    started,
+                    ok=False,
+                    status="failed",
+                    summary=f"worker_unavailable:{type(exc).__name__}",
+                    fail_reason=type(exc).__name__,
+                )
         reserve_worker_lease = getattr(
             self.session.budget_manager, "reserve_worker_lease", None
         )
@@ -119,7 +124,13 @@ class WorkerExecutorV2:
                     status="start",
                     task_id=task.task_id,
                     plan_version=task.plan_version,
-                    attributes={"worker_runtime": "v2", "step_type": task.step_type},
+                    attributes={
+                        "worker_runtime": "v2",
+                        "step_type": task.step_type,
+                        "search_mode": "agent",
+                        "task_shape": "simple_fact" if simple_fact else "",
+                        "execution_path": "fast_path" if simple_fact else "harness",
+                    },
                     run_id=context.run_id,
                     session_id=context.session_id,
                 )
@@ -129,8 +140,13 @@ class WorkerExecutorV2:
         tool_usage = {"tool_calls": 0, "tools_invoked": []}
         try:
             timeout_sec = self._timeout_for(step)
+            invoke_leaf = (
+                self._invoke_simple_fact
+                if simple_fact
+                else self._invoke_leaf
+            )
             result = await asyncio.wait_for(
-                self._invoke_leaf(
+                invoke_leaf(
                     task=task,
                     context=context,
                     step=step,
@@ -253,7 +269,12 @@ class WorkerExecutorV2:
                         status="ok" if worker_ok else "failed",
                         task_id=task.task_id,
                         plan_version=task.plan_version,
-                        attributes={"worker_runtime": "v2"},
+                        attributes={
+                            "worker_runtime": "v2",
+                            "search_mode": "agent",
+                            "task_shape": "simple_fact" if simple_fact else "",
+                            "execution_path": "fast_path" if simple_fact else "harness",
+                        },
                         run_id=context.run_id,
                         session_id=context.session_id,
                     )
@@ -351,6 +372,157 @@ class WorkerExecutorV2:
                 "tool_calls": len(tool_call_ids),
                 "step_assistants_called": [step.subagent] if step.subagent else [],
                 "duration_ms": 0,
+            },
+        )
+
+    async def _invoke_simple_fact(
+        self,
+        *,
+        task: ResearchTask,
+        context: ResearchContext,
+        step: Any,
+        step_index: int,
+        execute_agent: Any,
+        dispatch_mode: str,
+        tool_usage: dict[str, Any],
+    ) -> StepResult:
+        """Run one authorized provider search without an LLM worker."""
+        _ = (execute_agent, dispatch_mode)
+        from app.agent.harness.citations import SourceTier, classify_source_tier
+        from app.tools.tavily_tool import internet_search
+
+        tool_gateway = ToolGateway(self._remaining_tool_calls())
+        responses: list[dict[str, Any]] = []
+        queries: list[str] = [context.query]
+        try:
+            with tool_gateway.execution_scope():
+                first_response = tool_gateway.call(
+                    internet_search.invoke,
+                    {
+                        "query": context.query,
+                        "topic": "general",
+                        "max_results": 2,
+                        "include_raw_content": True,
+                    },
+                )
+                if isinstance(first_response, dict):
+                    responses.append(first_response)
+                first_results = [
+                    item
+                    for item in (first_response.get("results") or [])
+                    if isinstance(item, dict) and str(item.get("url") or "").strip()
+                ] if isinstance(first_response, dict) else []
+                first_tiers = {
+                    classify_source_tier(str(item.get("url")))
+                    for item in first_results
+                }
+                needs_followup = not (
+                    SourceTier.PRIMARY.value in first_tiers
+                    or len(
+                        [
+                            item
+                            for item in first_results
+                            if classify_source_tier(str(item.get("url")))
+                            == SourceTier.HIGH_QUALITY_SECONDARY.value
+                        ]
+                    ) >= 2
+                )
+                if needs_followup:
+                    import re
+
+                    normalized_query = re.sub(r"\s+", " ", context.query).strip(" ?？")
+                    normalized_query = re.sub(
+                        r"(?<=[A-Za-z0-9])\s+(?=[Vv]\d+\b)",
+                        "-",
+                        normalized_query,
+                    )
+                    followup_query = (
+                        f"{normalized_query} 官方"
+                        if any("\u4e00" <= char <= "\u9fff" for char in context.query)
+                        else f"{normalized_query} official source"
+                    )
+                    queries.append(followup_query)
+                    second_response = tool_gateway.call(
+                        internet_search.invoke,
+                        {
+                            "query": followup_query,
+                            "topic": "general",
+                            "max_results": 5,
+                            "include_raw_content": True,
+                        },
+                    )
+                    if isinstance(second_response, dict):
+                        responses.append(second_response)
+        finally:
+            tool_usage["tool_calls"] = len(queries)
+            tool_usage["tools_invoked"] = ["internet_search"] * len(queries)
+
+        if not responses:
+            raise RuntimeError("simple_fact_search_invalid_response")
+
+        seen_urls: set[str] = set()
+        all_results = []
+        for response in responses:
+            for item in response.get("results") or []:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                all_results.append(item)
+        ranked_results = sorted(
+            all_results,
+            key=lambda item: {
+                SourceTier.PRIMARY.value: 0,
+                SourceTier.HIGH_QUALITY_SECONDARY.value: 1,
+                SourceTier.COMMUNITY.value: 2,
+                SourceTier.UNKNOWN.value: 3,
+            }.get(classify_source_tier(str(item.get("url") or "")), 4),
+        )
+        results = [
+            item
+            for item in ranked_results
+        ][:4]
+        facts = [
+            str(item.get("content") or item.get("raw_content") or item.get("title") or "").strip()
+            for item in results
+        ]
+        facts = [fact for fact in facts if fact]
+        sources = [str(item.get("url")) for item in results]
+        summary = str(results[0].get("title") or next(iter(facts), "")).strip()
+        payload = {
+            "ok": bool(results and facts),
+            "summary": summary,
+            "facts": facts,
+            "sources": sources,
+            "findings": [
+                {
+                    "task_id": task.task_id,
+                    "claim": fact,
+                    "evidence_ids": [source],
+                    "sources": [source],
+                }
+                for fact, source in zip(facts, sources)
+            ],
+            "artifact_ids": [],
+            "error_code": "",
+            "worker": "simple_fact_search",
+            "step_type": step.step_type,
+        }
+        content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return StepResult(
+            step_type=step.step_type,
+            content=content,
+            metadata={
+                "step_index": step_index,
+                "task_id": task.task_id,
+                "worker_dispatch": "simple_fact_fast_path",
+                "tools_invoked": ["internet_search"],
+                "tool_calls": 1,
+                "step_assistants_called": [],
+                "duration_ms": 0,
+                "worker_payload": payload,
             },
         )
 

@@ -154,7 +154,7 @@ class ResearchGraphRunner:
     async def execute(self, ctx: Any, *, checkpointer: Any = None) -> Any:
         from langgraph.types import Command
 
-        from app.research.routing.mode_router import budget_for_mode, canonicalize_mode
+        from app.research.routing.mode_router import budget_for_mode, route
 
         session = RunSession(self.harness, ctx)
         bind_session(session)
@@ -179,9 +179,23 @@ class ResearchGraphRunner:
             "configurable": {"thread_id": session.run_id},
             "recursion_limit": 20,
         }
-        profile = canonicalize_mode(getattr(ctx, "search_mode", "agent") or "agent")
+        route_decision = route(
+            ctx.task_query,
+            user_mode=getattr(ctx, "search_mode", "agent") or "agent",
+            conversation_summary=str(getattr(ctx, "conversation_summary", "") or ""),
+        )
+        profile = route_decision.mode
         personal = getattr(self.harness.harness_config, "personal_search", None) or {}
         budget_cfg = budget_for_mode(profile, personal)
+        if route_decision.execution_path == "fast_path":
+            budget_cfg = {
+                **budget_cfg,
+                "max_tool_calls": 3,
+                "max_search_queries": 2,
+                "max_replan_count": 0,
+                "parallel": False,
+                "progress_eval": False,
+            }
         payload = empty_research_state(
             run_id=session.run_id,
             session_id=session.session_id,
@@ -201,6 +215,10 @@ class ResearchGraphRunner:
 
         budget_context_token = set_current_budget_manager(session.budget_manager)
         try:
+            if route_decision.execution_path == "fast_path":
+                return await self._execute_simple_fact_fast_path(
+                    session, route_decision
+                )
             graph = self.compile(
                 checkpointer=checkpointer or await _default_checkpointer(),
                 profile=profile,
@@ -234,6 +252,202 @@ class ResearchGraphRunner:
         finally:
             reset_current_budget_manager(budget_context_token)
             drop_session(session.run_id)
+
+    async def _execute_simple_fact_fast_path(
+        self,
+        session: RunSession,
+        route_decision: Any,
+    ) -> Any:
+        """One authorized search, deterministic answer, no planner/synthesis LLM."""
+        from app.agent.harness.state import ExecutionPlan, PlanStep
+        from app.research.execution.worker_executor import WorkerExecutorV2
+        from app.research.runtime.simple_fact import SimpleFactFallbackRenderer
+        from app.research.runtime.worker import ResearchContext, ResearchTask
+
+        state = session.state
+        metadata = state.metadata if isinstance(state.metadata, dict) else {}
+        state.plan = ExecutionPlan(
+            steps=[
+                PlanStep(
+                    step_type="network_search",
+                    description="检索并确认单一事实",
+                    task_id="simple_fact:search",
+                    allowed_tools=["internet_search"],
+                    metadata={"simple_fact_fast_path": True},
+                )
+            ],
+            summary="Simple fact fast path",
+            planning_mode="simple_fact_fast_path",
+        )
+        state.replan_count = 0
+        metadata.update(
+            {
+                "task_shape": "simple_fact",
+                "execution_path": "fast_path",
+                "planner_calls": 0,
+                "synthesis_calls": 0,
+                "replan_count": 0,
+                "workers": 1,
+                "route_signals": list(route_decision.signals),
+            }
+        )
+
+        task = ResearchTask(
+            task_id="simple_fact:search",
+            objective=session.ctx.task_query,
+            step_type="network_search",
+            step_index=0,
+            description="检索并确认单一事实",
+            allowed_tools=["internet_search"],
+            plan_version=1,
+        )
+        context = ResearchContext(
+            run_id=session.run_id,
+            query=session.ctx.task_query,
+            user_id=session.ctx.user_id,
+            tenant_id=session.ctx.tenant_id,
+            project_id=session.ctx.project_id,
+            session_id=session.session_id,
+        )
+        worker_result = await WorkerExecutorV2(self.harness, session).execute(
+            task, context
+        )
+        if worker_result.raw is not None:
+            state.step_results.append(worker_result.raw)
+
+        citation_manager = session.ctx.citation_manager
+        answer = (
+            SimpleFactFallbackRenderer().render(
+                query=session.ctx.task_query,
+                worker_result=worker_result,
+                citation_manager=citation_manager,
+            )
+            if citation_manager is not None
+            else None
+        )
+        source_counts = (
+            citation_manager.source_counts_by_tier()
+            if citation_manager is not None
+            else {}
+        )
+        quality_passed = bool(
+            worker_result.ok
+            and answer is not None
+            and answer.sufficient
+        )
+        if quality_passed and citation_manager is not None and answer is not None:
+            state.final_content = citation_manager.build_cited_report(answer.content)
+            metrics = citation_manager.compute_metrics(state.final_content)
+            state.citation_coverage_rate = metrics["citation_coverage_rate"]
+            state.hallucination_rate = metrics["hallucination_rate"]
+            state.evidence_source_count = metrics["registered_sources"]
+            state.numeric_citation_coverage = float(
+                metrics.get("numeric_citation_coverage") or 0.0
+            )
+            validator = getattr(self.harness, "validator", None)
+            outcome = (
+                validator.validate_finalize(
+                    state,
+                    session.ctx.session_dir,
+                    citation_manager=citation_manager,
+                    min_citation_coverage=(
+                        self.harness.harness_config.citations_min_coverage_rate
+                    ),
+                    deliverable_dir=session.ctx.deliverable_dir,
+                )
+                if validator is not None
+                else None
+            )
+            quality_passed = bool(
+                outcome is None
+                or outcome.passed
+                or outcome.severity == "warning"
+            )
+        else:
+            state.final_content = "未能从一手来源或两个独立高质量来源确认该事实。"
+
+        if not quality_passed:
+            state.abort_reason = state.abort_reason or "insufficient_trusted_evidence"
+        metadata.update(
+            {
+                "quality": {
+                    "passed": quality_passed,
+                    "reason": "" if quality_passed else "insufficient_trusted_evidence",
+                    "repairable": False,
+                    "repair_action": "",
+                    "attempts": 1,
+                },
+                "quality_attempted": True,
+                "source_counts": source_counts,
+                "primary_sources": source_counts.get("PRIMARY", 0),
+                "high_quality_secondary_sources": source_counts.get(
+                    "HIGH_QUALITY_SECONDARY", 0
+                ),
+                "community_sources": source_counts.get("COMMUNITY", 0),
+                "answer_grounded": quality_passed,
+                "partial_renderer_called": False,
+                "budget_reservation_errors": 0,
+                "tool_calls": int(state.tool_calls_count or 0),
+            }
+        )
+        if citation_manager is not None:
+            citation_manager.save_evidence_json(
+                session.ctx.run_dir, run_id=session.run_id
+            )
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.QUALITY_EVALUATED,
+                    phase="quality",
+                    status="pass" if quality_passed else "fail",
+                    attributes={
+                        "passed": quality_passed,
+                        "reason": "" if quality_passed else "insufficient_trusted_evidence",
+                        "task_shape": "simple_fact",
+                        "execution_path": "fast_path",
+                        "answer_grounded": quality_passed,
+                        "primary_sources": source_counts.get("PRIMARY", 0),
+                        "high_quality_secondary_sources": source_counts.get(
+                            "HIGH_QUALITY_SECONDARY", 0
+                        ),
+                        "grader": "simple_fact_source_gate",
+                        "grader_version": "v1",
+                    },
+                )
+        except Exception:
+            logger.debug("simple fact quality event skipped", exc_info=True)
+
+        result = await self.harness._phase_finalize(
+            state,
+            session.ctx.session_dir,
+            success=quality_passed,
+            started_at=session.ctx.run_started,
+            deliverable_dir=session.ctx.deliverable_dir,
+        )
+        session.result = result
+        result_metadata = getattr(result, "metadata", None)
+        if isinstance(result_metadata, dict):
+            result_metadata.update(
+                {
+                    "task_shape": "simple_fact",
+                    "execution_path": "fast_path",
+                    "planner_calls": 0,
+                    "synthesis_calls": 0,
+                    "replan_count": 0,
+                    "workers": 1,
+                    "tool_calls_count": int(state.tool_calls_count or 0),
+                    "primary_sources": source_counts.get("PRIMARY", 0),
+                    "source_counts": source_counts,
+                    "budget_reservation_errors": 0,
+                    "partial_renderer_called": False,
+                    "outcome": result.status,
+                    "quality": "pass" if quality_passed else "fail",
+                }
+            )
+        return result
 
     async def _bridge_interrupts(
         self, result: dict[str, Any], session: RunSession
@@ -2325,13 +2539,36 @@ class ResearchGraphRunner:
             min_citation_coverage=self.harness.harness_config.citations_min_coverage_rate,
             deliverable_dir=ctx.deliverable_dir,
         )
+        metadata = state.metadata if isinstance(state.metadata, dict) else {}
+        synthesis_failed = bool(metadata.get("synthesis_failed"))
+        if synthesis_failed:
+            from app.agent.harness.state import ValidationOutcome
+
+            outcome = ValidationOutcome(False, "synthesis_failed", "error")
+        if not str(state.final_content or "").strip():
+            from app.agent.harness.state import ValidationOutcome
+
+            outcome = ValidationOutcome(False, "no_content", "error")
+        answer_grounded = True
+        if citation_manager is not None and str(state.final_content or "").strip():
+            answer_grounded = citation_manager.validate_citations(
+                state.final_content,
+                self.harness.harness_config.citations_min_coverage_rate,
+            )[0]
         await self.harness._phase_validate(
             state,
             outcome,
             step_index=state.step_index,
             scope="finalize",
         )
-        passed = bool(outcome.passed or outcome.severity == "warning")
+        passed = bool(
+            not synthesis_failed
+            and str(state.final_content or "").strip()
+            and answer_grounded
+            and (outcome.passed or outcome.severity == "warning")
+        )
+        if isinstance(metadata, dict):
+            metadata["answer_grounded"] = passed
         reason = str(getattr(outcome, "reason", "") or "")
         quality_attempts = int(gstate.get("quality_attempts") or 0)
         repairable_reasons = {
@@ -2540,6 +2777,11 @@ class ResearchGraphRunner:
             and not session.state.abort_reason
             and gstate.get("status") != "partial"
             and not bool(gstate.get("control_no_progress"))
+            and not bool(
+                isinstance(session.state.metadata, dict)
+                and session.state.metadata.get("synthesis_failed")
+            )
+            and bool(str(session.state.final_content or "").strip())
         )
         if not success and isinstance(session.state.metadata, dict):
             session.state.metadata.setdefault(

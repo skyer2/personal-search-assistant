@@ -38,13 +38,16 @@ def harness_capabilities() -> dict[str, Any]:
         "enabled_sources": personal.get("enabled_sources", {"web": True, "file": True}),
         "identity": {"tenant_id": "local", "user_id": "me"},
         "loop": [
+            "simple_fact: direct provider search → deterministic answer",
             "agent: brief → effort → plan → dispatch → progress / replan → synthesize",
             "direct (baseline only): single worker + search tool",
         ],
         "control_plane": {
             "domain": "app.research",
             "runtime": "langgraph",
-            "worker_runtime": "WorkerRuntime",
+            "worker_runtime": "WorkerExecutorV2",
+            "synthesis_runtime": "SynthesisExecutor",
+            "simple_fact_execution_path": "fast_path",
             "leaf": "langchain.create_agent",
             "graph_runtime_enabled": bool(getattr(config, "graph_runtime_enabled", True)),
             "progress_eval_enabled": bool(getattr(config, "progress_eval_enabled", True)),
