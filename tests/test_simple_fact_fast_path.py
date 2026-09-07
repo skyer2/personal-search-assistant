@@ -24,6 +24,8 @@ from app.run_store import get_run_store, reset_run_store
 from app.research.runtime import runner as runner_module
 from app.research.routing.mode_router import route
 from app.research.routing.task_shape import TaskShape, execution_profile_for_shape
+from app.research.evidence.policy import registrable_domain
+from app.research.runtime.simple_fact import render_simple_fact_answer
 
 
 _CASES = [
@@ -153,6 +155,8 @@ def test_simple_fact_profile_has_deterministic_budget():
         ("https://www.reuters.com/article", SourceTier.HIGH_QUALITY_SECONDARY.value),
         ("https://blog.csdn.net/a", SourceTier.COMMUNITY.value),
         ("https://example.com/a", SourceTier.UNKNOWN.value),
+        ("https://docs.random-blog.com/a", SourceTier.UNKNOWN.value),
+        ("https://newsroom.anthropic.com/a", SourceTier.PRIMARY.value),
     ],
 )
 def test_source_tiers_are_not_url_equals_primary(locator: str, expected: str):
@@ -180,6 +184,41 @@ def test_high_quality_secondary_sources_must_be_independent():
         ["https://www.bloomberg.com/article-three"],
     )
     assert manager.simple_fact_evidence_sufficient() is True
+
+
+def test_registrable_domain_handles_multi_label_public_suffixes():
+    assert registrable_domain("https://news.bbc.co.uk/story") == "bbc.co.uk"
+    assert registrable_domain("https://www.economist.co.uk/story") == "economist.co.uk"
+
+
+def test_renderer_cites_the_source_that_contains_the_extracted_fact():
+    manager = CitationManager()
+    manager.bind_worker_facts(
+        0,
+        "network_search",
+        [
+            "DeepSeek-V3 technical report describes the model.",
+            "DeepSeek-V3 was released on 2024-12-26.",
+        ],
+        [
+            "https://arxiv.org/abs/2412.19437",
+            "https://www.reuters.com/technology/deepseek-v3",
+        ],
+    )
+    worker_result = SimpleNamespace(
+        facts=[source.bound_fact for source in manager.sources], summary="DeepSeek-V3"
+    )
+
+    answer = render_simple_fact_answer(
+        query="DeepSeek V3 发布时间？",
+        worker_result=worker_result,
+        citation_manager=manager,
+    )
+
+    assert "2024年12月26日" in answer.content
+    assert answer.source_id == manager.sources[1].source_id
+    assert answer.supporting_fact == manager.sources[1].bound_fact
+    assert "[2]" in answer.content
 
 
 def test_synthesis_failure_cannot_quality_pass():

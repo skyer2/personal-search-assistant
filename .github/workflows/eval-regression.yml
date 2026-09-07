@@ -22,13 +22,19 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --extra dev
 
       - name: Harness unit tests
         run: |
-      uv run python tests/test_harness_phase1.py
-      uv run python tests/test_harness_phase4.py
-      uv run python tests/test_harness_hitl.py
+          uv run python tests/test_harness_phase1.py
+          uv run python tests/test_harness_phase4.py
+          uv run python tests/test_harness_hitl.py
+
+      - name: Golden path release gate
+        run: |
+          uv run pytest -q tests/test_simple_fact_fast_path.py
+          uv run pytest -q tests/test_control_plane_invariants.py
+          uv run pytest -q tests/test_control_plane_e2e.py
 
       - name: Eval dry-run smoke
         run: uv run python tests/eval/test_eval_dry_run.py

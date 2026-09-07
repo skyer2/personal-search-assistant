@@ -261,7 +261,7 @@ class ResearchGraphRunner:
         """One authorized search, deterministic answer, no planner/synthesis LLM."""
         from app.agent.harness.state import ExecutionPlan, PlanStep
         from app.research.execution.worker_executor import WorkerExecutorV2
-        from app.research.runtime.simple_fact import SimpleFactFallbackRenderer
+        from app.research.runtime.simple_fact import render_simple_fact_answer
         from app.research.runtime.worker import ResearchContext, ResearchTask
 
         state = session.state
@@ -317,7 +317,7 @@ class ResearchGraphRunner:
 
         citation_manager = session.ctx.citation_manager
         answer = (
-            SimpleFactFallbackRenderer().render(
+            render_simple_fact_answer(
                 query=session.ctx.task_query,
                 worker_result=worker_result,
                 citation_manager=citation_manager,

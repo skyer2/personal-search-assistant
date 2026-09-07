@@ -388,7 +388,12 @@ class WorkerExecutorV2:
     ) -> StepResult:
         """Run one authorized provider search without an LLM worker."""
         _ = (execute_agent, dispatch_mode)
-        from app.agent.harness.citations import SourceTier, classify_source_tier
+        from app.agent.harness.citations import (
+            EvidenceSource,
+            SourceTier,
+            classify_source_tier,
+        )
+        from app.research.evidence.policy import SIMPLE_FACT_EVIDENCE_POLICY
         from app.tools.tavily_tool import internet_search
 
         tool_gateway = ToolGateway(self._remaining_tool_calls())
@@ -412,20 +417,19 @@ class WorkerExecutorV2:
                     for item in (first_response.get("results") or [])
                     if isinstance(item, dict) and str(item.get("url") or "").strip()
                 ] if isinstance(first_response, dict) else []
-                first_tiers = {
-                    classify_source_tier(str(item.get("url")))
-                    for item in first_results
-                }
-                needs_followup = not (
-                    SourceTier.PRIMARY.value in first_tiers
-                    or len(
-                        [
-                            item
-                            for item in first_results
-                            if classify_source_tier(str(item.get("url")))
-                            == SourceTier.HIGH_QUALITY_SECONDARY.value
-                        ]
-                    ) >= 2
+                provisional_sources = [
+                    EvidenceSource(
+                        source_id=f"candidate-{index}",
+                        step_index=step_index,
+                        step_type=step.step_type,
+                        source_kind="url",
+                        locator=str(item.get("url")),
+                        excerpt="",
+                    )
+                    for index, item in enumerate(first_results)
+                ]
+                needs_followup = not SIMPLE_FACT_EVIDENCE_POLICY.is_sufficient(
+                    provisional_sources
                 )
                 if needs_followup:
                     import re
@@ -519,7 +523,7 @@ class WorkerExecutorV2:
                 "task_id": task.task_id,
                 "worker_dispatch": "simple_fact_fast_path",
                 "tools_invoked": ["internet_search"],
-                "tool_calls": 1,
+                "tool_calls": len(queries),
                 "step_assistants_called": [],
                 "duration_ms": 0,
                 "worker_payload": payload,
