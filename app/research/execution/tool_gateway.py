@@ -13,9 +13,27 @@ class ToolGateway:
         self.remaining_calls = remaining_calls
 
     @contextmanager
-    def execution_scope(self) -> Iterator[None]:
+    def execution_scope(
+        self,
+        *,
+        worker_task_id: str = "",
+        step_index: int = -1,
+        run_id: str = "",
+        session_id: str = "",
+    ) -> Iterator[None]:
+        from app.agent.harness.usage_tracker import bind_worker_execution_scope
+
         with retrieval_budget(self.remaining_calls):
-            yield
+            if not worker_task_id:
+                yield
+                return
+            with bind_worker_execution_scope(
+                worker_task_id,
+                step_index=step_index,
+                run_id=run_id,
+                session_id=session_id,
+            ):
+                yield
 
     def authorize(self, count: int = 1) -> None:
         if self.remaining_calls is None:

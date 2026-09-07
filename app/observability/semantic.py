@@ -174,13 +174,13 @@ def earliest_failure_origin(events: list[dict[str, Any]]) -> dict[str, Any] | No
         if str(event.get("status") or "").lower() == "warning":
             continue
         if not origin:
-            # soft quality miss: eval.scored / quality.evaluated failed
+            # soft quality miss: eval.scored / quality.assessed failed
             event_type = str(event.get("type") or event.get("event") or "")
-            if event_type in {"eval.scored", "quality.evaluated"} and (
+            if event_type in {"eval.scored", "quality.assessed"} and (
                 attrs.get("passed") is False or event.get("status") in {"fail", "failed"}
             ):
                 origin = str(attrs.get("target_type") or attrs.get("failure.origin_stage") or "quality")
-            elif event_type == "progress.evaluated" and str(attrs.get("verdict") or "") == "gap":
+            elif event_type == "progress.assessed" and str(attrs.get("verdict") or "") == "gap":
                 # gap itself is not a failure unless never closed — skip here
                 continue
             else:
@@ -225,7 +225,7 @@ def compute_replan_gap_closure(events: list[dict[str, Any]]) -> dict[str, Any]:
             for gap_id in attrs.get("target_gap_ids") or []:
                 if gap_id:
                     targeted.append(str(gap_id))
-        if event_type in {"progress.evaluated", "progress.assessed"}:
+        if event_type == "progress.assessed":
             progress_n += 1
             for gap_id in attrs.get("resolved_gap_ids") or []:
                 if gap_id:
@@ -240,7 +240,7 @@ def compute_replan_gap_closure(events: list[dict[str, Any]]) -> dict[str, Any]:
         replan_useful = bool(closed) if unique_targets else False
     return {
         "replan_applied": applied,
-        "progress_evaluated": progress_n,
+        "progress_assessed": progress_n,
         "target_gap_ids": unique_targets,
         "resolved_gap_ids": sorted(resolved),
         "closed_gap_ids": closed,
@@ -258,7 +258,7 @@ _LINEAGE_EVENT_TYPES = frozenset({
     "plan.created",
     "worker.completed",
     "evidence.registered",
-    "progress.evaluated",
+    "progress.assessed",
     "replan.applied",
     "synthesis.completed",
 })

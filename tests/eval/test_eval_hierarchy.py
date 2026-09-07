@@ -32,13 +32,13 @@ def test_constraint_grader_if_then():
     from tests.eval.graders.trajectory import grade_constraints
 
     miss = grade_constraints(
-        ["progress.evaluated"],
+        ["progress.assessed"],
         {"if": {"progress.verdict": "gap"}, "then": {"required": ["replan.applied"]}},
         attributes={"progress.verdict": "gap"},
     )
     assert miss["ok"] is False
     hit = grade_constraints(
-        ["progress.evaluated", "replan.applied"],
+        ["progress.assessed", "replan.applied"],
         {"if": {"progress.verdict": "gap"}, "then": {"required": ["replan.applied"]}, "limits": {"replan_count": 2}},
         counts={"replan_count": 1},
         attributes={"progress.verdict": "gap"},

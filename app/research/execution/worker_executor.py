@@ -326,7 +326,12 @@ class WorkerExecutorV2:
         tools_invoked: list[str] = []
         tool_call_ids: set[tuple[str, str]] = set()
         try:
-            with tool_gateway.execution_scope():
+            with tool_gateway.execution_scope(
+                worker_task_id=task.task_id,
+                step_index=step_index,
+                run_id=context.run_id,
+                session_id=context.session_id,
+            ):
                 with gateway.execution_scope(
                     phase="execute",
                     worker_task_id=task.task_id,
@@ -400,7 +405,12 @@ class WorkerExecutorV2:
         responses: list[dict[str, Any]] = []
         queries: list[str] = [context.query]
         try:
-            with tool_gateway.execution_scope():
+            with tool_gateway.execution_scope(
+                worker_task_id=task.task_id,
+                step_index=step_index,
+                run_id=context.run_id,
+                session_id=context.session_id,
+            ):
                 first_response = tool_gateway.call(
                     internet_search.invoke,
                     {
@@ -611,13 +621,13 @@ class WorkerExecutorV2:
             )
 
         payload = {
-            "ok": True,
+            "ok": False,
             "summary": f"{cause}; recovered evidence from existing artifacts",
             "facts": facts,
             "sources": sources,
             "findings": findings,
             "artifact_ids": evidence_refs,
-            "error_code": "",
+            "error_code": fail_reason,
             "worker": step.subagent or "",
             "step_type": step.step_type,
         }
@@ -631,13 +641,13 @@ class WorkerExecutorV2:
                 "recovered_from_artifacts": True,
                 "failure_before_recovery": cause,
                 "worker_payload": payload,
-                "structured_ok": True,
+                "structured_ok": False,
             },
         )
         return self._result(
             task,
             started,
-            ok=True,
+            ok=False,
             status="partial",
             summary=payload["summary"],
             findings=findings,
@@ -645,7 +655,7 @@ class WorkerExecutorV2:
             facts=facts,
             sources=sources,
             raw=raw,
-            fail_reason="",
+            fail_reason=fail_reason,
         )
 
     def _result(

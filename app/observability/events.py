@@ -30,7 +30,6 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "execution_health.assessed",
     "delivery.assessed",
     "control.decided",
-    "progress.evaluated",
     "task.transitioned",
     "replan.proposed",
     "replan.applied",
@@ -46,7 +45,6 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "checkpoint.resumed",
     "budget.decided",
     "budget.exhausted",
-    "quality.evaluated",
     "quality.assessed",
     "run.terminated",
     "eval.scored",
@@ -78,7 +76,6 @@ class EventType:
     EXECUTION_HEALTH_ASSESSED = "execution_health.assessed"
     DELIVERY_ASSESSED = "delivery.assessed"
     CONTROL_DECIDED = "control.decided"
-    PROGRESS_EVALUATED = "progress.evaluated"
     TASK_TRANSITIONED = "task.transitioned"
     REPLAN_PROPOSED = "replan.proposed"
     REPLAN_APPLIED = "replan.applied"
@@ -94,7 +91,6 @@ class EventType:
     CHECKPOINT_RESUMED = "checkpoint.resumed"
     BUDGET_DECIDED = "budget.decided"
     BUDGET_EXHAUSTED = "budget.exhausted"
-    QUALITY_EVALUATED = "quality.evaluated"
     QUALITY_ASSESSED = "quality.assessed"
     RUN_TERMINATED = "run.terminated"
     EVAL_SCORED = "eval.scored"

@@ -11,6 +11,10 @@ def merge_dicts(left: dict[str, Any] | None, right: dict[str, Any] | None) -> di
     return merged
 
 
+def keep_last(left: Any, right: Any) -> Any:
+    return right if right is not None else left
+
+
 def merge_worker_payloads(results: list[dict[str, Any]]) -> dict[str, Any]:
     facts: list[str] = []
     sources: list[str] = []

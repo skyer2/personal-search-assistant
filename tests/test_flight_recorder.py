@@ -119,7 +119,7 @@ def test_summarize_trace_workers_and_replan():
         },
         {"type": "worker.completed", "task_id": "t_a", "status": "ok", "duration_ms": 12, "attempt": 1},
         {
-            "type": "progress.evaluated",
+            "type": "progress.assessed",
             "status": "enough",
             "plan_version": 1,
             "attributes": {"verdict": "enough", "reason": "ready_queue_empty", "gaps": []},
@@ -135,7 +135,7 @@ def test_summarize_trace_workers_and_replan():
         },
         {"type": "gen_ai.chat", "attributes": {"total_tokens": 100, "cost_usd": 0.01}},
         {
-            "type": "quality.evaluated",
+            "type": "quality.assessed",
             "status": "pass",
             "attributes": {"passed": True, "citation_coverage_rate": 0.9, "severity": "info"},
         },
@@ -154,7 +154,7 @@ def test_summarize_trace_workers_and_replan():
     assert summary["progress"][0]["verdict"] == "enough"
     assert summary["replan_count"] == 1
     assert summary["usage"]["total_tokens"] == 100
-    assert summary["evals"][0]["type"] == "quality.evaluated"
+    assert summary["evals"][0]["type"] == "quality.assessed"
     assert summary["evals"][0]["passed"] is True
     assert summary["evals"][1]["case_id"] == "037"
     print("[OK] summarize_trace")
@@ -179,7 +179,7 @@ def test_summarize_trace_progress_without_replan():
         },
         {"type": "worker.completed", "task_id": "t_langgraph", "status": "ok", "duration_ms": 230308, "attempt": 1},
         {
-            "type": "progress.evaluated",
+            "type": "progress.assessed",
             "status": "enough",
             "attributes": {"verdict": "enough", "reason": "coverage_ok"},
         },

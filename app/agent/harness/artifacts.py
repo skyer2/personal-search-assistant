@@ -171,9 +171,21 @@ class ArtifactStore:
     ) -> Artifact:
         text = content if content is not None else ""
         digest = _sha(text)
+        incoming_metadata = dict(metadata or {})
+        incoming_task_id = str(incoming_metadata.get("task_id") or "")
+        incoming_run_id = str(incoming_metadata.get("run_id") or "")
+        incoming_session_id = str(incoming_metadata.get("session_id") or "")
         for existing in self._items.values():
             if existing.content_sha256 == digest and existing.locator == (locator or existing.locator):
-                return existing
+                existing_metadata = existing.metadata
+                same_provenance = (
+                    existing.step_index == step_index
+                    and str(existing_metadata.get("task_id") or "") == incoming_task_id
+                    and str(existing_metadata.get("run_id") or "") == incoming_run_id
+                    and str(existing_metadata.get("session_id") or "") == incoming_session_id
+                )
+                if same_provenance:
+                    return existing
         self._counter += 1
         artifact = Artifact(
             artifact_id=_next_slug(kind or ARTIFACT_KIND_TOOL, self._counter),
@@ -185,7 +197,7 @@ class ArtifactStore:
             mime=mime,
             content_sha256=digest,
             char_count=len(text),
-            metadata=dict(metadata or {}),
+            metadata=incoming_metadata,
             step_index=step_index,
             step_type=step_type,
         )
@@ -203,6 +215,8 @@ class ArtifactStore:
         locator: str = "",
         title: str = "",
         worker_task_id: str = "",
+        run_id: str = "",
+        session_id: str = "",
     ) -> Artifact:
         if isinstance(raw, str):
             content = raw
@@ -217,6 +231,10 @@ class ArtifactStore:
         metadata = {"tool_name": tool_name}
         if worker_task_id:
             metadata["task_id"] = worker_task_id
+        if run_id:
+            metadata["run_id"] = run_id
+        if session_id:
+            metadata["session_id"] = session_id
         if kind in {
             ARTIFACT_KIND_WEB,
             ARTIFACT_KIND_FILE,

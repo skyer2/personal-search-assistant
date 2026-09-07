@@ -15,7 +15,12 @@ from app.agent.harness.artifacts import (
     get_artifact_store,
     infer_kind,
 )
-from app.agent.harness.usage_tracker import get_current_worker_task_id
+from app.agent.harness.usage_tracker import (
+    get_current_worker_run_id,
+    get_current_worker_session_id,
+    get_current_worker_step_index,
+    get_current_worker_task_id,
+)
 from app.agent.harness.token_counter import estimate_tokens
 
 DEFAULT_MAX_RESULT_TOKENS = 700
@@ -76,6 +81,9 @@ def compact_search_payload(
     tool_name: str = "internet_search",
     step_type: str = "network_search",
     worker_task_id: str = "",
+    step_index: int = -1,
+    run_id: str = "",
+    session_id: str = "",
 ) -> dict[str, Any]:
     data = raw if isinstance(raw, dict) else {"results": [{"content": _as_text(raw)}]}
     results = data.get("results") if isinstance(data.get("results"), list) else []
@@ -101,7 +109,11 @@ def compact_search_payload(
                 "tool_name": tool_name,
                 "score": item.get("score"),
                 **({"task_id": worker_task_id} if worker_task_id else {}),
+                **({"step_index": step_index} if step_index >= 0 else {}),
+                **({"run_id": run_id} if run_id else {}),
+                **({"session_id": session_id} if session_id else {}),
             },
+            step_index=step_index,
             step_type=step_type,
         )
         artifact_ids.append(artifact.artifact_id)
@@ -144,12 +156,18 @@ def compact_generic_payload(
     tool_name: str,
     step_type: str = "",
     worker_task_id: str = "",
+    step_index: int = -1,
+    run_id: str = "",
+    session_id: str = "",
 ) -> dict[str, Any]:
     artifact = store.put_from_tool_result(
         raw,
         tool_name=tool_name,
         step_type=step_type,
         worker_task_id=worker_task_id,
+        step_index=step_index,
+        run_id=run_id,
+        session_id=session_id,
     )
     text = artifact.content or ""
     snippet = (artifact.summary or text)[: contract.snippet_chars]
@@ -187,10 +205,17 @@ def apply_tool_output_contract(
     store: ArtifactStore | None = None,
     contract: ToolOutputContract | None = None,
     worker_task_id: str = "",
+    step_index: int = -1,
+    run_id: str = "",
+    session_id: str = "",
 ) -> str:
     store = store or get_artifact_store()
     contract = contract or contract_for(tool_name)
     worker_task_id = worker_task_id or get_current_worker_task_id()
+    if step_index < 0:
+        step_index = get_current_worker_step_index()
+    run_id = run_id or get_current_worker_run_id()
+    session_id = session_id or get_current_worker_session_id()
     if not contract.artifact_ref:
         return raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
     if tool_name == "internet_search":
@@ -201,6 +226,9 @@ def apply_tool_output_contract(
             tool_name=tool_name,
             step_type=step_type or "network_search",
             worker_task_id=worker_task_id,
+            step_index=step_index,
+            run_id=run_id,
+            session_id=session_id,
         )
     else:
         payload = compact_generic_payload(
@@ -210,6 +238,9 @@ def apply_tool_output_contract(
             tool_name=tool_name,
             step_type=step_type,
             worker_task_id=worker_task_id,
+            step_index=step_index,
+            run_id=run_id,
+            session_id=session_id,
         )
     text = json.dumps(payload, ensure_ascii=False)
     # 硬合同：即使 JSON 仍偏长，也截到 token 上限，并保留 artifact_id。

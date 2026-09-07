@@ -110,7 +110,7 @@ def test_policy_decision_matrix():
                 progress="sufficient",
                 evidence="partial",
             ),
-            "deliver_partial",
+            "synthesize",
         ),
         (
             state_with_task(
@@ -120,7 +120,7 @@ def test_policy_decision_matrix():
                 budget_status="exhausted",
                 max_replan=3,
             ),
-            "deliver_partial",
+            "synthesize",
         ),
         (
             state_with_task(
@@ -144,6 +144,40 @@ def test_policy_decision_matrix():
     for state, expected in cases:
         decision = decide_control(state)
         assert decision["action"] == expected
+
+
+def test_recovery_prefers_delivery_over_retry_and_respects_budget():
+    failed_partial = state_with_task(
+        execution_status=TaskExecutionStatus.FAILED,
+        result_status=ResultStatus.PARTIAL,
+        failure=dict(classify_failure("timeout")),
+        evidence_refs=["e1"],
+        progress="sufficient",
+        evidence="partial",
+    )
+    assert decide_control(failed_partial)["action"] == "synthesize"
+
+    budget_exhausted = state_with_task(
+        execution_status=TaskExecutionStatus.FAILED,
+        failure=dict(classify_failure("timeout")),
+        progress="gap",
+        evidence="partial",
+        evidence_refs=["e1"],
+        budget_status="exhausted",
+        max_replan=2,
+    )
+    budget_exhausted["progress_assessment"]["missing_dimensions"] = ["team_background"]
+    assert decide_control(budget_exhausted)["action"] == "deliver_partial"
+
+    no_evidence_budget_exhausted = state_with_task(
+        execution_status=TaskExecutionStatus.FAILED,
+        failure=dict(classify_failure("timeout")),
+        progress="gap",
+        budget_status="exhausted",
+        max_replan=2,
+    )
+    no_evidence_budget_exhausted["progress_assessment"]["missing_dimensions"] = ["team_background"]
+    assert decide_control(no_evidence_budget_exhausted)["action"] == "finalize_failure"
 
 
 def test_retry_node_only_mutates_task_state():

@@ -164,7 +164,7 @@ def classify_failure(
         stage = "tool"
     elif (event_type or "").startswith("replan."):
         stage = "replan"
-    elif (event_type or "") == "progress.evaluated":
+    elif (event_type or "") == "progress.assessed":
         stage = "progress"
     elif (event_type or "").startswith("synthesis."):
         stage = "synthesis"

@@ -30,7 +30,7 @@ Langfuse  TraceViewer / Metrics
 
 ## 事件词表
 
-`run.*` · `brief.compiled` · `plan.created/validated` · `worker.*` · `tool.*` · `retrieval.search` · `gen_ai.chat` · `evidence.registered` · `progress.evaluated` · `replan.*` · `synthesis.*` · `recovery.*` · `context.*` · `checkpoint.*` · `budget.*` · `quality.evaluated` · `eval.scored`
+`run.*` · `brief.compiled` · `plan.created/validated` · `worker.*` · `tool.*` · `retrieval.search` · `gen_ai.chat` · `evidence.registered` · `progress.assessed` · `replan.*` · `synthesis.*` · `recovery.*` · `context.*` · `checkpoint.*` · `budget.*` · `quality.assessed` · `eval.scored`
 
 每个重要事件可带：
 
@@ -94,13 +94,13 @@ JSONL/OTel 仍是 durable；EventBus 只负责跨进程 live delivery。
 
 `replan.proposed` → `replan.applied` / `replan.rejected` 记录 `target_gap_ids` / `triggered_by` / `from_plan_version` / `to_plan_version` / `reason` / `added_tasks`。
 
-**Gap closure（语义口径）**：`target_gap_ids` 在后续 `progress.evaluated.resolved_gap_ids` 中出现才算 recovered。`harness_live_replan_recovered_total` 不再等于「有 replan + run success」。
+**Gap closure（语义口径）**：`target_gap_ids` 在后续 `progress.assessed.resolved_gap_ids` 中出现才算 recovered。`harness_live_replan_recovered_total` 不再等于「有 replan + run success」。
 
 Trace summary 提供 `gap_closure_rate` / `replan_useful` / `failure_origin`（earliest evaluated failing stage）。
 
 ## Eval 关联
 
-live eval 把 `trace_id` / `run_id` / `variant` / `case_id` 写入 `TaskEvalResult`，并 emit `eval.scored`（含 `target_span_id` / `target_artifact_id` / `grader`）。用 `HARNESS_EVAL_VARIANT=full_harness|no_replan|vanilla` 做 ablation。交互提问只会产生 Finalize 时的 `quality.evaluated`，不会有 `eval.scored`。
+live eval 把 `trace_id` / `run_id` / `variant` / `case_id` 写入 `TaskEvalResult`，并 emit `eval.scored`（含 `target_span_id` / `target_artifact_id` / `grader`）。用 `HARNESS_EVAL_VARIANT=full_harness|no_replan|vanilla` 做 ablation。交互提问只会产生 Finalize 时的 `quality.assessed`，不会有 `eval.scored`。
 
 ## 依赖
 

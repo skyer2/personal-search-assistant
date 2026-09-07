@@ -276,7 +276,7 @@ def test_trace_summary_exposes_quality_and_termination_attribution() -> None:
             "timestamp": "2026-09-06T00:00:00Z",
         },
         {
-            "type": "quality.evaluated",
+            "type": "quality.assessed",
             "event_id": "e2",
             "span_id": "quality",
             "parent_span_id": "root",

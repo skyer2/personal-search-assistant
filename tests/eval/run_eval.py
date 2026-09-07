@@ -105,7 +105,7 @@ def _events_from_harness(metadata: dict, trace: list) -> list[str]:
     if metadata.get("replan_count"):
         events.append("replan.applied")
     if metadata.get("progress_assessment") or metadata.get("observability"):
-        events.append("progress.evaluated")
+        events.append("progress.assessed")
     for event in trace or []:
         phase = getattr(event, "phase", None) or (event.get("phase") if isinstance(event, dict) else None)
         if phase:

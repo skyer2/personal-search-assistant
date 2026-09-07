@@ -154,11 +154,11 @@ _SPAN_NAME_PRIORITY = (
     "synthesis.generate",
     "synthesis.completed",
     "replan.applied",
-    "progress.evaluated",
+    "progress.assessed",
     "retrieval.search",
     "tool.started",
     "gen_ai.chat",
-    "quality.evaluated",
+    "quality.assessed",
     "eval.scored",
     "recovery.decided",
     "context.built",
@@ -354,7 +354,7 @@ def summarize_trace(
                     "timestamp": event.get("timestamp"),
                 }
             )
-        elif event_type == "progress.evaluated":
+        elif event_type == "progress.assessed":
             progress.append(
                 {
                     "type": event_type,
@@ -436,7 +436,7 @@ def summarize_trace(
                     "timestamp": event.get("timestamp"),
                 }
             )
-        elif event_type in {"eval.scored", "quality.evaluated"}:
+        elif event_type in {"eval.scored", "quality.assessed"}:
             evals.append(
                 {
                     "case_id": attrs.get("case_id"),

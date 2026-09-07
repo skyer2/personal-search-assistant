@@ -526,7 +526,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
               <Card size="small">
                 {progress.length === 0 && replans.length === 0 ? (
                   <Alert
-                    message="尚未写入 progress.evaluated。第二波 Worker 可能只是计划内 READY 任务按 max_parallel 分批执行，不一定经过 PlanPatch。"
+                    message="尚未写入 progress.assessed。第二波 Worker 可能只是计划内 READY 任务按 max_parallel 分批执行，不一定经过 PlanPatch。"
                     showIcon
                     type="info"
                   />
@@ -893,7 +893,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                 ))}
                 {evals.length === 0 ? (
                   <Alert
-                    message="交互提问不会产生 eval.scored（那是 tests/eval/run_eval.py --live）。Finalize 后应出现 quality.evaluated；若仍为空，说明质量评估尚未发出或 run 未结束。"
+                    message="交互提问不会产生 eval.scored（那是 tests/eval/run_eval.py --live）。Finalize 后应出现 quality.assessed；若仍为空，说明质量评估尚未发出或 run 未结束。"
                     showIcon
                     type="info"
                   />

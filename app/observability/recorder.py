@@ -634,13 +634,13 @@ class AgentTelemetry:
             self.metrics.inc("harness.worker.retry")
         if event.type == EventType.PLAN_VALIDATED and event.status == "issues":
             self.metrics.inc("harness.plan.validation_failed")
-        if event.type == EventType.QUALITY_EVALUATED and event.status == "fail":
+        if event.type == EventType.QUALITY_ASSESSED and event.status == "fail":
             self.metrics.inc("harness.quality.failed")
         if event.type == EventType.REPLAN_APPLIED:
             self.metrics.inc("harness.replan.applied")
         if event.type == EventType.REPLAN_REJECTED:
             self.metrics.inc("harness.replan.rejected")
-        if event.type == EventType.PROGRESS_EVALUATED and str((event.attributes or {}).get("verdict") or "") == "gap":
+        if event.type == EventType.PROGRESS_ASSESSED and str((event.attributes or {}).get("verdict") or "") == "gap":
             self.metrics.inc("harness.progress.gap")
         if event.type == EventType.GEN_AI_CHAT:
             tokens = float((event.attributes or {}).get("total_tokens") or 0)

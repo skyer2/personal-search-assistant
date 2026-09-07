@@ -27,6 +27,13 @@ _current_budget_manager: ContextVar[Any | None] = ContextVar(
     "harness_budget_manager", default=None
 )
 _current_worker_task: ContextVar[str] = ContextVar("harness_worker_task", default="")
+_current_worker_step_index: ContextVar[int] = ContextVar(
+    "harness_worker_step_index", default=-1
+)
+_current_worker_run_id: ContextVar[str] = ContextVar("harness_worker_run_id", default="")
+_current_worker_session_id: ContextVar[str] = ContextVar(
+    "harness_worker_session_id", default=""
+)
 _current_llm_reservation: ContextVar[str] = ContextVar(
     "harness_llm_reservation", default=""
 )
@@ -66,6 +73,27 @@ def bind_worker_budget_scope(task_id: str) -> Iterator[None]:
         _current_worker_task.reset(token)
 
 
+@contextmanager
+def bind_worker_execution_scope(
+    task_id: str,
+    *,
+    step_index: int,
+    run_id: str = "",
+    session_id: str = "",
+) -> Iterator[None]:
+    task_token = _current_worker_task.set(task_id)
+    step_token = _current_worker_step_index.set(step_index)
+    run_token = _current_worker_run_id.set(run_id)
+    session_token = _current_worker_session_id.set(session_id)
+    try:
+        yield
+    finally:
+        _current_worker_session_id.reset(session_token)
+        _current_worker_run_id.reset(run_token)
+        _current_worker_step_index.reset(step_token)
+        _current_worker_task.reset(task_token)
+
+
 def get_current_budget_manager() -> Any | None:
     return _current_budget_manager.get()
 
@@ -80,6 +108,18 @@ def reset_current_budget_manager(token: Any) -> None:
 
 def get_current_worker_task_id() -> str:
     return _current_worker_task.get()
+
+
+def get_current_worker_step_index() -> int:
+    return _current_worker_step_index.get()
+
+
+def get_current_worker_run_id() -> str:
+    return _current_worker_run_id.get()
+
+
+def get_current_worker_session_id() -> str:
+    return _current_worker_session_id.get()
 
 
 def set_current_llm_reservation(reservation_id: str) -> Any:

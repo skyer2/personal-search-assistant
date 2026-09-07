@@ -52,7 +52,7 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
             "worker",
             f"[worker] failed task={event.task_id or '-'}",
         ),
-        EventType.PROGRESS_EVALUATED: (
+        EventType.PROGRESS_ASSESSED: (
             "progress",
             f"[progress] {attrs.get('verdict') or event.status or ''}",
         ),
@@ -80,7 +80,7 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
         EventType.CONTEXT_BUILT: ("context", "[context] built"),
         EventType.CONTEXT_COMPRESSED: ("context", "[context] compressed"),
         EventType.RETRIEVAL_SEARCH: ("retrieval", "[retrieval] search"),
-        EventType.QUALITY_EVALUATED: (
+        EventType.QUALITY_ASSESSED: (
             "quality",
             f"[quality] {event.status or ''} {attrs.get('reason') or ''}".strip(),
         ),

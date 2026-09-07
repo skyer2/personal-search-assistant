@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from app.agent.harness.planner import auto_resolve_clarification, build_plan, finalize_plan, understand_task
+from app.agent.harness.planner import auto_resolve_clarification, understand_task
 from app.agent.harness.citations import SourceTier
 from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep, TaskIntent
 from app.research.assessment.delivery import assess_delivery
@@ -506,6 +506,17 @@ class ResearchGraphRunner:
             intent = session.state.intent or understand_task(session.ctx.task_query)
             needs = bool(intent.needs_clarification and not intent.clarification_resolved)
         payload = intent.to_dict()
+        _emit(
+            session,
+            "brief.compiled",
+            phase=WorkflowPhase.UNDERSTAND.value,
+            status="ok",
+            attributes={
+                "brief": brief_from_intent(payload),
+                "search_mode": "agent",
+                "task_query": session.ctx.task_query,
+            },
+        )
         return transition_update(
             gstate,
             WorkflowPhase.UNDERSTAND,
@@ -520,12 +531,67 @@ class ResearchGraphRunner:
         return transition_update(gstate, WorkflowPhase.CLARIFY, {"intent": resolved.to_dict(), "needs_clarification": False})
 
     async def node_plan(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.agent.llm import compression_model
+        from app.agent.harness.planner import finalize_plan
+        from app.research.planning.compose import PlanningLimits
+        from app.research.planning.effort import resolve_effective_budget
+        from app.research.planning.lead_planner import heuristic_dynamic_plan, lead_plan_with_llm
+        from app.research.planning.policy import parse_source_policy
         session = _require_session(gstate)
         intent = TaskIntent.from_dict(gstate.get("intent") or {}) if gstate.get("intent") else understand_task(gstate["task_query"])
-        plan = research_only_plan(annotate_plan_tasks(finalize_plan(build_plan(intent)), intent))
+        config = self.harness.harness_config
+        limits = PlanningLimits.from_config(config)
+        policy = parse_source_policy(intent.raw_query)
+        effective = resolve_effective_budget(intent, config)
+        plan = None
+        planner_source = "heuristic"
+        if bool(getattr(config, "planner_llm_enabled", False)) and bool(
+            getattr(config, "planner_dynamic_lead_enabled", True)
+        ):
+            try:
+                plan = await asyncio.wait_for(
+                    lead_plan_with_llm(
+                        intent,
+                        policy,
+                        model=compression_model,
+                        session_id=session.session_id,
+                        max_tasks=limits.max_research_tasks,
+                        effort=effective,
+                    ),
+                    timeout=max(5.0, float(getattr(config, "planner_wall_budget_sec", 45) or 45)),
+                )
+            except Exception:
+                plan = None
+        if plan is None:
+            plan = heuristic_dynamic_plan(intent, policy)
+        else:
+            planner_source = "lead_llm"
+        plan = research_only_plan(annotate_plan_tasks(finalize_plan(plan), intent))
         session.state.intent = intent
         session.state.plan = plan
         session.state.replan_count = 0
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata.update(
+                {
+                    "effort_plan": effective.to_dict(),
+                    "run_budget": effective.as_run_budget(),
+                    "planner_source": planner_source,
+                }
+            )
+        _emit(
+            session,
+            "plan.created",
+            phase=WorkflowPhase.PLAN.value,
+            status="ok",
+            attributes={
+                "plan_id": f"plan:{session.run_id}:{plan.plan_version}",
+                "brief_id": f"brief:{session.run_id}",
+                "task_count": len(plan.steps),
+                "task_ids": [step.resolved_task_id(index) for index, step in enumerate(plan.steps)],
+                "planning_mode": plan.planning_mode,
+                "planner_source": planner_source,
+            },
+        )
         return transition_update(
             gstate,
             WorkflowPhase.PLAN,

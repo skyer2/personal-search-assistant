@@ -130,28 +130,54 @@ def decide_control(state: dict[str, Any]) -> ControlDecision:
         return _decision(state, ControlAction.DISPATCH, task_ids=runnable, reasons=["required_task_runnable"])
 
     health = assess_execution_health(state)
+    progress = assess_progress(state)
+    budget = replan_budget_from_state(state)
+    evidence = assess_evidence(state)
+    delivery = assess_delivery(state)
+    usable_evidence = evidence["status"] in {
+        EvidenceStatus.PARTIAL.value,
+        EvidenceStatus.SUFFICIENT.value,
+    }
+    budget_allows_recovery = (
+        str(state.get("budget_status") or BudgetStatus.UNKNOWN.value)
+        != BudgetStatus.EXHAUSTED.value
+    )
     retryable = [
         task_id
         for task_id in health["retryable_tasks"]
         if int(normalize_tasks(state.get("tasks")).get(task_id, {}).get("attempt") or 0) < MAX_TASK_ATTEMPTS
     ]
-    if retryable and health["status"] in {ExecutionHealthStatus.DEGRADED.value, ExecutionHealthStatus.FAILED.value}:
-        return _decision(state, ControlAction.RETRY, task_ids=retryable, reasons=["retryable_failure"])
 
-    progress = assess_progress(state)
-    budget = replan_budget_from_state(state)
+    if delivery["mode"] != DeliveryMode.NONE.value:
+        return _decision(
+            state,
+            ControlAction.SYNTHESIZE,
+            mode=delivery["mode"],
+            reasons=["delivery_ready", *delivery["limitations"]],
+        )
+
+    should_retry = bool(
+        retryable
+        and health["status"] in {ExecutionHealthStatus.DEGRADED.value, ExecutionHealthStatus.FAILED.value}
+        and budget_allows_recovery
+        and delivery["mode"] == DeliveryMode.NONE.value
+    )
+    if should_retry:
+        return _decision(
+            state,
+            ControlAction.RETRY,
+            task_ids=retryable,
+            reasons=["retryable_failure", "budget_allows_recovery", "delivery_not_ready"],
+        )
+
     if (
         progress["status"] == SemanticProgress.GAP.value
         and _progress_gap_is_actionable(progress)
+        and budget_allows_recovery
         and not replan_budget_exhausted(budget)
     ):
         return _decision(state, ControlAction.REPLAN, reasons=["semantic_gap", "replan_available"])
 
-    evidence = assess_evidence(state)
-    usable_evidence = evidence["status"] in {
-        EvidenceStatus.PARTIAL.value,
-        EvidenceStatus.SUFFICIENT.value,
-    }
     if usable_evidence and replan_budget_exhausted(budget):
         return _decision(
             state,
@@ -165,14 +191,6 @@ def decide_control(state: dict[str, Any]) -> ControlDecision:
             ControlAction.DELIVER_PARTIAL,
             mode=DeliveryMode.DEGRADED.value,
             reasons=["budget_exhausted", "usable_evidence"],
-        )
-    delivery = assess_delivery(state)
-    if delivery["mode"] != DeliveryMode.NONE.value:
-        return _decision(
-            state,
-            ControlAction.SYNTHESIZE,
-            mode=delivery["mode"],
-            reasons=["delivery_ready", *delivery["limitations"]],
         )
     return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=[*delivery["blockers"], "delivery_not_ready"])
 

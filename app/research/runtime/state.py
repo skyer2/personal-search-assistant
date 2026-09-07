@@ -7,6 +7,7 @@ from typing import Annotated, Any, NotRequired, TypedDict
 
 from app.research.domain.contracts import LifecycleStatus, WorkflowPhase, new_replan_budget
 from app.research.runtime.reducers import merge_dicts
+from app.research.runtime.reducers import keep_last
 
 
 class BudgetState(TypedDict):
@@ -58,7 +59,7 @@ class ResearchState(TypedDict):
     draft_ref: str | None
     final_ref: str | None
     final_content: str
-    phase: str
+    phase: Annotated[str, keep_last]
     lifecycle: dict[str, str]
     termination: dict[str, Any] | None
     cancel_reason: str

@@ -122,11 +122,11 @@ def check_trace_integrity(
         counts.get("worker.failed", 0)
     )
     evidence_count = int(counts.get("evidence.registered", 0))
-    progress_count = int(counts.get("progress.evaluated", 0))
+    progress_count = int(counts.get("progress.assessed", 0))
     synthesis_count = int(counts.get("synthesis.completed", 0)) + int(
         counts.get("synthesis.failed", 0)
     )
-    quality_count = int(counts.get("quality.evaluated", 0))
+    quality_count = int(counts.get("quality.assessed", 0))
     run_started = int(counts.get("run.started", 0))
     run_completed = int(counts.get("run.completed", 0)) + int(
         counts.get("run.failed", 0)

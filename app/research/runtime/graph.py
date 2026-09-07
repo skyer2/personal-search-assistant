@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, cast
 
-from app.agent.harness.planner import build_plan, understand_task
+from app.agent.harness.planner import understand_task
 from app.agent.harness.state import ExecutionPlan
 from app.research.control.policy import decide_control
 from app.research.control.terminal_policy import terminal_update
@@ -85,10 +85,13 @@ def clarify_node(state: ResearchState) -> dict[str, Any]:
 def plan_node(state: ResearchState) -> dict[str, Any]:
     from app.agent.harness.planner import finalize_plan
     from app.agent.harness.state import TaskIntent
+    from app.research.planning.lead_planner import heuristic_dynamic_plan
+    from app.research.planning.policy import parse_source_policy
 
     raw = state.get("intent") or {}
     intent = TaskIntent.from_dict(raw) if raw else understand_task(state["task_query"])
-    plan = research_only_plan(annotate_plan_tasks(finalize_plan(build_plan(intent))))
+    plan = heuristic_dynamic_plan(intent, parse_source_policy(intent.raw_query))
+    plan = research_only_plan(annotate_plan_tasks(finalize_plan(plan)))
     return transition_update(
         state,
         WorkflowPhase.PLAN,
