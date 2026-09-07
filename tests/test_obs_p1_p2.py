@@ -18,10 +18,10 @@ from app.observability.retention import prune_trace_files, should_sample
 from app.agent.harness.usage_tracker import prompt_template_for_phase
 
 
-def test_run_centric_jsonl_layout_and_legacy_read():
+def test_run_centric_jsonl_layout():
     with tempfile.TemporaryDirectory() as tmp:
         log_dir = Path(tmp)
-        exporter = JsonlExporter(log_dir=log_dir, enabled=True, run_centric=True)
+        exporter = JsonlExporter(log_dir=log_dir, enabled=True)
         tel = AgentTelemetry()
         tel._ws_enabled = False
         tel.configure_jsonl(log_dir, enabled=True)
@@ -148,7 +148,7 @@ def test_collect_run_summaries_nested_layout():
 
 
 if __name__ == "__main__":
-    test_run_centric_jsonl_layout_and_legacy_read()
+    test_run_centric_jsonl_layout()
     test_prompt_template_and_generation_refs()
     test_finish_tool_result_metadata_and_retrieval()
     test_event_bus_inprocess_fanout()

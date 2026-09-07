@@ -464,7 +464,7 @@ def test_budget_blocked_worker_salvages_artifact_evidence() -> None:
 
 def test_budget_blocked_worker_evidence_reaches_candidate_and_synthesis(monkeypatch) -> None:
     import app.research.runtime.runner as runner_module
-    import app.research.runtime.worker as worker_module
+    import app.research.execution.worker_executor as worker_executor_module
 
     intent = understand_task(EXAMPLE_QUERY)
     plan = heuristic_dynamic_plan(intent, parse_source_policy(EXAMPLE_QUERY))
@@ -509,10 +509,10 @@ def test_budget_blocked_worker_evidence_reaches_candidate_and_synthesis(monkeypa
                 fail_reason="research_token_cap",
             )
 
-    monkeypatch.setattr(worker_module, "LangChainWorkerRuntime", BlockedRuntime)
+    monkeypatch.setattr(worker_executor_module, "WorkerExecutorV2", BlockedRuntime)
     runner = runner_module.ResearchGraphRunner.__new__(runner_module.ResearchGraphRunner)
     runner.harness = SimpleNamespace(
-        harness_config=SimpleNamespace(hitl_enabled=False, worker_executor_v2=False),
+        harness_config=SimpleNamespace(hitl_enabled=False),
     )
     update = asyncio.run(
         runner.node_research_worker(

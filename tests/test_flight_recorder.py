@@ -5,14 +5,12 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.api.observability_metrics import aggregate_metrics, collect_run_summaries, render_prometheus_text
-from app.api.trace_logger import JsonlTraceLogger
+from app.api.observability_metrics import collect_run_summaries
 from app.observability.events import EventType, span_identity
 from app.observability.journal import build_span_tree, summarize_trace
 from app.observability.privacy import sanitize_attributes
@@ -24,61 +22,6 @@ def test_span_identity_parallel_workers():
     b = span_identity("execute", task_id="t2", attempt=1)
     assert a != b
     print("[OK] parallel span identity")
-
-
-def test_jsonl_run_summary_dual_schema():
-    logger = JsonlTraceLogger(log_dir=Path(tempfile.mkdtemp()) / "traces", enabled=True)
-    logger.log_run_summary(
-        trace_id="tr_dual",
-        session_id="sess_dual",
-        status="success",
-        duration_ms=1200,
-        metadata={"tool_calls_count": 3, "replan_count": 1},
-    )
-    events = logger.read_trace("sess_dual")
-    assert len(events) == 1
-    record = events[0]
-    assert record["event"] == "run_summary"
-    assert record["extra"]["event"] == "run_summary"
-    assert record["metadata"]["tool_calls_count"] == 3
-    summaries = collect_run_summaries(logger.log_dir, window_hours=24)
-    assert len(summaries) == 1
-    assert summaries[0]["metadata"]["tool_calls_count"] == 3
-    print("[OK] jsonl run_summary dual schema")
-
-
-def test_collect_legacy_flat_and_nested():
-    with tempfile.TemporaryDirectory() as tmp:
-        log_dir = Path(tmp)
-        nested = {
-            "trace_id": "t1",
-            "session_id": "a",
-            "phase": "run",
-            "status": "success",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "duration_ms": 100,
-            "extra": {"event": "run_summary", "metadata": {"tool_calls_count": 2}},
-        }
-        flat = {
-            "trace_id": "t2",
-            "session_id": "b",
-            "phase": "run",
-            "status": "success",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "duration_ms": 200,
-            "event": "run_summary",
-            "metadata": {"tool_calls_count": 4, "replan_count": 1},
-        }
-        (log_dir / "a.jsonl").write_text(json.dumps(nested) + "\n", encoding="utf-8")
-        (log_dir / "b.jsonl").write_text(json.dumps(flat) + "\n", encoding="utf-8")
-        metrics = aggregate_metrics(log_dir, window_hours=24)
-        assert metrics.runs_total == 2
-        assert metrics.latency_p50_ms > 0
-        assert metrics.replan_trigger_rate == 0.5
-        prom = render_prometheus_text(metrics)
-        assert "harness_runs_total 2" in prom
-        assert "# TYPE harness_runs_total gauge" in prom
-        print("[OK] collect both JSONL schemas + percentiles")
 
 
 def test_recorder_emits_once_and_builds_tree():
@@ -443,8 +386,6 @@ def test_failure_attribution_and_eval_matrix():
 
 if __name__ == "__main__":
     test_span_identity_parallel_workers()
-    test_jsonl_run_summary_dual_schema()
-    test_collect_legacy_flat_and_nested()
     test_recorder_emits_once_and_builds_tree()
     test_privacy_redacts_prompt_by_default()
     test_parallel_phase_spans_and_intermediate_status()

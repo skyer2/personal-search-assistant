@@ -160,21 +160,6 @@ class ResearchGraphRunner:
         bind_session(session)
         session.state.metadata["graph_runtime"] = True
         session.state.metadata["workflow_authority"] = "research_state"
-        persist_loop = bool(
-            getattr(self.harness.harness_config, "persist_loop_state", False)
-        )
-        # LoopState checkpoint 不再作为 Graph 的种子。仅当显式打开旧 persist 时保留 HITL 桥。
-        if persist_loop and ctx.restored_full:
-            waiting = dict((session.state.metadata or {}).get("hitl_waiting") or {})
-            gate = str(waiting.get("gate_type") or "")
-            if gate in {"clarification", "intent_clarification"}:
-                session.state = await self.harness._maybe_intent_clarification(
-                    session.state
-                )
-            elif gate == "plan_review":
-                session.state = await self.harness._maybe_plan_hitl_review(
-                    session.state
-                )
         config = {
             "configurable": {"thread_id": session.run_id},
             "recursion_limit": 20,
@@ -224,7 +209,7 @@ class ResearchGraphRunner:
                 profile=profile,
             )
             mgr = session.budget_manager
-            initial = await _initial_or_resume_payload(graph, payload, config, ctx)
+            initial = await _initial_or_resume_payload(graph, payload, config)
             research_sec = mgr.remaining_for_research_sec()
             if research_sec <= 1.0:
                 return await self._force_synthesis_then_finalize(
@@ -706,7 +691,7 @@ class ResearchGraphRunner:
         """对照实验：单 Worker + search/fetch/file，不跑 Brief/Plan/Progress。"""
         from app.agent.harness.state import ExecutionPlan, PlanStep
         from app.research.runtime.isolation import worker_row
-        from app.research.runtime.project import sync_legacy_execution_scratch
+        from app.research.runtime.project import sync_execution_projection
         from app.research.runtime.worker import (
             LangChainWorkerRuntime,
             ResearchContext,
@@ -715,8 +700,7 @@ class ResearchGraphRunner:
         )
 
         session = _require_session(gstate)
-        if not bool(getattr(self.harness.harness_config, "worker_executor_v2", True)):
-            sync_legacy_execution_scratch(session.state, gstate)
+        sync_execution_projection(session.state, gstate)
         query = str(gstate.get("resolved_query") or session.ctx.task_query or "")
         from app.research.planning.policy import tools_for_sources
 
@@ -791,10 +775,10 @@ class ResearchGraphRunner:
         }
 
     async def node_intent(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.project import brief_from_intent, sync_legacy_execution_scratch
+        from app.research.runtime.project import brief_from_intent, sync_execution_projection
 
         session = _require_session(gstate)
-        sync_legacy_execution_scratch(session.state, gstate)
+        sync_execution_projection(session.state, gstate)
         state = session.state
         ctx = session.ctx
         if gstate.get("intent"):
@@ -978,10 +962,10 @@ class ResearchGraphRunner:
         }
 
     async def node_plan(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.project import sync_legacy_execution_scratch
+        from app.research.runtime.project import sync_execution_projection
 
         session = _require_session(gstate)
-        sync_legacy_execution_scratch(session.state, gstate)
+        sync_execution_projection(session.state, gstate)
         ctx = session.ctx
         if gstate.get("plan"):
             from app.agent.harness.state import ExecutionPlan
@@ -1004,8 +988,7 @@ class ResearchGraphRunner:
         # Effort clamp 后的并行度写入 run_budget；刷新 Worker 闸门
         session.refresh_worker_sem()
         needs_review = bool(
-            not ctx.restored_full
-            and self.harness.harness_config.hitl_enabled
+            self.harness.harness_config.hitl_enabled
             and self.harness.harness_config.hitl_plan_review_enabled
             and session.state.intent is not None
             and should_request_plan_review(
@@ -1031,10 +1014,10 @@ class ResearchGraphRunner:
     async def node_plan_validate(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from langgraph.types import interrupt
 
-        from app.research.runtime.project import sync_legacy_execution_scratch
+        from app.research.runtime.project import sync_execution_projection
 
         session = _require_session(gstate)
-        sync_legacy_execution_scratch(session.state, gstate)
+        sync_execution_projection(session.state, gstate)
         ctx = session.ctx
         state = session.state
         if state.abort_reason:
@@ -1101,7 +1084,7 @@ class ResearchGraphRunner:
         )
 
     async def node_dispatch(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.project import sync_legacy_execution_scratch
+        from app.research.runtime.project import sync_execution_projection
         from app.research.planning.candidate import candidate_artifact_status
         from app.research.runtime.scheduler import (
             select_dispatch_wave,
@@ -1116,7 +1099,7 @@ class ResearchGraphRunner:
                 WorkflowPhase.DISPATCH,
                 {"progress": "dispatch"},
             )
-        sync_legacy_execution_scratch(session.state, gstate)
+        sync_execution_projection(session.state, gstate)
         if session.state.plan is None:
             return transition_update(
                 gstate,
@@ -1238,7 +1221,6 @@ class ResearchGraphRunner:
         from app.research.runtime.isolation import worker_row
         from app.research.execution.worker_executor import WorkerExecutorV2
         from app.research.runtime.worker import (
-            LangChainWorkerRuntime,
             ResearchContext,
             ResearchTask,
             WorkerResult,
@@ -1250,10 +1232,6 @@ class ResearchGraphRunner:
         step_type = str(gstate.get("step_type") or "")
         if session is None:
             return _failed_worker(task_id, step_type, "missing_session")
-        if not bool(getattr(self.harness.harness_config, "worker_executor_v2", True)):
-            from app.research.runtime.project import sync_legacy_execution_scratch
-
-            sync_legacy_execution_scratch(session.state, gstate)
         if session.state.plan is None:
             return _failed_worker(task_id, step_type, "missing_session")
         plan = session.state.plan
@@ -1294,11 +1272,7 @@ class ResearchGraphRunner:
             )
             await self.harness._flush_hitl_memories(session.state)
             session.state.metadata["graph_step_gated"] = True
-        runtime = (
-            WorkerExecutorV2(self.harness, session)
-            if bool(getattr(self.harness.harness_config, "worker_executor_v2", True))
-            else LangChainWorkerRuntime(self.harness, session)
-        )
+        runtime = WorkerExecutorV2(self.harness, session)
         from app.research.planning.candidate import objective_with_candidate_context
 
         objective = objective_with_candidate_context(
@@ -2964,7 +2938,6 @@ async def _initial_or_resume_payload(
     graph: Any,
     payload: Any,
     config: dict[str, Any],
-    ctx: Any,
 ) -> Any:
     """同一 thread 若仍有 next/interrupt，从 durable checkpoint 续跑。"""
     try:
@@ -2977,10 +2950,9 @@ async def _initial_or_resume_payload(
     interrupts = list(getattr(snapshot, "interrupts", None) or [])
     if nxt or interrupts:
         logger.info(
-            "resume research graph thread=%s next=%s restored=%s",
+            "resume research graph thread=%s next=%s",
             (config.get("configurable") or {}).get("thread_id"),
             nxt,
-            bool(getattr(ctx, "restored_full", False)),
         )
         return None
     return payload

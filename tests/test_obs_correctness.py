@@ -160,7 +160,6 @@ def test_plan_phase_emits_created_and_validated(monkeypatch):
     monkeypatch.setattr("app.observability.get_recorder", lambda: tel)
     harness = object.__new__(AgentHarness)
     harness._current_tracer = None
-    harness.trace_logger = None
     state = LoopState(session_id="s_plan", phase=Phase.PLAN)
     state.intent = understand_task("搜索 Tesla 2026 动态，生成 Markdown 报告")
     state.plan = build_plan(state.intent)

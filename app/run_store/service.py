@@ -183,7 +183,6 @@ class RunStore:
         tenant_id: str | None = None,
         output_root: Path | None = None,
         updated_root: Path | None = None,
-        traces_root: Path | None = None,
     ) -> dict[str, Any]:
         """Tombstone + 级联清理：runs / uploads / 工作区 / trace 全部按 Session 删除。"""
         session = self.get_session(session_id)
@@ -200,7 +199,6 @@ class RunStore:
         for root in (
             output / f"session_{session_id}",
             (updated_root or (APP_ROOT / "updated")) / f"session_{session_id}",
-            (traces_root or (APP_ROOT / "logs" / "traces")) / f"{session_id}.jsonl",
         ):
             if root.exists():
                 shutil.rmtree(root, ignore_errors=True) if root.is_dir() else root.unlink(missing_ok=True)

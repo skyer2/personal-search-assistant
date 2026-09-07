@@ -70,6 +70,34 @@ class MemoryBackend(ABC):
     ) -> int:
         raise NotImplementedError
 
+    async def delete_records_for_run(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str,
+    ) -> int:
+        return 0
+
+    async def delete_records_for_session(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> int:
+        return 0
+
+    async def delete_source_ledger(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str = "",
+        session_id: str = "",
+    ) -> int:
+        return 0
+
     async def mark_recalled(
         self,
         record_ids: list[str],

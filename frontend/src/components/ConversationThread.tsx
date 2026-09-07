@@ -6,11 +6,12 @@ import {
   CloudServerOutlined,
   FileSearchOutlined,
   FileTextOutlined,
+  DeleteOutlined,
   PauseCircleOutlined,
   StopOutlined,
   ToolOutlined,
 } from "@ant-design/icons";
-import { Button } from "antd";
+import { Button, Checkbox, Popconfirm, Space, Typography } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { DeliverableFiles, linkifyArtifactNames } from "./DeliverableFiles";
 import {
@@ -38,6 +39,9 @@ export interface ChatTurn {
 }
 
 interface ConversationThreadProps {
+  onArchiveSession?: () => void | Promise<void>;
+  onClearSession?: () => void | Promise<void>;
+  onDeleteTurns?: (runIds: string[]) => void | Promise<void>;
   hasMoreEvents?: boolean;
   onLoadOlderEvents?: () => void;
   onProcessHeightChange?: (value: number) => void;
@@ -184,6 +188,14 @@ function qualityFromEvents(events: MonitorMessage[]): Record<string, unknown> | 
   return event?.data;
 }
 
+function terminationFromEvents(events: MonitorMessage[]): Record<string, unknown> | undefined {
+  const event = [...events].reverse().find((item) => item.event === "task_result");
+  const termination = event?.data?.termination;
+  return typeof termination === "object" && termination !== null
+    ? (termination as Record<string, unknown>)
+    : undefined;
+}
+
 function ProcessDock({
   elapsedClock,
   events,
@@ -226,6 +238,7 @@ function ProcessDock({
         <RunProgress
           durationLabel={<ElapsedTimer clock={elapsedClock} />}
           quality={qualityFromEvents(events)}
+          termination={terminationFromEvents(events)}
           progress={phaseProgress}
           runStatus={runStatus}
         />
@@ -361,6 +374,9 @@ function resultStatus(turn: ChatTurn): RunStatus {
 }
 
 export function ConversationThread({
+  onArchiveSession,
+  onClearSession,
+  onDeleteTurns,
   hasMoreEvents,
   onLoadOlderEvents,
   onProcessHeightChange,
@@ -370,6 +386,35 @@ export function ConversationThread({
   sessionId,
   turns,
 }: ConversationThreadProps) {
+  const [selectedRunIds, setSelectedRunIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    setSelectedRunIds((previous) => {
+      const available = new Set(turns.map((turn) => turn.id));
+      const next = previous.filter((runId) => available.has(runId));
+      return next.length === previous.length ? previous : next;
+    });
+  }, [turns]);
+
+  const deletableTurns = turns.filter((turn) => !turn.isRunning);
+  const selectedCount = selectedRunIds.filter((runId) =>
+    deletableTurns.some((turn) => turn.id === runId)
+  ).length;
+
+  function toggleSelected(runId: string, checked: boolean) {
+    setSelectedRunIds((previous) =>
+      checked ? [...new Set([...previous, runId])] : previous.filter((id) => id !== runId)
+    );
+  }
+
+  async function deleteTurns(runIds: string[]) {
+    if (!onDeleteTurns || runIds.length === 0) {
+      return;
+    }
+    await onDeleteTurns(runIds);
+    setSelectedRunIds((previous) => previous.filter((id) => !runIds.includes(id)));
+  }
+
   if (turns.length === 0) {
     return (
       <div className="conversation-empty">
@@ -406,6 +451,36 @@ export function ConversationThread({
 
   return (
     <div className="conversation-thread" aria-label="聊天消息流">
+      <div className="conversation-history-toolbar">
+        <Typography.Text type="secondary">
+          历史 {turns.length} 问答 · 可删除 {deletableTurns.length} · 已选 {selectedCount}
+        </Typography.Text>
+        <Space size={8} wrap>
+          <Button
+            danger
+            disabled={selectedCount === 0 || !onDeleteTurns}
+            onClick={() => void deleteTurns(selectedRunIds)}
+            size="small"
+          >
+            删除选中
+          </Button>
+          <Popconfirm
+            title="清空当前会话"
+            description={`将删除 ${turns.length} 个问答及其 Run、Trace、Checkpoint 和派生记忆。`}
+            okText="确认删除"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => void onClearSession?.()}
+          >
+            <Button danger disabled={!onClearSession || turns.length === 0} size="small">
+              清空当前会话
+            </Button>
+          </Popconfirm>
+          <Button disabled={!onArchiveSession} onClick={() => void onArchiveSession?.()} size="small">
+            归档当前会话
+          </Button>
+        </Space>
+      </div>
+
       {turns.map((turn, index) => {
         const isLatest = index === turns.length - 1;
         const turnStatus = turn.isRunning ? runStatus : resultStatus(turn);
@@ -413,6 +488,29 @@ export function ConversationThread({
 
         return (
           <div className="conversation-turn" key={turn.id}>
+            <div className="conversation-turn-actions">
+              <Checkbox
+                aria-label={`选择问答 ${turn.content}`}
+                checked={selectedRunIds.includes(turn.id)}
+                disabled={turn.isRunning}
+                onChange={(event) => toggleSelected(turn.id, event.target.checked)}
+              />
+              <Popconfirm
+                title="删除此问答"
+                description="将删除该 Run 的执行记录、文件、Trace、Checkpoint 和派生记忆。"
+                okText="确认删除"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => void deleteTurns([turn.id])}
+              >
+                <Button
+                  danger
+                  disabled={turn.isRunning || !onDeleteTurns}
+                  icon={<DeleteOutlined aria-hidden />}
+                  size="small"
+                  type="text"
+                />
+              </Popconfirm>
+            </div>
             <article className="chat-message chat-message--user">
               <div className="message-bubble">
                 <div className="message-meta">

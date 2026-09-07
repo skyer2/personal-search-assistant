@@ -13,6 +13,7 @@ import type {
   JsonlTraceResponse,
   LangfuseConfigResponse,
   LangfuseTraceResponse,
+  MemoryRecordsResponse,
   RunEventsResponse,
   SearchMode,
   SessionBootstrap,
@@ -162,6 +163,49 @@ export async function fetchEvalLatest(): Promise<EvalReport> {
 
 export async function runEvalDryRun(): Promise<{ status: string; report_file?: string }> {
   return requestJson(apiUrl("/api/eval/run?dry_run=true&report_md=true"), { method: "POST" });
+}
+
+export async function deleteRun(runId: string): Promise<{ deleted: boolean; run_id?: string }> {
+  return requestJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}`), { method: "DELETE" });
+}
+
+export async function deleteSession(sessionId: string): Promise<{ deleted: boolean; session_id?: string }> {
+  return requestJson(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}`), { method: "DELETE" });
+}
+
+export async function archiveSession(sessionId: string): Promise<{ session_id: string; archived: boolean }> {
+  return requestJson(apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/archive`), { method: "POST" });
+}
+
+export async function fetchMemoryRecords(options?: {
+  tenantId?: string;
+  userId?: string;
+  projectId?: string;
+}): Promise<MemoryRecordsResponse> {
+  const params = new URLSearchParams();
+  if (options?.tenantId) {
+    params.set("tenant_id", options.tenantId);
+  }
+  if (options?.userId) {
+    params.set("user_id", options.userId);
+  }
+  if (options?.projectId) {
+    params.set("project_id", options.projectId);
+  }
+  const query = params.toString();
+  return requestJson(apiUrl(`/api/memory/records${query ? `?${query}` : ""}`));
+}
+
+export async function forgetMemoryRecord(recordId: string): Promise<{ deleted: boolean }> {
+  return requestJson(apiUrl(`/api/memory/records/${encodeURIComponent(recordId)}`), { method: "DELETE" });
+}
+
+export async function forgetSessionMemory(sessionId: string): Promise<{ deleted: number }> {
+  return requestJson(apiUrl(`/api/memory/forget-session/${encodeURIComponent(sessionId)}`), { method: "POST" });
+}
+
+export async function forgetUserMemory(): Promise<{ deleted: number }> {
+  return requestJson(apiUrl("/api/memory/forget-user"), { method: "POST" });
 }
 
 export async function fetchTraceTree(sessionId: string): Promise<{ session_id: string; tree: TraceTree; total: number }> {

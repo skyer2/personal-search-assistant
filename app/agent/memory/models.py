@@ -317,6 +317,7 @@ class SourceLedgerEntry:
     content_fingerprint: str = ""
     query_purpose: str = ""
     session_id: str = ""
+    run_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -335,6 +336,7 @@ class SourceLedgerEntry:
             "content_fingerprint": self.content_fingerprint,
             "query_purpose": self.query_purpose,
             "session_id": self.session_id,
+            "run_id": self.run_id,
             "metadata": dict(self.metadata),
         }
 
@@ -355,5 +357,6 @@ class SourceLedgerEntry:
             content_fingerprint=str(data.get("content_fingerprint") or ""),
             query_purpose=str(data.get("query_purpose") or ""),
             session_id=str(data.get("session_id") or ""),
+            run_id=str(data.get("run_id") or ""),
             metadata=dict(data.get("metadata") or {}),
         )

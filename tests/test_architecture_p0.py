@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -11,15 +10,8 @@ sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.state import LoopState
 from app.research.routing.mode_router import budget_for_mode, canonicalize_mode, graph_branch_for_mode, route
-from app.research.runtime.project import apply_graph_to_loop, findings_from_worker_row
+from app.research.runtime.project import sync_execution_projection
 from app.research.runtime.state import empty_research_state
-from app.research.runtime.worker import (
-    LangChainWorkerRuntime,
-    PlaceholderWorkerRuntime,
-    ResearchContext,
-    ResearchTask,
-    WorkerRuntime,
-)
 
 
 def test_canonicalize_experiment_modes():
@@ -71,43 +63,14 @@ def test_research_state_has_brief_and_findings():
     print("[OK] ResearchState brief/findings")
 
 
-def test_apply_graph_to_loop_is_one_way():
+def test_sync_execution_projection_is_one_way():
     loop = LoopState(session_id="s")
     loop.replan_count = 9
-    apply_graph_to_loop(loop, {"replan_count": 1, "final_content": "hi", "progress": "planned"})
+    sync_execution_projection(loop, {"replan_count": 1, "final_content": "hi", "progress": "planned"})
     assert loop.replan_count == 1
     assert loop.final_content == "hi"
     assert loop.metadata["workflow_authority"] == "research_state"
     print("[OK] graph→loop projection")
-
-
-def test_worker_runtime_protocol():
-    runtime: WorkerRuntime = PlaceholderWorkerRuntime()
-    assert isinstance(runtime, WorkerRuntime)
-    assert LangChainWorkerRuntime.__name__ == "LangChainWorkerRuntime"
-    print("[OK] WorkerRuntime protocol")
-
-
-def test_placeholder_execute_and_findings():
-    async def _run():
-        runtime = PlaceholderWorkerRuntime()
-        result = await runtime.execute(
-            ResearchTask(task_id="t1", objective="确认 ARM64 指令", step_type="research"),
-            ResearchContext(run_id="r", query="q"),
-        )
-        assert result.ok and result.findings
-        rows = findings_from_worker_row(
-            {
-                "task_id": "t1",
-                "ok": True,
-                "summary": "ok",
-                "payload": {"summary": "ok", "facts": ["x"], "sources": ["https://a"]},
-            }
-        )
-        assert rows and rows[0]["task_id"] == "t1"
-
-    asyncio.run(_run())
-    print("[OK] placeholder execute + findings")
 
 
 def test_memory_off_by_default():
@@ -115,9 +78,7 @@ def test_memory_off_by_default():
 
     cfg = reload_harness_config()
     assert cfg.memory_enabled is False
-    assert cfg.persist_loop_state is False
-    assert cfg.graph_runtime_enabled is True
-    print("[OK] memory off; persist_loop_state false")
+    print("[OK] memory off by default")
 
 
 def test_compile_agent_and_direct_graphs():
@@ -165,9 +126,7 @@ if __name__ == "__main__":
     test_budget_direct_has_no_replan()
     test_graph_branch_for_mode()
     test_research_state_has_brief_and_findings()
-    test_apply_graph_to_loop_is_one_way()
-    test_worker_runtime_protocol()
-    test_placeholder_execute_and_findings()
+    test_sync_execution_projection_is_one_way()
     test_memory_off_by_default()
     test_compile_agent_and_direct_graphs()
     print("\n=== harness scope tests passed ===")

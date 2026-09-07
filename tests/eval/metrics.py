@@ -280,10 +280,31 @@ class EvalReport:
             return None
         return sum(r.intent_confidence for r in items) / len(items)
 
+    @property
+    def regression_summary(self) -> dict[str, Any]:
+        component = [r for r in self.results if r.mode == "component"]
+        scenario = [r for r in self.results if r.mode == "scenario-dry"]
+
+        def _summary(rows: list[TaskEvalResult]) -> dict[str, int]:
+            return {
+                "total": len(rows),
+                "passed": sum(1 for row in rows if row.success),
+            }
+
+        return {
+            "component": _summary(component),
+            "scenario": _summary(scenario),
+            "by_component": {
+                variant: _summary([r for r in component if r.variant == variant])
+                for variant in ("planner", "progress", "replan", "evidence")
+            },
+        }
+
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "total": self.total,
             "passed": self.passed,
+            "regression_summary": self.regression_summary,
             "task_success_rate": round(self.task_success_rate, 3),
             "gate_pass_rate": round(self.gate_pass_rate, 3),
             "tool_selection_accuracy": round(self.tool_selection_accuracy, 3),

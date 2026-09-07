@@ -365,7 +365,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     type="warning"
                   />
                 ) : summary.status === "partial" ? (
-                  <Alert message={`Partial run: ${asText(summary.termination?.reason, "termination reason missing")}`} showIcon style={{ marginBottom: 12 }} type="error" />
+                  <Alert message={`部分结束：${asText(summary.termination?.reason, "termination reason missing")}`} showIcon style={{ marginBottom: 12 }} type="warning" />
                 ) : (
                   <Alert message="本 run 暂无语义 failure origin" showIcon style={{ marginBottom: 12 }} type="success" />
                 )}

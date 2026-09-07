@@ -86,6 +86,26 @@ class ProjectionStore:
             ).fetchone()
         return int(row[0] if row else 0)
 
+    def delete_run(self, run_id: str) -> int:
+        with self._lock, self._db:
+            cursor = self._db.execute("DELETE FROM run_events WHERE run_id=?", (run_id,))
+            event_count = cursor.rowcount
+            self._db.execute("DELETE FROM run_projections WHERE run_id=?", (run_id,))
+        return max(0, event_count)
+
+    def delete_session(self, session_id: str) -> int:
+        with self._lock, self._db:
+            self._db.execute(
+                """
+                DELETE FROM run_projections
+                WHERE run_id IN (SELECT DISTINCT run_id FROM run_events WHERE session_id=?)
+                """,
+                (session_id,),
+            )
+            cursor = self._db.execute("DELETE FROM run_events WHERE session_id=?", (session_id,))
+            event_count = cursor.rowcount
+        return max(0, event_count)
+
     def get_projection(self, run_id: str, kind: str) -> dict[str, Any] | None:
         max_seq = self.max_seq(run_id)
         with self._lock:

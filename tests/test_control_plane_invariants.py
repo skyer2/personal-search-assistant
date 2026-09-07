@@ -207,7 +207,7 @@ def test_validator_rejects_category_deep_dive_and_comparison_worker() -> None:
     assert "comparison_is_synthesis:t_compare" in comparison_issues
 
 
-def test_finding_normalizer_rejects_invalid_and_normalizes_legacy_shape() -> None:
+def test_finding_normalizer_rejects_invalid_and_normalizes_worker_shape() -> None:
     findings, rejected = normalize_findings(
         [
             {"task_id": "t1", "summary": "候选公司 A 完成 B 轮融资", "artifact_id": "art-1"},

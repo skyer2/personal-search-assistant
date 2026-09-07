@@ -13,9 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep
+import app.research.execution.worker_executor as worker_executor_module
 from app.research.runtime import runner as runner_module
-from app.research.domain.contracts import task_status_projection
 from app.research.runtime import worker as worker_module
+from app.research.domain.contracts import task_status_projection
 from app.research.runtime.isolation import IsolatedWorkerOutcome
 from app.research.runtime.worker import (
     LangChainWorkerRuntime,
@@ -30,7 +31,6 @@ class FakeConfig:
     step_timeout_sec: int = 10
     max_retries: int = 0
     hitl_enabled: bool = False
-    worker_executor_v2: bool = False
 
 
 class FakeHarness:
@@ -54,6 +54,12 @@ class FakeBudget:
 
     def research_allowed(self) -> tuple[bool, str]:
         return self._allowed, "" if self._allowed else "budget_tokens"
+
+    def reserve_worker_lease(self, *args: Any, **kwargs: Any) -> tuple[str, str]:
+        return ("lease" if self._allowed else ""), ("" if self._allowed else "budget_tokens")
+
+    def release_worker_lease(self, lease_id: str) -> None:
+        return None
 
     def remaining_for_research_sec(self) -> float:
         return 60.0 if self._allowed else 0.0
@@ -193,8 +199,8 @@ def test_node_research_worker_handles_timeout_without_crashing(monkeypatch):
     session = FakeSession(state, FakeBudget(True))
     runner_module.bind_session(session)
     monkeypatch.setattr(
-        worker_module,
-        "LangChainWorkerRuntime",
+        worker_executor_module,
+        "WorkerExecutorV2",
         lambda harness, worker_session: _TimeoutRuntime(worker_session),
     )
     try:
@@ -229,8 +235,8 @@ def test_node_research_worker_rejects_dict_contract(monkeypatch):
     session = FakeSession(state, FakeBudget(True))
     runner_module.bind_session(session)
     monkeypatch.setattr(
-        worker_module,
-        "LangChainWorkerRuntime",
+        worker_executor_module,
+        "WorkerExecutorV2",
         lambda harness, worker_session: _DictRuntime(worker_session),
     )
     try:

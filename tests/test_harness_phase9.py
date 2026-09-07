@@ -34,7 +34,8 @@ def test_observability_snapshot():
 def test_jsonl_metrics_aggregation():
     with tempfile.TemporaryDirectory() as tmp:
         log_dir = Path(tmp)
-        path = log_dir / "session_a.jsonl"
+        path = log_dir / "session_a" / "run_a.jsonl"
+        path.parent.mkdir(parents=True)
         record = {
             "trace_id": "t1",
             "session_id": "session_a",

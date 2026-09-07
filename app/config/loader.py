@@ -159,17 +159,12 @@ class HarnessConfig:
     max_parallel_workers: int = 3
     step_timeout_sec: int = 120
     enforce_subagent_binding: bool = True
-    step_checkpoint_enabled: bool = True
-    resume_checkpoint: bool = True
     supervisor_temperature: float = 0.1
     structured_output_retry: bool = True
     require_structured_worker_output: bool = True
     synthesis_use_evidence_digest: bool = True
     direct_worker_invoke: bool = True
-    worker_executor_v2: bool = True
     synthesis_step_timeout_sec: int = 240
-    persist_loop_state: bool = False
-    graph_runtime_enabled: bool = True
     progress_eval_enabled: bool = True
     graph_checkpoint_backend: str = "sqlite"
     graph_checkpoint_path: str = "output/.harness/graph_checkpoints.sqlite"
@@ -210,14 +205,12 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
     validation = raw.get("validation", {})
     observability = raw.get("observability", {})
     budget = raw.get("budget", {})
-    mcp = raw.get("mcp", {})
     personal = dict(raw.get("personal_search", {}) or {})
     experiment = dict(raw.get("experiment", {}) or {})
     if experiment:
         personal.setdefault("experiment", experiment)
         personal.setdefault("default_mode", experiment.get("default_mode", "agent"))
         personal.setdefault("enabled_sources", experiment.get("enabled_sources") or {"web": True, "file": True})
-    _ = mcp  # legacy yaml key ignored
     hitl = raw.get("hitl", {})
     citations = raw.get("citations", {})
     eval_cfg = raw.get("eval", {})
@@ -630,14 +623,6 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             "HARNESS_ENFORCE_SUBAGENT_BINDING",
             bool(orch.get("enforce_subagent_binding", True)),
         ),
-        step_checkpoint_enabled=_env_bool(
-            "HARNESS_STEP_CHECKPOINT",
-            bool(orch.get("step_checkpoint_enabled", True)),
-        ),
-        resume_checkpoint=_env_bool(
-            "HARNESS_RESUME_CHECKPOINT",
-            bool(orch.get("resume_checkpoint", True)),
-        ),
         supervisor_temperature=float(
             os.getenv(
                 "HARNESS_SUPERVISOR_TEMPERATURE",
@@ -660,23 +645,11 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             "HARNESS_DIRECT_WORKER_INVOKE",
             bool(orch.get("direct_worker_invoke", True)),
         ),
-        worker_executor_v2=_env_bool(
-            "WORKER_EXECUTOR_V2",
-            bool(orch.get("worker_executor_v2", True)),
-        ),
         synthesis_step_timeout_sec=int(
             os.getenv(
                 "HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC",
                 orch.get("synthesis_step_timeout_sec", 240),
             )
-        ),
-        persist_loop_state=_env_bool(
-            "HARNESS_PERSIST_LOOP_STATE",
-            bool(orch.get("persist_loop_state", False)),
-        ),
-        graph_runtime_enabled=_env_bool(
-            "HARNESS_GRAPH_RUNTIME",
-            bool(orch.get("graph_runtime_enabled", True)),
         ),
         progress_eval_enabled=_env_bool(
             "HARNESS_PROGRESS_EVAL",

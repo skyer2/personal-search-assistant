@@ -422,7 +422,7 @@ def _gap_severity(assessment: dict[str, Any] | None) -> int:
     if unique:
         score = sum(unique.values())
         return 1 if score <= 1 else 2 if score <= 3 else 3
-    # Legacy projections without materialized gaps: dedupe repeated labels
+    # Projection fallback without materialized gaps: dedupe repeated labels
     # across coverage_gaps/gaps/open_gap_ids instead of adding list lengths.
     labels: set[str] = set()
     for key in (

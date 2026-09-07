@@ -321,14 +321,14 @@ class LangChainWorkerRuntime:
                         session_id=session.session_id,
                         tool_calls=session.state.tool_calls_count,
                     )
-                    if callable(getattr(mgr, "reserve_worker_lease", None)):
-                        lease_id, why = mgr.reserve_worker_lease(
+                    lease_id, why = "", "budget_manager_unavailable"
+                    reserve_worker_lease = getattr(mgr, "reserve_worker_lease", None)
+                    if callable(reserve_worker_lease):
+                        resolve_parallel = getattr(session, "_resolve_max_workers", None)
+                        lease_id, why = reserve_worker_lease(
                             task.task_id,
-                            parallel_workers=session._resolve_max_workers(),
+                            parallel_workers=int(resolve_parallel() if callable(resolve_parallel) else 3),
                         )
-                    else:
-                        allowed, why = mgr.research_allowed()
-                        lease_id = "legacy_budget_contract" if allowed else ""
                     # Research 不得侵占 synthesis 时间储备
                     remaining = mgr.remaining_for_research_sec()
                 except Exception:
@@ -458,7 +458,6 @@ class LangChainWorkerRuntime:
                                         session.ctx.session_dir,
                                         None,
                                         session.ctx.idempotency,
-                                        None,
                                     ),
                                     child=child,
                                     wall_timeout_sec=worker_timeout,
@@ -843,7 +842,7 @@ class LangChainWorkerRuntime:
                 )
             raise
         finally:
-            if lease_id and lease_id != "legacy_budget_contract":
+            if lease_id:
                 try:
                     session.budget_manager.release_worker_lease(lease_id)
                 except Exception:
@@ -852,21 +851,3 @@ class LangChainWorkerRuntime:
                 from app.observability.context import set_context
 
                 set_context(parent_ctx)
-
-
-class PlaceholderWorkerRuntime:
-    """无 harness 时的图编译 / 单测工人。"""
-
-    async def execute(
-        self, task: ResearchTask, context: ResearchContext
-    ) -> WorkerResult:
-        return WorkerResult(
-            ok=True,
-            task_id=task.task_id,
-            status="done",
-            summary="placeholder",
-            findings=[
-                {"task_id": task.task_id, "summary": task.objective or task.description}
-            ],
-            evidence_refs=[task.task_id] if task.task_id else [],
-        )

@@ -152,7 +152,7 @@ Progress → GAP 且 `can_replan`：
 4. **不提高**会话 `max_tool_calls` / `max_run_sec` 硬顶  
 5. reserve 耗尽 / 连续无边际收益 / replan 耗尽 → ENOUGH 或 abort（现有路径）
 
-`run_budget.max_parallel_workers` 在 Plan 落盘后刷新 `RunSession.worker_sem` 与 legacy loop fan-out Semaphore。
+`run_budget.max_parallel_workers` 在 Plan 落盘后刷新 `RunSession.worker_sem`，由 StateGraph dispatch 消费。
 
 Task 上的 `effort: low|medium|high` 只缩放该步 `max_retrieval_calls`（仍 ≤ hard step），禁止假精确 `exact_search_calls`。
 

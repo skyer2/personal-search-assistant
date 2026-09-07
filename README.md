@@ -22,12 +22,11 @@ Search is only a tool environment used to study:
 
 补充文档：
 
-- [docs/control-plane-convergence-implementation-2026-09.md](docs/control-plane-convergence-implementation-2026-09.md) — 控制面、FSM、终止原因与执行边界（当前权威）
 - [docs/HARD_CEILING_ADAPTIVE_EFFORT.md](docs/HARD_CEILING_ADAPTIVE_EFFORT.md) — Hard Ceiling + Adaptive Effort（全局确定性控制 / 局部自治）
 - [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) — Agent Flight Recorder（统一 Trace / Replan / Eval）
 - [docs/EVALUATION.md](docs/EVALUATION.md) — 五层 Eval（Component / Scenario / BrowseComp / Ablation）
+- [docs/CONTEXT_SYSTEM.md](docs/CONTEXT_SYSTEM.md) — History / Context / Memory 分层与遗忘
 - [docs/HARNESS_ARCHITECTURE.md](docs/HARNESS_ARCHITECTURE.md) — StateGraph 运行时
-- [docs/CONTEXT_SYSTEM.md](docs/CONTEXT_SYSTEM.md) — 上下文外置与压缩
 - [docs/BROWSECOMP_PLUS_EVAL.md](docs/BROWSECOMP_PLUS_EVAL.md) — BrowseComp-Plus 评测
 - [docs/OPENEULER_BARE_METAL.md](docs/OPENEULER_BARE_METAL.md) — 裸机安装、`.env`、启停与 systemd
 
@@ -48,7 +47,8 @@ Search is only a tool environment used to study:
 默认只有 **agent**（Harness）：
 
 ```text
-Task → Brief → Plan → parallel Workers → Progress / Replan → Synthesis → Answer
+Simple Fact → Fast Path → Source Gate → Answer
+Other Task → Brief → Plan → parallel Workers → Progress / Replan → Synthesis → Answer
 ```
 
 `direct` 只用于对照实验，不是产品能力：
@@ -58,6 +58,24 @@ Query → single agent + search tool → Answer
 ```
 
 环境工具固定且尽量简单：`search(query)`、`fetch(url)`、本地 `file_read`。
+
+## History / Context / Memory
+
+```text
+UI History         显示 Session 下全部 Run
+Model Context      当前 Run + 相关 RunSummary Top-K + Memory Top-K
+Long-term Memory   带 provenance / trust tier 的跨任务记忆
+```
+
+前端支持：
+
+- 删除单个问答（对应 Run）
+- 多选删除
+- 清空当前会话
+- 归档当前会话
+- Memory 管理：查看、单条遗忘、按会话遗忘、清空用户记忆
+
+删除 Run 会级联清理 RunStore、run 目录、Trace / Projection / Payload、Graph checkpoint、RunSummary 和 `provenance.run_id` 派生记忆。
 
 ## 快速启动
 

@@ -14,9 +14,7 @@ Agent Harness 主循环
 【Phase 13】运行时护栏：墙钟时限、重规划上限、计划步数上限、标准化 abort_reason。
 【Phase 14】结构化槽位 + 置信度 + HITL 歧义澄清 + 默认 LLM Planner + Plan 校验强化。
 【Phase 19】窗口卫生、分层预算淘汰、工作笔记、证据回读、压缩保留检查。
-【Phase 20】检索步直调工人；LoopState 为任务进度唯一权威并写入 checkpoint.json。
-【Phase 21】Domain Harness + create_agent Leaf；删除 Main DeepAgent 二次路由。
-【Phase 22】生产调度切到 Research StateGraph；while 仅作 legacy 回退。
+【Phase 22】生产调度唯一入口为 Research StateGraph；LoopState 仅作为图执行投影。
 """
 
 import asyncio
@@ -54,13 +52,11 @@ from app.agent.harness.orchestration import (
     IdempotencyRegistry,
     JSON_ONLY_FAIL_REASONS,
     RETRIEVAL_STEP_TYPES,
-    StepCheckpointStore,
     attach_structured_payload,
     build_strict_json_retry_instruction,
     check_subagent_binding,
     check_unauthorized_tools,
     extract_last_assistant_text,
-    find_parallel_batch,
     is_assistant_message,
     message_text,
     parse_worker_payload,
@@ -69,11 +65,9 @@ from app.agent.harness.orchestration import (
     task_query_fingerprint,
     validate_structured_worker_payload,
 )
-from app.agent.harness.loop_state_store import deserialize_loop_state, serialize_loop_state
 from app.agent.harness.worker_runtime import resolve_execute_target
 from app.agent.harness.guardrails import (
     GuardrailAction,
-    can_replan,
     evaluate_run_guardrails,
 )
 from app.agent.harness.step_budget import retrieval_budget
@@ -110,7 +104,6 @@ from app.api.context import (
     set_thread_context,
 )
 from app.api.monitor import monitor
-from app.api.trace_logger import JsonlTraceLogger, get_trace_logger
 from app.api.tracing import HarnessTracer, build_run_config
 from app.config.loader import HarnessConfig, get_harness_config
 
@@ -134,13 +127,10 @@ class HarnessRunContext:
     tokens: tuple
     tracer: Any
     citation_manager: Optional[CitationManager]
-    checkpoint_store: StepCheckpointStore
     idempotency: IdempotencyRegistry
     identity_token: Any
     run_started: float
     policy_token: Any = None
-    restored_full: bool = False
-    step_index: int = 0
     original_query: str = ""
     search_mode: str = "agent"
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -163,7 +153,6 @@ class AgentHarness:
         memory: Optional[MemoryStore] = None,
         memory_extractor: Optional[MemoryExtractor] = None,
         harness_config: Optional[HarnessConfig] = None,
-        trace_logger: Optional[JsonlTraceLogger] = None,
         max_retries: Optional[int] = None,
         workers: Optional[dict[str, Any]] = None,
     ):
@@ -171,7 +160,6 @@ class AgentHarness:
         self.agent = agent
         self.workers = workers or {}
         self.project_root = project_root
-        self._run_checkpoint_store: Optional[StepCheckpointStore] = None
         self._run_citation_manager: Optional[CitationManager] = None
         self.validator = validator or ResultValidator()
         self.recovery = recovery or RecoveryManager()
@@ -184,7 +172,6 @@ class AgentHarness:
         self.context_builder = context_builder or ContextBuilder.from_harness_config()
         self.memory = memory or MemoryStore()
         self.memory_extractor = memory_extractor or MemoryExtractor()
-        self.trace_logger = trace_logger or get_trace_logger(project_root)
         self.max_retries = (
             max_retries
             if max_retries is not None
@@ -310,16 +297,6 @@ class AgentHarness:
             state.obs_tool_results_cleared += cleared
         return cleared
 
-    def _use_graph_runtime(self) -> bool:
-        if not getattr(self.harness_config, "graph_runtime_enabled", False):
-            return False
-        try:
-            from langgraph.graph import StateGraph  # noqa: F401
-        except ImportError:
-            logger.warning("graph_runtime_enabled 但未安装 langgraph，回退 legacy while")
-            return False
-        return True
-
     def _bootstrap_run(
         self,
         task_query: str,
@@ -365,9 +342,10 @@ class AgentHarness:
                 "waves": [],
             },
         )
-        self._current_trace_id = self.trace_logger.new_trace_id()
         from app.observability import get_recorder
         from app.observability.events import new_id
+
+        self._current_trace_id = new_id(16)
 
         run_id = run_id or new_id(16)
         obs_ctx = get_recorder().start_run(
@@ -408,8 +386,6 @@ class AgentHarness:
         tracer.start()
         self._current_tracer = tracer
         citation_manager = CitationManager() if self.harness_config.citations_enabled else None
-        checkpoint_store = StepCheckpointStore(state_dir)
-        self._run_checkpoint_store = checkpoint_store
         self._run_citation_manager = citation_manager
         idempotency = IdempotencyRegistry()
         state.task_fingerprint = task_query_fingerprint(task_query)
@@ -435,26 +411,6 @@ class AgentHarness:
         state.memory_wrap_untrusted = memory_policy.wrap_untrusted
         state.metadata["memory_identity"] = identity.to_dict()
 
-        restored_full = False
-        step_index = 0
-        persist_loop = bool(getattr(self.harness_config, "persist_loop_state", False))
-        # Graph 路径只从 LangGraph SQLite 恢复；不要再 hydrate LoopState checkpoint。
-        if (
-            persist_loop
-            and not self._use_graph_runtime()
-            and self.harness_config.step_checkpoint_enabled
-            and self.harness_config.resume_checkpoint
-        ):
-            preview = checkpoint_store.load()
-            if preview and preview.get("loop_state") and self._checkpoint_matches(
-                preview, state
-            ):
-                state, step_index, restored_full = self._hydrate_loop_checkpoint(
-                    state,
-                    preview,
-                    idempotency,
-                    citation_manager,
-                )
         return HarnessRunContext(
             task_query=task_query,
             session_id=session_id,
@@ -469,13 +425,10 @@ class AgentHarness:
             tokens=tokens,
             tracer=tracer,
             citation_manager=citation_manager,
-            checkpoint_store=checkpoint_store,
             idempotency=idempotency,
             identity_token=identity_token,
             run_started=run_started,
             policy_token=policy_token,
-            restored_full=restored_full,
-            step_index=step_index,
             search_mode=mode or "agent",
             original_query=task_query,
             budget_manager=budget_manager,
@@ -486,7 +439,6 @@ class AgentHarness:
 
     def _teardown_run(self, ctx: HarnessRunContext) -> None:
         self._current_tracer = None
-        self._run_checkpoint_store = None
         self._run_citation_manager = None
         reset_artifact_store()
         reset_evidence_store()
@@ -516,14 +468,14 @@ class AgentHarness:
         state = ctx.state
         _project_run_running(ctx)
         try:
-            if self._use_graph_runtime():
-                from app.research.runtime.runner import ResearchGraphRunner
+            try:
+                from langgraph.graph import StateGraph  # noqa: F401
+            except ImportError as exc:
+                raise RuntimeError("LangGraph is required by the research runtime") from exc
 
-                return await ResearchGraphRunner(self).execute(ctx)
-            logger.warning(
-                "graph_runtime_enabled=false：_run_legacy_loop 已弃用，仅作显式回退"
-            )
-            return await self._run_legacy_loop(ctx)
+            from app.research.runtime.runner import ResearchGraphRunner
+
+            return await ResearchGraphRunner(self).execute(ctx)
         except asyncio.CancelledError:
             state.abort_reason = "cancelled"
             state.abort_message = "任务被取消"
@@ -569,22 +521,13 @@ class AgentHarness:
                     **failure_attribution,
                 }
                 duration_ms = int((time.perf_counter() - ctx.run_started) * 1000)
-                if recorder.is_active:
-                    recorder.finish_run(
-                        status="failed",
-                        duration_ms=duration_ms,
-                        metadata=failure_metadata,
-                        result_preview=state.final_content[:240],
-                        error=str(e),
-                    )
-                else:
-                    self.trace_logger.log_run_summary(
-                        trace_id=self._current_trace_id,
-                        session_id=state.session_id,
-                        status="failed",
-                        duration_ms=duration_ms,
-                        metadata=failure_metadata,
-                    )
+                recorder.finish_run(
+                    status="failed",
+                    duration_ms=duration_ms,
+                    metadata=failure_metadata,
+                    result_preview=state.final_content[:240],
+                    error=str(e),
+                )
             except Exception:
                 logger.exception("Failed to close observability run (run_id=%s)", state.run_id)
             return HarnessResult(
@@ -603,218 +546,6 @@ class AgentHarness:
             )
         finally:
             self._teardown_run(ctx)
-
-    async def _run_legacy_loop(self, ctx: HarnessRunContext) -> HarnessResult:
-        """已弃用的 while 调度。生产路径是 Research StateGraph。"""
-        state = ctx.state
-        task_query = ctx.task_query
-        session_id = ctx.session_id
-        session_dir = ctx.session_dir
-        relative_session_dir = ctx.relative_session_dir
-        uploaded_prompt = ctx.uploaded_prompt
-        citation_manager = ctx.citation_manager
-        checkpoint_store = ctx.checkpoint_store
-        idempotency = ctx.idempotency
-        run_started = ctx.run_started
-        restored_full = ctx.restored_full
-        step_index = ctx.step_index
-
-        if restored_full:
-            waiting = dict((state.metadata or {}).get("hitl_waiting") or {})
-            if waiting.get("gate_type") in {"clarification", "intent_clarification"}:
-                state = await self._maybe_intent_clarification(state)
-            elif waiting.get("gate_type") == "plan_review":
-                state = await self._maybe_plan_hitl_review(state)
-            state = await self._phase_build_context(state, task_query)
-            monitor.report_session_dir(str(session_dir).replace("\\", "/"))
-            if waiting.get("gate_type") == "interrupt_on":
-                state.metadata.pop("hitl_waiting", None)
-                step_index = int(waiting.get("step_index") or step_index)
-        else:
-            state = await self._phase_understand(state, task_query, bool(uploaded_prompt))
-            state = await self._maybe_intent_clarification(state)
-            state = await self._phase_plan(state)
-            state = await self._maybe_plan_hitl_review(state)
-            state = await self._phase_build_context(state, task_query)
-            monitor.report_session_dir(str(session_dir).replace("\\", "/"))
-
-            if not state.plan or not state.plan.steps:
-                raise RuntimeError("Harness plan is empty")
-
-            state, step_index, _ = self._try_restore_checkpoint(
-                state,
-                task_query,
-                checkpoint_store,
-                idempotency,
-                citation_manager,
-            )
-            if not state.resumed_from_checkpoint:
-                self._save_step_checkpoint(state, session_id, 0, checkpoint_store)
-
-        if not state.plan or not state.plan.steps:
-            raise RuntimeError("Harness plan is empty")
-
-        while step_index < len(state.plan.steps):
-            step = state.plan.steps[step_index]
-            if str(step.metadata.get("status") or "") == StepStatus.SKIPPED.value:
-                # 预算降级 / early-stop 跳过的检索步：直接推进，让合成步继续
-                step_index += 1
-                continue
-            state.step_index = step_index
-            step.metadata["status"] = StepStatus.RUNNING.value
-            if self._apply_run_guardrails(state, run_started, ctx.budget_manager):
-                self._report_phase(
-                    Phase.ABORT,
-                    state.abort_reason or "guardrail",
-                    state=state,
-                    tool_calls=state.tool_calls_count,
-                    abort_reason=state.abort_reason,
-                    abort_message=state.abort_message,
-                )
-                break
-            if str(step.metadata.get("status") or "") == StepStatus.SKIPPED.value:
-                # 护栏降级把当前检索步标记为 skipped：不再执行，推进到合成步
-                step_index += 1
-                continue
-
-            batch_indices = find_parallel_batch(
-                state.plan.steps,
-                step_index,
-                enabled=(
-                    self.harness_config.parallel_retrieval_enabled
-                    and not (
-                        self.harness_config.hitl_enabled
-                        and any(
-                            candidate.step_type
-                            in self.harness_config.hitl_step_gate_types
-                            for candidate in state.plan.steps[step_index:]
-                            if candidate.metadata.get("parallel_group")
-                            == step.metadata.get("parallel_group")
-                        )
-                    )
-                ),
-            )
-            if len(batch_indices) >= 2:
-                batch_passed = await self._run_parallel_retrieval_batch(
-                    state,
-                    batch_indices,
-                    task_query,
-                    relative_session_dir,
-                    uploaded_prompt,
-                    session_id,
-                    session_dir,
-                    citation_manager,
-                    idempotency,
-                    checkpoint_store,
-                )
-                for idx in batch_indices:
-                    state.step_validation_results.append(
-                        {
-                            "step_index": idx,
-                            "step_type": state.plan.steps[idx].step_type,
-                            "passed": batch_passed,
-                            "parallel": True,
-                        }
-                    )
-                if not batch_passed:
-                    if can_replan(state, self.harness_config):
-                        state.plan = dynamic_replan(
-                            state.plan,
-                            batch_indices[-1],
-                            "step_failed",
-                        )
-                        state.replan_count += 1
-                        step_index = batch_indices[-1] + 1
-                        continue
-                    break
-                step_index = batch_indices[-1] + 1
-                continue
-
-            step_passed = await self._run_single_step(
-                state,
-                step,
-                step_index,
-                task_query,
-                relative_session_dir,
-                uploaded_prompt,
-                session_id,
-                session_dir,
-                citation_manager,
-                idempotency,
-                checkpoint_store,
-            )
-            state.step_validation_results.append(
-                {
-                    "step_index": step_index,
-                    "step_type": step.step_type,
-                    "passed": step_passed,
-                }
-            )
-            if not step_passed:
-                step.metadata["status"] = StepStatus.FAILED.value
-                if can_replan(state, self.harness_config):
-                    state.plan = dynamic_replan(
-                        state.plan,
-                        step_index,
-                        "step_failed",
-                    )
-                    state.replan_count += 1
-                    self._report_phase(
-                        Phase.REPLAN,
-                        "done",
-                        state=state,
-                        step_index=step_index,
-                        reason="step_failed",
-                        new_steps=len(state.plan.steps),
-                    )
-                    step_index += 1
-                    continue
-                break
-            step.metadata["status"] = StepStatus.DONE.value
-            step_index += 1
-
-        if citation_manager and state.final_content:
-            cited = citation_manager.build_cited_report(state.final_content)
-            state.final_content = cited
-            metrics = citation_manager.compute_metrics(cited)
-            state.citation_coverage_rate = metrics["citation_coverage_rate"]
-            state.hallucination_rate = metrics["hallucination_rate"]
-            state.evidence_source_count = metrics["registered_sources"]
-            state.numeric_citation_coverage = float(
-                metrics.get("numeric_citation_coverage") or 0.0
-            )
-        if state.run_id:
-            citation_manager.save_evidence_json(
-                session_dir / "runs" / str(state.run_id),
-                run_id=state.run_id,
-            )
-
-        finalize_outcome = self.validator.validate_finalize(
-            state,
-            session_dir,
-            citation_manager=citation_manager,
-            min_citation_coverage=self.harness_config.citations_min_coverage_rate,
-            deliverable_dir=ctx.deliverable_dir,
-        )
-        state = await self._phase_validate(
-            state,
-            finalize_outcome,
-            step_index=state.step_index,
-            scope="finalize",
-        )
-        success = (
-            (finalize_outcome.passed or finalize_outcome.severity == "warning")
-            and not state.abort_reason
-        )
-
-        return await self._phase_finalize(
-            state,
-            session_dir,
-            success=success,
-            started_at=run_started,
-            deliverable_dir=ctx.deliverable_dir,
-        )
-
 
     async def _execute_and_validate_step(
         self,
@@ -955,7 +686,6 @@ class AgentHarness:
         session_dir: Path,
         citation_manager: Optional[CitationManager] = None,
         idempotency: Optional[IdempotencyRegistry] = None,
-        checkpoint_store: Optional[StepCheckpointStore] = None,
     ) -> bool:
         cached, idem_key = self._cached_step_result(
             idempotency, state, step, step_index
@@ -1001,257 +731,17 @@ class AgentHarness:
                 if idempotency is not None:
                     idempotency.register(idem_key, result)
                 state.completed_step_keys.append(idem_key)
-                self._save_step_checkpoint(
-                    state,
-                    session_id,
-                    step_index + 1,
-                    checkpoint_store,
-                )
                 return True
 
             if step_retry >= state.max_retries:
                 return False
 
             state = await self._phase_recover(state, fail_reason, step_index)
-            if (
-                can_replan(state, self.harness_config)
-                and not state.metadata.get("graph_runtime")
-                and fail_reason
-                in {"sql_empty", "search_too_short", "wrong_subagent", "step_timeout"}
-            ):
-                state.plan = dynamic_replan(state.plan, step_index, fail_reason)
-                state.replan_count += 1
-                self._report_phase(
-                    Phase.REPLAN,
-                    "done",
-                    state=state,
-                    step_index=step_index,
-                    reason=fail_reason,
-                    new_steps=len(state.plan.steps),
-                )
             step_retry += 1
             state.retry_count += 1
             json_only = fail_reason in JSON_ONLY_FAIL_REASONS
 
         return False
-
-    async def _run_parallel_retrieval_batch(
-        self,
-        state: LoopState,
-        batch_indices: list[int],
-        task_query: str,
-        relative_session_dir: str,
-        uploaded_prompt: str,
-        session_id: str,
-        session_dir: Path,
-        citation_manager: Optional[CitationManager],
-        idempotency: IdempotencyRegistry,
-        checkpoint_store: Optional[StepCheckpointStore],
-    ) -> bool:
-        """【Phase 7】无依赖检索步 fan-out + join。"""
-        state.phase = Phase.PARALLEL_EXECUTE
-        self._report_phase(
-            Phase.PARALLEL_EXECUTE,
-            "start",
-            state=state,
-            batch_indices=batch_indices,
-            batch_size=len(batch_indices),
-        )
-        hard_parallel = max(1, int(self.harness_config.max_parallel_workers))
-        run_budget_parallel = hard_parallel
-        if isinstance(getattr(state, "metadata", None), dict):
-            raw_budget = state.metadata.get("run_budget")
-            if isinstance(raw_budget, dict) and raw_budget.get("max_parallel_workers") is not None:
-                run_budget_parallel = max(
-                    1, min(hard_parallel, int(raw_budget["max_parallel_workers"]))
-                )
-        sem = asyncio.Semaphore(run_budget_parallel)
-        timeout_sec = max(10, int(self.harness_config.step_timeout_sec))
-
-        async def _run_one(
-            idx: int,
-        ) -> tuple[int, bool, Optional[StepResult], str, Optional[LoopState]]:
-            step = state.plan.steps[idx]
-            cached, idem_key = self._cached_step_result(idempotency, state, step, idx)
-            if cached is not None:
-                return idx, True, cached, "", None
-
-            # fan-out 任务只读父状态，并在独立副本上累计 trace/counter。
-            # join 阶段按 step_index 单线程合并，杜绝共享 LoopState 的竞态。
-            from app.research.runtime.isolation import snapshot_worker_loop_state
-
-            child_state = snapshot_worker_loop_state(state)
-            child_state.step_index = idx
-            child_state.trace = []
-            child_state.assistants_called = []
-            child_state.compression_ratios = []
-            child_state.tool_calls_count = 0
-            child_state.obs_entity_retention_rates = []
-            child_state.graph_thread_ids = []
-            for field_name in (
-                "obs_structured_checks",
-                "obs_structured_passes",
-                "obs_structured_retries",
-                "obs_orchestration_violations",
-                "obs_binding_violations",
-                "obs_unauthorized_tool_hits",
-                "obs_estimated_tokens_saved",
-                "obs_step_message_tokens_peak",
-                "obs_context_budget_trims",
-                "obs_fresh_threads",
-                "obs_retention_patches",
-                "obs_tool_results_cleared",
-            ):
-                setattr(child_state, field_name, 0)
-
-            try:
-                async with sem:
-                    passed, result, fail_reason = await self._execute_and_validate_step(
-                        child_state,
-                        step,
-                        idx,
-                        task_query,
-                        relative_session_dir,
-                        uploaded_prompt,
-                        session_id,
-                        session_dir,
-                        None,
-                        timeout_sec=timeout_sec,
-                        context_builder=ContextBuilder.from_harness_config(),
-                        run_session_id=self._graph_thread_id(
-                            session_id,
-                            idx,
-                            parallel=True,
-                            run_id=str(state.run_id or ""),
-                        ),
-                    )
-            except Exception as exc:
-                result = StepResult(
-                    step_type=step.step_type,
-                    content="并行步骤执行异常",
-                    metadata={"parallel_error": str(exc)},
-                )
-                passed = False
-                fail_reason = "parallel_step_error"
-            return (
-                idx,
-                passed,
-                result if passed else None,
-                fail_reason,
-                child_state,
-            )
-
-        raw = await asyncio.gather(
-            *[_run_one(idx) for idx in batch_indices],
-        )
-
-        all_passed = True
-        ordered: list[tuple[int, StepResult, Optional[LoopState]]] = []
-        for item in sorted(raw, key=lambda x: x[0]):
-            idx, passed, result, _reason, child_state = item
-            if not passed or result is None:
-                all_passed = False
-                if child_state is not None:
-                    self._merge_parallel_child_state(state, child_state)
-                state.plan.steps[idx].metadata["status"] = StepStatus.FAILED.value
-                continue
-            ordered.append((idx, result, child_state))
-            state.plan.steps[idx].metadata["status"] = StepStatus.DONE.value
-
-        for idx, result, child_state in ordered:
-            idem_key = self._action_idem_key(state, state.plan.steps[idx], idx)
-            if child_state is not None:
-                self._merge_parallel_child_state(state, child_state)
-            if citation_manager is not None:
-                registered = citation_manager.register_from_step(
-                    idx,
-                    result.step_type,
-                    result.content,
-                    result.metadata,
-                )
-                if registered:
-                    evidence = [source.__dict__.copy() for source in registered]
-                    result.metadata["evidence_sources"] = evidence
-                    source_meta = result.metadata.setdefault("source_metadata", {})
-                    if isinstance(source_meta, dict):
-                        source_meta["source_ids"] = [
-                            source.source_id for source in registered
-                        ]
-                payload = (result.metadata or {}).get("worker_payload") or {}
-                if isinstance(payload, dict):
-                    citation_manager.bind_worker_facts(
-                        idx,
-                        result.step_type,
-                        list(payload.get("facts") or []),
-                        list(payload.get("sources") or []),
-                    )
-            state.step_results.append(result)
-            step = state.plan.steps[idx]
-            await self._maybe_remember_step(state, step, result)
-            idempotency.register(idem_key, result)
-            if idem_key not in state.completed_step_keys:
-                state.completed_step_keys.append(idem_key)
-            for assistant in result.metadata.get("step_assistants_called") or []:
-                if assistant not in state.assistants_called:
-                    state.assistants_called.append(assistant)
-        if ordered:
-            last_result = ordered[-1][1]
-            state.final_content = last_result.compressed_content or last_result.content
-        self._refresh_working_memory(
-            state,
-            citation_manager,
-            session_dir / "runs" / str(state.run_id or "") if state.run_id else session_dir,
-            task_query,
-        )
-
-        if all_passed and checkpoint_store is not None:
-            next_index = batch_indices[-1] + 1
-            self._save_step_checkpoint(state, session_id, next_index, checkpoint_store)
-
-        state.obs_parallel_batch_count += 1
-        state.obs_parallel_steps_executed += len(batch_indices)
-        self._report_phase(
-            Phase.PARALLEL_EXECUTE,
-            "done" if all_passed else "failed",
-            state=state,
-            batch_indices=batch_indices,
-            passed=all_passed,
-            timeout_sec=timeout_sec,
-        )
-        return all_passed
-
-    @staticmethod
-    def _merge_parallel_child_state(parent: LoopState, child: LoopState) -> None:
-        """只合并可加和/可取最大值的执行增量，不覆盖父状态权威字段。"""
-        parent.trace.extend(child.trace)
-        parent.tool_calls_count += child.tool_calls_count
-        parent.compression_ratios.extend(child.compression_ratios)
-        for field_name in (
-            "obs_structured_checks",
-            "obs_structured_passes",
-            "obs_structured_retries",
-            "obs_orchestration_violations",
-            "obs_binding_violations",
-            "obs_unauthorized_tool_hits",
-            "obs_estimated_tokens_saved",
-            "obs_context_budget_trims",
-            "obs_fresh_threads",
-            "obs_retention_patches",
-            "obs_tool_results_cleared",
-        ):
-            setattr(
-                parent,
-                field_name,
-                getattr(parent, field_name) + getattr(child, field_name),
-            )
-        parent.obs_step_message_tokens_peak = max(
-            parent.obs_step_message_tokens_peak,
-            child.obs_step_message_tokens_peak,
-        )
-        parent.obs_entity_retention_rates.extend(
-            getattr(child, "obs_entity_retention_rates", []) or []
-        )
-        parent.graph_thread_ids.extend(getattr(child, "graph_thread_ids", []) or [])
 
     def _enrich_worker_result(
         self,
@@ -1381,228 +871,16 @@ class AgentHarness:
         state.obs_evidence_used_count = len(store.findings)
         state.obs_artifacts_stored = len(artifacts)
 
-    def _checkpoint_matches(self, data: dict[str, Any] | None, state: LoopState) -> bool:
-        if not data:
-            return False
-        if data.get("task_fingerprint") != state.task_fingerprint:
-            return False
-        if data.get("session_id") != state.session_id:
-            return False
-        return True
-
-    def _hydrate_loop_checkpoint(
-        self,
-        state: LoopState,
-        data: dict[str, Any],
-        idempotency: IdempotencyRegistry,
-        citation_manager: Optional[CitationManager],
-    ) -> tuple[LoopState, int, bool]:
-        state = deserialize_loop_state(data.get("loop_state") or {}, base=state)
-        if citation_manager is not None:
-            citation_manager.load_from_snapshot(data.get("citation_snapshot"))
-            if state.evidence_lookup and not citation_manager.sources:
-                citation_manager.load_from_snapshot({"sources": state.evidence_lookup})
-            if citation_manager.fact_bindings:
-                state.metadata["citation_fact_bindings"] = list(
-                    citation_manager.fact_bindings
-                )
-        if not state.step_results:
-            rows = data.get("step_results") or []
-            state.step_results = [
-                StepResult(
-                    step_type=str(row.get("step_type", "")),
-                    content=str(row.get("content", "")),
-                    compressed_content=row.get("compressed_content"),
-                    metadata=dict(row.get("metadata") or {}),
-                )
-                for row in rows
-                if isinstance(row, dict)
-            ]
-        keys = list(data.get("completed_step_keys") or state.completed_step_keys)
-        for key, result in zip(keys, state.step_results):
-            idempotency.register(key, result)
-        next_index = int(data.get("next_step_index") or state.step_index or 0)
-        if state.plan:
-            for idx in range(min(next_index, len(state.plan.steps))):
-                state.plan.steps[idx].metadata["status"] = StepStatus.DONE.value
-        return state, next_index, True
-
-    def _try_restore_checkpoint(
-        self,
-        state: LoopState,
-        task_query: str,
-        checkpoint_store: StepCheckpointStore,
-        idempotency: IdempotencyRegistry,
-        citation_manager: Optional[CitationManager] = None,
-    ) -> tuple[LoopState, int, bool]:
-        if not (
-            self.harness_config.step_checkpoint_enabled
-            and self.harness_config.resume_checkpoint
-        ):
-            return state, 0, False
-
-        data = checkpoint_store.load()
-        if not self._checkpoint_matches(data, state):
-            return state, 0, False
-        assert data is not None
-
-        if data.get("loop_state") and getattr(self.harness_config, "persist_loop_state", False):
-            state, next_index, _ = self._hydrate_loop_checkpoint(
-                state, data, idempotency, citation_manager
-            )
-            for idx in range(min(next_index, len(state.plan.steps) if state.plan else 0)):
-                state.plan.steps[idx].metadata["status"] = StepStatus.DONE.value
-            self._emit_checkpoint_resumed(state, data, next_index, authority="loop_state")
-            self._report_phase(
-                Phase.BUILD_CONTEXT,
-                "checkpoint_resumed",
-                state=state,
-                next_step_index=next_index,
-                restored_steps=len(state.step_results),
-                authority="loop_state",
-            )
-            return state, next_index, True
-
-        state.step_results = checkpoint_store.restore_step_results(data)
-        state.assistants_called = list(data.get("assistants_called") or [])
-        state.completed_step_keys = list(data.get("completed_step_keys") or [])
-        idempotency.load_from_checkpoint(data, checkpoint_store)
-        state.resumed_from_checkpoint = True
-        next_index = int(data.get("next_step_index") or 0)
-        for idx in range(min(next_index, len(state.plan.steps) if state.plan else 0)):
-            state.plan.steps[idx].metadata["status"] = StepStatus.DONE.value
-        self._emit_checkpoint_resumed(state, data, next_index, authority="legacy")
-        self._report_phase(
-            Phase.BUILD_CONTEXT,
-            "checkpoint_resumed",
-            state=state,
-            next_step_index=next_index,
-            restored_steps=len(state.step_results),
-            authority="legacy",
-        )
-        return state, next_index, False
-
-    def _emit_checkpoint_resumed(
-        self,
-        state: LoopState,
-        data: dict[str, Any],
-        next_index: int,
-        *,
-        authority: str,
-    ) -> None:
-        try:
-            from app.observability import EventType, get_recorder
-
-            recorder = get_recorder()
-            if not recorder.is_active:
-                return
-            completed = list(data.get("completed_step_keys") or state.completed_step_keys or [])
-            pending = []
-            if state.plan is not None:
-                for i, step in enumerate(state.plan.steps):
-                    tid = step.resolved_task_id(i)
-                    if i >= next_index:
-                        pending.append(tid)
-            recorder.emit(
-                EventType.CHECKPOINT_RESUMED,
-                phase="build_context",
-                status="ok",
-                attributes={
-                    "checkpoint_id": str(data.get("checkpoint_id") or data.get("task_fingerprint") or ""),
-                    "resume_from_checkpoint_id": str(data.get("checkpoint_id") or ""),
-                    "plan_version": int(getattr(state.plan, "plan_version", 1) or 1) if state.plan else None,
-                    "completed_task_ids": completed[:40],
-                    "pending_task_ids": pending[:40],
-                    "last_seq": data.get("last_seq"),
-                    "state_hash": str(data.get("state_hash") or data.get("task_fingerprint") or "")[:64],
-                    "replayed_actions": int(data.get("replayed_actions") or len(state.step_results) or 0),
-                    "skipped_idempotent_actions": int(data.get("skipped_idempotent_actions") or 0),
-                    "authority": authority,
-                },
-            )
-        except Exception:
-            import logging as _log
-            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
-
-    def _save_step_checkpoint(
-        self,
-        state: LoopState,
-        session_id: str,
-        next_step_index: int,
-        checkpoint_store: Optional[StepCheckpointStore],
-    ) -> None:
-        if not self.harness_config.step_checkpoint_enabled or checkpoint_store is None:
-            return
-        loop_payload = None
-        citation_snapshot = None
-        if getattr(self.harness_config, "persist_loop_state", False):
-            loop_payload = serialize_loop_state(state)
-            loop_payload["step_index"] = next_step_index
-            if self._run_citation_manager is not None:
-                citation_snapshot = self._run_citation_manager.checkpoint_snapshot()
-                loop_payload["citation_fact_bindings"] = list(
-                    self._run_citation_manager.fact_bindings
-                )
-        checkpoint_store.save(
-            session_id=session_id,
-            task_fingerprint=state.task_fingerprint,
-            next_step_index=next_step_index,
-            step_results=state.step_results,
-            assistants_called=state.assistants_called,
-            completed_keys=state.completed_step_keys,
-            plan_summary=state.plan.summary if state.plan else "",
-            loop_state=loop_payload,
-            citation_snapshot=citation_snapshot,
-        )
-        try:
-            from app.observability import EventType, get_recorder
-
-            recorder = get_recorder()
-            if recorder.is_active:
-                pending = []
-                completed = list(state.completed_step_keys or [])
-                if state.plan is not None:
-                    for i, step in enumerate(state.plan.steps):
-                        tid = step.resolved_task_id(i)
-                        if i >= next_step_index:
-                            pending.append(tid)
-                recorder.emit(
-                    EventType.CHECKPOINT_SAVED,
-                    phase="execute",
-                    status="ok",
-                    attributes={
-                        "checkpoint_id": str(state.task_fingerprint or session_id),
-                        "plan_version": int(getattr(state.plan, "plan_version", 1) or 1) if state.plan else None,
-                        "completed_task_ids": completed[:40],
-                        "pending_task_ids": pending[:40],
-                        "last_seq": None,
-                        "state_hash": str(state.task_fingerprint or "")[:64],
-                        "next_step_index": next_step_index,
-                    },
-                )
-        except Exception:
-            import logging as _log
-            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
-
     async def _persist_hitl_waiting(
         self,
         state: LoopState,
         waiting: dict[str, Any],
     ) -> None:
         state.metadata["hitl_waiting"] = waiting
-        store = self._run_checkpoint_store
-        if store is None:
-            return
-        self._save_step_checkpoint(state, state.session_id, max(0, state.step_index), store)
 
     async def _clear_hitl_waiting(self, state: LoopState) -> None:
         if "hitl_waiting" in (state.metadata or {}):
             state.metadata.pop("hitl_waiting", None)
-            store = self._run_checkpoint_store
-            if store is not None:
-                self._save_step_checkpoint(
-                    state, state.session_id, max(0, state.step_index), store
-                )
 
     def _prepare_session(self, session_id: str):
         session_dir = self.project_root / "output" / f"session_{session_id}"
@@ -2077,6 +1355,7 @@ class AgentHarness:
                 source_kind="url",
                 quality="mixed" if step.step_type == "network_search" else "reliable",
                 session_id=state.session_id,
+                run_id=str(state.run_id or ""),
             )
             state.obs_memory_sources_recorded += recorded
 
@@ -3063,6 +2342,8 @@ class AgentHarness:
         if abort_reason:
             pdf_path = written.get("pdf")
             md_path = written.get("md")
+            quality = metadata.get("quality")
+            quality_rejected = isinstance(quality, dict) and quality.get("passed") is False
             if pdf_path is not None:
                 note = (
                     f"任务因 {abort_reason} 提前结束，已根据已有材料生成部分 PDF：{pdf_path.name}"
@@ -3071,6 +2352,10 @@ class AgentHarness:
                 note = (
                     f"任务因 {abort_reason} 提前结束，已写出 Markdown：{md_path.name}，但未能生成 PDF。"
                 )
+            elif abort_reason == "insufficient_trusted_evidence":
+                note = "未能找到可靠来源，质量门禁拒绝生成结论文件。"
+            elif quality_rejected:
+                note = "质量门禁拒绝低可信结论，未能生成请求的文件交付物。"
             else:
                 note = (
                     f"任务因 {abort_reason} 提前结束，未能生成请求的文件交付物。"
@@ -3270,21 +2555,12 @@ class AgentHarness:
         from app.observability import get_recorder
 
         recorder = get_recorder()
-        if recorder.is_active:
-            recorder.finish_run(
-                status=result.status,
-                duration_ms=total_latency_ms,
-                metadata=result.metadata,
-                result_preview=state.final_content[:240],
-            )
-        else:
-            self.trace_logger.log_run_summary(
-                trace_id=self._current_trace_id,
-                session_id=state.session_id,
-                status=result.status,
-                duration_ms=total_latency_ms,
-                metadata=result.metadata,
-            )
+        recorder.finish_run(
+            status=result.status,
+            duration_ms=total_latency_ms,
+            metadata=result.metadata,
+            result_preview=state.final_content[:240],
+        )
         return result
 
     def _estimate_run_tokens(self, state: LoopState) -> int:
@@ -3575,41 +2851,6 @@ class AgentHarness:
                 )
         monitor_data = {k: v for k, v in data.items() if k != "status"}
         monitor.report_phase(phase.value, status, session_id=state.session_id, **monitor_data)
-
-        log_status = status
-        if status in {"done", "start"}:
-            log_status = "ok" if status == "done" else "start"
-        elif status in {
-            "failed",
-            "error",
-            "cancelled",
-            "budget_exceeded",
-            "budget_tool_calls",
-            "budget_tokens",
-            "deadline_exceeded",
-            "max_replan",
-            "max_plan_steps",
-            "guardrail",
-        }:
-            log_status = status
-
-        # Legacy JsonlTraceLogger only when Flight Recorder is inactive (avoid dual-write).
-        if not recorder.is_active:
-            self.trace_logger.log_event(
-                trace_id=self._current_trace_id,
-                session_id=state.session_id,
-                phase=phase.value,
-                status=log_status,
-                step_index=data.get("step_index"),
-                step_type=data.get("step_type"),
-                duration_ms=data.get("duration_ms"),
-                tool_calls=data.get("tool_calls"),
-                tokens_used=data.get("tokens_used"),
-                extra={k: v for k, v in data.items() if k not in {
-                    "step_index", "step_type", "duration_ms", "tool_calls", "tokens_used"
-                }},
-            )
-
 
 def _project_run_running(ctx: HarnessRunContext) -> None:
     try:

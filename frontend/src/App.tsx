@@ -5,6 +5,7 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   CloudServerOutlined,
+  DatabaseOutlined,
   FileTextOutlined,
   LineChartOutlined,
   MessageOutlined,
@@ -18,6 +19,7 @@ import { ChatComposer } from "./components/ChatComposer";
 import { ConversationThread } from "./components/ConversationThread";
 import type { ChatTurn } from "./components/ConversationThread";
 import { EvalPanel } from "./components/EvalPanel";
+import { MemoryPanel } from "./components/MemoryPanel";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { TraceViewer } from "./components/TraceViewer";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
@@ -60,14 +62,12 @@ export default function App() {
   const [processHeight, setProcessHeight] = usePersistentNumber("harness-ui-process-height", 280);
   const streamRef = useRef<HTMLElement | null>(null);
   const failureHandledRef = useRef<string | null>(null);
-  const hydratedTurnsRef = useRef(false);
   const session = useDeepAgentSession();
 
   useEffect(() => {
-    if (!session.hydrated || hydratedTurnsRef.current) {
+    if (!session.hydrated) {
       return;
     }
-    hydratedTurnsRef.current = true;
     setTurns(session.initialTurns);
   }, [session.hydrated, session.initialTurns]);
 
@@ -119,11 +119,11 @@ export default function App() {
         {
           ...lastTurn,
           isRunning: false,
-          result: `任务失败：${failureMessage}`
+          result: `执行失败：${failureMessage}`
         }
       ];
     });
-    message.error(`任务失败：${failureMessage}`);
+    message.error(`执行失败：${failureMessage}`);
   }, [message, session.taskFailure, session.events.length]);
 
   async function handleSubmit() {
@@ -181,7 +181,6 @@ export default function App() {
 
   function handleNewSession() {
     failureHandledRef.current = null;
-    hydratedTurnsRef.current = false;
     session.resetSession();
     setTurns([]);
     setQuery("");
@@ -197,6 +196,43 @@ export default function App() {
       message.success("审批已提交，任务继续执行");
     } catch (error) {
       message.error(error instanceof Error ? error.message : "审批提交失败");
+    }
+  }
+
+  async function handleDeleteTurns(runIds: string[]) {
+    try {
+      await session.deleteTurns(runIds);
+      message.success(`已删除 ${runIds.length} 个问答及其派生数据`);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "删除问答失败");
+    }
+  }
+
+  async function handleClearSession() {
+    try {
+      await session.clearSession();
+      failureHandledRef.current = null;
+      setTurns([]);
+      setQuery("");
+      setStagedItems([]);
+      setWorkspace("chat");
+      message.success("当前会话及其派生数据已删除");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "清空会话失败");
+    }
+  }
+
+  async function handleArchiveSession() {
+    try {
+      await session.archiveCurrentSession();
+      failureHandledRef.current = null;
+      setTurns([]);
+      setQuery("");
+      setStagedItems([]);
+      setWorkspace("chat");
+      message.success("当前会话已归档，并已切换到新会话");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "归档会话失败");
     }
   }
 
@@ -244,6 +280,15 @@ export default function App() {
             block
           >
             Trace 查看器
+          </Button>
+          <Button
+            className={workspace === "memory" ? "workspace-nav-btn workspace-nav-btn--active" : "workspace-nav-btn"}
+            icon={<DatabaseOutlined aria-hidden />}
+            onClick={() => setWorkspace("memory")}
+            type={workspace === "memory" ? "primary" : "default"}
+            block
+          >
+            Memory 管理
           </Button>
         </div>
 
@@ -324,14 +369,22 @@ export default function App() {
         <header className="chat-topbar">
           <div>
             <span className="panel-kicker">
-              {workspace === "chat" ? "CHAT WORKSPACE" : workspace === "eval" ? "EVAL PANEL" : "TRACE VIEWER"}
+              {workspace === "chat"
+                ? "CHAT WORKSPACE"
+                : workspace === "eval"
+                  ? "REGRESSION PANEL"
+                  : workspace === "memory"
+                    ? "MEMORY PANEL"
+                    : "TRACE VIEWER"}
             </span>
             <h2>
               {workspace === "chat"
                 ? "运行台"
                 : workspace === "eval"
-                  ? "Developer · Eval"
-                  : "Developer · Trace"}
+                  ? "Developer · Regression"
+                  : workspace === "memory"
+                    ? "Developer · Memory"
+                    : "Developer · Trace"}
             </h2>
           </div>
           <div
@@ -397,6 +450,9 @@ export default function App() {
         {workspace === "chat" ? (
           <section className="chat-stream-panel" ref={streamRef}>
             <ConversationThread
+              onArchiveSession={handleArchiveSession}
+              onClearSession={handleClearSession}
+              onDeleteTurns={handleDeleteTurns}
               hasMoreEvents={session.hasMoreEvents}
               onLoadOlderEvents={() => void session.loadOlderEvents()}
               onProcessHeightChange={setProcessHeight}
@@ -411,6 +467,7 @@ export default function App() {
 
         {workspace === "eval" ? <EvalPanel /> : null}
         {workspace === "trace" ? <TraceViewer runId={session.currentRunId} sessionId={session.threadId} /> : null}
+        {workspace === "memory" ? <MemoryPanel sessionId={session.threadId} /> : null}
 
         {workspace === "chat" ? (
           <ChatComposer

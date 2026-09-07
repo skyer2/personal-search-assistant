@@ -28,6 +28,25 @@ L4  Ablation                  Vanilla / No-Replan / Full
 
 `task_success_rate` 现在等于 **Gate Pass Rate**（timeout / invalid schema / 错误答案等硬约束）。不再把 Trajectory 相似度、报告格式分、Memory 召回混进同一个 success。
 
+## Dry-run 的语义
+
+前端 **Eval 面板** 现在叫 **Regression Gate**。它只展示确定性回归结果：
+
+```text
+Component  20 / 20
+Scenario   20 / 20
+Planner     5 / 5
+Progress    6 / 6
+Replan      5 / 5
+Evidence    4 / 4
+Regression  0
+Merge Blocked NO
+```
+
+Dry-run 不调用真实 LLM、搜索工具，也不产生真实延迟。因此 Grounding、Citation P/R、CCR、Tool Calls、Tokens、Cost、P50/P95、pass@1、pass^k 只能在 **Live E2E / Benchmark** 中展示；在 Regression 面板中必须显示 `N/A`，不能显示 `0`。
+
+Evidence component 里的低 grounding 分数是 **unsupported-claim 检测器样例通过** 的结果，不代表真实 Agent 的 grounding 能力。不要把检测器测试分和产品能力分混在一个 Dashboard。
+
 ## 分层
 
 ### L0 Deterministic invariants
@@ -164,6 +183,6 @@ python tests/eval/run_eval.py --live --variant full --repeat 3 --fixture --limit
 python tests/eval/run_eval.py --calibrate-judge
 ```
 
-旧 `tasks.jsonl`（数据库 / RAGFlow / 电商 PDF）已归档到 `tests/eval/datasets/legacy/tasks_legacy.jsonl`，不再作为回归真源。
+旧 `tasks.jsonl`（数据库 / RAGFlow / 电商 PDF）已删除；当前回归真源只保留 Component datasets 与 `harness_scenarios_v1.jsonl`。
 
 基线：`tests/eval/results/baseline.json`（L1+L2 dry-run）。它证明的是 **Planner / Progress / Replan / Evidence invariants 不退化**，不证明线上答案质量。

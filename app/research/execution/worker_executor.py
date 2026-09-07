@@ -1,4 +1,4 @@
-"""Task executor that bypasses the legacy per-step control loop."""
+"""Task executor for the graph research worker node."""
 
 from __future__ import annotations
 

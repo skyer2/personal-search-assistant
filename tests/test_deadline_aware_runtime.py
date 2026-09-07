@@ -87,6 +87,12 @@ class FakeBudget:
     def remaining_run_sec(self) -> float:
         return self._remaining_run_sec
 
+    def reserve_worker_lease(self, *args: Any, **kwargs: Any) -> tuple[str, str]:
+        return "lease", ""
+
+    def release_worker_lease(self, lease_id: str) -> None:
+        return None
+
 
 class FakeContext:
     task_query = "research query"

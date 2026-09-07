@@ -1,7 +1,6 @@
 """Phase 4: harness.yml / JSONL logger / health endpoint tests."""
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 
@@ -9,7 +8,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.api.health import collect_health
-from app.api.trace_logger import JsonlTraceLogger
 from app.config.loader import load_harness_config, reload_harness_config
 
 
@@ -20,26 +18,6 @@ def test_harness_config_loads():
     assert config.jsonl_log_dir == "logs/traces"
     assert config.compression_max_chars >= 200
     print(f"[OK] harness config version={config.version}")
-
-
-def test_jsonl_trace_logger(tmp_path: Path):
-    logger = JsonlTraceLogger(log_dir=tmp_path / "traces", enabled=True)
-    trace_id = logger.new_trace_id()
-    logger.log_event(
-        trace_id=trace_id,
-        session_id="sess_test",
-        phase="execute",
-        status="ok",
-        step_index=0,
-        step_type="network_search",
-        duration_ms=120,
-        tool_calls=2,
-    )
-    events = logger.read_trace("sess_test")
-    assert len(events) == 1
-    assert events[0]["phase"] == "execute"
-    assert events[0]["trace_id"] == trace_id
-    print("[OK] jsonl trace logger")
 
 
 def test_health_endpoint_shape():
@@ -84,7 +62,6 @@ def test_eval_comparison_markdown():
 
 if __name__ == "__main__":
     test_harness_config_loads()
-    test_jsonl_trace_logger(Path(ROOT) / "output" / "test_jsonl")
     test_health_endpoint_shape()
     test_eval_comparison_markdown()
     print("\n=== All Phase 4 tests passed ===")

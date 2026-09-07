@@ -4,7 +4,7 @@
 > 范围权威：[ARCHITECTURE.md](./ARCHITECTURE.md)。运行时：[HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md)。
 > Phase 23：Context Virtualization — Artifact/Evidence Store + 可恢复压缩 + glm-5.2 tokenizer + JIT。
 > 原则：**LLM context 只保存当前决策真正需要的信息**；可重新取得的大内容放窗口外，用 ref 按需读取。
-> 跨任务 Memory 默认关闭，不是本层职责。MCP / RAGFlow 已移除；环境工具只有 search / fetch / file。
+> 跨任务 Memory 是独立治理层，不是 Context Builder 的隐式历史堆叠。MCP / RAGFlow 已移除；环境工具只有 search / fetch / file。
 
 ---
 
@@ -24,6 +24,14 @@ Artifact Store     →  网页/SQL/文件原文
 长期 Memory         →  跨任务精炼结论
 ```
 
+三层产品语义必须分开：
+
+```text
+Conversation History → UI 展示全部 Run
+Context              → 当前 Run + 相关 RunSummary Top-K + Memory Top-K
+Long-term Memory     → 带 provenance / trust tier 的跨任务记忆
+```
+
 ### 1.2 研搜为什么必须做（优先级）
 
 ```text
@@ -36,7 +44,7 @@ P2  可观测                      → Agent Flight Recorder：统一 emit，JSO
 
 ### 1.3 一次任务里，上下文怎么转
 
-生产调度权威是 Research StateGraph（`graph_runtime_enabled: true`）；下面是**每一步工人内部**仍要走的上下文卫生，不是主 Agent 自己 while 路由。
+生产调度权威固定是 Research StateGraph；下面是**每一步工人内部**仍要走的上下文卫生，不是主 Agent 自己 while 路由。
 
 ```text
 POST /api/task
@@ -67,7 +75,7 @@ POST /api/task
 | `compressed_content` | 下一步 prior / 最终拼接 | 本任务内 |
 | evidence digest | 合成步 | 本任务内，从工人 JSON 汇总 |
 | `CitationManager.sources` | finalize 参考文献 | 本任务内，另存 `evidence.json` |
-| 长期 Memory | 跨任务（Phase 2，默认关闭） | `app/agent/memory/`，不进本层 |
+| 长期 Memory | 跨任务，按身份和项目隔离 | `app/agent/memory/`，由 Memory 面板显式管理 |
 | LangGraph messages | Leaf Worker 图内 replay | 进程内 |
 
 检索工具不是上下文工程。search / fetch / file 的结果进入本步 `StepResult`，再被压缩/digest。

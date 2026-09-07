@@ -67,6 +67,7 @@ _NEW_COLUMNS: list[tuple[str, str]] = [
 ]
 
 _LEDGER_COLUMNS: list[tuple[str, str]] = [
+    ("run_id", "TEXT NOT NULL DEFAULT ''"),
     ("last_checked_at", "TEXT NOT NULL DEFAULT ''"),
     ("content_fingerprint", "TEXT NOT NULL DEFAULT ''"),
     ("query_purpose", "TEXT NOT NULL DEFAULT ''"),
@@ -106,7 +107,6 @@ class SqliteMemoryBackend(MemoryBackend):
         self.policy = policy
         self.audit = MemoryAuditLog(db_path)
         self._ensure_schema()
-        self._migrate_legacy_json()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -181,6 +181,7 @@ class SqliteMemoryBackend(MemoryBackend):
                     last_used_at TEXT NOT NULL,
                     first_seen_at TEXT NOT NULL,
                     session_id TEXT,
+                    run_id TEXT NOT NULL DEFAULT '',
                     metadata TEXT
                 )
                 """
@@ -236,70 +237,6 @@ class SqliteMemoryBackend(MemoryBackend):
                 ON memory_jobs(status, available_at)
                 """
             )
-            conn.commit()
-
-    def _migrate_legacy_json(self) -> None:
-        legacy_dir = self.db_path.parent
-        if not legacy_dir.exists():
-            return
-        with self._connect() as conn:
-            count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-            if count > 0:
-                return
-        for path in legacy_dir.glob("*.json"):
-            user_id = path.stem
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            writes: list[MemoryWriteRequest] = []
-            for item in raw:
-                if isinstance(item, str):
-                    writes.append(MemoryWriteRequest(fact=item, write_source=WriteSource.SEED))
-                elif isinstance(item, dict):
-                    rec = MemoryRecord.from_dict(item)
-                    writes.append(
-                        MemoryWriteRequest(
-                            fact=rec.fact,
-                            memory_type=rec.memory_type,
-                            confidence=rec.confidence,
-                            write_source=WriteSource.SEED,
-                            task=rec.task,
-                            topic=rec.topic,
-                            session_id=rec.session_id,
-                            metadata=rec.metadata,
-                            project_id=rec.project_id,
-                            trust_tier=rec.trust_tier,
-                            provenance=rec.provenance,
-                        )
-                    )
-            if writes:
-                self._import_legacy_writes(user_id, writes)
-
-    def _import_legacy_writes(self, user_id: str, writes: list[MemoryWriteRequest]) -> None:
-        now = _now()
-        with self._connect() as conn:
-            for write in writes:
-                if len(write.fact.strip()) < self.policy.min_fact_chars:
-                    continue
-                record = MemoryRecord(
-                    tenant_id="default",
-                    user_id=user_id,
-                    fact=write.fact.strip(),
-                    memory_type=write.memory_type,
-                    confidence=write.confidence,
-                    write_source=write.write_source,
-                    task=write.task,
-                    topic=write.topic,
-                    session_id=write.session_id,
-                    metadata=write.metadata,
-                    created_at=now,
-                    updated_at=now,
-                    project_id=write.project_id or "default",
-                    trust_tier=write.resolved_trust_tier(),
-                    provenance=write.resolved_provenance(),
-                )
-                self._insert_record(conn, record)
             conn.commit()
 
     def _row_to_record(self, row: sqlite3.Row) -> MemoryRecord:
@@ -821,6 +758,92 @@ class SqliteMemoryBackend(MemoryBackend):
 
         return await asyncio.to_thread(_delete_all)
 
+    async def delete_records_for_run(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str,
+    ) -> int:
+        def _delete_for_run() -> int:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, provenance FROM memories
+                    WHERE tenant_id = ? AND user_id = ? AND is_deleted = 0
+                    """,
+                    (tenant_id, user_id),
+                ).fetchall()
+                ids: list[str] = []
+                for row in rows:
+                    provenance = Provenance.from_dict(
+                        json.loads(row["provenance"]) if row["provenance"] else None
+                    )
+                    if provenance.run_id == run_id:
+                        ids.append(str(row["id"]))
+                if not ids:
+                    return 0
+                placeholders = ",".join("?" for _ in ids)
+                cur = conn.execute(
+                    f"""
+                    UPDATE memories SET is_deleted = 1, updated_at = ?
+                    WHERE tenant_id = ? AND user_id = ? AND id IN ({placeholders})
+                    """,
+                    (_now(), tenant_id, user_id, *ids),
+                )
+                conn.commit()
+                return cur.rowcount
+
+        return await asyncio.to_thread(_delete_for_run)
+
+    async def delete_records_for_session(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> int:
+        def _delete_for_session() -> int:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE memories SET is_deleted = 1, updated_at = ?
+                    WHERE tenant_id = ? AND user_id = ? AND session_id = ? AND is_deleted = 0
+                    """,
+                    (_now(), tenant_id, user_id, session_id),
+                )
+                conn.commit()
+                return cur.rowcount
+
+        return await asyncio.to_thread(_delete_for_session)
+
+    async def delete_source_ledger(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str = "",
+        session_id: str = "",
+    ) -> int:
+        if not run_id and not session_id:
+            return 0
+
+        def _delete_ledger() -> int:
+            clause = "run_id = ?" if run_id else "session_id = ?"
+            value = run_id or session_id
+            with self._connect() as conn:
+                cur = conn.execute(
+                    f"""
+                    DELETE FROM source_ledger
+                    WHERE tenant_id = ? AND user_id = ? AND {clause}
+                    """,
+                    (tenant_id, user_id, value),
+                )
+                conn.commit()
+                return cur.rowcount
+
+        return await asyncio.to_thread(_delete_ledger)
+
     async def mark_recalled(
         self,
         record_ids: list[str],
@@ -888,6 +911,7 @@ class SqliteMemoryBackend(MemoryBackend):
                                 last_checked_at = ?,
                                 quality = CASE WHEN ? != 'unknown' THEN ? ELSE quality END,
                                 session_id = ?,
+                                run_id = ?,
                                 metadata = ?,
                                 content_fingerprint = CASE WHEN ? != '' THEN ? ELSE content_fingerprint END,
                                 query_purpose = CASE WHEN ? != '' THEN ? ELSE query_purpose END
@@ -899,6 +923,7 @@ class SqliteMemoryBackend(MemoryBackend):
                                 entry.quality,
                                 entry.quality,
                                 entry.session_id,
+                                entry.run_id,
                                 json.dumps(entry.metadata, ensure_ascii=False),
                                 entry.content_fingerprint,
                                 entry.content_fingerprint,
@@ -913,9 +938,9 @@ class SqliteMemoryBackend(MemoryBackend):
                             INSERT INTO source_ledger (
                                 id, tenant_id, user_id, project_id, source_kind, locator,
                                 quality, hit_count, last_used_at, first_seen_at,
-                                session_id, metadata, last_checked_at, content_fingerprint,
+                                session_id, run_id, metadata, last_checked_at, content_fingerprint,
                                 query_purpose
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 entry.id,
@@ -928,6 +953,7 @@ class SqliteMemoryBackend(MemoryBackend):
                                 now,
                                 now,
                                 entry.session_id,
+                                entry.run_id,
                                 json.dumps(entry.metadata, ensure_ascii=False),
                                 now,
                                 entry.content_fingerprint,
@@ -982,6 +1008,7 @@ class SqliteMemoryBackend(MemoryBackend):
                     content_fingerprint=row["content_fingerprint"] if "content_fingerprint" in row.keys() and row["content_fingerprint"] else "",
                     query_purpose=row["query_purpose"] if "query_purpose" in row.keys() and row["query_purpose"] else "",
                     session_id=row["session_id"] or "",
+                    run_id=row["run_id"] if "run_id" in row.keys() and row["run_id"] else "",
                     metadata=metadata,
                 )
             )

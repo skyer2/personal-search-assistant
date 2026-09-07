@@ -232,7 +232,6 @@ def test_jit_synthesis_uses_relevant_evidence():
 def test_architecture_doc_mentions_stategraph():
     text = (ROOT / "docs" / "HARNESS_ARCHITECTURE.md").read_text(encoding="utf-8")
     assert "Research StateGraph" in text
-    assert "graph_runtime_enabled" in text
     assert "while 外环（领域 Harness）是权威" not in text
     print("[OK] architecture doc")
 
@@ -243,7 +242,6 @@ def test_config_phase23():
     assert cfg.context_jit_retrieval_enabled is True
     assert cfg.context_reversible_compression is True
     assert cfg.token_stage_budgets["synthesis"] == 40000
-    assert cfg.graph_runtime_enabled is True
     assert cfg.progress_eval_enabled is True
     print("[OK] config phase23")
 

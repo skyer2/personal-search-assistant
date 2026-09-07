@@ -53,9 +53,6 @@ from tests.eval.runners.scenario import run_scenario_dry_eval
 
 BASELINE_PATH = ROOT / "tests" / "eval" / "results" / "baseline.json"
 SCENARIO_PATH = ROOT / "tests" / "eval" / "datasets" / "harness_scenarios_v1.jsonl"
-LEGACY_PATH = ROOT / "tests" / "eval" / "datasets" / "legacy" / "tasks_legacy.jsonl"
-
-
 def load_tasks(path: Path) -> list[dict]:
     return load_jsonl(path)
 

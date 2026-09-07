@@ -58,9 +58,9 @@ def test_persist_markdown_missing_never_falls_back_to_existing(tmp_path):
 
 def test_run_artifacts_listing_is_run_scoped(tmp_path):
     session_root = tmp_path / "session_s1"
-    legacy = session_root / "legacy.pdf"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_bytes(b"legacy")
+    stale = session_root / "stale.pdf"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"stale")
     for run_id, name in (("run_001", "A.pdf"), ("run_002", "B.pdf")):
         run_deliverables = session_root / "runs" / run_id / "deliverables"
         run_deliverables.mkdir(parents=True)
@@ -70,12 +70,12 @@ def test_run_artifacts_listing_is_run_scoped(tmp_path):
     names = [f["name"] for f in run2_files]
     assert names == ["B.pdf"]
     assert "A.pdf" not in names
-    assert "legacy.pdf" not in names
+    assert "stale.pdf" not in names
 
     # Session 级列表仍是完整历史（历史视图），但 Run 级严格隔离
     session_files = list_output_files(tmp_path, "s1")
     session_names = {f["name"] for f in session_files}
-    assert {"A.pdf", "B.pdf", "legacy.pdf"} <= session_names
+    assert {"A.pdf", "B.pdf", "stale.pdf"} <= session_names
     print("[OK] run endpoint lists only run-owned files")
 
 
@@ -86,9 +86,9 @@ def test_bootstrap_output_files_are_current_run_scoped(tmp_path):
     store.create_run(run_id="run_002", session_id="s1", query="q2")
 
     session_root = output_root / "session_s1"
-    legacy = session_root / "legacy.pdf"
-    legacy.parent.mkdir(parents=True)
-    legacy.write_bytes(b"legacy")
+    stale = session_root / "stale.pdf"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"stale")
     for run_id, name in (("run_001", "A.pdf"), ("run_002", "B.pdf")):
         deliverables = session_root / "runs" / run_id / "deliverables"
         deliverables.mkdir(parents=True)
@@ -101,8 +101,8 @@ def test_bootstrap_output_files_are_current_run_scoped(tmp_path):
 
     upload_only = RunStore(tmp_path / "upload-only.sqlite")
     upload_only.add_upload("s2", "paper.pdf", 12)
-    (output_root / "session_s2" / "legacy.pdf").parent.mkdir(parents=True)
-    (output_root / "session_s2" / "legacy.pdf").write_bytes(b"legacy")
+    (output_root / "session_s2" / "stale.pdf").parent.mkdir(parents=True)
+    (output_root / "session_s2" / "stale.pdf").write_bytes(b"stale")
     assert upload_only.bootstrap("s2", output_root=output_root).output_files == []
     print("[OK] bootstrap lists only current run files")
 

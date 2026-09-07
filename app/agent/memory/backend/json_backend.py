@@ -207,6 +207,79 @@ class JsonMemoryBackend(MemoryBackend):
             self._save(tenant_id, user_id, records)
         return count
 
+    async def delete_records_for_run(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str,
+    ) -> int:
+        records = self._load(tenant_id, user_id)
+        now = datetime.now(timezone.utc).isoformat()
+        count = 0
+        for record in records:
+            if not record.is_deleted and record.provenance and record.provenance.run_id == run_id:
+                record.is_deleted = True
+                record.updated_at = now
+                count += 1
+        if count:
+            self._save(tenant_id, user_id, records)
+        return count
+
+    async def delete_records_for_session(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> int:
+        records = self._load(tenant_id, user_id)
+        now = datetime.now(timezone.utc).isoformat()
+        count = 0
+        for record in records:
+            if not record.is_deleted and record.session_id == session_id:
+                record.is_deleted = True
+                record.updated_at = now
+                count += 1
+        if count:
+            self._save(tenant_id, user_id, records)
+        return count
+
+    async def delete_source_ledger(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        run_id: str = "",
+        session_id: str = "",
+    ) -> int:
+        if not run_id and not session_id:
+            return 0
+        import json
+
+        removed = 0
+        project_root = self.storage_dir
+        if not project_root.exists():
+            return 0
+        for path in project_root.glob("*.sources.json"):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            kept = []
+            for item in raw if isinstance(raw, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                if run_id and item.get("run_id") == run_id:
+                    removed += 1
+                    continue
+                if session_id and item.get("session_id") == session_id:
+                    removed += 1
+                    continue
+                kept.append(item)
+            path.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
+        return removed
+
     async def upsert_source_ledger(self, entries: list[SourceLedgerEntry]) -> int:
         if not entries:
             return 0
@@ -232,6 +305,8 @@ class JsonMemoryBackend(MemoryBackend):
                 if prev:
                     prev["hit_count"] = int(prev.get("hit_count") or 1) + 1
                     prev["last_used_at"] = now
+                    prev["session_id"] = entry.session_id
+                    prev["run_id"] = entry.run_id
                     if entry.quality != "unknown":
                         prev["quality"] = entry.quality
                 else:

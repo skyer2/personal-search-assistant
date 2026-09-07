@@ -1,23 +1,21 @@
 import { PauseCircleOutlined } from "@ant-design/icons";
 import type { ReactNode } from "react";
 import { PHASE_LABELS, PHASE_ORDER, type PhaseProgress } from "../lib/phaseProgress";
-import { type RunStatus } from "../lib/runStatus";
+import { describeRunOutcome, type RunStatus } from "../lib/runStatus";
 
 interface RunProgressProps {
   durationLabel: ReactNode;
   quality?: Record<string, unknown>;
+  termination?: Record<string, unknown>;
   progress: PhaseProgress;
   runStatus: RunStatus;
-}
-
-function asText(value: unknown): string {
-  return typeof value === "string" ? value : value == null ? "" : String(value);
 }
 
 export function RunProgress({
   durationLabel,
   progress,
   quality,
+  termination,
   runStatus,
 }: RunProgressProps) {
   const paused = runStatus === "awaiting_approval";
@@ -31,8 +29,8 @@ export function RunProgress({
   const qualityFailed =
     progress.items.some((item) => item.phase === "validate" && item.tone === "failed") ||
     progress.hasFailed;
-  const qualityReason = asText(quality?.reason);
   const qualityRepairable = quality?.repairable === true;
+  const outcome = describeRunOutcome({ runStatus, quality, termination });
 
   const title = paused
     ? "已暂停 · 等待人工审批"
@@ -41,9 +39,9 @@ export function RunProgress({
       : runStatus === "completed"
         ? "运行完成"
         : runStatus === "partial"
-          ? "执行已结束 · 部分完成"
+          ? outcome?.title ?? "部分可确认"
         : runStatus === "failed"
-          ? "任务失败"
+          ? "执行失败"
           : runStatus === "interrupted"
             ? "执行已中断"
           : "正在运行";
@@ -54,10 +52,7 @@ export function RunProgress({
       ? "全部阶段已完成"
       : runStatus === "partial"
         ? [
-            "未达到完整交付标准",
-            qualityFailed
-              ? `Quality Failed${qualityReason ? ` · ${qualityReason}` : ""}`
-              : "",
+            outcome?.detail ?? "已保留可确认结论，但未达到完整交付标准。",
             qualityFailed && qualityRepairable ? "可修复" : "",
             researchSkipped ? "Research Skipped / 未执行" : "",
             progress.stepHint || "",

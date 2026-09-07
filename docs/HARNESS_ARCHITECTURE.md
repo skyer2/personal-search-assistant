@@ -1,10 +1,9 @@
 # Harness 运行时架构（Phase 20–25）
 
 > **权威方案**：[ARCHITECTURE.md](./ARCHITECTURE.md)。本文只补充 StateGraph Runtime 细节。  
-> 生产配置 `orchestration.graph_runtime_enabled: true`；调度权威是 **Research StateGraph**。  
-> `persist_loop_state` 默认 false。没有 ANSWER/SEARCH 产品路径。
+> 调度权威固定为 **Research StateGraph**。没有 ANSWER/SEARCH 产品路径，也没有旧 while 调度回退。
 
-对照：[教学版 deepsearch-agents](https://github.com/didilili/deepsearch-agents) 是一次 `create_deep_agent` 黑盒跑完全程。本仓库的调度权威是 Research StateGraph，`AgentHarness._run_legacy_loop()` 仅作显式回退。
+对照：[教学版 deepsearch-agents](https://github.com/didilili/deepsearch-agents) 是一次 `create_deep_agent` 黑盒跑完全程。本仓库只保留 Research StateGraph 生产调度路径。
 
 ---
 
@@ -19,11 +18,20 @@ API / UI（实验台，不是搜索产品）
    → Environment: search / fetch / file  +  Artifact / Evidence
 ```
 
-`AgentHarness._run_legacy_loop()` 已弃用，仅在显式关闭 graph 时回退。研究 Worker 默认走 `WorkerExecutorV2`；综合固定走 `SynthesisExecutor`，综合阶段禁止新增检索。
+研究 Worker 固定走 `WorkerExecutorV2`；综合固定走 `SynthesisExecutor`，综合阶段禁止新增检索。
 
 ---
 
 ## 状态：Graph 是唯一 workflow truth
+
+### UI 终态语义
+
+| 用户可见终态 | 判定 | 含义 |
+|--|--|--|
+| 执行失败 | Run status = `failed` | 执行链路异常、超时或崩溃，不是质量结论 |
+| 质量拒绝 | Run status = `partial` 且 `quality.passed=false` / `quality_passed=false` / `quality_reason` 非空 | 已执行但质量门禁拒绝低可信结论 |
+| 部分可确认 | Run status = `partial`，且没有明确质量失败 | 已保留部分可信结论，但未达到完整交付标准 |
+| 无法找到可靠来源 | Run status = `partial` 且 reason = `insufficient_trusted_evidence` / `no_evidence` / `no_content` | 检索完成但证据等级不足，不是执行错误 |
 
 ```text
 ResearchState  →  LangGraph SQLite checkpointer
@@ -35,7 +43,7 @@ Artifact/Evidence Store → 原文
 
 任务运行态只存 `ResearchState["tasks"]`。`task_status` 只能通过 `task_status_projection(tasks)` 在 API/UI 输出时动态生成，不再是持久化字段。
 
-控制面阶段迁移必须经过 `transition_update()`；终止必须经过 `FINALIZE/ABORT → TERMINATED`。终止原因采用 first-cause-wins，后续 Quality/Finalize 不得覆盖首个真实原因。详见 [control-plane-convergence-implementation-2026-09.md](./control-plane-convergence-implementation-2026-09.md)。
+控制面阶段迁移必须经过 `transition_update()`；终止必须经过 `FINALIZE/ABORT → TERMINATED`。终止原因采用 first-cause-wins，后续 Quality/Finalize 不得覆盖首个真实原因。
 
 Harness 路径：
 
@@ -61,6 +69,23 @@ GAP → replan；ENOUGH → synthesis → Quality Gate → finalize
 
 The fast path still uses the real `RunBudgetManager`, worker lease, `ToolGateway`, `WorkerExecutorV2`, citation manager, validator, and finalizer. It does not create a second control plane.
 
+### History Deletion Cascade
+
+One UI turn maps to one Run. Deleting a turn is therefore a Run-level operation, not a message-level operation:
+
+```text
+DELETE /api/runs/{run_id}
+  ├── RunStore row
+  ├── output/session_{session_id}/runs/{run_id}
+  ├── run_summary.json / evidence / artifacts
+  ├── run_events + trace projections + payload dir
+  ├── JSONL run file
+  ├── graph checkpoint thread_id = run_id
+  └── memories whose provenance.run_id = run_id
+```
+
+`DELETE /api/sessions/{session_id}` applies the same cleanup to every Run in the Session. Archive only changes session visibility and keeps data.
+
 ---
 
 ## 和教学版的差别
@@ -77,7 +102,7 @@ The fast path still uses the real `RunBudgetManager`, worker lease, `ToolGateway
 
 权威设计：[ARCHITECTURE.md](./ARCHITECTURE.md)。
 
-面试运维面：`GET /api/harness/capabilities` 返回当前 `graph_runtime_enabled`、实验档 `agent|direct`、environment tools。
+面试运维面：`GET /api/harness/capabilities` 返回实验档 `agent|direct`、environment tools 与固定控制面实现。
 
 ---
 
@@ -121,7 +146,7 @@ Simple-fact completion uses source tier, not URL presence. Community-only eviden
 
 - 实时 UI：过程框 / 执行过程
 - 因果树：`GET /api/traces/tree/{session_id}` 与 Trace 查看器
-- 落盘：`app/logs/traces/{session_id}.jsonl`
+- 落盘：`app/logs/traces/{session_id}/{run_id}.jsonl`
 - 指标：`GET /api/metrics/summary`、`GET /api/metrics/prometheus`（窗口值是 gauge；`harness_live_*` 才是进程内 counter）
 
 细节与事件词表见 [OBSERVABILITY.md](./OBSERVABILITY.md)。

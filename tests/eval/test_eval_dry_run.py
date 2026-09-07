@@ -19,6 +19,12 @@ def test_dry_eval_runs():
     assert report.plan_validation_pass_rate == 1.0
     payload = report.to_dict()
     assert "gate_pass_rate" in payload
+    assert payload["regression_summary"]["component"] == {"total": 20, "passed": 20}
+    assert payload["regression_summary"]["scenario"] == {"total": 20, "passed": 20}
+    assert payload["regression_summary"]["by_component"]["planner"] == {"total": 5, "passed": 5}
+    assert payload["regression_summary"]["by_component"]["progress"] == {"total": 6, "passed": 6}
+    assert payload["regression_summary"]["by_component"]["replan"] == {"total": 5, "passed": 5}
+    assert payload["regression_summary"]["by_component"]["evidence"] == {"total": 4, "passed": 4}
     print(f"[OK] dry eval TSR/Gate={report.task_success_rate:.1%} n={report.total}")
 
 

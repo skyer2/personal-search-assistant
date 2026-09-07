@@ -49,8 +49,8 @@ Langfuse  TraceViewer / Metrics
 | Semantic payload | `GET /api/traces/payloads/{run_id}/{name}` |
 | JSONL | 该 session 全部事件时间线，含每次 LLM 调用。用来对耗时、重试、abort |
 | 证据链 | `evidence.json` 引用源，不是 JSONL |
-| 落盘 journal | `app/logs/traces/{session_id}.jsonl`（运行时根是 `app/`，`schema=agent_event.v1`） |
-| 窗口聚合 | `GET /api/metrics/summary`（同时读 nested `extra` 和顶层 `event=run_summary`） |
+| 落盘 journal | `app/logs/traces/{session_id}/{run_id}.jsonl`（运行时根是 `app/`，`schema=agent_event.v1`） |
+| 窗口聚合 | `GET /api/metrics/summary`（只扫描 run-centric JSONL 中的 `event=run_summary`） |
 | 进程内 Counter/Histogram | `GET /api/metrics/prometheus` 中 `harness_live_*` |
 | Langfuse | OTLP：`{LANGFUSE_HOST}/api/public/otel`；**不再**调用已弃用的 `GET /api/public/traces` |
 
@@ -74,7 +74,6 @@ logs/traces/
   {session_id}/
     {run_id}.jsonl
     index.jsonl
-  {session_id}.jsonl          # legacy 仍可读
   payloads/{run_id}/*.json
 ```
 

@@ -69,7 +69,7 @@ class ProgressAssessment:
     execution_failure_reasons: list[str] = field(default_factory=list)
 
     def sync_gap_views(self) -> None:
-        """Keep legacy views derived from the canonical gaps list."""
+        """Keep derived views aligned with the canonical gaps list."""
         coverage_descriptions: list[str] = []
         seen_coverage_descriptions: set[str] = set()
         for item in self.gaps:
@@ -651,7 +651,7 @@ def _fill_worker_signals(
         if (not row.get("ok", True) or not summary) and not findings and not evidence_ids:
             assessment.coverage_gaps.append(f"empty:{tid}:{step.objective or step.description}")
         for gap in payload.get("gaps") or []:
-            # Legacy string gaps are limitations, not proof that a core brief
+            # Plain string gaps are limitations, not proof that a core brief
             # dimension is unanswered. Workers must explicitly promote blockers.
             if isinstance(gap, dict):
                 description = str(gap.get("description") or gap.get("claim") or "").strip()

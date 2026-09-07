@@ -1334,12 +1334,38 @@ textarea {
 
 .conversation-thread {
   display: grid;
+  align-content: start;
   gap: 36px;
+}
+
+.conversation-history-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: -6px 0 -12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(9, 15, 23, 0.92);
+  backdrop-filter: blur(12px);
+  padding: 8px 10px;
 }
 
 .conversation-turn {
   display: grid;
   gap: 14px;
+}
+
+.conversation-turn-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin: -10px 0 -8px;
 }
 
 .chat-message {
@@ -2426,6 +2452,20 @@ textarea {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
+}
+
+.eval-panel,
+.memory-panel {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 18px;
+  overflow-y: auto;
+}
+
+.memory-panel .ant-table-wrapper {
+  background: rgba(12, 18, 28, 0.72);
+  border-radius: 10px;
 }
 
 .run-progress {

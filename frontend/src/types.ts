@@ -107,7 +107,7 @@ export interface UploadedItem {
   serverFileId?: number | string;
 }
 
-export type WorkspaceTab = "chat" | "eval" | "trace";
+export type WorkspaceTab = "chat" | "eval" | "trace" | "memory";
 
 export interface HitlActionRequest {
   name: string;
@@ -140,6 +140,11 @@ export interface EvalReport {
   mode?: string;
   generated_at?: string;
   report_file?: string;
+  regression_summary?: {
+    component?: RegressionSummary;
+    scenario?: RegressionSummary;
+    by_component?: Record<string, RegressionSummary | undefined>;
+  };
   task_success_rate?: number;
   gate_pass_rate?: number;
   outcome_score?: number;
@@ -169,11 +174,43 @@ export interface EvalReport {
   results?: Array<{
     task_id: string;
     success: boolean;
+    mode?: string;
+    variant?: string;
     status?: string;
     retry_count?: number;
     failure_stage?: string;
     failure_type?: string;
   }>;
+}
+
+export interface RegressionSummary {
+  total?: number;
+  passed?: number;
+}
+
+export interface MemoryRecord {
+  id: string;
+  fact: string;
+  project_id?: string;
+  memory_type?: string;
+  confidence?: number;
+  trust_tier?: string;
+  session_id?: string;
+  created_at?: string;
+  updated_at?: string;
+  provenance?: {
+    run_id?: string;
+    source_kind?: string;
+    source_urls?: string[];
+  };
+}
+
+export interface MemoryRecordsResponse {
+  tenant_id: string;
+  user_id: string;
+  project_id?: string;
+  total: number;
+  records: MemoryRecord[];
 }
 
 export interface JsonlTraceEvent {

@@ -2,7 +2,7 @@
 【Phase 9】从 JSONL run_summary 聚合 Harness 在线指标
 
 供 GET /api/metrics/summary 与 Prometheus scrape 使用。
-口径：扫描 logs/traces/*.jsonl 中 phase=run 且 event=run_summary 的记录。
+口径：扫描 logs/traces/{session}/{run}.jsonl 中 phase=run 且 event=run_summary 的记录。
 """
 
 from __future__ import annotations
@@ -113,7 +113,7 @@ def collect_run_summaries(
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, window_hours))
     summaries: list[dict[str, Any]] = []
 
-    for path in sorted(list(log_dir.glob("*.jsonl")) + list(log_dir.glob("*/*.jsonl"))):
+    for path in sorted(log_dir.glob("*/*.jsonl")):
         if path.name == "index.jsonl":
             continue
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -155,9 +155,7 @@ def aggregate_metrics(
     """【Phase 9】聚合 JSONL run_summary → 在线指标。"""
     summaries = collect_run_summaries(log_dir, window_hours=window_hours)
     agg = AggregatedMetrics(window_hours=window_hours)
-    agg.source_files_scanned = (
-        len(list(log_dir.glob("*.jsonl")) + list(log_dir.glob("*/*.jsonl"))) if log_dir.exists() else 0
-    )
+    agg.source_files_scanned = len(list(log_dir.glob("*/*.jsonl"))) if log_dir.exists() else 0
 
     if not summaries:
         return agg

@@ -284,12 +284,8 @@ Web Search Provider 仍要单独配置：`search` 不走火山网关。
 HARNESS_LLM_COMPRESSION=true
 HARNESS_TOKEN_MODEL=glm-5.2
 HARNESS_MEMORY_ENABLED=false
-HARNESS_GRAPH_RUNTIME=true
-HARNESS_PERSIST_LOOP_STATE=false
 HARNESS_HITL_ENABLED=false
 ```
-
-不要把 `HARNESS_PERSIST_LOOP_STATE` 设成 `true`（双 checkpoint 已废弃）。
 
 ### 7.3 可选
 

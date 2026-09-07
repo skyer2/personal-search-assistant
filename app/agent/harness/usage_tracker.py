@@ -13,7 +13,6 @@ import threading
 import time
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -229,24 +228,11 @@ class LLMCallRecord:
 
 
 class UsageTracker:
-    """进程内聚合 + JSONL 落盘。"""
+    """进程内聚合 + 通过唯一 Recorder 导出 LLM usage。"""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._by_session: dict[str, list[LLMCallRecord]] = {}
-        self._log_dir: Optional[Path] = None
-
-    def _ensure_log_dir(self) -> Optional[Path]:
-        if self._log_dir is not None:
-            return self._log_dir
-        cfg = get_harness_config()
-        if not cfg.jsonl_log_enabled:
-            return None
-        root = Path(__file__).resolve().parents[2]
-        self._log_dir = root / cfg.jsonl_log_dir
-        self._log_dir.mkdir(parents=True, exist_ok=True)
-        return self._log_dir
-
     def record(self, rec: LLMCallRecord) -> None:
         with self._lock:
             self._by_session.setdefault(rec.session_id, []).append(rec)
@@ -254,35 +240,24 @@ class UsageTracker:
             from app.observability import get_recorder
 
             recorder = get_recorder()
-            if recorder.is_active:
-                extra = dict(rec.extra or {})
-                recorder.record_generation(
-                    model=rec.model,
-                    phase=rec.phase,
-                    prompt_tokens=rec.prompt_tokens,
-                    completion_tokens=rec.completion_tokens,
-                    total_tokens=rec.total_tokens,
-                    cache_read_tokens=rec.cache_read_tokens,
-                    cost_usd=rec.cost_usd,
-                    duration_ms=int(extra.pop("duration_ms", 0) or 0) or None,
-                    finish_reason=str(extra.pop("finish_reason", "") or ""),
-                    usage_missing=bool(extra.get("usage_missing")),
-                    extra=extra,
-                )
+            if not recorder.is_active:
                 return
+            extra = dict(rec.extra or {})
+            recorder.record_generation(
+                model=rec.model,
+                phase=rec.phase,
+                prompt_tokens=rec.prompt_tokens,
+                completion_tokens=rec.completion_tokens,
+                total_tokens=rec.total_tokens,
+                cache_read_tokens=rec.cache_read_tokens,
+                cost_usd=rec.cost_usd,
+                duration_ms=int(extra.pop("duration_ms", 0) or 0) or None,
+                finish_reason=str(extra.pop("finish_reason", "") or ""),
+                usage_missing=bool(extra.get("usage_missing")),
+                extra=extra,
+            )
         except Exception:
-            pass
-        log_dir = self._ensure_log_dir()
-        if log_dir is None:
             return
-        path = log_dir / f"{rec.session_id}.jsonl"
-        line = json.dumps(
-            {"event": "llm_usage", **rec.to_dict()},
-            ensure_ascii=False,
-        )
-        with self._lock:
-            with path.open("a", encoding="utf-8") as fp:
-                fp.write(line + "\n")
 
     def session_summary(self, session_id: str) -> dict[str, Any]:
         with self._lock:

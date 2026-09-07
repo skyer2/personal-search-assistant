@@ -1,6 +1,6 @@
-"""Graph → legacy execution scratch projection.
+"""Graph → execution projection.
 
-ResearchState 是唯一 workflow truth。LoopState 只是 legacy execution scratch：
+ResearchState 是唯一 workflow truth。LoopState 只是进程内执行投影：
 领域函数仍可读取它，但 plan/task runtime 状态不得写回或反向成为 resume 来源。
 """
 
@@ -11,13 +11,8 @@ from typing import Any
 from app.agent.harness.state import ExecutionPlan, LoopState, TaskIntent
 
 
-def apply_graph_to_loop(loop: LoopState, gstate: dict[str, Any]) -> LoopState:
-    """Legacy alias kept for old tests and the non-graph fallback."""
-    return sync_legacy_execution_scratch(loop, gstate)
-
-
-def sync_legacy_execution_scratch(loop: LoopState, gstate: dict[str, Any]) -> LoopState:
-    """Project graph-owned inputs to read-only legacy execution scratch."""
+def sync_execution_projection(loop: LoopState, gstate: dict[str, Any]) -> LoopState:
+    """Project graph-owned inputs to the read-only execution view."""
     intent = gstate.get("intent")
     if isinstance(intent, dict) and intent:
         loop.intent = TaskIntent.from_dict(intent)

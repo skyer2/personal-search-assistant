@@ -20,10 +20,7 @@ class Finding:
     summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        # Compatibility alias for existing coverage and report consumers.
-        payload["summary"] = self.summary or self.claim
-        return payload
+        return asdict(self)
 
 
 def _safe_id(value: str, fallback: str) -> str:

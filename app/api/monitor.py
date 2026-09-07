@@ -219,9 +219,24 @@ class ToolMonitor:
                 "reason": termination_reason,
                 "stage": termination_stage,
             }
+        if status == "completed":
+            result_message = "任务执行完成"
+        elif status == "partial":
+            reason = str(lifecycle.get("reason") or "")
+            quality_failed = lifecycle.get("quality_passed") is False or bool(
+                lifecycle.get("quality_reason")
+            )
+            if reason == "insufficient_trusted_evidence":
+                result_message = "无法找到可靠来源"
+            elif quality_failed:
+                result_message = "质量拒绝"
+            else:
+                result_message = "部分可确认"
+        else:
+            result_message = f"任务结束（{status}）"
         self._emit(
             "task_result",
-            "任务执行完成" if status == "completed" else f"任务结束（{status}）",
+            result_message,
             {
                 "result": result,
                 "status": status,

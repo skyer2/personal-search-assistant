@@ -49,7 +49,6 @@ def harness_capabilities() -> dict[str, Any]:
             "synthesis_runtime": "SynthesisExecutor",
             "simple_fact_execution_path": "fast_path",
             "leaf": "langchain.create_agent",
-            "graph_runtime_enabled": bool(getattr(config, "graph_runtime_enabled", True)),
             "progress_eval_enabled": bool(getattr(config, "progress_eval_enabled", True)),
         },
         "hard_ceiling": hard.to_dict(),

@@ -109,7 +109,7 @@ def test_progress_policy_never_replans_after_no_progress() -> None:
     assert decide_progress(state).value == "quality_gate"
 
 
-def test_worker_executor_v2_uses_gateways_and_never_legacy_loop() -> None:
+def test_worker_executor_v2_uses_gateways_and_graph_runtime() -> None:
     source = (ROOT / "app/research/execution/worker_executor.py").read_text(
         encoding="utf-8"
     )

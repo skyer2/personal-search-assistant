@@ -15,7 +15,7 @@ from app.agent.harness.loop import AgentHarness
 from app.agent.harness.compressor import ContextCompressor
 from app.agent.llm import compression_model, model, worker_model
 from app.agent.memory.extractor import MemoryExtractor
-from app.agent.memory.store import MemoryStore
+from app.agent.memory.store import get_memory_store
 from app.config.loader import get_harness_config
 from app.research.workers.registry import build_worker_registry
 
@@ -42,7 +42,7 @@ _default_agent = worker_registry.get("generate_markdown") or next(
 
 project_root_path = Path(__file__).parents[1].resolve()
 
-memory_store = MemoryStore()
+memory_store = get_memory_store()
 memory_extractor = MemoryExtractor(model=compression_model)
 
 harness = AgentHarness(

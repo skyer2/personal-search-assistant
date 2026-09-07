@@ -39,6 +39,7 @@ from app.api.eval_routes import router as eval_router
 from app.api.harness_routes import router as harness_router
 from app.api.health import collect_health
 from app.api.metrics_routes import router as metrics_router
+from app.api.memory_routes import router as memory_router
 from app.api.meta import router as meta_router
 from app.api.monitor import manager
 from app.api.session_routes import router as session_router
@@ -120,6 +121,7 @@ app.include_router(harness_router)
 app.include_router(trace_routes)
 app.include_router(metrics_router)
 app.include_router(meta_router)
+app.include_router(memory_router)
 app.include_router(session_router)
 
 # 保存 thread_id -> 后台 Agent 任务，用于同一会话任务替换和主动取消

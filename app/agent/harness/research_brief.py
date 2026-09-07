@@ -449,7 +449,7 @@ def compile_research_brief(
     if not entities:
         entities = _split_entities(summary or query)[:8]
 
-    # Backward-compatible normalization. Explicit subjects win; otherwise a
+    # Canonical subject normalization. Explicit subjects win; otherwise a
     # comparison has independent subjects while ordinary topic strings are
     # aliases of one canonical subject (rather than accidental fan-out).
     if not subjects:

@@ -77,9 +77,9 @@ file_read     -> Artifact         # 本地附件
 
 ---
 
-## 2. 主路径只有 AGENT
+## 2. 主路径只有 AGENT，Simple Fact 走受控旁路
 
-产品路径 **ANSWER / SEARCH 删除**。不问「这是事实题还是概念题」，每个任务都是研究 workload。
+产品路径 **ANSWER / SEARCH 删除**。`agent` 是唯一产品模式；TaskShape 只决定执行拓扑。单一稳定事实走 `SIMPLE_FACT` fast path，其余任务进入完整 Research Graph。
 
 ```text
                     User Task
@@ -126,7 +126,8 @@ file_read     -> Artifact         # 本地附件
 
 | 档 | 用途 | 路径 |
 |----|------|------|
-| **agent**（默认） | 研究对象 | Brief → Plan → Workers → Progress / Replan → Answer |
+| **agent + simple_fact** | 单一稳定事实 | 一个 Worker → 搜索 → 来源分级 → deterministic answer |
+| **agent + full graph** | 研究对象 | Brief → Plan → Workers → Progress / Replan → Answer |
 | **direct** | 对照实验 baseline | Query → single agent + search tool → Answer |
 
 Direct 用来回答：
@@ -167,7 +168,7 @@ Direct 用来回答：
 
 **可以砍掉 SEARCH 产品路径，不要砍掉 search tool。**
 
-Memory：Phase 1 只研究单次 long-running Agent。`Context ≠ Memory`，`Checkpoint ≠ Memory`，`Evidence ≠ Memory`。跨任务经验积累放到 Phase 2。
+Memory：`Conversation History ≠ Context ≠ Long-term Memory`。UI 显示全部 Run，不等于全部进入模型上下文；ContextSelector 只取当前 Run、相关 RunSummary Top-K 和 Memory Top-K。长期记忆带 provenance / trust tier，并提供查看、单条遗忘、按 Run/Session 遗忘和用户级遗忘。
 
 ---
 
@@ -189,6 +190,7 @@ Query → single agent               Brief → Plan →                   关掉
 
 - **唯一 workflow truth**：`ResearchState` → LangGraph SQLite
 - **Run / UI projection truth**：`RunStore` SQLite（`app/run_store/`）。刷新、断线、HITL、计时、文件列表都从这里 hydrate，不从 Trace 反推业务状态
+- **删除语义**：删除 Run 会级联 RunStore 行、run 目录、Trace/Projection/Payload、Graph checkpoint、RunSummary 和 `provenance.run_id` 派生 Memory；删除 Session 会级联全部 Run
 - **Agent history / debug**：Flight Recorder `AgentEvent` journal + JSONL。WebSocket 是 tail：先 `after_seq` replay，再 live
 - **原文外置**：Artifact / Evidence（Claim → Evidence → Artifact → Source）
 - `LoopState` 只是进程内 handles
@@ -226,6 +228,8 @@ turn_id                 = 前端一条用户问题（= run_id）
 | Environment search/fetch | `app/tools/`（`internet_search`、`fetch_url`） |
 | Artifact / Evidence | `artifacts.py`、`evidence_store.py` |
 | Run / UI projection | `app/run_store/` + `GET /api/sessions/{id}/bootstrap` |
+| Run / Session delete cascade | `app/run_store/deletion.py` + `DELETE /api/runs/{id}` / `DELETE /api/sessions/{id}` |
+| Long-term memory management | `app/agent/memory/` + `app/api/memory_routes.py` + Memory 面板 |
 | Event replay | `app/observability/replay.py` + WS `subscribe.after_seq` |
 
 补充文档（非范围权威）：

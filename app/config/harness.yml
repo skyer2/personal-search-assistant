@@ -198,17 +198,12 @@ harness:
     max_parallel_workers: 3
     step_timeout_sec: 120
     enforce_subagent_binding: true
-    step_checkpoint_enabled: true
-    resume_checkpoint: true
     supervisor_temperature: 0.1
     structured_output_retry: true
     require_structured_worker_output: true
     synthesis_use_evidence_digest: true
     direct_worker_invoke: true
-    worker_executor_v2: true
     synthesis_step_timeout_sec: 240
-    persist_loop_state: false
-    graph_runtime_enabled: true
     progress_eval_enabled: true
     graph_checkpoint_backend: sqlite
     graph_checkpoint_path: output/.harness/graph_checkpoints.sqlite

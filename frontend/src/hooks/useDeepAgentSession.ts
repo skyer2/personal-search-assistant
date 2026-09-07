@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatTurn } from "../components/ConversationThread";
 import {
+  archiveSession,
   cancelTask,
+  deleteRun,
+  deleteSession,
   fetchRunEvents,
   fetchSessionBootstrap,
   listRunArtifacts,
@@ -274,6 +277,39 @@ export function useDeepAgentSession() {
   useEffect(() => {
     void hydrateFromServer();
   }, [hydrateFromServer]);
+
+  const deleteTurns = useCallback(
+    async (runIds: string[]) => {
+      const ids = Array.from(new Set(runIds.filter(Boolean)));
+      if (ids.length === 0) {
+        return;
+      }
+      if (ids.includes(currentRunIdRef.current) && isRunning) {
+        throw new Error("请先取消当前运行中的任务");
+      }
+      for (const runId of ids) {
+        await deleteRun(runId);
+      }
+      if (ids.includes(currentRunIdRef.current)) {
+        applyCurrentRun("");
+      }
+      await hydrateFromServer();
+    },
+    [applyCurrentRun, hydrateFromServer, isRunning]
+  );
+
+  const clearSession = useCallback(async () => {
+    if (isRunning) {
+      throw new Error("请先取消当前运行中的任务");
+    }
+    await deleteSession(threadId);
+    resetSession();
+  }, [isRunning, resetSession, threadId]);
+
+  const archiveCurrentSession = useCallback(async () => {
+    await archiveSession(threadId);
+    resetSession();
+  }, [resetSession, threadId]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -648,7 +684,9 @@ export function useDeepAgentSession() {
   );
 
   return {
+    archiveCurrentSession,
     bootstrapNotice,
+    clearSession,
     connectionState,
     currentRunId,
     elapsedClock,
@@ -674,6 +712,7 @@ export function useDeepAgentSession() {
     sessionPath,
     stats,
     cancelCurrentTask,
+    deleteTurns,
     submitTask,
     submitHitlDecisions,
     threadId,

@@ -34,7 +34,6 @@ from app.research.runtime import runner as runner_module
 class FakeConfig:
     step_timeout_sec: int = 10
     max_retries: int = 0
-    worker_executor_v2: bool = False
     direct_worker_invoke: bool = True
     enforce_subagent_binding: bool = False
     synthesis_use_evidence_digest: bool = False
@@ -98,6 +97,12 @@ class FakeBudget:
 
     def research_allowed(self) -> tuple[bool, str]:
         return True, ""
+
+    def reserve_worker_lease(self, *args: Any, **kwargs: Any) -> tuple[str, str]:
+        return "lease", ""
+
+    def release_worker_lease(self, lease_id: str) -> None:
+        return None
 
     def remaining_for_research_sec(self) -> float:
         return 60.0

@@ -212,7 +212,7 @@ def fit_layers_to_token_budget(
             message = trim_text_to_token_budget(join_layers(working), max_tokens, tok)
             metrics.total_tokens = max_tokens
             metrics.layers["budget_trimmed"] = 1
-            metrics.evictions = ["legacy_head_trim"]
+            metrics.evictions = ["head_trim"]
             return message, metrics
         return join_layers(working), metrics
 

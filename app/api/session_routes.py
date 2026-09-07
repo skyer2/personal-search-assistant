@@ -20,6 +20,8 @@ from app.observability.replay import (
     load_tree_projection,
     load_wire_events,
 )
+from app.agent.memory import get_memory_store
+from app.run_store.deletion import delete_run_cascade, delete_session_cascade
 from app.run_store import get_run_store
 from app.run_store.files import list_output_files, list_run_output_files, resolve_output_file
 
@@ -76,14 +78,16 @@ async def unarchive_session(session_id: str, tenant_id: str | None = None):
 
 @router.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str, tenant_id: str | None = None):
-    """删除 Session：tombstone + 级联清理 runs / uploads / 工作区 / trace。"""
+    """删除 Session：级联清理 runs、输出、Trace、Checkpoint 与派生 Memory。"""
     store = get_run_store()
-    result = store.delete_session(
+    result = await delete_session_cascade(
+        store,
         session_id,
         tenant_id=_tenant_of(tenant_id),
         output_root=_OUTPUT_DIR,
         updated_root=_UPDATED_DIR,
         traces_root=_TRACES_DIR,
+        memory_store=get_memory_store(),
     )
     if result.get("reason") == "forbidden":
         raise HTTPException(status_code=403, detail="forbidden")
@@ -94,12 +98,15 @@ async def delete_session(session_id: str, tenant_id: str | None = None):
 
 @router.delete("/api/runs/{run_id}")
 async def delete_run(run_id: str, tenant_id: str | None = None):
-    """删除单次 Run 及其 Run-owned 数据。"""
+    """删除单次 Run 及其 Trace、Checkpoint 与派生 Memory。"""
     store = get_run_store()
-    result = store.delete_run(
+    result = await delete_run_cascade(
+        store,
         run_id,
         tenant_id=_tenant_of(tenant_id),
         output_root=_OUTPUT_DIR,
+        traces_root=_TRACES_DIR,
+        memory_store=get_memory_store(),
     )
     if result.get("reason") == "forbidden":
         raise HTTPException(status_code=403, detail="forbidden")

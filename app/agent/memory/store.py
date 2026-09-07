@@ -345,6 +345,46 @@ class MemoryStore:
         ident = self._identity(user_id=user_id, tenant_id=tenant_id)
         return await self._backend.delete_all(tenant_id=ident.tenant_id, user_id=ident.user_id)
 
+    async def forget_run(
+        self,
+        run_id: str,
+        *,
+        user_id: str,
+        tenant_id: Optional[str] = None,
+    ) -> int:
+        ident = self._identity(user_id=user_id, tenant_id=tenant_id)
+        memories_deleted = await self._backend.delete_records_for_run(
+            tenant_id=ident.tenant_id,
+            user_id=ident.user_id,
+            run_id=run_id,
+        )
+        sources_deleted = await self._backend.delete_source_ledger(
+            tenant_id=ident.tenant_id,
+            user_id=ident.user_id,
+            run_id=run_id,
+        )
+        return memories_deleted + sources_deleted
+
+    async def forget_session(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        tenant_id: Optional[str] = None,
+    ) -> int:
+        ident = self._identity(user_id=user_id, tenant_id=tenant_id)
+        memories_deleted = await self._backend.delete_records_for_session(
+            tenant_id=ident.tenant_id,
+            user_id=ident.user_id,
+            session_id=session_id,
+        )
+        sources_deleted = await self._backend.delete_source_ledger(
+            tenant_id=ident.tenant_id,
+            user_id=ident.user_id,
+            session_id=session_id,
+        )
+        return memories_deleted + sources_deleted
+
     async def record_sources(
         self,
         locators: list[str],
@@ -353,6 +393,7 @@ class MemoryStore:
         source_kind: str = "url",
         quality: str = "unknown",
         session_id: str = "",
+        run_id: str = "",
         metadata: Optional[dict[str, Any]] = None,
     ) -> int:
         if not self.policy.source_ledger_enabled or not locators:
@@ -386,6 +427,7 @@ class MemoryStore:
                     metadata=metadata or {},
                     query_purpose=str((metadata or {}).get("query_purpose") or ""),
                     content_fingerprint=str((metadata or {}).get("content_fingerprint") or ""),
+                    run_id=run_id,
                 )
             )
         return await self._backend.upsert_source_ledger(entries)

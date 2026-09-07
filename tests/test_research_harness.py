@@ -8,7 +8,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.planner import build_plan, finalize_plan, understand_task
 from app.agent.harness.state import ExecutionPlan, PlanStep
-from app.research.idempotency import action_idempotency_key, legacy_step_key
+from app.research.idempotency import action_idempotency_key
 from app.research.runtime.reducers import merge_dicts, merge_worker_payloads
 from app.research.runtime.scheduler import (
     all_retrieval_done,
@@ -34,7 +34,6 @@ def test_action_idempotency_stable_across_index_shift():
         action_id="execute",
     )
     assert key1 == key2
-    assert key1 != legacy_step_key("run-a", 0, "network_search")
     assert "p2" in key1
     print("[OK] action idempotency key")
 

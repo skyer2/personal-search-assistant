@@ -136,7 +136,7 @@ def task_query_fingerprint(task_query: str) -> str:
 
 
 def mark_parallel_retrieval_groups(plan: ExecutionPlan) -> ExecutionPlan:
-    """【修改点】为连续检索步标记 parallel_group，供 Loop fan-out。"""
+    """为连续检索步标记 parallel_group，供 StateGraph dispatch。"""
     group_id = 0
     i = 0
     steps = plan.steps
@@ -154,30 +154,6 @@ def mark_parallel_retrieval_groups(plan: ExecutionPlan) -> ExecutionPlan:
             group_id += 1
         i = j
     return plan
-
-
-def find_parallel_batch(
-    steps: list[PlanStep],
-    start_index: int,
-    *,
-    enabled: bool,
-) -> list[int]:
-    """从 start_index 起，返回可并行执行的 step 下标列表（至少 2 步才并行）。"""
-    if not enabled or start_index >= len(steps):
-        return [start_index] if start_index < len(steps) else []
-
-    step = steps[start_index]
-    group = step.metadata.get("parallel_group")
-    if group is None:
-        return [start_index]
-
-    batch = [
-        idx
-        for idx in range(start_index, len(steps))
-        if steps[idx].metadata.get("parallel_group") == group
-    ]
-    return batch if len(batch) >= 2 else [start_index]
-
 
 def parse_worker_payload(
     raw_content: str,
@@ -447,73 +423,6 @@ def build_worker_output_instruction(step: PlanStep) -> str:
     """
 
 
-class StepCheckpointStore:
-    """步级 checkpoint：进程重启后可从已完成步骤继续。"""
-
-    def __init__(self, session_dir: Path):
-        self.path = session_dir / ".harness" / "checkpoint.json"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    def save(
-        self,
-        *,
-        session_id: str,
-        task_fingerprint: str,
-        next_step_index: int,
-        step_results: list[StepResult],
-        assistants_called: list[str],
-        completed_keys: list[str],
-        plan_summary: str = "",
-        loop_state: dict[str, Any] | None = None,
-        citation_snapshot: dict[str, Any] | None = None,
-    ) -> None:
-        payload: dict[str, Any] = {
-            "session_id": session_id,
-            "task_fingerprint": task_fingerprint,
-            "next_step_index": next_step_index,
-            "plan_summary": plan_summary,
-            "assistants_called": assistants_called,
-            "completed_step_keys": completed_keys,
-            "step_results": [
-                {
-                    "step_type": r.step_type,
-                    "content": r.content,
-                    "compressed_content": r.compressed_content,
-                    "metadata": r.metadata,
-                }
-                for r in step_results
-            ],
-            "authority": "loop_state",
-        }
-        if loop_state is not None:
-            payload["loop_state"] = loop_state
-        if citation_snapshot is not None:
-            payload["citation_snapshot"] = citation_snapshot
-        self.path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
-    def load(self) -> Optional[dict[str, Any]]:
-        if not self.path.exists():
-            return None
-        try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return None
-
-    def restore_step_results(self, data: dict[str, Any]) -> list[StepResult]:
-        rows = data.get("step_results") or []
-        return [
-            StepResult(
-                step_type=str(row.get("step_type", "")),
-                content=str(row.get("content", "")),
-                compressed_content=row.get("compressed_content"),
-                metadata=dict(row.get("metadata") or {}),
-            )
-            for row in rows
-        ]
-
-
 class IdempotencyRegistry:
     """已完成步骤登记，避免 resume 重复调用外部工具。"""
 
@@ -528,14 +437,6 @@ class IdempotencyRegistry:
 
     def keys(self) -> list[str]:
         return list(self._completed.keys())
-
-    def load_from_checkpoint(
-        self, data: dict[str, Any], store: StepCheckpointStore
-    ) -> None:
-        results = store.restore_step_results(data)
-        keys = data.get("completed_step_keys") or []
-        for key, result in zip(keys, results):
-            self._completed[key] = result
 
 
 def _normalize_findings(raw: Any, facts: list[str]) -> list[dict[str, Any]]:
