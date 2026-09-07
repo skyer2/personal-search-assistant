@@ -46,6 +46,14 @@ _OFFICIAL_GITHUB_ORGS = {
     "google", "pytorch", "tensorflow", "meta-llama", "qwenlm",
 }
 
+# Authority is an entity/domain relationship, not a page-shape heuristic.  In
+# particular, an arbitrary ``docs.*`` hostname must never become PRIMARY.
+_OFFICIAL_DOMAINS = {
+    "anthropic.com", "deepseek.com", "google.com", "huggingface.co",
+    "langchain.com", "microsoft.com", "openai.com", "pytorch.org",
+    "tensorflow.org",
+}
+
 
 def classify_source_tier(locator: str) -> str:
     """Classify evidence provenance without treating every URL as primary."""
@@ -76,7 +84,10 @@ def classify_source_tier(locator: str) -> str:
         for item in _HIGH_QUALITY_SECONDARY_HOSTS
     ):
         return SourceTier.HIGH_QUALITY_SECONDARY.value
-    if hostname.startswith(("docs.", "developer.", "api-docs.")):
+    if any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for domain in _OFFICIAL_DOMAINS
+    ):
         return SourceTier.PRIMARY.value
     return SourceTier.UNKNOWN.value
 DERIVED_OUTPUT_STEP_TYPES = frozenset(
@@ -457,16 +468,9 @@ class CitationManager:
 
     def simple_fact_evidence_sufficient(self) -> bool:
         """One primary source, or two independent high-quality secondary domains."""
-        counts = self.source_counts_by_tier()
-        secondary_domains = {
-            ".".join(urlsplit(src.locator).netloc.lower().split(".")[-2:])
-            for src in self.sources
-            if src.source_tier == SourceTier.HIGH_QUALITY_SECONDARY.value
-        }
-        return (
-            counts[SourceTier.PRIMARY.value] >= 1
-            or len(secondary_domains) >= 2
-        )
+        from app.research.evidence.policy import SIMPLE_FACT_EVIDENCE_POLICY
+
+        return SIMPLE_FACT_EVIDENCE_POLICY.is_sufficient(self.sources)
 
     def inject_inline_citation_hints(self, content: str) -> str:
         """只在段落命中已绑定 fact 时补 [n]，不再按段落序号盲贴。"""

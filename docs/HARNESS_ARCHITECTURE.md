@@ -56,7 +56,7 @@ GAP → replan；ENOUGH → synthesis → Quality Gate → finalize
 
 - one worker, at most two authorized provider searches, and at most three tool calls
 - zero planner calls, zero replans, zero progress evaluation, zero compression, and zero synthesis-agent calls
-- `SimpleFactFallbackRenderer` renders the grounded answer deterministically
+- `render_simple_fact_answer` renders the grounded answer deterministically
 - one `PRIMARY` source or two independent `HIGH_QUALITY_SECONDARY` sources are required; community-only evidence returns low confidence instead of success
 
 The fast path still uses the real `RunBudgetManager`, worker lease, `ToolGateway`, `WorkerExecutorV2`, citation manager, validator, and finalizer. It does not create a second control plane.

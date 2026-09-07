@@ -20,6 +20,7 @@ class SimpleFactAnswer:
     source_id: str
     source_tier: str
     sufficient: bool
+    supporting_fact: str = ""
 
 
 def _normalize_date(match: re.Match[str]) -> str:
@@ -67,19 +68,33 @@ def render_simple_fact_answer(
             sufficient=False,
         )
 
-    primary_sources = [
-        source for source in sources if str(source.source_tier) == "PRIMARY"
+    # Extraction and citation selection operate on the same bound pair.  Never
+    # extract a date from source B and then cite a more authoritative source A.
+    candidates = [
+        (str(source.bound_fact or "").strip(), source)
+        for source in sources
+        if str(source.bound_fact or "").strip()
     ]
-    bound_primary_sources = [
-        source for source in primary_sources if str(source.bound_fact or "").strip()
-    ]
-    selected = (
-        bound_primary_sources[0]
-        if bound_primary_sources
-        else (primary_sources[0] if primary_sources else sources[0])
-    )
+    if not candidates:
+        return SimpleFactAnswer(
+            content="未能确认事实与来源的绑定关系。",
+            source_id="",
+            source_tier="UNKNOWN",
+            sufficient=False,
+        )
+
+    def extraction(pair: tuple[str, Any]) -> re.Match[str] | None:
+        fact, _ = pair
+        if "哪年" in query or "哪一年" in query or "发布时间" in query:
+            return _FULL_DATE_PATTERN.search(fact) or _YEAR_PATTERN.search(fact)
+        return re.match(r".", fact)
+
+    supported = [pair for pair in candidates if extraction(pair)]
+    if not supported:
+        supported = candidates
+    supported.sort(key=lambda pair: 0 if str(pair[1].source_tier) == "PRIMARY" else 1)
+    evidence_text, selected = supported[0]
     source_number = citation_manager.source_number_map().get(selected.source_id, 1)
-    evidence_text = " ".join(facts)
 
     if "哪年" in query or "哪一年" in query or "发布时间" in query:
         full_date = _FULL_DATE_PATTERN.search(evidence_text)
@@ -88,19 +103,18 @@ def render_simple_fact_answer(
                 date = _normalize_date(full_date)
                 content = f"{_subject(query)}发布于 {date}。"
             except ValueError:
-                content = _first_sentence(facts[0])
+                content = _first_sentence(evidence_text)
         else:
             year = _YEAR_PATTERN.search(evidence_text)
             content = (
                 f"{_subject(query)}发布于 {year.group(0)} 年。"
                 if year
-                else _first_sentence(facts[0])
+                else _first_sentence(evidence_text)
             )
     elif "是什么" in query or "what is" in query.lower():
-        title = str(getattr(worker_result, "summary", "") or "").strip()
-        content = f"{_subject(query)}是 {title}。" if title else _first_sentence(facts[0])
+        content = _first_sentence(evidence_text)
     else:
-        content = _first_sentence(facts[0])
+        content = _first_sentence(evidence_text)
 
     content = f"{content}[{source_number}]"
     return SimpleFactAnswer(
@@ -108,28 +122,11 @@ def render_simple_fact_answer(
         source_id=selected.source_id,
         source_tier=str(selected.source_tier),
         sufficient=sufficient,
+        supporting_fact=evidence_text,
     )
-
-
-class SimpleFactFallbackRenderer:
-    """Delivery fallback that never degrades an already-grounded answer."""
-
-    def render(
-        self,
-        *,
-        query: str,
-        worker_result: Any,
-        citation_manager: Any,
-    ) -> SimpleFactAnswer:
-        return render_simple_fact_answer(
-            query=query,
-            worker_result=worker_result,
-            citation_manager=citation_manager,
-        )
 
 
 __all__ = [
     "SimpleFactAnswer",
-    "SimpleFactFallbackRenderer",
     "render_simple_fact_answer",
 ]
