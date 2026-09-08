@@ -552,6 +552,14 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     type="info"
                   />
                 ) : null}
+                {summary.termination?.reason ? (
+                  <Alert
+                    message={`停止原因：${asText(summary.termination.reason)}`}
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    type={String(summary.termination.outcome || "") === "failed" ? "error" : "info"}
+                  />
+                ) : null}
                 {progress.length > 0 ? (
                   <>
                     <Typography.Title level={5}>进度评估</Typography.Title>
@@ -580,6 +588,27 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                           width: 280,
                           key: "reason_codes",
                           render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
+                        },
+                        {
+                          title: "Gap IDs",
+                          dataIndex: "gap_ids",
+                          width: 200,
+                          key: "gap_ids",
+                          render: (value: unknown) => <div className="table-wrap-cell">{asText(value, "0")}</div>
+                        },
+                        {
+                          title: "Unresolved",
+                          dataIndex: "unresolved_gap_count",
+                          width: 100,
+                          key: "unresolved_gap_count",
+                          render: (value: unknown) => asText(value, "0")
+                        },
+                        {
+                          title: "Wave",
+                          dataIndex: "dispatch_wave_id",
+                          width: 80,
+                          key: "dispatch_wave_id",
+                          render: (value: unknown) => asText(value, "-")
                         },
                         {
                           title: "Coverage Gaps",
@@ -641,6 +670,44 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                               : "-"}
                           </div>
                         )
+                      },
+                      {
+                        title: "Gap IDs",
+                        dataIndex: "target_gap_ids",
+                        width: 180,
+                        key: "target_gap_ids",
+                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
+                      },
+                      {
+                        title: "Superseded",
+                        dataIndex: "superseded_task_ids",
+                        width: 200,
+                        key: "superseded_task_ids",
+                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
+                      },
+                      {
+                        title: "Replacement",
+                        dataIndex: "added_task_ids",
+                        width: 220,
+                        key: "added_task_ids",
+                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
+                      },
+                      {
+                        title: "Generation",
+                        dataIndex: "recovery_generation",
+                        width: 100,
+                        key: "recovery_generation",
+                        render: (value: unknown) => asText(value)
+                      },
+                      {
+                        title: "Budget",
+                        width: 130,
+                        key: "budget",
+                        render: (_, row) => {
+                          const attempted = Number(row.attempted ?? 0);
+                          const maxAttempts = Number(row.max_attempts ?? 0);
+                          return `${Number.isFinite(attempted) ? attempted : 0}/${Number.isFinite(maxAttempts) ? maxAttempts : 0} · 剩 ${Math.max(0, (Number.isFinite(maxAttempts) ? maxAttempts : 0) - (Number.isFinite(attempted) ? attempted : 0))}`;
+                        }
                       },
                       {
                         title: "Added",

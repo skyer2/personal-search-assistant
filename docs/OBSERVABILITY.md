@@ -92,7 +92,9 @@ JSONL/OTel 仍是 durable；EventBus 只负责跨进程 live delivery。
 
 ## Replan 指标
 
-`replan.proposed` → `replan.applied` / `replan.rejected` 记录 `target_gap_ids` / `triggered_by` / `from_plan_version` / `to_plan_version` / `reason` / `added_tasks`。
+`replan.applied` / `replan.rejected` 记录 `target_gap_ids` / `superseded_task_ids` / `added_task_ids` / `recovery_generation` / `fingerprint` / `attempted` / `max_attempts` / `from_plan_version` / `to_plan_version` / `reason`。
+
+`progress.assessed` 记录 `gap_ids` / `resolved_gap_ids` / `unresolved_gap_count` / `dispatch_wave_id`。Trace UI 在进度页展示稳定 Gap、替换关系、恢复代数、剩余预算和停止原因。
 
 **Gap closure（语义口径）**：`target_gap_ids` 在后续 `progress.assessed.resolved_gap_ids` 中出现才算 recovered。`harness_live_replan_recovered_total` 不再等于「有 replan + run success」。
 

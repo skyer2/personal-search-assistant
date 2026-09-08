@@ -21,6 +21,10 @@ class BudgetState(TypedDict):
     synthesis_reserve_sec: float
     max_parallel_workers: int
     max_replan_count: int
+    max_recovery_generation: int
+    max_same_gap_recovery: int
+    max_stalled_cycles: int
+    max_active_tasks: int
     exhausted: bool
     low: bool
 
@@ -54,7 +58,10 @@ class ResearchState(TypedDict):
     budget: BudgetState
     budget_status: str
     replan_budget: dict[str, int]
+    business_gaps: Annotated[dict[str, dict[str, Any]], merge_dicts]
     rejected_patch_hashes: Annotated[list[str], operator.add]
+    recovery_snapshot: dict[str, Any]
+    dispatch_wave_id: int
 
     draft_ref: str | None
     final_ref: str | None
@@ -141,12 +148,19 @@ def empty_research_state(
             "synthesis_reserve_sec": 180.0,
             "max_parallel_workers": 3,
             "max_replan_count": max_replan_count,
+            "max_recovery_generation": 2,
+            "max_same_gap_recovery": 2,
+            "max_stalled_cycles": 2,
+            "max_active_tasks": 3,
             "exhausted": False,
             "low": False,
         },
         "budget_status": "available",
         "replan_budget": new_replan_budget(max_replan_count),
+        "business_gaps": {},
         "rejected_patch_hashes": [],
+        "recovery_snapshot": {},
+        "dispatch_wave_id": 0,
         "draft_ref": None,
         "final_ref": None,
         "final_content": "",

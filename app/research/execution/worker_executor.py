@@ -122,6 +122,7 @@ class WorkerExecutorV2:
                         search_mode="agent",
                         task_shape="simple_fact" if simple_fact else "",
                         execution_path="fast_path" if simple_fact else "harness",
+                        dispatch_wave_id=task.dispatch_wave_id,
                     ),
                 )
                 recorder.emit(
@@ -138,6 +139,7 @@ class WorkerExecutorV2:
                         search_mode="agent",
                         task_shape="simple_fact" if simple_fact else "",
                         execution_path="fast_path" if simple_fact else "harness",
+                        dispatch_wave_id=task.dispatch_wave_id,
                     ),
                     run_id=context.run_id,
                     session_id=context.session_id,
@@ -309,6 +311,7 @@ class WorkerExecutorV2:
                             search_mode="agent",
                             task_shape="simple_fact" if simple_fact else "",
                             execution_path="fast_path" if simple_fact else "harness",
+                            dispatch_wave_id=task.dispatch_wave_id,
                             execution_status=execution_status,
                             result_status=result_status,
                             fail_reason=(

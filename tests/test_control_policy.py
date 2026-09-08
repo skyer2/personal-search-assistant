@@ -159,7 +159,7 @@ def test_recovery_respects_evidence_quality_and_budget():
         evidence="partial",
         max_replan=2,
     )
-    assert decide_control(failed_partial)["action"] == "retry"
+    assert decide_control(failed_partial)["action"] == "replan"
 
     failed_partial_without_replan_budget = state_with_task(
         execution_status=TaskExecutionStatus.FAILED,

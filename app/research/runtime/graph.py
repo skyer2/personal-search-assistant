@@ -6,10 +6,19 @@ from typing import Any, Literal, cast
 
 from app.agent.harness.planner import understand_task
 from app.agent.harness.state import ExecutionPlan
+from app.research.assessment.progress import assess_progress
 from app.research.control.policy import decide_control
 from app.research.control.terminal_policy import terminal_update
 from app.research.control.transitions import transition_update
-from app.research.domain.contracts import ControlAction, WorkflowPhase
+from app.research.domain.contracts import (
+    ControlAction,
+    WorkflowPhase,
+    new_replan_budget,
+    recovery_limits_from_state,
+    replan_budget_from_state,
+)
+from app.research.domain.gaps import sync_business_gaps
+from app.research.domain.recovery import build_replacement_patch
 from app.research.domain.task_state import (
     ResultStatus,
     TaskExecutionStatus,
@@ -51,11 +60,12 @@ def intent_node(state: ResearchState) -> dict[str, Any]:
     budget["max_parallel_workers"] = int(profile["parallel_workers"])
     existing_replan = budget.get("max_replan_count")
     profile_replan = int(profile["max_replan_count"])
-    budget["max_replan_count"] = (
+    effective_replan = (
         profile_replan
         if existing_replan is None
         else min(int(cast(int, existing_replan)), profile_replan)
     )
+    budget["max_replan_count"] = effective_replan
     return transition_update(
         state,
         WorkflowPhase.UNDERSTAND,
@@ -65,6 +75,7 @@ def intent_node(state: ResearchState) -> dict[str, Any]:
             "needs_clarification": bool(intent.needs_clarification),
             "route_signals": [f"task_shape:{shape.shape.value}"],
             "budget": budget,
+            "replan_budget": new_replan_budget(effective_replan),
         },
     )
 
@@ -92,13 +103,16 @@ def plan_node(state: ResearchState) -> dict[str, Any]:
     intent = TaskIntent.from_dict(raw) if raw else understand_task(state["task_query"])
     plan = heuristic_dynamic_plan(intent, parse_source_policy(intent.raw_query))
     plan = research_only_plan(annotate_plan_tasks(finalize_plan(plan)))
+    tasks = initialize_tasks(plan)
+    business_gaps = sync_business_gaps(plan, tasks, {})
     return transition_update(
         state,
         WorkflowPhase.PLAN,
         {
             "plan": plan.to_dict(),
             "plan_version": plan.plan_version,
-            "tasks": initialize_tasks(plan),
+            "tasks": tasks,
+            "business_gaps": business_gaps,
             "needs_plan_review": False,
         },
     )
@@ -114,7 +128,11 @@ def plan_validate_node(state: ResearchState) -> dict[str, Any]:
 
 
 def dispatch_node(state: ResearchState) -> dict[str, Any]:
-    return transition_update(state, WorkflowPhase.DISPATCH, {})
+    return transition_update(
+        state,
+        WorkflowPhase.DISPATCH,
+        {"dispatch_wave_id": int(state.get("dispatch_wave_id") or 0) + 1},
+    )
 
 
 def route_after_intent(state: ResearchState) -> Literal["clarify", "plan"]:
@@ -156,6 +174,7 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
                         "session_id": state["session_id"],
                         "phase": state.get("phase") or WorkflowPhase.DISPATCH.value,
                         "plan_version": int(state.get("plan_version") or 1),
+                        "dispatch_wave_id": int(state.get("dispatch_wave_id") or 0),
                         "task_id": step.resolved_task_id(index),
                         "step_index": index,
                         "step_type": step.step_type,
@@ -184,6 +203,22 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
 
 def research_worker_node(state: ResearchState) -> dict[str, Any]:
     task_id = str(state.get("task_id") or "")
+    current = dict(state.get("tasks") or {}).get(task_id)
+    if current is not None and current.get("execution_status") != TaskExecutionStatus.PENDING.value:
+        return transition_update(
+            state,
+            WorkflowPhase.EXECUTE,
+            {
+                "worker_results": [
+                    {
+                        "task_id": task_id,
+                        "ok": False,
+                        "status": "duplicate_skipped",
+                        "summary": "duplicate task attempt suppressed",
+                    }
+                ]
+            },
+        )
     running = transition_task(
         state.get("tasks"),
         task_id,
@@ -200,7 +235,7 @@ def research_worker_node(state: ResearchState) -> dict[str, Any]:
         state,
         WorkflowPhase.EXECUTE,
         {
-            "tasks": tasks,
+            "tasks": {task_id: tasks[task_id]},
             "worker_results": [
                 {
                     "task_id": task_id,
@@ -215,32 +250,44 @@ def research_worker_node(state: ResearchState) -> dict[str, Any]:
     )
 
 
+def dispatch_barrier_node(_state: ResearchState) -> dict[str, Any]:
+    """Join all worker branches before a single assessment superstep."""
+    return {}
+
+
 def progress_node(state: ResearchState) -> dict[str, Any]:
     plan = _plan_from_state(state)
-    required = required_research_ids(plan) if plan is not None else []
-    tasks = state.get("tasks")
-    succeeded = [task_id for task_id in required if tasks.get(task_id, {}).get("execution_status") == TaskExecutionStatus.SUCCEEDED.value]
-    partial = [
-        task_id
-        for task_id in required
-        if tasks.get(task_id, {}).get("execution_status") == TaskExecutionStatus.FAILED.value
-        and tasks.get(task_id, {}).get("result_status") == ResultStatus.PARTIAL.value
-    ]
-    if succeeded and len(succeeded) + len(partial) == len(required):
-        status = "sufficient"
-        reasons = ["required_research_terminal"]
-    elif succeeded or partial:
-        status = "gap"
-        reasons = ["coverage_incomplete"]
-    else:
-        status = "unknown"
-        reasons = ["no_completed_research"]
+    if plan is None:
+        return transition_update(state, WorkflowPhase.ASSESS, {"abort_reason": "missing_plan"})
+    assessment = assess_progress(dict(state))
+    business_gaps = sync_business_gaps(
+        plan,
+        state.get("tasks"),
+        state.get("business_gaps"),
+        resolved_gap_ids=assessment["resolved_gap_ids"],
+    )
     evidence_count = len(state.get("evidence_refs") or [])
+    snapshot = {
+        "gap_ids": assessment["gap_ids"],
+        "resolved_gap_ids": assessment["resolved_gap_ids"],
+        "evidence_refs": sorted(set(state.get("evidence_refs") or [])),
+        "delivery_mode": "none",
+        "delivery_status": "unknown",
+    }
+    stalled = int(state.get("stalled_cycles") or 0) + 1 if snapshot == dict(state.get("recovery_snapshot") or {}) else 0
+    decision = decide_control(
+        {
+            **state,
+            "progress_assessment": assessment,
+            "business_gaps": business_gaps,
+            "stalled_cycles": stalled,
+        }
+    )
     return transition_update(
         state,
         WorkflowPhase.ASSESS,
         {
-            "progress_assessment": {"status": status, "reason_codes": reasons},
+            "progress_assessment": assessment,
             "evidence_assessment": {
                 "status": "sufficient" if evidence_count else "insufficient",
                 "evidence_count": evidence_count,
@@ -248,8 +295,12 @@ def progress_node(state: ResearchState) -> dict[str, Any]:
                 "primary_source_count": min(1, evidence_count),
                 "independent_source_count": evidence_count,
             },
-            "execution_health": {"status": "degraded" if partial else "healthy"},
+            "execution_health": {"status": "degraded" if assessment["status"] == "gap" else "healthy", "stalled_cycles": stalled},
             "delivery_readiness": {},
+            "business_gaps": business_gaps,
+            "recovery_snapshot": snapshot,
+            "stalled_cycles": stalled,
+            "control_decision": decision,
         },
     )
 
@@ -267,10 +318,37 @@ def route_progress(state: ResearchState) -> str:
 
 
 def replan_node(state: ResearchState) -> dict[str, Any]:
-    budget = dict(state.get("replan_budget") or {})
+    plan = _plan_from_state(state)
+    if plan is None:
+        return transition_update(state, WorkflowPhase.REPLAN, {})
+    assessment = dict(state.get("progress_assessment") or {})
+    patch = build_replacement_patch(
+        plan,
+        state.get("tasks"),
+        gap_ids=[str(item) for item in assessment.get("gap_ids") or []],
+        limits=recovery_limits_from_state(dict(state)),
+        rejected_hashes=[str(item) for item in state.get("rejected_patch_hashes") or []],
+        previous_gaps=state.get("business_gaps"),
+    )
+    budget = dict(replan_budget_from_state(dict(state)))
     attempted = int(budget.get("attempted") or 0) + 1
-    budget.update(attempted=attempted, applied=int(budget.get("applied") or 0))
-    return transition_update(state, WorkflowPhase.REPLAN, {"replan_budget": budget})
+    applied = int(budget.get("applied") or 0) + (1 if patch["applied"] else 0)
+    budget.update(attempted=attempted, applied=applied)
+    rejected = [str(item) for item in state.get("rejected_patch_hashes") or []]
+    if not patch["applied"]:
+        rejected = list(dict.fromkeys([*rejected, patch["fingerprint"]]))
+    return transition_update(
+        state,
+        WorkflowPhase.REPLAN,
+        {
+            "plan": patch["plan"].to_dict(),
+            "plan_version": patch["plan"].plan_version if patch["applied"] else int(state.get("plan_version") or 1),
+            "tasks": patch["tasks"],
+            "business_gaps": patch["business_gaps"],
+            "replan_budget": budget,
+            "rejected_patch_hashes": rejected,
+        },
+    )
 
 
 def synthesize_node(state: ResearchState) -> dict[str, Any]:
@@ -382,8 +460,7 @@ def compile_research_graph(
 
     def _worker(payload: dict[str, Any]) -> dict[str, Any]:
         if invoke_worker is not None:
-            payload = dict(payload)
-            payload["_invoke_worker"] = invoke_worker
+            return invoke_worker(payload)
         return research_worker_node(cast(ResearchState, payload))
 
     if runtime is not None:
@@ -433,6 +510,7 @@ def compile_research_graph(
     builder.add_node("plan_validate", plan_validate)
     builder.add_node("dispatch", dispatch)
     builder.add_node("research_worker", worker)
+    builder.add_node("dispatch_barrier", dispatch_barrier_node)
     builder.add_node("progress", progress)
     builder.add_node("retry", retry)
     builder.add_node("replan", replan)
@@ -449,7 +527,8 @@ def compile_research_graph(
         route_dispatch,
         ["research_worker", "progress", "retry", "replan", "synthesize", "finalize"],
     )
-    builder.add_edge("research_worker", "progress")
+    builder.add_edge("research_worker", "dispatch_barrier")
+    builder.add_edge("dispatch_barrier", "progress")
     builder.add_conditional_edges(
         "progress",
         route_progress,

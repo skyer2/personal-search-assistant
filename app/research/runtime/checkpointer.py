@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import sqlite3
@@ -18,11 +17,6 @@ logger = logging.getLogger(__name__)
 _SQLITE_SAVER: Any = None
 _SQLITE_CONN: sqlite3.Connection | None = None
 _SQLITE_PATH: str | None = None
-
-_ASYNC_SAVER: Any = None
-_ASYNC_CONN: Any = None
-_ASYNC_PATH: str | None = None
-_ASYNC_LOOP_ID: int | None = None
 
 DEFAULT_CHECKPOINT_PATH = "output/.harness/graph_checkpoints.sqlite"
 
@@ -110,8 +104,7 @@ def sqlite_checkpointer(path: str | Path | None = None):
 
 
 async def async_sqlite_checkpointer(path: str | Path | None = None):
-    """给 graph.ainvoke() / aget_state() 用的 AsyncSqliteSaver。"""
-    global _ASYNC_SAVER, _ASYNC_CONN, _ASYNC_PATH, _ASYNC_LOOP_ID
+    """Create a run-owned AsyncSqliteSaver for graph.ainvoke()/aget_state()."""
     import aiosqlite
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -120,39 +113,28 @@ async def async_sqlite_checkpointer(path: str | Path | None = None):
         or os.getenv("HARNESS_GRAPH_CHECKPOINT")
         or DEFAULT_CHECKPOINT_PATH
     )
-    loop_id = id(asyncio.get_running_loop())
-    if (
-        _ASYNC_SAVER is not None
-        and _ASYNC_PATH == resolved
-        and _ASYNC_CONN is not None
-        and _ASYNC_LOOP_ID == loop_id
-    ):
-        return _ASYNC_SAVER
-
-    if _ASYNC_CONN is not None:
-        try:
-            await _ASYNC_CONN.close()
-        except Exception:
-            pass
-        _ASYNC_SAVER = None
-        _ASYNC_CONN = None
-
     target = Path(resolved)
     target.parent.mkdir(parents=True, exist_ok=True)
     conn = await aiosqlite.connect(str(target))
     await conn.execute("PRAGMA journal_mode=WAL")
     saver = AsyncSqliteSaver(conn)
     await saver.setup()
-    _ASYNC_CONN = conn
-    _ASYNC_SAVER = saver
-    _ASYNC_PATH = resolved
-    _ASYNC_LOOP_ID = loop_id
     return saver
+
+
+async def close_async_checkpointer(checkpointer: Any) -> None:
+    """Close a checkpointer created by async_sqlite_checkpointer."""
+    connection = getattr(checkpointer, "conn", None)
+    if connection is None:
+        return
+    try:
+        await connection.close()
+    except Exception:
+        logger.debug("async checkpointer close failed", exc_info=True)
 
 
 def reset_checkpointer_cache() -> None:
     global _SQLITE_SAVER, _SQLITE_CONN, _SQLITE_PATH
-    global _ASYNC_SAVER, _ASYNC_CONN, _ASYNC_PATH, _ASYNC_LOOP_ID
     if _SQLITE_CONN is not None:
         try:
             _SQLITE_CONN.close()
@@ -161,20 +143,15 @@ def reset_checkpointer_cache() -> None:
     _SQLITE_SAVER = None
     _SQLITE_CONN = None
     _SQLITE_PATH = None
-    _ASYNC_SAVER = None
-    _ASYNC_CONN = None
-    _ASYNC_PATH = None
-    _ASYNC_LOOP_ID = None
 
 
-async def reset_async_checkpointer_cache() -> None:
-    global _ASYNC_SAVER, _ASYNC_CONN, _ASYNC_PATH, _ASYNC_LOOP_ID
-    if _ASYNC_CONN is not None:
-        try:
-            await _ASYNC_CONN.close()
-        except Exception:
-            pass
-    _ASYNC_SAVER = None
-    _ASYNC_CONN = None
-    _ASYNC_PATH = None
-    _ASYNC_LOOP_ID = None
+__all__ = [
+    "DEFAULT_CHECKPOINT_PATH",
+    "aget_research_checkpointer",
+    "async_sqlite_checkpointer",
+    "close_async_checkpointer",
+    "default_research_checkpointer",
+    "memory_checkpointer",
+    "reset_checkpointer_cache",
+    "sqlite_checkpointer",
+]

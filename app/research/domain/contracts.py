@@ -62,6 +62,14 @@ class ReplanBudget(TypedDict):
     max_attempts: int
 
 
+class RecoveryLimits(TypedDict):
+    max_replan_attempts: int
+    max_recovery_generation: int
+    max_same_gap_recovery: int
+    max_stalled_cycles: int
+    max_active_tasks: int
+
+
 class ControlDecision(TypedDict):
     decision_id: str
     action: str
@@ -96,6 +104,19 @@ def replan_budget_exhausted(budget: ReplanBudget) -> bool:
     return budget["attempted"] >= budget["max_attempts"]
 
 
+def recovery_limits_from_state(state: dict[str, Any]) -> RecoveryLimits:
+    budget = state.get("budget")
+    value = dict(budget) if isinstance(budget, dict) else {}
+    replan_budget = replan_budget_from_state(state)
+    return RecoveryLimits(
+        max_replan_attempts=replan_budget["max_attempts"],
+        max_recovery_generation=max(0, int(value.get("max_recovery_generation") or 2)),
+        max_same_gap_recovery=max(0, int(value.get("max_same_gap_recovery") or 2)),
+        max_stalled_cycles=max(1, int(value.get("max_stalled_cycles") or 2)),
+        max_active_tasks=max(1, int(value.get("max_active_tasks") or 3)),
+    )
+
+
 def budget_status(state: dict[str, Any]) -> BudgetStatus:
     budget = state.get("budget")
     if not isinstance(budget, dict):
@@ -116,6 +137,8 @@ __all__ = [
     "LifecycleStatus",
     "OutcomeStatus",
     "ReplanBudget",
+    "RecoveryLimits",
+    "recovery_limits_from_state",
     "WorkflowPhase",
     "budget_status",
     "new_replan_budget",

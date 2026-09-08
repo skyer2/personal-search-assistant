@@ -108,7 +108,7 @@ def execution_profile_for_shape(shape: TaskShape) -> dict[str, int | bool]:
     if shape == TaskShape.BREADTH_HEAVY:
         return {
             "parallel_workers": 3,
-            "max_replan_count": 1,
+            "max_replan_count": 2,
         }
     return {
         "parallel_workers": 3,

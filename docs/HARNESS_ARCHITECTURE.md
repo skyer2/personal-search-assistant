@@ -51,15 +51,35 @@ Harness 路径：
 ```text
 TaskShape
   ├── SIMPLE_FACT → single WorkerExecutorV2 search → deterministic answer
-  └── other shapes
-        → intent → clarify → plan → validate → dispatch
-Send(isolated workers via WorkerExecutorV2) → Assessments
+      └── other shapes
+            → intent → clarify → plan → validate → dispatch
+Send(isolated workers via WorkerExecutorV2) → dispatch barrier
     → ControlPolicy → dispatch / retry / replan / synthesize
     → SynthesisExecutor → Quality Assessment
     → TerminalPolicy → success / partial / failed / cancelled
 ```
 
 `direct` 仅对照实验：single worker + search tool，不进上述节点。
+
+### Bounded Recovery 与并行 Barrier
+
+Recovery 的业务对象是 **Business Gap**，不是 Task ID：
+
+- `GapState.gap_id` 稳定存在（例如 `candidate_pool`），Task attempt 通过 `gap_ids` / `origin_task_id` / `generation` 关联到 Gap。
+- Replan 使用 replacement patch：旧 Task 标记 `SUPERSEDED`，新 Task 原位替换 Plan Step，并继承同一 Gap；不追加新的必需义务。
+- 恢复上限由 `ResearchState.replan_budget` 和 `budget.max_recovery_generation` / `max_same_gap_recovery` 共同约束；TaskShape、Mode Router、HarnessConfig 只负责初始化或 clamp，不是第二套 runtime authority。
+- Gap 数量必须单调不增；恢复耗尽时有可用证据则 `DELIVER_PARTIAL`，无可用证据则 explicit failure。
+- Stalled snapshot 连续无变化时终止恢复，不允许靠提高 `recursion_limit` 正常收尾。
+
+并行调度的合并契约：
+
+```text
+dispatch → Send(worker A/B/C) → dispatch_barrier → one Progress → ControlPolicy
+```
+
+Worker 图更新只返回自己的 `tasks[task_id]` delta；`tasks` keyed reducer 合并各分支结果。`dispatch_barrier` 是无业务副作用的 join 节点，保证同一 `dispatch_wave_id` 只进入一次 Progress 评估，也不会重复执行 pending task。
+
+异步 SQLite checkpointer 由一次 Runner 执行独立创建并关闭；外部传入的 checkpointer 所有权不变。这样不会把 `aiosqlite` 连接线程泄漏到进程退出阶段。
 
 ### Simple Fact Fast Path
 
@@ -101,7 +121,7 @@ DELETE /api/runs/{run_id}
 | 进度 | 无任务级 checkpoint | **只有**图内 SQLite checkpointer |
 | Search | 产品能力 | **Environment tool only** |
 
-相关代码：`app/research/runtime/graph.py`、`app/research/control/policy.py`、`app/research/control/terminal_policy.py`、`app/research/assessment/`、`app/research/runtime/worker.py`、`app/research/execution/synthesis_executor.py`。
+相关代码：`app/research/runtime/graph.py`、`app/research/domain/gaps.py`、`app/research/domain/recovery.py`、`app/research/control/policy.py`、`app/research/control/terminal_policy.py`、`app/research/assessment/`、`app/research/runtime/worker.py`、`app/research/execution/synthesis_executor.py`。
 
 权威设计：[ARCHITECTURE.md](./ARCHITECTURE.md)。
 

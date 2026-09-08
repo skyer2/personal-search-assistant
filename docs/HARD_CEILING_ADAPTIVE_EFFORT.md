@@ -144,15 +144,15 @@ apply_effort_to_hard_ceiling(effort, hard) → EffectiveBudget
 
 Lead Planner **可以**在 task metadata 里带 `effort: low|medium|high` 提示；**不可以**输出「必须 search 13 次」这种假精确。
 
-### 3.3 Incremental Grant（GAP 时）
+### 3.3 Bounded Replacement Recovery（GAP 时）
 
 `assess_progress() → GAP` 且 replan budget 未耗尽：
 
-1. `PlanPatch` 新增任务数 ≤ `min(hard.max_plan_patch_tasks, remaining_plan_patch_tasks, severity)`  
-2. 新任务的 `metadata.max_retrieval_calls` 从 `remaining_reserve_step_tool_calls` 发放  
-3. 成功 patch 后 **扣减** `remaining_*`（`apply_grant_to_run_budget`）  
-4. **不提高**会话 `max_tool_calls` / `max_run_sec` 硬顶  
-5. reserve 耗尽 / 连续无边际收益 / replan 耗尽 → 交给 ControlPolicy；有可用证据则 degraded delivery，否则 TerminalPolicy 判失败
+1. 定位稳定 Business Gap（`gap_id`），不是失败的 Task ID
+2. 旧 Task 标记 `SUPERSEDED`，replacement Task 原位替换 Plan Step，并继承 `gap_ids` / `origin_task_id`
+3. replacement 数量、recovery generation、同 Gap 恢复次数都受 hard ceiling / `ResearchState.replan_budget` clamp
+4. **不提高**会话 `max_tool_calls` / `max_run_sec` / `recursion_limit` 硬顶
+5. recovery exhausted / stalled → ControlPolicy 终止；有可用证据则 degraded delivery，否则 TerminalPolicy 判失败
 
 `run_budget.max_parallel_workers` 在 Plan 落盘后刷新 `RunSession.worker_sem`，由 StateGraph dispatch 消费。
 
@@ -215,7 +215,7 @@ Lead Planner 仍只输出 **objective DAG**，不调工具、不调度、不定�
 | Hard 配置 | `app/config/harness.yml` `budget` + `effort` 注释段 |
 | 能力清单 | `GET /api/harness/capabilities` → `control_model` / `effort` |
 
-图边不变：仍在 domain compose / replan 挂钩，不新增 graph 节点。
+图边只在 Worker fan-out 后增加无业务副作用的 `dispatch_barrier` join 节点；语义决策仍在 Domain / ControlPolicy。
 
 ---
 

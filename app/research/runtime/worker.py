@@ -171,6 +171,7 @@ class ResearchTask:
     source_policy: dict[str, Any] = field(default_factory=dict)
     plan_version: int = 1
     attempt: int = 1
+    dispatch_wave_id: int = 0
 
 
 @dataclass

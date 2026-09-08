@@ -60,6 +60,12 @@ def check_trace_integrity(
     worker_evidence_ids: set[str] = set()
     synthesis_evidence_ids: set[str] = set()
     worker_terminal_without_task_id = 0
+    worker_attempt_keys: list[tuple[str, int, int]] = []
+    progress_waves: list[int] = []
+    last_unresolved_gap_count: int | None = None
+    gap_baseline_after_replan: int | None = None
+    superseded_task_ids: set[str] = set()
+    superseded_worker_attempts: list[str] = []
 
     for event in events:
         event_type = str(event.get("type") or event.get("event") or "")
@@ -84,6 +90,55 @@ def check_trace_integrity(
             if not str(event.get("task_id") or attrs.get("task_id") or "").strip():
                 worker_terminal_without_task_id += 1
             worker_evidence_ids.update(str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip())
+        if event_type == "worker.started":
+            try:
+                started_task_id = str(event.get("task_id") or attrs.get("task_id") or "")
+                worker_attempt_keys.append(
+                    (
+                        started_task_id,
+                        int(event.get("plan_version") or attrs.get("plan_version") or 0),
+                        int(event.get("attempt") or attrs.get("attempt") or 0),
+                    )
+                )
+                if started_task_id in superseded_task_ids:
+                    superseded_worker_attempts.append(started_task_id)
+            except (TypeError, ValueError):
+                pass
+        if event_type == "progress.assessed":
+            try:
+                wave_id = int(attrs.get("dispatch_wave_id") or 0)
+                if wave_id > 0:
+                    progress_waves.append(wave_id)
+            except (TypeError, ValueError):
+                pass
+            try:
+                gap_count = int(attrs.get("unresolved_gap_count") or 0)
+            except (TypeError, ValueError):
+                gap_count = 0
+            if gap_baseline_after_replan is not None and gap_count > gap_baseline_after_replan:
+                issues.append("business_gap_growth")
+            gap_baseline_after_replan = None
+            last_unresolved_gap_count = gap_count
+        if event_type in {"replan.applied", "replan.rejected"}:
+            superseded_task_ids.update(str(item) for item in attrs.get("superseded_task_ids") or [])
+            try:
+                attempted = int(attrs.get("attempted") or 0)
+                maximum = int(attrs.get("max_attempts") or 0)
+            except (TypeError, ValueError):
+                attempted, maximum = 0, 0
+            if maximum and attempted > maximum:
+                issues.append("replan_budget_exceeded")
+            try:
+                generation = int(attrs.get("recovery_generation") or 0)
+                generation_limit = int(attrs.get("max_recovery_generation") or 0)
+            except (TypeError, ValueError):
+                generation, generation_limit = 0, 0
+            if generation_limit and generation > generation_limit:
+                issues.append("recovery_generation_exceeded")
+            if last_unresolved_gap_count is not None:
+                gap_baseline_after_replan = last_unresolved_gap_count
+        if "_recovery_recovery" in str(event.get("task_id") or ""):
+            issues.append("recovery_of_recovery_task_id")
         if event_type == "synthesis.completed":
             synthesis_evidence_ids.update(str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip())
         if event_type in {"run.failed", "run_summary"}:
@@ -142,6 +197,37 @@ def check_trace_integrity(
         counts.get("run.failed", 0)
     )
     run_terminated = int(counts.get("run.terminated", 0))
+
+    duplicate_worker_keys = {
+        key for key in worker_attempt_keys if worker_attempt_keys.count(key) > 1
+    }
+    if duplicate_worker_keys:
+        issues.append(f"duplicate_worker_execution:{len(duplicate_worker_keys)}")
+    duplicate_progress_waves = {wave for wave in progress_waves if progress_waves.count(wave) > 1}
+    if duplicate_progress_waves:
+        issues.append(f"duplicate_progress_for_wave:{len(duplicate_progress_waves)}")
+    if superseded_worker_attempts:
+        issues.append("superseded_task_still_active")
+    if any(
+        "graphrecursion" in " ".join(
+            [
+                str(event.get("status") or ""),
+                str(event.get("error") or ""),
+                str((event.get("attributes") or {}).get("error") or ""),
+                str((event.get("attributes") or {}).get("reason") or ""),
+            ]
+        ).lower()
+        or "recursion_limit" in " ".join(
+            [
+                str(event.get("status") or ""),
+                str(event.get("error") or ""),
+                str((event.get("attributes") or {}).get("error") or ""),
+                str((event.get("attributes") or {}).get("reason") or ""),
+            ]
+        ).lower()
+        for event in events
+    ):
+        issues.append("graph_recursion_termination")
 
     if is_agent_mode and not is_simple_fact_fast_path:
         if brief_count == 0 and _stage_required("brief", failure_origin_stage):

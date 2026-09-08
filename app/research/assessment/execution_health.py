@@ -5,6 +5,8 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, TypedDict
 
+from app.agent.harness.state import ExecutionPlan
+from app.research.domain.gaps import active_research_steps
 from app.research.domain.task_state import ResultStatus, TaskExecutionStatus, normalize_tasks
 
 
@@ -28,9 +30,20 @@ class ExecutionHealth(TypedDict):
 
 def assess_execution_health(state: dict[str, Any]) -> ExecutionHealth:
     tasks = normalize_tasks(state.get("tasks"))
-    active = [task_id for task_id, task in tasks.items() if task["execution_status"] == TaskExecutionStatus.RUNNING.value]
-    succeeded = sum(task["execution_status"] == TaskExecutionStatus.SUCCEEDED.value for task in tasks.values())
-    failed_tasks = [task for task in tasks.values() if task["execution_status"] == TaskExecutionStatus.FAILED.value]
+    raw_plan = state.get("plan")
+    plan = ExecutionPlan.from_dict(raw_plan) if isinstance(raw_plan, dict) and raw_plan else None
+    if plan is None:
+        active_task_ids = list(tasks)
+    else:
+        active_task_ids = [
+            step.resolved_task_id(index)
+            for index, step in active_research_steps(plan)
+            if not (isinstance(step.metadata, dict) and step.metadata.get("optional"))
+        ]
+    active_tasks = [tasks[task_id] for task_id in active_task_ids if task_id in tasks]
+    active = [task["task_id"] for task in active_tasks if task["execution_status"] == TaskExecutionStatus.RUNNING.value]
+    succeeded = sum(task["execution_status"] == TaskExecutionStatus.SUCCEEDED.value for task in active_tasks)
+    failed_tasks = [task for task in active_tasks if task["execution_status"] == TaskExecutionStatus.FAILED.value]
     partial_failed_tasks = [
         task for task in failed_tasks if task["result_status"] == ResultStatus.PARTIAL.value
     ]
@@ -43,7 +56,7 @@ def assess_execution_health(state: dict[str, Any]) -> ExecutionHealth:
         status = ExecutionHealthStatus.FAILED
     elif failed_tasks or retryable:
         status = ExecutionHealthStatus.DEGRADED
-    elif tasks:
+    elif active_tasks:
         status = ExecutionHealthStatus.HEALTHY
     else:
         status = ExecutionHealthStatus.UNKNOWN

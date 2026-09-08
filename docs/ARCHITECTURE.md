@@ -98,6 +98,8 @@ file_read     -> Artifact         # 本地附件
           │            │            │
           └────── WorkerRuntime ─────┘
                        │
+              dispatch barrier
+                       │
               Minimal Capabilities
                ├── web_search
                ├── fetch_url
@@ -196,7 +198,9 @@ Query → single agent               Brief → Plan →                   关掉
 ## 5. 状态模型（不变）
 
 - **唯一 workflow truth**：`ResearchState` → LangGraph SQLite
+- **Business Gap truth**：Gap 使用稳定 `gap_id`；Replan 用 replacement task 继承 Gap，不把 Task ID 当 Gap，也不追加必需任务
 - **Task truth**：`TaskExecutionStatus` 与 `ResultStatus` 分离；`FAILED + PARTIAL` 是合法降级交付输入
+- **并行 barrier truth**：同一 `dispatch_wave_id` 的所有 Worker 先 join，再执行一次 Progress / ControlPolicy；Worker 只返回自己的 task delta
 - **Readiness truth**：`TaskReadiness` 是由 Plan dependency 与 resource 推导的临时值，不落成 Task 状态
 - **Run / UI projection truth**：`RunStore` SQLite（`app/run_store/`）。刷新、断线、HITL、计时、文件列表都从这里 hydrate，不从 Trace 反推业务状态
 - **删除语义**：删除 Run 会级联 RunStore 行、run 目录、Trace/Projection/Payload、Graph checkpoint、RunSummary 和 `provenance.run_id` 派生 Memory；删除 Session 会级联全部 Run

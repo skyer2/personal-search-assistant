@@ -78,14 +78,13 @@ def test_async_sqlite_checkpointer_ainvoke(tmp_path: Path):
     from app.research.domain.task_state import task_execution_projection
     from app.research.runtime.checkpointer import (
         async_sqlite_checkpointer,
-        reset_async_checkpointer_cache,
+        close_async_checkpointer,
         reset_checkpointer_cache,
     )
     from app.research.runtime.graph import compile_research_graph, initial_graph_state
 
     async def _run() -> None:
         reset_checkpointer_cache()
-        await reset_async_checkpointer_cache()
         path = str(tmp_path / "async-graph.sqlite")
         saver = await async_sqlite_checkpointer(path)
         graph = compile_research_graph(checkpointer=saver)
@@ -101,7 +100,7 @@ def test_async_sqlite_checkpointer_ainvoke(tmp_path: Path):
             snapshot = await graph.aget_state(config)
             assert task_execution_projection(snapshot.values.get("tasks"))
         finally:
-            await reset_async_checkpointer_cache()
+            await close_async_checkpointer(saver)
             reset_checkpointer_cache()
 
     asyncio.run(_run())

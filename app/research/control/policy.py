@@ -16,9 +16,12 @@ from app.research.domain.contracts import (
     BudgetStatus,
     ControlAction,
     ControlDecision,
+    recovery_limits_from_state,
     replan_budget_exhausted,
     replan_budget_from_state,
 )
+from app.research.domain.gaps import active_research_steps, step_gap_ids
+from app.research.domain.recovery import eligible_recovery_targets
 from app.research.domain.task_state import (
     TaskExecutionStatus,
     TaskReadiness,
@@ -40,7 +43,7 @@ def plan_from_state(state: dict[str, Any]) -> ExecutionPlan | None:
 def _required_steps(plan: ExecutionPlan) -> list[tuple[int, Any]]:
     return [
         (index, step)
-        for index, step in enumerate(plan.steps)
+        for index, step in active_research_steps(plan)
         if not (isinstance(step.metadata, dict) and step.metadata.get("optional"))
     ]
 
@@ -132,6 +135,7 @@ def decide_control(state: dict[str, Any]) -> ControlDecision:
     health = assess_execution_health(state)
     progress = assess_progress(state)
     budget = replan_budget_from_state(state)
+    limits = recovery_limits_from_state(state)
     evidence = assess_evidence(state)
     delivery = assess_delivery(state)
     usable_evidence = evidence["status"] in {
@@ -142,6 +146,21 @@ def decide_control(state: dict[str, Any]) -> ControlDecision:
         str(state.get("budget_status") or BudgetStatus.UNKNOWN.value)
         != BudgetStatus.EXHAUSTED.value
     )
+    semantic_gap_ids = [str(item) for item in progress.get("gap_ids") or []]
+    if not semantic_gap_ids:
+        semantic_gap_ids = [
+            gap_id
+            for _index, step in _required_steps(plan)
+            for gap_id in step_gap_ids(step)
+        ]
+    recovery_targets = eligible_recovery_targets(
+        plan,
+        state.get("tasks"),
+        semantic_gap_ids,
+        limits,
+        [str(item) for item in state.get("rejected_patch_hashes") or []],
+    )
+    stalled = int(state.get("stalled_cycles") or 0) >= int(limits["max_stalled_cycles"])
     retryable = [
         task_id
         for task_id in health["retryable_tasks"]
@@ -161,6 +180,10 @@ def decide_control(state: dict[str, Any]) -> ControlDecision:
         and health["status"] in {ExecutionHealthStatus.DEGRADED.value, ExecutionHealthStatus.FAILED.value}
         and budget_allows_recovery
         and delivery["mode"] == DeliveryMode.NONE.value
+        and (
+            progress["status"] != SemanticProgress.GAP.value
+            or (replan_budget_exhausted(budget) and budget["max_attempts"] == 0)
+        )
     )
     if should_retry:
         return _decision(
@@ -173,10 +196,23 @@ def decide_control(state: dict[str, Any]) -> ControlDecision:
     if (
         progress["status"] == SemanticProgress.GAP.value
         and _progress_gap_is_actionable(progress)
+        and not stalled
         and budget_allows_recovery
         and not replan_budget_exhausted(budget)
+        and recovery_targets
     ):
         return _decision(state, ControlAction.REPLAN, reasons=["semantic_gap", "replan_available"])
+
+    if progress["status"] == SemanticProgress.GAP.value and _progress_gap_is_actionable(progress):
+        stop_reason = "recovery_stalled" if stalled else "recovery_exhausted"
+        if usable_evidence:
+            return _decision(
+                state,
+                ControlAction.DELIVER_PARTIAL,
+                mode=DeliveryMode.DEGRADED.value,
+                reasons=[stop_reason, "usable_evidence"],
+            )
+        return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=[stop_reason, "no_usable_evidence"])
 
     if usable_evidence and replan_budget_exhausted(budget):
         return _decision(

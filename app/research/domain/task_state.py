@@ -13,6 +13,7 @@ class TaskExecutionStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     SKIPPED = "skipped"
+    SUPERSEDED = "superseded"
 
 
 class ResultStatus(StrEnum):
@@ -77,6 +78,20 @@ def normalize_task_state(raw: Any, task_id: str) -> TaskExecutionState:
         evidence_refs=[str(item) for item in value.get("evidence_refs") or []],
         artifact_refs=[str(item) for item in value.get("artifact_refs") or []],
     )
+
+
+def supersede_task(tasks: Any, task_id: str, *, replacement_task_id: str) -> dict[str, TaskExecutionState]:
+    """Preserve historical execution facts while removing an active obligation."""
+    normalized = normalize_tasks(tasks)
+    current = normalized.get(task_id)
+    if current is None:
+        raise ValueError(f"cannot supersede unknown task: {task_id}")
+    current.update(
+        execution_status=TaskExecutionStatus.SUPERSEDED.value,
+        skip_reason=f"superseded_by:{replacement_task_id}",
+    )
+    normalized[task_id] = current
+    return normalized
 
 
 def normalize_tasks(raw: Any) -> dict[str, TaskExecutionState]:
@@ -211,6 +226,7 @@ __all__ = [
     "normalize_tasks",
     "normalize_task_state",
     "retry_task",
+    "supersede_task",
     "task_execution_projection",
     "task_readiness",
     "transition_task",

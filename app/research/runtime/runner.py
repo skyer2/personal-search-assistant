@@ -17,8 +17,16 @@ from app.research.assessment.progress import assess_progress
 from app.research.control.policy import decide_control
 from app.research.control.terminal_policy import terminal_update
 from app.research.control.transitions import transition_update
-from app.research.domain.contracts import BudgetStatus, WorkflowPhase
+from app.research.domain.contracts import (
+    BudgetStatus,
+    WorkflowPhase,
+    new_replan_budget,
+    recovery_limits_from_state,
+    replan_budget_from_state,
+)
 from app.research.domain.failure import classify_failure
+from app.research.domain.gaps import active_research_steps, step_gap_ids, sync_business_gaps
+from app.research.domain.recovery import build_replacement_patch
 from app.research.domain.task_state import (
     ResultStatus,
     TaskExecutionStatus,
@@ -197,7 +205,14 @@ def _emit(
         logger.debug("observability emit skipped", exc_info=True)
 
 
-def _emit_assessments(session: RunSession, state: dict[str, Any], decision: dict[str, Any], phase: str) -> None:
+def _emit_assessments(
+    session: RunSession,
+    state: dict[str, Any],
+    decision: dict[str, Any],
+    phase: str,
+    *,
+    include_progress: bool = True,
+) -> None:
     plan_version = int(state.get("plan_version") or 1)
     assessment_events = (
         ("progress.assessed", "progress_assessment", progress_event_attributes),
@@ -206,13 +221,22 @@ def _emit_assessments(session: RunSession, state: dict[str, Any], decision: dict
         ("delivery.assessed", "delivery_readiness", delivery_event_attributes),
     )
     for event_type, key, event_attributes in assessment_events:
+        if key == "progress_assessment" and not include_progress:
+            continue
         assessment = dict(state.get(key) or {})
         _emit(
             session,
             event_type,
             phase=phase,
             status=str(assessment.get("status") or "unknown"),
-            attributes=event_attributes(assessment) if key == "progress_assessment" else event_attributes(assessment),
+            attributes=(
+                event_attributes(
+                    assessment,
+                    dispatch_wave_id=int(state.get("dispatch_wave_id") or 0),
+                )
+                if key == "progress_assessment"
+                else event_attributes(assessment)
+            ),
         )
     _emit(
         session,
@@ -268,6 +292,8 @@ def _interrupt_payloads(result: dict[str, Any]) -> list[dict[str, Any]]:
 class ResearchGraphRunner:
     """Compile and execute the graph; semantic routing stays in ControlPolicy."""
 
+    RECURSION_LIMIT = 30
+
     def __init__(self, harness: Any):
         self.harness = harness
 
@@ -314,11 +340,16 @@ class ResearchGraphRunner:
         from app.agent.harness.usage_tracker import reset_current_budget_manager, set_current_budget_manager
 
         token = set_current_budget_manager(session.budget_manager)
-        config = {"configurable": {"thread_id": session.run_id}, "recursion_limit": 30}
+        config = {"configurable": {"thread_id": session.run_id}, "recursion_limit": self.RECURSION_LIMIT}
+        active_checkpointer = checkpointer
+        owns_checkpointer = False
         try:
             if route_decision.execution_path == "fast_path":
                 return await self._execute_simple_fact_fast_path(session, route_decision)
-            graph = self.compile(checkpointer or await _default_checkpointer(), profile=profile)
+            if active_checkpointer is None:
+                active_checkpointer = await _default_checkpointer()
+                owns_checkpointer = True
+            graph = self.compile(active_checkpointer, profile=profile)
             initial = await _initial_or_resume_payload(graph, payload, config)
             if initial is None:
                 result = await _ainvoke_resilient(graph, Command(resume=True), config)
@@ -336,6 +367,10 @@ class ResearchGraphRunner:
         finally:
             reset_current_budget_manager(token)
             drop_session(session.run_id)
+            if owns_checkpointer and active_checkpointer is not None:
+                from app.research.runtime.checkpointer import close_async_checkpointer
+
+                await close_async_checkpointer(active_checkpointer)
 
     async def _bridge_interrupts(self, result: dict[str, Any], session: RunSession) -> Any:
         from app.agent.harness.hitl import hitl_coordinator
@@ -552,6 +587,8 @@ class ResearchGraphRunner:
         else:
             planner_source = "lead_llm"
         plan = research_only_plan(annotate_plan_tasks(finalize_plan(plan), intent))
+        tasks = initialize_tasks(plan)
+        business_gaps = sync_business_gaps(plan, tasks, {})
         session.state.intent = intent
         session.state.plan = plan
         session.state.replan_count = 0
@@ -579,7 +616,16 @@ class ResearchGraphRunner:
         return transition_update(
             gstate,
             WorkflowPhase.PLAN,
-            {"plan": plan.to_dict(), "plan_version": plan.plan_version, "tasks": initialize_tasks(plan), "needs_plan_review": False, "replan_budget": {"attempted": 0, "applied": 0, "max_attempts": int((gstate.get("budget") or {}).get("max_replan_count") or 0)}},
+            {
+                "plan": plan.to_dict(),
+                "plan_version": plan.plan_version,
+                "tasks": tasks,
+                "business_gaps": business_gaps,
+                "needs_plan_review": False,
+                "replan_budget": new_replan_budget(
+                    int((gstate.get("budget") or {}).get("max_replan_count") or 0)
+                ),
+            },
         )
 
     async def node_plan_validate(self, gstate: dict[str, Any]) -> dict[str, Any]:
@@ -595,7 +641,15 @@ class ResearchGraphRunner:
         state = _sync_assessments(session, dict(gstate))
         decision = decide_control(state)
         state["control_decision"] = decision
-        _emit_assessments(session, state, decision, WorkflowPhase.DISPATCH.value)
+        dispatch_wave_id = int(gstate.get("dispatch_wave_id") or 0) + 1
+        state["dispatch_wave_id"] = dispatch_wave_id
+        _emit_assessments(
+            session,
+            state,
+            decision,
+            WorkflowPhase.DISPATCH.value,
+            include_progress=False,
+        )
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
                 {
@@ -619,6 +673,7 @@ class ResearchGraphRunner:
                     "control_decision",
                     "budget",
                     "budget_status",
+                    "dispatch_wave_id",
                 )
             },
         )
@@ -652,8 +707,40 @@ class ResearchGraphRunner:
             if isinstance(resume, dict) and resume.get("_timeout"):
                 return transition_update(gstate, WorkflowPhase.EXECUTE, {"cancel_reason": "user_cancelled"})
         sync_execution_projection(session.state, gstate)
-        attempt = int(normalize_tasks(gstate.get("tasks")).get(task_id, {}).get("attempt") or 0) + 1
-        task = ResearchTask(task_id=task_id, objective=str(step.objective or step.description), step_type=step.step_type, step_index=step_index, description=step.description, subagent=step.subagent or "", allowed_tools=list(step.allowed_tools or []), plan_version=int(gstate.get("plan_version") or 1), attempt=attempt)
+        current_task = normalize_tasks(gstate.get("tasks")).get(task_id)
+        attempt = int((current_task or {}).get("attempt") or 0) + 1
+        if current_task is not None and current_task["execution_status"] != TaskExecutionStatus.PENDING.value:
+            _emit(
+                session,
+                "recovery.decided",
+                phase=WorkflowPhase.EXECUTE.value,
+                status="duplicate",
+                plan_version=int(gstate.get("plan_version") or 1),
+                task_id=task_id,
+                attempt=int(current_task.get("attempt") or 0),
+                attributes={
+                    "decision": "skip_duplicate_worker",
+                    "execution_status": current_task["execution_status"],
+                    "dispatch_wave_id": int(gstate.get("dispatch_wave_id") or 0),
+                },
+            )
+            return transition_update(
+                gstate,
+                WorkflowPhase.EXECUTE,
+                {
+                    "worker_results": [
+                        {
+                            "task_id": task_id,
+                            "ok": False,
+                            "status": "duplicate_skipped",
+                            "summary": "duplicate task attempt suppressed",
+                            "payload": {"duplicate": True},
+                        }
+                    ]
+                },
+            )
+        dispatch_wave_id = int(gstate.get("dispatch_wave_id") or 0)
+        task = ResearchTask(task_id=task_id, objective=str(step.objective or step.description), step_type=step.step_type, step_index=step_index, description=step.description, subagent=step.subagent or "", allowed_tools=list(step.allowed_tools or []), plan_version=int(gstate.get("plan_version") or 1), attempt=attempt, dispatch_wave_id=dispatch_wave_id)
         context = ResearchContext(run_id=session.run_id, query=session.ctx.task_query, user_id=session.ctx.user_id, tenant_id=session.ctx.tenant_id, project_id=session.ctx.project_id, session_id=session.session_id)
         running = transition_task(gstate.get("tasks"), task_id, execution_status=TaskExecutionStatus.RUNNING, attempt=attempt, timestamp=_now())
         result = await WorkerExecutorV2(self.harness, session).execute(task, context)
@@ -698,6 +785,7 @@ class ResearchGraphRunner:
                 "result_status": result_status.value,
                 "failure": failure or {},
                 "evidence_refs": result.evidence_refs,
+                "dispatch_wave_id": dispatch_wave_id,
             },
         )
         for evidence_id in result.evidence_refs:
@@ -716,15 +804,50 @@ class ResearchGraphRunner:
                     "source_quality": "untrusted_external",
                 },
             )
-        return transition_update(gstate, WorkflowPhase.EXECUTE, {"tasks": tasks, "worker_results": [row], "evidence_refs": result.evidence_refs, "findings": normalized_findings})
+        return transition_update(
+            gstate,
+            WorkflowPhase.EXECUTE,
+            {
+                "tasks": {task_id: tasks[task_id]},
+                "worker_results": [row],
+                "evidence_refs": result.evidence_refs,
+                "findings": normalized_findings,
+            },
+        )
 
     async def node_progress(self, gstate: dict[str, Any]) -> dict[str, Any]:
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
         state = _sync_assessments(session, dict(gstate))
-        previous = dict(gstate.get("control_decision") or {})
+        plan = session.state.plan
+        if plan is None:
+            return transition_update(gstate, WorkflowPhase.ASSESS, {"abort_reason": "missing_plan"})
+        business_gaps = sync_business_gaps(
+            plan,
+            state.get("tasks"),
+            gstate.get("business_gaps"),
+            resolved_gap_ids=[str(item) for item in state["progress_assessment"].get("resolved_gap_ids") or []],
+        )
+        state["business_gaps"] = business_gaps
+        snapshot = {
+            "gap_ids": [str(item) for item in state["progress_assessment"].get("gap_ids") or []],
+            "resolved_gap_ids": [
+                str(item) for item in state["progress_assessment"].get("resolved_gap_ids") or []
+            ],
+            "evidence_refs": sorted(
+                {str(item) for item in gstate.get("evidence_refs") or [] if str(item).strip()}
+            ),
+            "delivery_mode": str(state["delivery_readiness"].get("mode") or "none"),
+            "delivery_status": str(state["delivery_readiness"].get("status") or "unknown"),
+        }
+        previous_snapshot = dict(gstate.get("recovery_snapshot") or {})
+        stalled = int(gstate.get("stalled_cycles") or 0) + 1 if snapshot == previous_snapshot else 0
+        state["stalled_cycles"] = stalled
+        state["recovery_snapshot"] = snapshot
+        state = _sync_assessments(session, state)
+        state["business_gaps"] = business_gaps
+        state["recovery_snapshot"] = snapshot
         decision = decide_control(state)
-        stalled = int(gstate.get("stalled_cycles") or 0) + 1 if previous.get("decision_id") == decision["decision_id"] else 0
         state["execution_health"] = {**state["execution_health"], "stalled_cycles": stalled}
         state["control_decision"] = decision
         _emit_assessments(session, state, decision, WorkflowPhase.ASSESS.value)
@@ -738,81 +861,97 @@ class ResearchGraphRunner:
                     "control_decision": decision,
                 }
             )
-        return transition_update(gstate, WorkflowPhase.ASSESS, {key: state[key] for key in ("progress_assessment", "evidence_assessment", "execution_health", "delivery_readiness", "control_decision", "budget", "stalled_cycles") if key != "stalled_cycles"} | {"stalled_cycles": stalled, "budget_status": state["budget_status"]})
+        return transition_update(
+            gstate,
+            WorkflowPhase.ASSESS,
+            {
+                key: state[key]
+                for key in (
+                    "progress_assessment",
+                    "evidence_assessment",
+                    "execution_health",
+                    "delivery_readiness",
+                    "control_decision",
+                    "business_gaps",
+                    "recovery_snapshot",
+                    "budget",
+                )
+            }
+            | {
+                "stalled_cycles": stalled,
+                "budget_status": state["budget_status"],
+                "dispatch_wave_id": int(gstate.get("dispatch_wave_id") or 0),
+            },
+        )
 
     async def node_replan(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.planning.lead_planner import research_step_from_task
-
         session = _require_session(gstate)
+        sync_execution_projection(session.state, gstate)
         plan = session.state.plan
         if plan is None or session.state.intent is None:
             return transition_update(gstate, WorkflowPhase.REPLAN, {})
-        budget = dict(gstate.get("replan_budget") or {})
+        budget = dict(replan_budget_from_state(gstate))
         assessment = dict(gstate.get("progress_assessment") or {})
-        signals = list(
-            dict.fromkeys(
-                [
-                    *[str(item) for item in assessment.get("coverage_gaps") or []],
-                    *[str(item) for item in assessment.get("missing_dimensions") or []],
-                ]
-            )
-        )[:2]
-        existing_task_ids = {
-            step.resolved_task_id(index) for index, step in enumerate(plan.steps)
+        gap_ids = [str(item) for item in assessment.get("gap_ids") or [] if str(item).strip()]
+        if not gap_ids:
+            gap_ids = [
+                gap_id
+                for _index, step in active_research_steps(plan)
+                if not (isinstance(step.metadata, dict) and step.metadata.get("optional"))
+                for gap_id in step_gap_ids(step)
+            ]
+        patch = build_replacement_patch(
+            plan,
+            gstate.get("tasks"),
+            gap_ids=gap_ids,
+            limits=recovery_limits_from_state(gstate),
+            rejected_hashes=[str(item) for item in gstate.get("rejected_patch_hashes") or []],
+            previous_gaps=gstate.get("business_gaps"),
+        )
+        attempted = int(budget.get("attempted") or 0) + 1
+        applied = int(budget.get("applied") or 0) + (1 if patch["applied"] else 0)
+        budget.update(attempted=attempted, applied=applied)
+        rejected_hashes = [str(item) for item in gstate.get("rejected_patch_hashes") or []]
+        if not patch["applied"]:
+            rejected_hashes = list(dict.fromkeys([*rejected_hashes, patch["fingerprint"]]))
+        session.state.plan = patch["plan"]
+        session.state.replan_count = applied
+        from_plan_version = int(gstate.get("plan_version") or patch["plan"].plan_version)
+        to_plan_version = patch["plan"].plan_version if patch["applied"] else from_plan_version
+        event_type = "replan.applied" if patch["applied"] else "replan.rejected"
+        common_attributes = {
+            "patch_id": f"patch:{session.run_id}:{attempted}",
+            "triggered_by": "progress_gap",
+            "target_gap_ids": patch["target_gap_ids"],
+            "from_plan_version": from_plan_version,
+            "to_plan_version": to_plan_version,
+            "superseded_task_ids": patch["superseded_task_ids"],
+            "added_task_ids": patch["added_task_ids"],
+            "recovery_generation": patch["recovery_generation"],
+            "max_recovery_generation": int(recovery_limits_from_state(gstate)["max_recovery_generation"]),
+            "attempted": attempted,
+            "max_attempts": int(budget.get("max_attempts") or 0),
+            "fingerprint": patch["fingerprint"],
         }
-        added_tasks: list[str] = []
-        for signal in signals:
-            gap_key = signal
-            for prefix in ("required_task:", "task:", "dimension:"):
-                if gap_key.startswith(prefix):
-                    gap_key = gap_key[len(prefix):]
-                    break
-            if not gap_key:
-                continue
-            new_task_id = f"{gap_key}_recovery"
-            suffix = 2
-            while new_task_id in existing_task_ids:
-                new_task_id = f"{gap_key}_recovery_{suffix}"
-                suffix += 1
-            if len(plan.steps) >= 12:
-                break
-            plan.steps.append(
-                research_step_from_task(
-                    task_id=new_task_id,
-                    objective=f"补充证据：{gap_key}",
-                    depends_on=[],
-                    sources=["web"],
-                    required=True,
-                )
-            )
-            existing_task_ids.add(new_task_id)
-            added_tasks.append(new_task_id)
-        plan.plan_version += 1
-        session.state.plan = plan
-        budget.update(attempted=int(budget.get("attempted") or 0) + 1, applied=int(budget.get("applied") or 0) + len(added_tasks))
-        session.state.replan_count = int(budget["applied"])
-        existing_tasks = normalize_tasks(gstate.get("tasks"))
-        tasks = {**initialize_tasks(plan), **existing_tasks}
         _emit(
             session,
-            "replan.applied",
+            event_type,
             phase=WorkflowPhase.REPLAN.value,
-            status="ok",
-            plan_version=plan.plan_version,
-            attributes={
-                "patch_id": f"patch:{session.run_id}:{plan.plan_version}",
-                "triggered_by": "progress_gap",
-                "target_gap_ids": signals,
-                "from_plan_version": int(plan.plan_version) - 1,
-                "to_plan_version": plan.plan_version,
-                "added_tasks": added_tasks,
-                "replan_budget": budget,
-            },
+            status="ok" if patch["applied"] else "no_op",
+            plan_version=to_plan_version,
+            attributes=common_attributes,
         )
         return transition_update(
             gstate,
             WorkflowPhase.REPLAN,
-            {"plan": plan.to_dict(), "plan_version": plan.plan_version, "tasks": tasks, "replan_budget": budget},
+            {
+                "plan": patch["plan"].to_dict(),
+                "plan_version": to_plan_version,
+                "tasks": patch["tasks"],
+                "business_gaps": patch["business_gaps"],
+                "replan_budget": budget,
+                "rejected_patch_hashes": rejected_hashes,
+            },
         )
 
     async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:

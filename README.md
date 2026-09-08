@@ -48,8 +48,10 @@ Search is only a tool environment used to study:
 
 ```text
 Simple Fact → Fast Path → Source Gate → Answer
-Other Task → Brief → research-only Plan → parallel Workers → Assessments → ControlPolicy → Synthesis → TerminalPolicy → Answer
+Other Task → Brief → research-only Plan → parallel Workers → dispatch barrier → Assessments → ControlPolicy → Synthesis → TerminalPolicy → Answer
 ```
+
+Replan 使用稳定 Business Gap 与 replacement task：旧任务被 supersede，新任务继承同一 Gap；恢复次数、代数和同 Gap 次数都有硬上限。
 
 `direct` 只用于对照实验，不是产品能力：
 

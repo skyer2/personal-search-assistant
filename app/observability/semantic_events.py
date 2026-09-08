@@ -98,6 +98,7 @@ def worker_event_attributes(
     search_mode: str = "",
     task_shape: str = "",
     execution_path: str = "",
+    dispatch_wave_id: int = 0,
     execution_status: str = "",
     result_status: str = "",
     fail_reason: str = "",
@@ -113,6 +114,7 @@ def worker_event_attributes(
         "search_mode": str(search_mode or ""),
         "task_shape": str(task_shape or ""),
         "execution_path": str(execution_path or ""),
+        "dispatch_wave_id": _optional_int(dispatch_wave_id) or 0,
         "execution_status": str(execution_status or ""),
         "result_status": str(result_status or ""),
         "fail_reason": str(fail_reason or ""),
@@ -127,12 +129,14 @@ def progress_event_attributes(
     assessment: dict[str, Any] | None,
     *,
     plan_version: int = 1,
+    dispatch_wave_id: int = 0,
 ) -> dict[str, Any]:
     value = dict(assessment or {})
     identity = {
         "status": str(value.get("status") or "unknown"),
         "reason_codes": _strings(value.get("reason_codes")),
         "coverage_gaps": _strings(value.get("coverage_gaps")),
+        "gap_ids": _strings(value.get("gap_ids")),
         "missing_dimensions": _strings(value.get("missing_dimensions")),
         "unresolved_conflicts": _strings(value.get("unresolved_conflicts")),
     }
@@ -142,6 +146,8 @@ def progress_event_attributes(
         "stale_evidence": _strings(value.get("stale_evidence")),
         "unmet_success_criteria": _strings(value.get("unmet_success_criteria")),
         "resolved_gap_ids": _strings(value.get("resolved_gap_ids")),
+        "unresolved_gap_count": len(_strings(value.get("gap_ids"))),
+        "dispatch_wave_id": _optional_int(dispatch_wave_id) or 0,
         "plan_version": _optional_int(value.get("plan_version")) or int(plan_version or 1),
         "progress_id": f"progress:{_digest(identity)}",
     }
