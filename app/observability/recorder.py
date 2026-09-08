@@ -640,7 +640,7 @@ class AgentTelemetry:
             self.metrics.inc("harness.replan.applied")
         if event.type == EventType.REPLAN_REJECTED:
             self.metrics.inc("harness.replan.rejected")
-        if event.type == EventType.PROGRESS_ASSESSED and str((event.attributes or {}).get("verdict") or "") == "gap":
+        if event.type == EventType.PROGRESS_ASSESSED and str(event.status or "") == "gap":
             self.metrics.inc("harness.progress.gap")
         if event.type == EventType.GEN_AI_CHAT:
             tokens = float((event.attributes or {}).get("total_tokens") or 0)

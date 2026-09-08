@@ -21,7 +21,7 @@ interface TraceViewerProps {
 
 function statusColor(status: unknown): string {
   const value = String(status || "").toLowerCase();
-  if (["ok", "pass", "enough", "success", "done"].includes(value)) {
+  if (["ok", "pass", "sufficient", "success", "done"].includes(value)) {
     return "green";
   }
   if (["failed", "error", "fail", "abort", "rejected"].includes(value)) {
@@ -486,6 +486,20 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       { title: "ms", dataIndex: "duration_ms", width: 100, key: "duration_ms" },
                       { title: "Attempt", dataIndex: "attempt", width: 90, key: "attempt" },
                       {
+                        title: "Execution",
+                        dataIndex: "execution_status",
+                        width: 110,
+                        key: "execution_status",
+                        render: (value: unknown) => <Tag color={statusColor(value)}>{asText(value)}</Tag>
+                      },
+                      {
+                        title: "Result",
+                        dataIndex: "result_status",
+                        width: 100,
+                        key: "result_status",
+                        render: (value: unknown) => <Tag color={value === "partial" ? "orange" : statusColor(value)}>{asText(value)}</Tag>
+                      },
+                      {
                         title: "Plan",
                         dataIndex: "plan_version",
                         width: 80,
@@ -533,7 +547,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                 ) : null}
                 {progress.length > 0 && replanCount === 0 ? (
                   <Alert
-                    message="进度已评估但未应用 PlanPatch。verdict=enough，或 gap 但被 max_replan / validator 拦住时，后续 Worker 仍是原计划 READY 队列。"
+                    message="进度已评估但未应用 PlanPatch。status=sufficient，或 gap 但被 max_replan / validator 拦住时，后续 Worker 仍是原计划 READY 队列。"
                     showIcon
                     type="info"
                   />
@@ -547,11 +561,11 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       size="small"
                       columns={[
                         {
-                          title: "Verdict",
-                          dataIndex: "verdict",
+                          title: "Status",
+                          dataIndex: "status",
                           width: 110,
-                          key: "verdict",
-                          render: (verdict: unknown) => <Tag color={statusColor(verdict)}>{asText(verdict)}</Tag>
+                          key: "status",
+                          render: (status: unknown) => <Tag color={statusColor(status)}>{asText(status)}</Tag>
                         },
                         {
                           title: "Plan",
@@ -561,24 +575,32 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                           render: (version: unknown) => (version == null || version === "" ? "-" : `v${version}`)
                         },
                         {
-                          title: "Reason",
-                          dataIndex: "reason",
+                          title: "Reasons",
+                          dataIndex: "reason_codes",
                           width: 280,
-                          key: "reason",
-                          render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
+                          key: "reason_codes",
+                          render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
                         },
                         {
-                          title: "Gaps",
+                          title: "Coverage Gaps",
                           width: 280,
-                          key: "gaps",
-                          render: (_, row) => <div className="table-wrap-cell">{asText(row.gaps)}</div>
+                          dataIndex: "coverage_gaps",
+                          key: "coverage_gaps",
+                          render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
+                        },
+                        {
+                          title: "Missing Dimensions",
+                          dataIndex: "missing_dimensions",
+                          width: 260,
+                          key: "missing_dimensions",
+                          render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
                         },
                         {
                           title: "Conflicts",
-                          dataIndex: "conflict_count",
-                          width: 100,
-                          key: "conflict_count",
-                          render: (value: unknown) => asText(value, "0")
+                          dataIndex: "unresolved_conflicts",
+                          width: 220,
+                          key: "unresolved_conflicts",
+                          render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value, "0")}</div>
                         }
                       ]}
                     />

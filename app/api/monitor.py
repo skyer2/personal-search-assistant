@@ -70,7 +70,7 @@ class ToolMonitor:
                 thread_id = get_thread_context()
                 manager_loop = self.websocket_manager.loop
 
-                if manager_loop and thread_id:
+                if manager_loop and thread_id and self.websocket_manager.has_connections(thread_id):
                     self._send_to_websocket(payload, thread_id, manager_loop)
             except Exception as e:
                 print(f"[Monitor] WebSocket send failed: {e}")
@@ -361,6 +361,10 @@ class ConnectionManager:
         if not sockets:
             self.active_connections.pop(thread_id, None)
         print(f"Client disconnected: {thread_id} ({len(sockets)} remaining)")
+
+    def has_connections(self, thread_id: str) -> bool:
+        """Avoid scheduling WebSocket sends for threads with no active client."""
+        return bool(self.active_connections.get(thread_id))
 
     async def send_personal_message(self, message: str, websocket: WebSocket) -> None:
         """向指定 WebSocket 发送纯文本消息"""

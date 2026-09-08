@@ -37,19 +37,25 @@ export function RunProgress({
     : cancelling
       ? "正在取消当前任务"
       : runStatus === "completed"
-        ? "运行完成"
+        ? progress.completedCount === progress.totalCount
+          ? "运行完成 · 全部阶段已完成"
+          : "运行完成 · 阶段事件不完整"
         : runStatus === "partial"
           ? outcome?.title ?? "部分可确认"
         : runStatus === "failed"
           ? "执行失败"
           : runStatus === "interrupted"
             ? "执行已中断"
-          : "正在运行";
+          : runStatus === "unknown"
+            ? "运行已结束 · 状态未知"
+            : "正在运行";
 
   const detail = paused
     ? "计时与进度已冻结，审批通过后才会继续"
     : runStatus === "completed"
-      ? "全部阶段已完成"
+      ? progress.completedCount === progress.totalCount
+        ? "全部阶段已完成"
+        : "终端状态为完成，但未观察到全部阶段事件；进度不伪造为 100%。"
       : runStatus === "partial"
         ? [
             outcome?.detail ?? "已保留可确认结论，但未达到完整交付标准。",
@@ -61,7 +67,9 @@ export function RunProgress({
             .join(" · ")
       : progress.stepHint
         ? `${progress.currentLabel} · ${progress.stepHint}`
-        : progress.currentLabel;
+        : runStatus === "unknown"
+          ? "终端事件缺少状态字段，已保留真实阶段进度。"
+          : progress.currentLabel;
 
   return (
     <div

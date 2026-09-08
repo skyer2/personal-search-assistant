@@ -40,7 +40,7 @@ def test_span_context_push_pop_no_stale_parent():
     ctx_after_worker = current_context()
     assert ctx_after_worker.span_id == root_span
     # Emit after spans closed should use root as parent, not stale worker
-    event = tel.emit(EventType.PROGRESS_ASSESSED, phase="validate", status="enough")
+    event = tel.emit(EventType.PROGRESS_ASSESSED, phase="validate", status="sufficient")
     assert event.parent_span_id != worker_span or event.parent_span_id is None
     tel.finish_run(status="success", duration_ms=1, metadata={})
     records = [e.to_jsonl_record() for e in tel.journal.replay("s_pp")]
@@ -107,12 +107,20 @@ def test_trace_integrity_passes_complete_run():
         {"type": "run.started", "span_id": "root", "seq": 1, "attributes": {"search_mode": "agent"}},
         {"type": "brief.compiled", "span_id": "s1", "parent_span_id": "root", "seq": 2, "attributes": {}},
         {"type": "plan.created", "span_id": "s2", "parent_span_id": "root", "seq": 3, "attributes": {}},
-        {"type": "worker.started", "span_id": "s3", "seq": 4, "attributes": {}},
-        {"type": "worker.completed", "span_id": "s3", "seq": 5, "attributes": {}},
-        {"type": "progress.assessed", "span_id": "s4", "seq": 6, "attributes": {"verdict": "enough"}},
-        {"type": "synthesis.completed", "span_id": "s5", "seq": 7, "attributes": {}},
-        {"type": "quality.assessed", "span_id": "s6", "seq": 8, "attributes": {"passed": True}},
-        {"type": "run.completed", "span_id": "root", "seq": 9, "status": "success", "attributes": {}},
+        {"type": "worker.started", "span_id": "s3", "seq": 4, "task_id": "t1", "attributes": {}},
+        {"type": "worker.completed", "span_id": "s3", "seq": 5, "task_id": "t1", "attributes": {}},
+        {
+            "type": "progress.assessed",
+            "span_id": "s4",
+            "seq": 6,
+            "status": "sufficient",
+            "attributes": {"status": "sufficient", "reason_codes": ["required_research_complete"], "coverage_gaps": []},
+        },
+        {"type": "control.decided", "span_id": "s4", "seq": 7, "status": "synthesize", "attributes": {"action": "synthesize"}},
+        {"type": "synthesis.completed", "span_id": "s5", "seq": 8, "attributes": {}},
+        {"type": "quality.assessed", "span_id": "s6", "seq": 9, "attributes": {"passed": True}},
+        {"type": "run.terminated", "span_id": "root", "seq": 10, "status": "success", "attributes": {"termination": {"outcome": "success"}}},
+        {"type": "run.completed", "span_id": "root", "seq": 11, "status": "success", "attributes": {}},
     ]
     result = check_trace_integrity(events, run_status="success")
     assert result["passed"]

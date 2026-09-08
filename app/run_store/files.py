@@ -110,6 +110,20 @@ def resolve_output_file(output_root: Path, session_id: str, relative_name: str) 
     return target
 
 
+def resolve_run_output_file(
+    output_root: Path,
+    session_id: str,
+    run_id: str,
+    relative_name: str,
+) -> Path:
+    """Resolve a file strictly inside one run output directory."""
+    root = run_output_dir(output_root, session_id, run_id).resolve()
+    target = (root / relative_name).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError("path escapes run output directory")
+    return target
+
+
 def list_upload_files_from_disk(updated_root: Path, session_id: str) -> list[dict[str, Any]]:
     root = session_upload_dir(updated_root, session_id)
     if not root.exists():

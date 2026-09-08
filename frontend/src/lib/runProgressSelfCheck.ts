@@ -47,12 +47,6 @@ export function runProgressSelfCheck(): string[] {
   if (pausedProgress.percent !== liveProgress.percent) {
     errors.push("HITL pause must not rewind or animate progress");
   }
-  const completed = computePhaseProgress(runningEvents, { completed: true });
-  if (completed.percent !== 100) errors.push("completed percent should be 100");
-  if (completed.items.some((item) => item.tone !== "done")) {
-    errors.push("completed pipeline should mark every phase done");
-  }
-
   const elapsedErrors = elapsedClockSelfCheck();
   errors.push(...elapsedErrors.map((error) => `elapsed: ${error}`));
   return errors;

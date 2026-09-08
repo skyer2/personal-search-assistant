@@ -54,7 +54,21 @@ def _events(run_status: str) -> list[dict]:
             "run_id": "r1",
             "session_id": "s1",
             "seq": 6,
-            "attributes": {"status": "gap", "verdict": "gap"},
+            "attributes": {
+                "status": "gap",
+                "reason_codes": ["required_research_failed"],
+                "coverage_gaps": ["required_task:t_landscape"],
+            },
+        },
+        {
+            "type": "control.decided",
+            "span_id": "progress",
+            "parent_span_id": "root",
+            "run_id": "r1",
+            "session_id": "s1",
+            "seq": 7,
+            "status": "deliver_partial",
+            "attributes": {"action": "deliver_partial"},
         },
         {
             "type": "synthesis.completed",
@@ -62,7 +76,7 @@ def _events(run_status: str) -> list[dict]:
             "parent_span_id": "root",
             "run_id": "r1",
             "session_id": "s1",
-            "seq": 7,
+            "seq": 8,
         },
         {
             "type": "quality.assessed",
@@ -70,15 +84,24 @@ def _events(run_status: str) -> list[dict]:
             "parent_span_id": "root",
             "run_id": "r1",
             "session_id": "s1",
-            "seq": 8,
+            "seq": 9,
             "attributes": {"passed": True},
+        },
+        {
+            "type": "run.terminated",
+            "span_id": "root",
+            "run_id": "r1",
+            "session_id": "s1",
+            "seq": 10,
+            "status": "partial",
+            "attributes": {"termination": {"outcome": "partial", "reason": "degraded_delivery"}},
         },
         {
             "type": "run.completed",
             "span_id": "root",
             "run_id": "r1",
             "session_id": "s1",
-            "seq": 9,
+            "seq": 11,
             "status": run_status,
             "attributes": {
                 "termination": {
@@ -102,4 +125,3 @@ def test_assessed_events_are_required_and_span_tree_has_root():
     assert result["span_tree"]["span_count"] > 0
     assert result["span_tree"]["root_count"] >= 1
     assert result["span_tree"]["cycle_count"] == 0
-

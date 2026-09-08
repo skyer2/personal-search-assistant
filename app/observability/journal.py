@@ -210,6 +210,8 @@ def _coalesce_worker_row(
         "attempt": key[1],
         "plan_version": event.get("plan_version") if event.get("plan_version") is not None else attrs.get("plan_version"),
         "objective": attrs.get("objective"),
+        "execution_status": attrs.get("execution_status"),
+        "result_status": attrs.get("result_status"),
         "fail_reason": attrs.get("fail_reason") or event.get("fail_reason"),
         "evidence_ids": attrs.get("evidence_ids") or [],
         "finding_ids": attrs.get("finding_ids") or [],
@@ -229,7 +231,18 @@ def _coalesce_worker_row(
     terminal = existing.get("type") in _WORKER_TERMINAL
     if event_type in _WORKER_TERMINAL or not terminal:
         existing["type"] = event_type
-    for field in ("status", "duration_ms", "plan_version", "timestamp", "confidence", "tool_calls", "brief_id", "plan_id"):
+    for field in (
+        "status",
+        "duration_ms",
+        "plan_version",
+        "timestamp",
+        "confidence",
+        "tool_calls",
+        "brief_id",
+        "plan_id",
+        "execution_status",
+        "result_status",
+    ):
         if incoming.get(field) not in (None, ""):
             existing[field] = incoming[field]
     if incoming.get("objective"):
@@ -278,9 +291,11 @@ def summarize_trace(
     for event in events:
         event_type = str(event.get("type") or event.get("event") or "")
         attrs = event.get("attributes") if isinstance(event.get("attributes"), dict) else {}
-        if event_type in {"run.completed", "run.failed", "run_summary"}:
+        if event_type in {"run.completed", "run.failed", "run.terminated", "run_summary"}:
             metadata = attrs.get("metadata") if isinstance(attrs.get("metadata"), dict) else {}
             candidate = metadata.get("termination") if isinstance(metadata.get("termination"), dict) else None
+            if candidate is None and isinstance(attrs.get("termination"), dict):
+                candidate = attrs["termination"]
             if candidate:
                 termination = dict(candidate)
             elif str(event.get("status") or "") == "partial":
@@ -359,16 +374,13 @@ def summarize_trace(
                 {
                     "type": event_type,
                     "progress_id": attrs.get("progress_id"),
-                    "verdict": attrs.get("verdict") or event.get("status"),
-                    "reason": attrs.get("reason"),
-                    "issues": attrs.get("issues") or [],
-                    "gaps": attrs.get("gaps") or [],
-                    "open_gap_ids": attrs.get("open_gap_ids") or [],
-                    "resolved_gap_ids": attrs.get("resolved_gap_ids") or [],
-                    "conflict_count": attrs.get("conflict_count"),
+                    "status": attrs.get("status") or event.get("status"),
+                    "reason_codes": attrs.get("reason_codes") or [],
+                    "coverage_gaps": attrs.get("coverage_gaps") or [],
                     "missing_dimensions": attrs.get("missing_dimensions") or [],
-                    "plan_version": event.get("plan_version"),
-                    "status": event.get("status"),
+                    "resolved_gap_ids": attrs.get("resolved_gap_ids") or [],
+                    "unresolved_conflicts": attrs.get("unresolved_conflicts") or [],
+                    "plan_version": event.get("plan_version") or attrs.get("plan_version"),
                     "timestamp": event.get("timestamp"),
                 }
             )
@@ -454,7 +466,7 @@ def summarize_trace(
                     "type": event_type,
                     "tool_calls": attrs.get("tool_calls") or attrs.get("tool_calls_count"),
                     "tokens": attrs.get("total_tokens") or attrs.get("tokens"),
-                    "progress": attrs.get("progress") or attrs.get("verdict"),
+                    "progress": attrs.get("progress"),
                     "replan": attrs.get("replan"),
                     "evidence": attrs.get("evidence") or attrs.get("evidence_ids") or [],
                     "target_span_id": attrs.get("target_span_id"),

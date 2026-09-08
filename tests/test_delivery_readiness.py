@@ -13,7 +13,17 @@ def test_unknown_facts_block_delivery():
 def test_partial_evidence_produces_degraded_delivery():
     readiness = assess_delivery(
         {
-            "progress_assessment": {"status": "sufficient"},
+            "plan": {
+                "steps": [
+                    {
+                        "step_type": "research",
+                        "task_id": "t0",
+                        "description": "collect evidence",
+                        "objective": "collect evidence",
+                    }
+                ],
+                "plan_version": 1,
+            },
             "evidence_assessment": {"status": "partial", "trusted_evidence_count": 1},
             "tasks": {
                 "t0": {
@@ -33,7 +43,17 @@ def test_partial_evidence_produces_degraded_delivery():
 def test_stalled_execution_is_a_limitation_not_a_progress_fact():
     readiness = assess_delivery(
         {
-            "progress_assessment": {"status": "sufficient"},
+            "plan": {
+                "steps": [
+                    {
+                        "step_type": "research",
+                        "task_id": "t0",
+                        "description": "collect evidence",
+                        "objective": "collect evidence",
+                    }
+                ],
+                "plan_version": 1,
+            },
             "evidence_assessment": {"status": "sufficient", "trusted_evidence_count": 2},
             "stalled_cycles": 2,
             "tasks": {

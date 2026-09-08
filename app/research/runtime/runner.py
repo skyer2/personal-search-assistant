@@ -13,6 +13,7 @@ from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep, TaskInte
 from app.research.assessment.delivery import assess_delivery
 from app.research.assessment.evidence import assess_evidence
 from app.research.assessment.execution_health import assess_execution_health
+from app.research.assessment.progress import assess_progress
 from app.research.control.policy import decide_control
 from app.research.control.terminal_policy import terminal_update
 from app.research.control.transitions import transition_update
@@ -29,6 +30,17 @@ from app.research.domain.task_state import (
 from app.research.runtime.project import brief_from_intent, sync_execution_projection
 from app.research.runtime.scheduler import annotate_plan_tasks, research_only_plan, required_research_ids
 from app.research.runtime.state import empty_research_state
+from app.observability.semantic_events import (
+    brief_event_attributes,
+    control_decision_event_attributes,
+    delivery_event_attributes,
+    evidence_event_attributes,
+    execution_health_event_attributes,
+    plan_event_attributes,
+    progress_event_attributes,
+    quality_event_attributes,
+    termination_event_attributes,
+)
 
 logger = logging.getLogger(__name__)
 _SESSIONS: dict[str, RunSession] = {}
@@ -127,9 +139,10 @@ def _evidence_snapshot(session: RunSession, state: dict[str, Any]) -> dict[str, 
     for locator in locators:
         if locator.startswith(("http://", "https://")):
             domains.add(locator.split("/")[2].lower())
+    evidence_refs = [str(item) for item in state.get("evidence_refs") or [] if str(item).strip()]
     return {
-        "status": "sufficient" if primary >= 1 or high_quality >= 2 else ("partial" if sources else "insufficient"),
-        "evidence_count": len(sources) or len(state.get("evidence_refs") or []),
+        "status": "sufficient" if primary >= 1 or high_quality >= 2 else ("partial" if sources or evidence_refs else "insufficient"),
+        "evidence_count": len(sources) or len(evidence_refs),
         "trusted_evidence_count": primary + high_quality,
         "primary_source_count": primary,
         "independent_source_count": len(domains),
@@ -137,52 +150,13 @@ def _evidence_snapshot(session: RunSession, state: dict[str, Any]) -> dict[str, 
         "unsupported_claims": 0,
         "unresolved_conflicts": [],
         "stale_sources": [],
-        "reason_codes": ["citation_subsystem"],
-    }
-
-
-def _progress_snapshot(state: dict[str, Any]) -> dict[str, Any]:
-    plan_raw = state.get("plan")
-    plan = ExecutionPlan.from_dict(plan_raw) if isinstance(plan_raw, dict) and plan_raw else None
-    required = required_research_ids(plan) if plan is not None else []
-    tasks = normalize_tasks(state.get("tasks"))
-    succeeded = [task_id for task_id in required if tasks.get(task_id, {}).get("execution_status") == TaskExecutionStatus.SUCCEEDED.value]
-    partial = [
-        task_id
-        for task_id in required
-        if tasks.get(task_id, {}).get("execution_status") == TaskExecutionStatus.FAILED.value
-        and tasks.get(task_id, {}).get("result_status") == ResultStatus.PARTIAL.value
-    ]
-    terminal = [task_id for task_id in required if tasks.get(task_id, {}).get("execution_status") not in {TaskExecutionStatus.PENDING.value, TaskExecutionStatus.RUNNING.value}]
-    evidence = assess_evidence(state)
-    if not required:
-        status = "unknown"
-    elif terminal and len(terminal) == len(required):
-        status = "sufficient" if succeeded or (partial and evidence["trusted_evidence_count"]) else "gap"
-    elif succeeded or partial:
-        status = "gap"
-    else:
-        status = "unknown"
-    missing = [
-        task_id
-        for task_id in required
-        if tasks.get(task_id, {}).get("execution_status") in {TaskExecutionStatus.PENDING.value, TaskExecutionStatus.RUNNING.value}
-    ]
-    return {
-        "status": status,
-        "coverage_gaps": [f"task:{task_id}" for task_id in missing],
-        "missing_dimensions": [f"task:{task_id}" for task_id in missing],
-        "unresolved_conflicts": [],
-        "low_confidence_claims": [],
-        "stale_evidence": [],
-        "unmet_success_criteria": [],
-        "reason_codes": ["required_research_state"],
+        "reason_codes": ["citation_subsystem"] if sources else (["artifact_evidence_refs"] if evidence_refs else []),
     }
 
 
 def _sync_assessments(session: RunSession, state: dict[str, Any]) -> dict[str, Any]:
     state["evidence_assessment"] = _evidence_snapshot(session, state)
-    state["progress_assessment"] = _progress_snapshot(state)
+    state["progress_assessment"] = assess_progress(state)
     state["execution_health"] = assess_execution_health(state)
     state["delivery_readiness"] = assess_delivery(state)
     state["budget"] = {**state.get("budget", {}), **_budget_snapshot(session)}
@@ -199,6 +173,7 @@ def _emit(
     phase: str,
     status: str,
     duration_ms: int | None = None,
+    plan_version: int | None = None,
     task_id: str | None = None,
     attempt: int | None = None,
     attributes: dict[str, Any] | None = None,
@@ -213,6 +188,7 @@ def _emit(
                 phase=phase,
                 status=status,
                 duration_ms=duration_ms,
+                plan_version=plan_version,
                 task_id=task_id,
                 attempt=attempt,
                 attributes=attributes or {},
@@ -222,25 +198,28 @@ def _emit(
 
 
 def _emit_assessments(session: RunSession, state: dict[str, Any], decision: dict[str, Any], phase: str) -> None:
-    for event_type, key in (
-        ("progress.assessed", "progress_assessment"),
-        ("evidence.assessed", "evidence_assessment"),
-        ("execution_health.assessed", "execution_health"),
-        ("delivery.assessed", "delivery_readiness"),
-    ):
+    plan_version = int(state.get("plan_version") or 1)
+    assessment_events = (
+        ("progress.assessed", "progress_assessment", progress_event_attributes),
+        ("evidence.assessed", "evidence_assessment", evidence_event_attributes),
+        ("execution_health.assessed", "execution_health", execution_health_event_attributes),
+        ("delivery.assessed", "delivery_readiness", delivery_event_attributes),
+    )
+    for event_type, key, event_attributes in assessment_events:
+        assessment = dict(state.get(key) or {})
         _emit(
             session,
             event_type,
             phase=phase,
-            status=str(dict(state.get(key) or {}).get("status") or "unknown"),
-            attributes=dict(state.get(key) or {}),
+            status=str(assessment.get("status") or "unknown"),
+            attributes=event_attributes(assessment) if key == "progress_assessment" else event_attributes(assessment),
         )
     _emit(
         session,
         "control.decided",
         phase=phase,
         status=str(decision["action"]),
-        attributes=decision,
+        attributes=control_decision_event_attributes(decision),
     )
 
 
@@ -312,6 +291,12 @@ class ResearchGraphRunner:
         )
         profile = route_decision.mode
         budget_cfg = budget_for_mode(profile, getattr(self.harness.harness_config, "personal_search", None) or {})
+        harness_replan_limit = getattr(self.harness.harness_config, "max_replan_count", None)
+        if harness_replan_limit is not None:
+            budget_cfg["max_replan_count"] = min(
+                int(budget_cfg["max_replan_count"]),
+                max(0, int(harness_replan_limit)),
+            )
         if route_decision.execution_path == "fast_path":
             budget_cfg = {**budget_cfg, "max_tool_calls": 3, "max_replan_count": 0, "parallel": False}
         payload = empty_research_state(
@@ -511,11 +496,11 @@ class ResearchGraphRunner:
             "brief.compiled",
             phase=WorkflowPhase.UNDERSTAND.value,
             status="ok",
-            attributes={
-                "brief": brief_from_intent(payload),
-                "search_mode": "agent",
-                "task_query": session.ctx.task_query,
-            },
+            attributes=brief_event_attributes(
+                brief_from_intent(payload),
+                run_id=session.run_id,
+                planner_source="intent",
+            ),
         )
         return transition_update(
             gstate,
@@ -583,14 +568,13 @@ class ResearchGraphRunner:
             "plan.created",
             phase=WorkflowPhase.PLAN.value,
             status="ok",
-            attributes={
-                "plan_id": f"plan:{session.run_id}:{plan.plan_version}",
-                "brief_id": f"brief:{session.run_id}",
-                "task_count": len(plan.steps),
-                "task_ids": [step.resolved_task_id(index) for index, step in enumerate(plan.steps)],
-                "planning_mode": plan.planning_mode,
-                "planner_source": planner_source,
-            },
+            plan_version=plan.plan_version,
+            attributes=plan_event_attributes(
+                plan,
+                brief_from_intent(intent.to_dict()),
+                run_id=session.run_id,
+                planner_source=planner_source,
+            ),
         )
         return transition_update(
             gstate,
@@ -668,9 +652,9 @@ class ResearchGraphRunner:
             if isinstance(resume, dict) and resume.get("_timeout"):
                 return transition_update(gstate, WorkflowPhase.EXECUTE, {"cancel_reason": "user_cancelled"})
         sync_execution_projection(session.state, gstate)
-        task = ResearchTask(task_id=task_id, objective=str(step.objective or step.description), step_type=step.step_type, step_index=step_index, description=step.description, subagent=step.subagent or "", allowed_tools=list(step.allowed_tools or []), plan_version=int(gstate.get("plan_version") or 1))
-        context = ResearchContext(run_id=session.run_id, query=session.ctx.task_query, user_id=session.ctx.user_id, tenant_id=session.ctx.tenant_id, project_id=session.ctx.project_id, session_id=session.session_id)
         attempt = int(normalize_tasks(gstate.get("tasks")).get(task_id, {}).get("attempt") or 0) + 1
+        task = ResearchTask(task_id=task_id, objective=str(step.objective or step.description), step_type=step.step_type, step_index=step_index, description=step.description, subagent=step.subagent or "", allowed_tools=list(step.allowed_tools or []), plan_version=int(gstate.get("plan_version") or 1), attempt=attempt)
+        context = ResearchContext(run_id=session.run_id, query=session.ctx.task_query, user_id=session.ctx.user_id, tenant_id=session.ctx.tenant_id, project_id=session.ctx.project_id, session_id=session.session_id)
         running = transition_task(gstate.get("tasks"), task_id, execution_status=TaskExecutionStatus.RUNNING, attempt=attempt, timestamp=_now())
         result = await WorkerExecutorV2(self.harness, session).execute(task, context)
         if not isinstance(result, WorkerResult):
@@ -716,6 +700,22 @@ class ResearchGraphRunner:
                 "evidence_refs": result.evidence_refs,
             },
         )
+        for evidence_id in result.evidence_refs:
+            _emit(
+                session,
+                "evidence.registered",
+                phase=WorkflowPhase.EXECUTE.value,
+                status="ok",
+                task_id=task_id,
+                attempt=attempt,
+                attributes={
+                    "evidence_id": evidence_id,
+                    "artifact_id": evidence_id,
+                    "source_kind": "artifact",
+                    "support_type": "partial",
+                    "source_quality": "untrusted_external",
+                },
+            )
         return transition_update(gstate, WorkflowPhase.EXECUTE, {"tasks": tasks, "worker_results": [row], "evidence_refs": result.evidence_refs, "findings": normalized_findings})
 
     async def node_progress(self, gstate: dict[str, Any]) -> dict[str, Any]:
@@ -749,13 +749,47 @@ class ResearchGraphRunner:
             return transition_update(gstate, WorkflowPhase.REPLAN, {})
         budget = dict(gstate.get("replan_budget") or {})
         assessment = dict(gstate.get("progress_assessment") or {})
-        gaps = [str(item).replace("task:", "") for item in assessment.get("missing_dimensions") or []][:2]
-        for gap in gaps:
-            if gap not in plan.steps and len(plan.steps) < 12:
-                plan.steps.append(research_step_from_task(task_id=f"{gap}_gap", objective=f"补充证据：{gap}", depends_on=[], sources=["web"], required=True))
+        signals = list(
+            dict.fromkeys(
+                [
+                    *[str(item) for item in assessment.get("coverage_gaps") or []],
+                    *[str(item) for item in assessment.get("missing_dimensions") or []],
+                ]
+            )
+        )[:2]
+        existing_task_ids = {
+            step.resolved_task_id(index) for index, step in enumerate(plan.steps)
+        }
+        added_tasks: list[str] = []
+        for signal in signals:
+            gap_key = signal
+            for prefix in ("required_task:", "task:", "dimension:"):
+                if gap_key.startswith(prefix):
+                    gap_key = gap_key[len(prefix):]
+                    break
+            if not gap_key:
+                continue
+            new_task_id = f"{gap_key}_recovery"
+            suffix = 2
+            while new_task_id in existing_task_ids:
+                new_task_id = f"{gap_key}_recovery_{suffix}"
+                suffix += 1
+            if len(plan.steps) >= 12:
+                break
+            plan.steps.append(
+                research_step_from_task(
+                    task_id=new_task_id,
+                    objective=f"补充证据：{gap_key}",
+                    depends_on=[],
+                    sources=["web"],
+                    required=True,
+                )
+            )
+            existing_task_ids.add(new_task_id)
+            added_tasks.append(new_task_id)
         plan.plan_version += 1
         session.state.plan = plan
-        budget.update(attempted=int(budget.get("attempted") or 0) + 1, applied=int(budget.get("applied") or 0) + len(gaps))
+        budget.update(attempted=int(budget.get("attempted") or 0) + 1, applied=int(budget.get("applied") or 0) + len(added_tasks))
         session.state.replan_count = int(budget["applied"])
         existing_tasks = normalize_tasks(gstate.get("tasks"))
         tasks = {**initialize_tasks(plan), **existing_tasks}
@@ -764,7 +798,16 @@ class ResearchGraphRunner:
             "replan.applied",
             phase=WorkflowPhase.REPLAN.value,
             status="ok",
-            attributes={"plan_version": plan.plan_version, "added_tasks": gaps, "replan_budget": budget},
+            plan_version=plan.plan_version,
+            attributes={
+                "patch_id": f"patch:{session.run_id}:{plan.plan_version}",
+                "triggered_by": "progress_gap",
+                "target_gap_ids": signals,
+                "from_plan_version": int(plan.plan_version) - 1,
+                "to_plan_version": plan.plan_version,
+                "added_tasks": added_tasks,
+                "replan_budget": budget,
+            },
         )
         return transition_update(
             gstate,
@@ -801,7 +844,7 @@ class ResearchGraphRunner:
             "synthesis.started",
             phase=WorkflowPhase.SYNTHESIS.value,
             status="start",
-            attributes={"mode": mode, "evidence_count": len(evidence_refs)},
+            attributes={"mode": mode, "evidence_count": len(evidence_refs), "evidence_ids": evidence_refs},
         )
         result = await SynthesisExecutor(self.harness, session).execute(
             request,
@@ -830,9 +873,9 @@ class ResearchGraphRunner:
                 session,
                 "synthesis.completed",
                 phase=WorkflowPhase.SYNTHESIS.value,
-                status="ok",
-                duration_ms=result.duration_ms,
-                attributes={"mode": mode, "content_chars": len(final_content)},
+            status="ok",
+            duration_ms=result.duration_ms,
+            attributes={"mode": mode, "content_chars": len(final_content), "evidence_ids": result.evidence_refs},
             )
             return transition_update(
                 gstate,
@@ -858,7 +901,7 @@ class ResearchGraphRunner:
             phase=WorkflowPhase.SYNTHESIS.value,
             status="failed",
             duration_ms=result.duration_ms,
-            attributes={"mode": mode, "fail_reason": result.fail_reason},
+            attributes={"mode": mode, "fail_reason": result.fail_reason, "evidence_ids": result.evidence_refs},
         )
         return transition_update(
             gstate,
@@ -944,14 +987,14 @@ class ResearchGraphRunner:
             "quality.assessed",
             phase=WorkflowPhase.QUALITY.value,
             status=str(assessment["verdict"]),
-            attributes={"issues": assessment["issues"], "citation_metrics": assessment["citation_metrics"]},
+            attributes=quality_event_attributes(assessment),
         )
         _emit(
             session,
             "control.decided",
             phase=WorkflowPhase.QUALITY.value,
             status=str(decision["action"]),
-            attributes=decision,
+            attributes=control_decision_event_attributes(decision),
         )
         return transition_update(
             gstate,
@@ -992,6 +1035,13 @@ class ResearchGraphRunner:
                     "quality_attempted": bool(gstate.get("quality_assessment")),
                 }
             )
+        _emit(
+            session,
+            "run.terminated",
+            phase=WorkflowPhase.FINALIZE.value,
+            status=outcome,
+            attributes=termination_event_attributes(termination["termination"]),
+        )
         result = await self.harness._phase_finalize(
             session.state,
             session.ctx.session_dir,
@@ -1000,13 +1050,6 @@ class ResearchGraphRunner:
             deliverable_dir=session.ctx.deliverable_dir,
         )
         session.result = result
-        _emit(
-            session,
-            "run.terminated",
-            phase=WorkflowPhase.FINALIZE.value,
-            status=outcome,
-            attributes={"termination": termination["termination"]},
-        )
         return transition_update(
             gstate,
             WorkflowPhase.FINALIZE,

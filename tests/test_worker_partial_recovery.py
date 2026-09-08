@@ -5,7 +5,7 @@ import pytest
 from app.agent.harness.artifacts import ArtifactStore, set_artifact_store
 from app.agent.harness.state import PlanStep
 from app.research.execution.worker_executor import WorkerExecutorV2
-from app.research.runtime.worker import ResearchTask, salvage_worker_evidence
+from app.research.runtime.worker import ResearchContext, ResearchTask
 
 
 def _reset_store() -> ArtifactStore:
@@ -36,6 +36,7 @@ def test_timeout_without_evidence_is_failed_without_result():
     _reset_store()
     result = WorkerExecutorV2(None, None)._salvage_or_fail(
         _task(),
+        ResearchContext(run_id="run-worker", query="collect evidence"),
         _step(),
         2,
         0.0,
@@ -58,12 +59,13 @@ def test_timeout_with_evidence_is_failed_partial_and_keeps_failure():
         kind="web",
         locator="https://example.com/deepseek",
         title="DeepSeek profile",
-        metadata={"task_id": "t_timeout"},
+        metadata={"run_id": "run-worker", "task_id": "t_timeout"},
         step_index=2,
         step_type="research",
     )
     result = WorkerExecutorV2(None, None)._salvage_or_fail(
         _task(),
+        ResearchContext(run_id="run-worker", query="collect evidence"),
         _step(),
         2,
         0.0,

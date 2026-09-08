@@ -99,6 +99,7 @@ async def _run_worker_step_with_lease(
 
 def salvage_worker_evidence(
     *,
+    run_id: str,
     task_id: str,
     step_index: int,
     limit: int = 8,
@@ -112,8 +113,11 @@ def salvage_worker_evidence(
         artifacts = [
             item
             for item in store.iter_artifacts()
-            if item.step_index == step_index
-            or str(item.metadata.get("task_id") or "") == task_id
+            if str(item.metadata.get("run_id") or "") == run_id
+            and (
+                item.step_index == step_index
+                or str(item.metadata.get("task_id") or "") == task_id
+            )
         ][:limit]
     except Exception:
         return {"findings": [], "evidence_refs": [], "sources": []}
@@ -166,6 +170,7 @@ class ResearchTask:
     allowed_tools: list[str] = field(default_factory=list)
     source_policy: dict[str, Any] = field(default_factory=dict)
     plan_version: int = 1
+    attempt: int = 1
 
 
 @dataclass
@@ -504,6 +509,7 @@ class LangChainWorkerRuntime:
                     exec_ms = int((time.perf_counter() - exec_started) * 1000)
                     duration_ms = int((time.perf_counter() - worker_started) * 1000)
                     salvaged = salvage_worker_evidence(
+                        run_id=session.run_id,
                         task_id=task.task_id,
                         step_index=step_index,
                     )
@@ -721,6 +727,7 @@ class LangChainWorkerRuntime:
             if isinstance(exc, BudgetReservationError):
                 reason = str(exc.reason or "budget_tokens")
                 salvaged = salvage_worker_evidence(
+                    run_id=session.run_id,
                     task_id=task.task_id,
                     step_index=step_index,
                 )
@@ -780,6 +787,7 @@ class LangChainWorkerRuntime:
                     child = snapshot_worker_loop_state(session.state)
                     child.step_index = step_index
                 salvaged = salvage_worker_evidence(
+                    run_id=session.run_id,
                     task_id=task.task_id,
                     step_index=step_index,
                 )

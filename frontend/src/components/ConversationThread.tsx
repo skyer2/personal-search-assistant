@@ -218,8 +218,7 @@ function ProcessDock({
   const [open, setOpen] = useState(isLatest);
   const height = processHeight ?? 280;
   const phaseProgress = computePhaseProgress(events, {
-    paused: runStatus === "awaiting_approval",
-    completed: runStatus === "completed",
+    paused: runStatus === "awaiting_approval"
   });
 
   function handleResize(next: number) {
@@ -302,10 +301,12 @@ function AssistantMessage({
   result,
   runStatus,
   sessionId,
+  runId,
 }: Pick<ChatTurn, "events" | "files" | "isRunning" | "result"> & {
   elapsedClock: ElapsedClockState;
   runStatus: RunStatus;
   sessionId?: string;
+  runId?: string;
 }) {
   const durationLabel = <ElapsedTimer clock={elapsedClock} />;
   const isCancelled = events.some((event) => event.event === "task_cancelled");
@@ -332,14 +333,25 @@ function AssistantMessage({
         {files.length > 0 ? (
           <div className="deliverable-banner" aria-label="可下载文件">
             <div className="result-sheet-kicker">FILES</div>
-            <DeliverableFiles files={files} sessionId={sessionId} variant="banner" />
+            <DeliverableFiles
+              files={files}
+              runId={runId}
+              scope={runId ? "run" : "session"}
+              sessionId={sessionId}
+              variant="banner"
+            />
           </div>
         ) : null}
 
         {result ? (
           <div className="assistant-answer result-sheet">
             <div className="result-sheet-kicker">RESULT</div>
-            <MarkdownRenderer content={linkifyArtifactNames(result, files, sessionId)} />
+            <MarkdownRenderer
+              content={linkifyArtifactNames(result, files, sessionId, {
+                scope: runId ? "run" : "session",
+                runId
+              })}
+            />
           </div>
         ) : (
           <div
@@ -544,6 +556,7 @@ export function ConversationThread({
               result={turn.result}
               runStatus={turnStatus}
               sessionId={sessionId}
+              runId={turn.id}
             />
           </div>
         );

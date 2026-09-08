@@ -83,7 +83,7 @@ class InProcessMetrics:
             ("harness.replan.rejected", "harness_live_replan_rejected_total", "Rejected plan patches"),
             ("harness.replan.recovered", "harness_live_replan_recovered_total", "Replans that later closed target_gap_ids"),
             ("harness.replan.waste", "harness_live_replan_waste_total", "Runs that replanned and still failed"),
-            ("harness.progress.gap", "harness_live_progress_gap_total", "Progress evaluator GAP verdicts"),
+            ("harness.progress.gap", "harness_live_progress_gap_total", "Progress evaluator GAP status"),
             ("harness.worker.failed", "harness_live_worker_failed_total", "Failed worker executions"),
             ("harness.worker.retry", "harness_live_worker_retry_total", "Worker attempts > 1"),
             ("harness.tool.calls", "harness_live_tool_calls_total", "Tool starts"),

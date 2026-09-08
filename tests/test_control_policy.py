@@ -100,7 +100,7 @@ def test_policy_decision_matrix():
                 progress="gap",
                 max_replan=2,
             ),
-            "finalize_failure",
+            "replan",
         ),
         (
             state_with_task(
@@ -110,11 +110,12 @@ def test_policy_decision_matrix():
                 progress="sufficient",
                 evidence="partial",
             ),
-            "synthesize",
+            "deliver_partial",
         ),
         (
             state_with_task(
                 execution_status=TaskExecutionStatus.SUCCEEDED,
+                result_status=ResultStatus.COMPLETE,
                 progress="sufficient",
                 evidence="partial",
                 budget_status="exhausted",
@@ -125,6 +126,7 @@ def test_policy_decision_matrix():
         (
             state_with_task(
                 execution_status=TaskExecutionStatus.SUCCEEDED,
+                result_status=ResultStatus.COMPLETE,
                 progress="sufficient",
                 evidence="sufficient",
                 max_replan=3,
@@ -134,6 +136,7 @@ def test_policy_decision_matrix():
         (
             state_with_task(
                 execution_status=TaskExecutionStatus.SUCCEEDED,
+                result_status=ResultStatus.COMPLETE,
                 progress="sufficient",
                 evidence="sufficient",
                 quality={"verdict": "fail", "issues": ["evidence_partial"]},
@@ -146,7 +149,7 @@ def test_policy_decision_matrix():
         assert decision["action"] == expected
 
 
-def test_recovery_prefers_delivery_over_retry_and_respects_budget():
+def test_recovery_respects_evidence_quality_and_budget():
     failed_partial = state_with_task(
         execution_status=TaskExecutionStatus.FAILED,
         result_status=ResultStatus.PARTIAL,
@@ -154,8 +157,29 @@ def test_recovery_prefers_delivery_over_retry_and_respects_budget():
         evidence_refs=["e1"],
         progress="sufficient",
         evidence="partial",
+        max_replan=2,
     )
-    assert decide_control(failed_partial)["action"] == "synthesize"
+    assert decide_control(failed_partial)["action"] == "retry"
+
+    failed_partial_without_replan_budget = state_with_task(
+        execution_status=TaskExecutionStatus.FAILED,
+        result_status=ResultStatus.PARTIAL,
+        failure=dict(classify_failure("timeout")),
+        evidence_refs=["e1"],
+        progress="sufficient",
+        evidence="partial",
+        attempt=2,
+    )
+    assert decide_control(failed_partial_without_replan_budget)["action"] == "deliver_partial"
+
+    failed_partial_sufficient = state_with_task(
+        execution_status=TaskExecutionStatus.FAILED,
+        result_status=ResultStatus.PARTIAL,
+        failure=dict(classify_failure("timeout")),
+        evidence_refs=["e1", "e2"],
+        evidence="sufficient",
+    )
+    assert decide_control(failed_partial_sufficient)["action"] == "synthesize"
 
     budget_exhausted = state_with_task(
         execution_status=TaskExecutionStatus.FAILED,

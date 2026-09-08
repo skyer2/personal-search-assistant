@@ -109,7 +109,7 @@ export function buildPhaseTimeline(
 
 export function computePhaseProgress(
   events: MonitorMessage[],
-  options: { paused?: boolean; completed?: boolean } = {}
+  options: { paused?: boolean } = {}
 ): PhaseProgress {
   let items = buildPhaseTimeline(events, { paused: options.paused });
   const done = items.filter((item) => item.tone === "done").length;
@@ -122,37 +122,21 @@ export function computePhaseProgress(
   const runningCredit = current && (current.tone === "running" || current.tone === "paused") ? 0.45 : 0;
   let percent = Math.round(((done + runningCredit) / totalCount) * 100);
 
-  if (options.completed) {
-    percent = 100;
-    items = PHASE_ORDER.map((phase) => {
-      const existing = items.find((item) => item.phase === phase);
-      return {
-        phase,
-        status: "done",
-        tone: "done" as const,
-        durationMs: existing?.durationMs,
-        timestamp: existing?.timestamp ?? "",
-        data: existing?.data ?? {},
-        stepHint: ""
-      };
-    });
-  } else if (failed && percent < 8) {
+  if (failed && percent < 8) {
     percent = 8;
   }
 
   percent = Math.max(0, Math.min(100, percent));
 
-  const currentPhase = options.completed
-    ? "finalize"
-    : current?.phase ?? (events.length > 0 ? "understand" : "");
+  const currentPhase = current?.phase ?? (events.length > 0 ? "understand" : "");
   const currentLabel = currentPhase ? PHASE_LABELS[currentPhase] ?? currentPhase : "等待开始";
 
   return {
     percent,
     currentPhase,
     currentLabel,
-    stepHint: options.completed ? "" : current?.stepHint || "",
-    completedCount: options.completed ? totalCount : done,
+    stepHint: current?.stepHint || "",
+    completedCount: done,
     totalCount,
     items,
     hasFailed: failed

@@ -23,7 +23,12 @@ from app.observability.replay import (
 from app.agent.memory import get_memory_store
 from app.run_store.deletion import delete_run_cascade, delete_session_cascade
 from app.run_store import get_run_store
-from app.run_store.files import list_output_files, list_run_output_files, resolve_output_file
+from app.run_store.files import (
+    list_output_files,
+    list_run_output_files,
+    resolve_output_file,
+    resolve_run_output_file,
+)
 
 router = APIRouter()
 
@@ -369,3 +374,29 @@ async def list_run_artifacts(run_id: str):
         # Run endpoint 必须 Run Scope：禁止借 session_id 列出整段 Session 历史
         "files": await asyncio.to_thread(list_run_output_files, _OUTPUT_DIR, run.session_id, run_id),
     }
+
+
+@router.get("/api/runs/{run_id}/download")
+async def download_run_artifact(run_id: str, name: str, download: bool = False):
+    run = get_run_store().get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run_not_found")
+    try:
+        target = await asyncio.to_thread(
+            resolve_run_output_file,
+            _OUTPUT_DIR,
+            run.session_id,
+            run_id,
+            name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    is_pdf = target.suffix.lower() == ".pdf"
+    return FileResponse(
+        target,
+        filename=target.name,
+        media_type="application/pdf" if is_pdf else None,
+        content_disposition_type="attachment" if download or not is_pdf else "inline",
+    )

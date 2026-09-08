@@ -54,7 +54,7 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
         ),
         EventType.PROGRESS_ASSESSED: (
             "progress",
-            f"[progress] {attrs.get('verdict') or event.status or ''}",
+            f"[progress] {attrs.get('status') or event.status or ''}",
         ),
         EventType.REPLAN_PROPOSED: (
             "replan",

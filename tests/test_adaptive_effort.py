@@ -51,7 +51,7 @@ def test_compare_query_breadth_heavy_still_under_ceiling():
     assert effective.session_tool_calls <= hard.max_tool_calls
     assert effective.as_run_budget()["max_tool_calls"] == hard.max_tool_calls
     assert effective.as_run_budget()["initial_retrieval_units"] == effective.session_tool_calls
-    grant = grant_on_gap(effective, assessment={"verdict": "gap", "coverage_gaps": ["a", "b"]})
+    grant = grant_on_gap(effective, assessment={"status": "gap", "coverage_gaps": ["a", "b"]})
     assert grant["max_new_tasks"] <= hard.max_plan_patch_tasks
     assert grant["gap_severity"] >= 1
     print("[OK] breadth effort under hard ceiling")

@@ -133,6 +133,9 @@ def compact_search_payload(
             tool_name=tool_name,
             step_type=step_type,
             worker_task_id=worker_task_id,
+            step_index=step_index,
+            run_id=run_id,
+            session_id=session_id,
         )
         artifact_ids.append(artifact.artifact_id)
         cards.append(artifact.compact_card(contract.snippet_chars))

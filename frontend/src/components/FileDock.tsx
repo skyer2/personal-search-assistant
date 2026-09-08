@@ -47,10 +47,20 @@ interface FileDockProps {
   files: OutputFile[];
   onRefresh: () => void;
   sessionId?: string;
+  scope?: "session" | "run";
+  runId?: string;
   sessionPath: string;
 }
 
-export function FileDock({ files, onRefresh, sessionId, sessionPath }: FileDockProps) {
+export function FileDock({
+  files,
+  onRefresh,
+  sessionId,
+  scope = "session",
+  runId,
+  sessionPath
+}: FileDockProps) {
+  const downloadOptions = (download = false) => ({ download, scope, runId });
   return (
     <section className="console-panel file-panel" aria-labelledby="file-title">
       <div className="panel-heading">
@@ -93,7 +103,7 @@ export function FileDock({ files, onRefresh, sessionId, sessionPath }: FileDockP
                   <Button
                     aria-label={`打开 ${file.name}`}
                     className="icon-button"
-                    href={getDownloadUrl(file.path, sessionId)}
+                    href={getDownloadUrl(file.path, sessionId, downloadOptions())}
                     rel="noreferrer"
                     target="_blank"
                   >
@@ -105,7 +115,7 @@ export function FileDock({ files, onRefresh, sessionId, sessionPath }: FileDockP
                     aria-label={`下载 ${file.name}`}
                     className="icon-button"
                     download={file.name}
-                    href={getDownloadUrl(file.path, sessionId, { download: true })}
+                    href={getDownloadUrl(file.path, sessionId, downloadOptions(true))}
                     icon={<DownloadOutlined />}
                     shape="circle"
                   />

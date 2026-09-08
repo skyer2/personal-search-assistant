@@ -43,7 +43,14 @@ export function RunStatesPreview() {
   const checkErrors = runProgressSelfCheck();
   const running = computePhaseProgress(runningEvents);
   const paused = computePhaseProgress(pausedEvents, { paused: true });
-  const done = computePhaseProgress(runningEvents, { completed: true });
+  const done = computePhaseProgress([
+    ...runningEvents,
+    event("phase", "[build_context] ✓ done", { phase: "build_context", status: "done" }),
+    event("phase", "[execute] ✓ done", { phase: "execute", status: "done" }),
+    event("phase", "[compress] ✓ done", { phase: "compress", status: "done" }),
+    event("phase", "[validate] ✓ done", { phase: "validate", status: "done" }),
+    event("phase", "[finalize] ✓ done", { phase: "finalize", status: "done" })
+  ]);
 
   return (
     <div className="run-states-preview">

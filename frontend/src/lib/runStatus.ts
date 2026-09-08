@@ -9,7 +9,8 @@ export type RunStatus =
   | "failed"
   | "recoverable"
   | "interrupted"
-  | "partial";
+  | "partial"
+  | "unknown";
 
 export type RunOutcomeKind =
   | "execution_failed"
@@ -106,11 +107,16 @@ export function deriveRunStatus(input: {
   if (input.serverStatus === "partial") {
     return "partial";
   }
-  if (input.result || input.events.some((event) => event.event === "task_result") || input.serverStatus === "completed") {
+  const taskResult = [...input.events].reverse().find((event) => event.event === "task_result");
+  const taskResultStatus = typeof taskResult?.data?.status === "string" ? taskResult.data.status : "";
+  if (taskResultStatus === "completed" || input.serverStatus === "completed") {
     return "completed";
   }
   if (input.events.some((event) => event.event === "task_cancelled") || input.serverStatus === "interrupted") {
     return "interrupted";
+  }
+  if (taskResult || input.result) {
+    return "unknown";
   }
   return "idle";
 }
@@ -133,7 +139,8 @@ export function runStatusLabel(status: RunStatus): string {
     failed: "执行失败",
     recoverable: "可恢复",
     interrupted: "已中断",
-    partial: "部分可确认"
+    partial: "部分可确认",
+    unknown: "状态未知"
   };
   return labels[status];
 }

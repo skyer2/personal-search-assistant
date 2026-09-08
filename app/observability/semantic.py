@@ -180,7 +180,7 @@ def earliest_failure_origin(events: list[dict[str, Any]]) -> dict[str, Any] | No
                 attrs.get("passed") is False or event.get("status") in {"fail", "failed"}
             ):
                 origin = str(attrs.get("target_type") or attrs.get("failure.origin_stage") or "quality")
-            elif event_type == "progress.assessed" and str(attrs.get("verdict") or "") == "gap":
+            elif event_type == "progress.assessed" and str(attrs.get("status") or event.get("status") or "") == "gap":
                 # gap itself is not a failure unless never closed — skip here
                 continue
             else:

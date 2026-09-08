@@ -227,6 +227,59 @@ def test_download_pdf_inline_vs_attachment(tmp_path, monkeypatch):
     print("[OK] PDF download inline vs attachment")
 
 
+def test_run_artifact_download_is_run_scoped(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import session_routes
+    from app.run_store import RunStore
+
+    store = RunStore(tmp_path / "run-store.sqlite")
+    store.create_run(run_id="run-1", session_id="session-run", query="run files")
+    store.create_run(run_id="run-2", session_id="session-run", query="other run")
+    run_root = tmp_path / "output" / "session_session-run" / "runs" / "run-1" / "deliverables"
+    run_root.mkdir(parents=True)
+    (run_root / "report.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    monkeypatch.setattr(session_routes, "get_run_store", lambda: store)
+    monkeypatch.setattr(session_routes, "_OUTPUT_DIR", tmp_path / "output")
+    app = FastAPI()
+    app.include_router(session_routes.router)
+
+    with TestClient(app) as client:
+        listed = client.get("/api/runs/run-1/artifacts")
+        assert listed.status_code == 200
+        assert listed.json()["files"][0]["path"] == "deliverables/report.pdf"
+
+        opened = client.get(
+            "/api/runs/run-1/download",
+            params={"name": "deliverables/report.pdf"},
+        )
+        assert opened.status_code == 200
+        assert opened.content.startswith(b"%PDF")
+
+        escaped = client.get(
+            "/api/runs/run-1/download",
+            params={"name": "../../secret.txt"},
+        )
+        assert escaped.status_code == 403
+
+        wrong_run = client.get(
+            "/api/runs/run-2/download",
+            params={"name": "deliverables/report.pdf"},
+        )
+        assert wrong_run.status_code == 404
+
+        missing_run = client.get(
+            "/api/runs/missing-run/download",
+            params={"name": "deliverables/report.pdf"},
+        )
+        assert missing_run.status_code == 404
+
+    store.close()
+    print("[OK] run artifact list/download scope")
+
+
 if __name__ == "__main__":
     test_run_completed_requires_full_result()
     test_run_failed_still_maps()

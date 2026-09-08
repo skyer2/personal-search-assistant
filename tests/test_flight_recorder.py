@@ -120,9 +120,13 @@ def test_summarize_trace_workers_and_replan():
         {"type": "worker.completed", "task_id": "t_a", "status": "ok", "duration_ms": 12, "attempt": 1},
         {
             "type": "progress.assessed",
-            "status": "enough",
+            "status": "sufficient",
             "plan_version": 1,
-            "attributes": {"verdict": "enough", "reason": "ready_queue_empty", "gaps": []},
+            "attributes": {
+                "status": "sufficient",
+                "reason_codes": ["required_research_complete"],
+                "coverage_gaps": [],
+            },
         },
         {
             "type": "replan.applied",
@@ -151,7 +155,7 @@ def test_summarize_trace_workers_and_replan():
     assert worker["duration_ms"] == 12
     assert worker["objective"] == "下一跳预测"
     assert summary["progress_count"] == 1
-    assert summary["progress"][0]["verdict"] == "enough"
+    assert summary["progress"][0]["status"] == "sufficient"
     assert summary["replan_count"] == 1
     assert summary["usage"]["total_tokens"] == 100
     assert summary["evals"][0]["type"] == "quality.assessed"
@@ -180,8 +184,12 @@ def test_summarize_trace_progress_without_replan():
         {"type": "worker.completed", "task_id": "t_langgraph", "status": "ok", "duration_ms": 230308, "attempt": 1},
         {
             "type": "progress.assessed",
-            "status": "enough",
-            "attributes": {"verdict": "enough", "reason": "coverage_ok"},
+            "status": "sufficient",
+            "attributes": {
+                "status": "sufficient",
+                "reason_codes": ["required_research_complete"],
+                "coverage_gaps": [],
+            },
         },
         {
             "type": "worker.started",

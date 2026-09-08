@@ -228,7 +228,7 @@ def test_worker_timeout_salvages_artifact_evidence(monkeypatch):
                 title="Partial evidence",
                 step_index=0,
                 step_type="research",
-                metadata={"task_id": "t_resilience"},
+                metadata={"task_id": "t_resilience", "run_id": "r_resilience", "session_id": "s_resilience"},
             )
             raise asyncio.TimeoutError
 
@@ -248,7 +248,7 @@ def test_worker_timeout_salvages_artifact_evidence(monkeypatch):
                 title="Partial evidence",
                 step_index=0,
                 step_type="research",
-                metadata={"task_id": "t_resilience"},
+                metadata={"task_id": "t_resilience", "run_id": "r_resilience", "session_id": "s_resilience"},
             )
             raise asyncio.TimeoutError
 
@@ -280,7 +280,7 @@ def test_sensitive_content_failure_returns_worker_result_not_crash():
             title="Sensitive page",
             step_index=0,
             step_type="research",
-            metadata={"task_id": "t_resilience"},
+            metadata={"task_id": "t_resilience", "run_id": "r_resilience", "session_id": "s_resilience"},
         )
         result = asyncio.run(runtime.execute(_task(), _context()))
         assert isinstance(result, WorkerResult)
@@ -392,11 +392,16 @@ def test_worker_or_compress_failure_does_not_require_quality_event():
         {"type": "run.started", "seq": 1, "attributes": {"search_mode": "agent"}},
         {"type": "brief.compiled", "seq": 2, "attributes": {"search_mode": "agent"}},
         {"type": "plan.created", "seq": 3, "attributes": {}},
-        {"type": "worker.started", "seq": 4, "attributes": {}},
-        {"type": "worker.failed", "seq": 5, "attributes": {"fail_reason": "step_timeout"}},
+        {"type": "worker.started", "seq": 4, "attributes": {"task_id": "t_resilience"}},
+        {"type": "worker.failed", "seq": 5, "attributes": {"task_id": "t_resilience", "fail_reason": "step_timeout"}},
+        {
+            "type": "control.decided",
+            "seq": 6,
+            "attributes": {"action": "finalize_failure", "reasons": ["worker_failed"]},
+        },
         {
             "type": "run.failed",
-            "seq": 6,
+            "seq": 7,
             "attributes": {
                 "failure.origin_stage": "compress",
                 "failure.detected_stage": "runtime",

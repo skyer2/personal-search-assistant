@@ -156,8 +156,8 @@ async def run_live_eval(
                             "tool_calls": int(meta.get("tool_calls_count") or 0),
                         },
                         attributes={
-                            "progress.verdict": str(
-                                (meta.get("progress_assessment") or {}).get("verdict") or ""
+                            "progress.status": str(
+                                (meta.get("progress_assessment") or {}).get("status") or ""
                             )
                         },
                     )

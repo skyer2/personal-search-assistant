@@ -26,6 +26,7 @@ from app.research.runtime.worker import (
     WorkerResultStatus,
     salvage_worker_evidence,
 )
+from app.observability.semantic_events import worker_event_attributes
 
 
 class WorkerExecutorV2:
@@ -46,6 +47,7 @@ class WorkerExecutorV2:
         if plan is None or step_index >= len(plan.steps):
             return self._result(task, started, ok=False, status="failed", summary="missing_step")
         step = plan.steps[step_index]
+        worker_result: WorkerResult | None = None
         worker_ok: bool | None = None
         simple_fact = bool(step.metadata.get("simple_fact_fast_path"))
         execute_agent = None
@@ -76,7 +78,7 @@ class WorkerExecutorV2:
         )
         if not callable(reserve_worker_lease):
             worker_ok = False
-            return self._result(
+            worker_result = self._result(
                 task,
                 started,
                 ok=False,
@@ -112,11 +114,15 @@ class WorkerExecutorV2:
                     phase="execute",
                     task_id=task.task_id,
                     plan_version=task.plan_version,
-                    attributes={
-                        "objective": task.objective,
-                        "worker_runtime": "v2",
-                        "step_type": task.step_type,
-                    },
+                    attempt=task.attempt,
+                    attributes=worker_event_attributes(
+                        objective=task.objective,
+                        step_type=task.step_type,
+                        worker_runtime="v2",
+                        search_mode="agent",
+                        task_shape="simple_fact" if simple_fact else "",
+                        execution_path="fast_path" if simple_fact else "harness",
+                    ),
                 )
                 recorder.emit(
                     EventType.WORKER_STARTED,
@@ -124,13 +130,15 @@ class WorkerExecutorV2:
                     status="start",
                     task_id=task.task_id,
                     plan_version=task.plan_version,
-                    attributes={
-                        "worker_runtime": "v2",
-                        "step_type": task.step_type,
-                        "search_mode": "agent",
-                        "task_shape": "simple_fact" if simple_fact else "",
-                        "execution_path": "fast_path" if simple_fact else "harness",
-                    },
+                    attempt=task.attempt,
+                    attributes=worker_event_attributes(
+                        objective=task.objective,
+                        step_type=task.step_type,
+                        worker_runtime="v2",
+                        search_mode="agent",
+                        task_shape="simple_fact" if simple_fact else "",
+                        execution_path="fast_path" if simple_fact else "harness",
+                    ),
                     run_id=context.run_id,
                     session_id=context.session_id,
                 )
@@ -208,6 +216,7 @@ class WorkerExecutorV2:
             reason = str(getattr(exc, "reason", "") or "budget_tokens")
             recovered = self._salvage_or_fail(
                 task,
+                context,
                 step,
                 step_index,
                 started,
@@ -217,11 +226,13 @@ class WorkerExecutorV2:
                 ok=False,
             )
             worker_ok = recovered.ok
+            worker_result = recovered
             return recovered
         except asyncio.TimeoutError:
             worker_ok = False
             recovered = self._salvage_or_fail(
                 task,
+                context,
                 step,
                 step_index,
                 started,
@@ -231,12 +242,14 @@ class WorkerExecutorV2:
                 ok=False,
             )
             worker_ok = recovered.ok
+            worker_result = recovered
             return recovered
         except Exception as exc:
             worker_ok = False
             reason = type(exc).__name__
             recovered = self._salvage_or_fail(
                 task,
+                context,
                 step,
                 step_index,
                 started,
@@ -246,6 +259,7 @@ class WorkerExecutorV2:
                 ok=False,
             )
             worker_ok = recovered.ok
+            worker_result = recovered
             return recovered
         finally:
             self._sync_tool_usage(tool_usage)
@@ -263,18 +277,60 @@ class WorkerExecutorV2:
 
                 recorder = get_recorder()
                 if recorder.is_active:
+                    duration_ms = int((time.perf_counter() - started) * 1000)
+                    if worker_result is None:
+                        execution_status = "failed"
+                        result_status = "none"
+                    elif worker_result.ok:
+                        execution_status = "succeeded"
+                        result_status = "complete"
+                    elif worker_result.status == "skipped":
+                        execution_status = "skipped"
+                        result_status = "none"
+                    else:
+                        execution_status = "failed"
+                        result_status = (
+                            "partial"
+                            if worker_result.evidence_refs or worker_result.findings
+                            else "none"
+                        )
                     recorder.emit(
                         EventType.WORKER_COMPLETED if worker_ok else EventType.WORKER_FAILED,
                         phase="execute",
                         status="ok" if worker_ok else "failed",
                         task_id=task.task_id,
                         plan_version=task.plan_version,
-                        attributes={
-                            "worker_runtime": "v2",
-                            "search_mode": "agent",
-                            "task_shape": "simple_fact" if simple_fact else "",
-                            "execution_path": "fast_path" if simple_fact else "harness",
-                        },
+                        attempt=task.attempt,
+                        duration_ms=duration_ms,
+                        attributes=worker_event_attributes(
+                            objective=task.objective,
+                            step_type=task.step_type,
+                            worker_runtime="v2",
+                            search_mode="agent",
+                            task_shape="simple_fact" if simple_fact else "",
+                            execution_path="fast_path" if simple_fact else "harness",
+                            execution_status=execution_status,
+                            result_status=result_status,
+                            fail_reason=(
+                                worker_result.fail_reason
+                                if worker_result is not None
+                                else "worker_result_missing"
+                            ),
+                            evidence_ids=(
+                                worker_result.evidence_refs if worker_result is not None else []
+                            ),
+                            finding_ids=(
+                                [
+                                    str(item.get("finding_id") or "")
+                                    for item in worker_result.findings
+                                    if isinstance(item, dict)
+                                ]
+                                if worker_result is not None
+                                else []
+                            ),
+                            tool_calls=int(tool_usage.get("tool_calls") or 0),
+                            duration_ms=duration_ms,
+                        ),
                         run_id=context.run_id,
                         session_id=context.session_id,
                     )
@@ -282,7 +338,7 @@ class WorkerExecutorV2:
                         recorder.end_span(
                             recorder_span,
                             status="ok" if worker_ok else "failed",
-                            duration_ms=int((time.perf_counter() - started) * 1000),
+                            duration_ms=duration_ms,
                         )
             except Exception:
                 pass
@@ -596,6 +652,7 @@ class WorkerExecutorV2:
     def _salvage_or_fail(
         self,
         task: ResearchTask,
+        context: ResearchContext,
         step: Any,
         step_index: int,
         started: float,
@@ -605,7 +662,11 @@ class WorkerExecutorV2:
         status: WorkerResultStatus,
         ok: bool,
     ) -> WorkerResult:
-        salvaged = salvage_worker_evidence(task_id=task.task_id, step_index=step_index)
+        salvaged = salvage_worker_evidence(
+            run_id=context.run_id,
+            task_id=task.task_id,
+            step_index=step_index,
+        )
         findings = list(salvaged.get("findings") or [])
         evidence_refs = list(salvaged.get("evidence_refs") or [])
         sources = list(salvaged.get("sources") or [])

@@ -48,22 +48,48 @@ export function sortDeliverableFiles(files: OutputFile[]): OutputFile[] {
   });
 }
 
-export function linkifyArtifactNames(content: string, files: OutputFile[], sessionId?: string): string {
-  if (!content || !sessionId || files.length === 0) {
+type ArtifactScope = {
+  scope?: "session" | "run";
+  runId?: string;
+};
+
+function downloadOptions(scope: ArtifactScope = {}, options?: { download?: boolean }) {
+  return {
+    ...options,
+    scope: scope.scope,
+    runId: scope.runId
+  };
+}
+
+export function linkifyArtifactNames(
+  content: string,
+  files: OutputFile[],
+  sessionId?: string,
+  scope: ArtifactScope = {}
+): string {
+  if (!content || (!sessionId && scope.scope !== "run") || files.length === 0) {
     return content;
   }
   let next = content;
   sortDeliverableFiles(files).slice(0, 20).forEach((file) => {
-    if (!file.name || next.includes(`](${getDownloadUrl(file.path, sessionId)})`)) {
+    const openUrl = getDownloadUrl(file.path, sessionId, downloadOptions(scope));
+    if (!file.name || next.includes(`](${openUrl})`)) {
       return;
     }
-    const openUrl = getDownloadUrl(file.path, sessionId);
     next = next.replaceAll(file.name, `[${file.name}](${openUrl})`);
   });
   return next;
 }
 
-function ArtifactDisclosure({ files, sessionId }: { files: OutputFile[]; sessionId?: string }) {
+function ArtifactDisclosure({
+  files,
+  sessionId,
+  scope
+}: {
+  files: OutputFile[];
+  sessionId?: string;
+  scope?: ArtifactScope;
+}) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -77,7 +103,7 @@ function ArtifactDisclosure({ files, sessionId }: { files: OutputFile[]; session
       {open ? (
         <div className="deliverable-more-list">
           {files.map((file) => (
-            <ArtifactRow compact file={file} key={file.path} sessionId={sessionId} />
+            <ArtifactRow compact file={file} key={file.path} sessionId={sessionId} scope={scope} />
           ))}
         </div>
       ) : null}
@@ -89,13 +115,15 @@ function ArtifactRow({
   compact,
   file,
   sessionId,
+  scope,
 }: {
   compact?: boolean;
   file: OutputFile;
   sessionId?: string;
+  scope?: ArtifactScope;
 }) {
-  const openUrl = getDownloadUrl(file.path, sessionId);
-  const saveUrl = getDownloadUrl(file.path, sessionId, { download: true });
+  const openUrl = getDownloadUrl(file.path, sessionId, downloadOptions(scope));
+  const saveUrl = getDownloadUrl(file.path, sessionId, downloadOptions(scope, { download: true }));
   const isPdf = file.name.toLowerCase().endsWith(".pdf");
 
   return (
@@ -140,10 +168,19 @@ function ArtifactRow({
 interface DeliverableFilesProps {
   files: OutputFile[];
   sessionId?: string;
+  scope?: "session" | "run";
+  runId?: string;
   variant?: "shelf" | "banner";
 }
 
-export function DeliverableFiles({ files, sessionId, variant = "shelf" }: DeliverableFilesProps) {
+export function DeliverableFiles({
+  files,
+  sessionId,
+  scope = "session",
+  runId,
+  variant = "shelf"
+}: DeliverableFilesProps) {
+  const artifactScope = { scope, runId };
   const ordered = sortDeliverableFiles(files);
   const visibleCount = variant === "banner" ? 5 : 20;
   const visible = ordered.slice(0, visibleCount);
@@ -164,9 +201,9 @@ export function DeliverableFiles({ files, sessionId, variant = "shelf" }: Delive
     return (
       <div className="artifact-shelf artifact-shelf--banner">
         {visible.map((file) => (
-          <ArtifactRow compact file={file} key={file.path} sessionId={sessionId} />
+          <ArtifactRow compact file={file} key={file.path} sessionId={sessionId} scope={artifactScope} />
         ))}
-        {rest.length > 0 ? <ArtifactDisclosure files={rest} sessionId={sessionId} /> : null}
+        {rest.length > 0 ? <ArtifactDisclosure files={rest} sessionId={sessionId} scope={artifactScope} /> : null}
       </div>
     );
   }
@@ -174,9 +211,9 @@ export function DeliverableFiles({ files, sessionId, variant = "shelf" }: Delive
   return (
     <div className="artifact-shelf">
       {visible.map((file) => (
-        <ArtifactRow file={file} key={file.path} sessionId={sessionId} />
+          <ArtifactRow file={file} key={file.path} sessionId={sessionId} scope={artifactScope} />
       ))}
-      {rest.length > 0 ? <ArtifactDisclosure files={rest} sessionId={sessionId} /> : null}
+      {rest.length > 0 ? <ArtifactDisclosure files={rest} sessionId={sessionId} scope={artifactScope} /> : null}
     </div>
   );
 }

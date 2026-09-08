@@ -418,7 +418,7 @@ export function useDeepAgentSession() {
 
           if (payload.event === "task_result") {
             const finalResult = extractString(payload.data, "result");
-            const finalStatus = extractString(payload.data, "status") || "completed";
+            const finalStatus = extractString(payload.data, "status") || "unknown";
             setElapsedClock((previous) => stopElapsedClock(previous, Date.now()));
             setResult(finalResult || payload.message);
             setIsRunning(false);

@@ -57,6 +57,9 @@ def check_trace_integrity(
     is_agent_mode = False
     is_simple_fact_fast_path = False
     failure_origin_stage = ""
+    worker_evidence_ids: set[str] = set()
+    synthesis_evidence_ids: set[str] = set()
+    worker_terminal_without_task_id = 0
 
     for event in events:
         event_type = str(event.get("type") or event.get("event") or "")
@@ -77,6 +80,12 @@ def check_trace_integrity(
             and attrs.get("execution_path") == "fast_path"
         ):
             is_simple_fact_fast_path = True
+        if event_type in {"worker.completed", "worker.failed"}:
+            if not str(event.get("task_id") or attrs.get("task_id") or "").strip():
+                worker_terminal_without_task_id += 1
+            worker_evidence_ids.update(str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip())
+        if event_type == "synthesis.completed":
+            synthesis_evidence_ids.update(str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip())
         if event_type in {"run.failed", "run_summary"}:
             failure_origin_stage = str(
                 attrs.get("failure.origin_stage")
@@ -127,10 +136,12 @@ def check_trace_integrity(
         counts.get("synthesis.failed", 0)
     )
     quality_count = int(counts.get("quality.assessed", 0))
+    control_count = int(counts.get("control.decided", 0))
     run_started = int(counts.get("run.started", 0))
     run_completed = int(counts.get("run.completed", 0)) + int(
         counts.get("run.failed", 0)
     )
+    run_terminated = int(counts.get("run.terminated", 0))
 
     if is_agent_mode and not is_simple_fact_fast_path:
         if brief_count == 0 and _stage_required("brief", failure_origin_stage):
@@ -178,6 +189,19 @@ def check_trace_integrity(
         ):
             issues.append("missing_quality_event")
 
+    control_required = bool(
+        progress_count
+        or worker_done
+        or synthesis_count
+        or run_status in {"success", "completed", "partial", "ok", "done"}
+    )
+    if is_agent_mode and not is_simple_fact_fast_path and control_required and control_count == 0:
+        issues.append("missing_control_decision_event")
+    if worker_terminal_without_task_id:
+        issues.append(f"worker_terminal_without_task_id:{worker_terminal_without_task_id}")
+    if synthesis_count > 0 and run_terminated == 0:
+        issues.append("missing_run_terminated_event")
+
     if worker_started > 0 and worker_done < worker_started:
         issues.append(f"worker_mismatch:started={worker_started},done={worker_done}")
     if is_agent_mode and evidence_count > 0 and worker_done == 0:
@@ -190,6 +214,67 @@ def check_trace_integrity(
             or terminal_attrs.get("abort_reason")
         ):
             issues.append("partial_without_termination_reason")
+
+    for event in events:
+        if str(event.get("type") or event.get("event")) != "progress.assessed":
+            continue
+        attrs = event.get("attributes") if isinstance(event.get("attributes"), dict) else {}
+        status = str(attrs.get("status") or event.get("status") or "")
+        if status != "gap":
+            continue
+        actionable = any(
+            attrs.get(key)
+            for key in (
+                "coverage_gaps",
+                "missing_dimensions",
+                "unresolved_conflicts",
+                "low_confidence_claims",
+                "stale_evidence",
+                "unmet_success_criteria",
+                "reason_codes",
+            )
+        )
+        if not actionable:
+            issues.append("non_actionable_gap")
+            break
+
+    if worker_evidence_ids and synthesis_evidence_ids and not (worker_evidence_ids & synthesis_evidence_ids):
+        issues.append("artifact_evidence_disconnect")
+    if worker_evidence_ids and synthesis_count == 0 and run_status in {"success", "partial", "completed"}:
+        issues.append("artifact_evidence_without_synthesis")
+
+    terminated_event = next(
+        (
+            event
+            for event in reversed(events)
+            if str(event.get("type") or event.get("event")) == "run.terminated"
+        ),
+        {},
+    )
+    terminal_run_event = next(
+        (
+            event
+            for event in reversed(events)
+            if str(event.get("type") or event.get("event")) in {"run.completed", "run.failed"}
+        ),
+        {},
+    )
+    if terminated_event and terminal_run_event:
+        terminated_attrs = (
+            terminated_event.get("attributes")
+            if isinstance(terminated_event.get("attributes"), dict)
+            else {}
+        )
+        outcome = str(terminated_event.get("status") or terminated_attrs.get("termination_status") or "")
+        run_terminal_status = str(terminal_run_event.get("status") or "")
+        allowed = {
+            "success": {"success", "ok", "completed"},
+            "partial": {"partial"},
+            "failed": {"failed", "error"},
+            "cancelled": {"cancelled", "interrupted"},
+        }.get(outcome)
+        if allowed and run_terminal_status and run_terminal_status not in allowed:
+            issues.append(f"terminal_outcome_mismatch:{outcome}!={run_terminal_status}")
 
     # Seq uniqueness
     if seq_values:
@@ -227,8 +312,10 @@ def check_trace_integrity(
             "progress": progress_count,
             "synthesis": synthesis_count,
             "quality": quality_count,
+            "control": control_count,
             "run_started": run_started,
             "run_completed": run_completed,
+            "run_terminated": run_terminated,
         },
         "is_agent_mode": is_agent_mode,
         "span_tree": {
