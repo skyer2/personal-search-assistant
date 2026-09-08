@@ -125,3 +125,67 @@ def test_assessed_events_are_required_and_span_tree_has_root():
     assert result["span_tree"]["span_count"] > 0
     assert result["span_tree"]["root_count"] >= 1
     assert result["span_tree"]["cycle_count"] == 0
+
+
+def test_integrity_rejects_zero_worker_started():
+    events = [item for item in _events("partial") if item["type"] != "worker.started"]
+    result = check_trace_integrity(events, run_status="partial")
+    assert "worker_lifecycle_mismatch:started=0,done=1" in result["issues"]
+
+
+def test_integrity_rejects_zero_root_span():
+    events = [{"type": "llm_usage", "attributes": {"search_mode": "agent"}}]
+    result = check_trace_integrity(events, run_status="partial")
+    assert "missing_root_span" in result["issues"]
+
+
+def test_integrity_rejects_missing_lineage_and_synthesis_span():
+    events = _events("partial")
+    for synthesis in (item for item in events if str(item["type"]).startswith("synthesis.")):
+        synthesis["span_id"] = "root"
+        synthesis["attributes"] = {"evidence_ids": []}
+    worker_failed = next(item for item in events if item["type"] == "worker.failed")
+    worker_failed["attributes"] = {"evidence_ids": ["ev-1"]}
+    events.append(
+        {
+            "type": "synthesis.started",
+            "span_id": "root",
+            "parent_span_id": "root",
+            "seq": 13,
+            "attributes": {"evidence_ids": []},
+        }
+    )
+    events.append(
+        {
+            "type": "evidence.assessed",
+            "span_id": "progress",
+            "parent_span_id": "root",
+            "seq": 12,
+            "attributes": {"status": "partial"},
+        }
+    )
+    result = check_trace_integrity(events, run_status="partial")
+    assert "missing_synthesis_span" in result["issues"]
+    assert "missing_evidence_lineage" in result["issues"]
+
+
+def test_integrity_rejects_synthesis_failure_without_reason_and_empty_delivery():
+    events = _events("failed")
+    synthesis = next(item for item in events if item["type"] == "synthesis.completed")
+    synthesis["type"] = "synthesis.failed"
+    synthesis["status"] = "failed"
+    synthesis["attributes"] = {"evidence_ids": ["ev-1"], "fail_reason": ""}
+    events.append(
+        {
+            "type": "evidence.assessed",
+            "span_id": "progress",
+            "parent_span_id": "root",
+            "seq": 12,
+            "attributes": {"status": "partial"},
+        }
+    )
+    terminated = next(item for item in reversed(events) if item["type"] == "run.terminated")
+    terminated["attributes"]["final_content_chars"] = 0
+    result = check_trace_integrity(events, run_status="failed")
+    assert "synthesis_failure_reason_missing" in result["issues"]
+    assert "usable_evidence_with_empty_final_content" in result["issues"]

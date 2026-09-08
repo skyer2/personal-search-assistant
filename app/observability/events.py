@@ -45,6 +45,7 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "checkpoint.resumed",
     "budget.decided",
     "budget.exhausted",
+    "observability.internal_error",
     "quality.assessed",
     "run.terminated",
     "eval.scored",
@@ -91,6 +92,7 @@ class EventType:
     CHECKPOINT_RESUMED = "checkpoint.resumed"
     BUDGET_DECIDED = "budget.decided"
     BUDGET_EXHAUSTED = "budget.exhausted"
+    OBSERVABILITY_INTERNAL_ERROR = "observability.internal_error"
     QUALITY_ASSESSED = "quality.assessed"
     RUN_TERMINATED = "run.terminated"
     EVAL_SCORED = "eval.scored"

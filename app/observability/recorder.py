@@ -248,6 +248,7 @@ class AgentTelemetry:
         name: str,
         *,
         phase: str | None = None,
+        plan_version: int | None = None,
         task_id: str | None = None,
         attempt: int | None = None,
         attributes: dict[str, Any] | None = None,
@@ -261,6 +262,7 @@ class AgentTelemetry:
             child = ctx.child(
                 span_id=span_id,
                 parent_span_id=parent,
+                plan_version=plan_version,
                 task_id=task_id or ctx.task_id,
                 attempt=attempt if attempt is not None else ctx.attempt,
             )

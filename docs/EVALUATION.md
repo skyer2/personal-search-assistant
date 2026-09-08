@@ -8,14 +8,15 @@
 
 ## 一句话架构
 
-Eval 分五层。PR 只跑确定性层；Live 和 BrowseComp 不进每次 CI。
+Eval 分六层。PR 只跑确定性层；Production-Fidelity、Live 和 BrowseComp 不进每次 CI。
 
 ```text
 L0  Unit / Invariant          每 PR
 L1  Agent Component Eval      每 PR
-L2  Harness Scenario Eval     dry-run 每 PR；live nightly
-L3  BrowseComp-Plus           release / 手工
-L4  Ablation                  Vanilla / No-Replan / Full
+L2  Structural Harness Eval   dry-run 每 PR；live nightly
+L3  Production-Fidelity E2E   release / 手工
+L4  BrowseComp-Plus           release / 手工
+L5  Ablation                  Vanilla / No-Replan / Full
 ```
 
 对外报告只保留三组指标：
@@ -64,7 +65,7 @@ Evidence component 里的低 grounding 分数是 **unsupported-claim 检测器�
 
 入口：`python tests/eval/run_eval.py --component`
 
-### L2 Harness Scenario Eval
+### L2 Structural Harness Scenario Eval
 
 `tests/eval/datasets/harness_scenarios_v1.jsonl`（20 条），每条对应一种 Agent failure mode：
 
@@ -72,7 +73,27 @@ Plan / Parallel / Progress false-enough / Conflict / Needless replan / Replan bu
 
 Trajectory 评的是 **required / forbidden / if-then / limits**，不是 `A→B→C→D` 固定路径。
 
-### L3 BrowseComp-Plus
+### L3 Production-Fidelity E2E
+
+入口：`tests/e2e/test_production_fidelity_synthesis.py` 与 `scripts/release_smoke.py`。
+
+这一层与 L2 的区别是：**L2 证明控制面结构不变，L3 证明生产配置在故障下仍能正确收敛**。
+
+- 保留生产配置：planner LLM enabled、direct worker invoke、replan 上限、全局 token 预算、synthesis timeout。
+- 只替换 provider implementation 与 clock，不修改 HarnessConfig，也不把生产路径降级为假 runtime。
+- 注入 rate limit、empty、context overflow、provider unavailable、auth、budget exhausted、timeout 等故障。
+- 断言终态、非空输出、Worker 生命周期、root span、lineage、synthesis attempt / fail reason / fallback。
+- Q1 release blocker 默认重复 3 次，要求每次都是非空 `partial` 或 `success` 且 Trace Integrity 通过。
+
+发布冒烟：
+
+```bash
+python scripts/release_smoke.py --q1-runs 3
+```
+
+该命令先运行 L3 fault-injection，再运行 4 条 release query suite。它是发布门禁，不是普通单测；需要完整的 Python 环境，与前端构建无关。
+
+### L4 BrowseComp-Plus
 
 公开坐标系。Retrieval 与 Agent 分开算。离线 surrogate **不冒充**官方 Accuracy。详见 [BROWSECOMP_PLUS_EVAL.md](./BROWSECOMP_PLUS_EVAL.md)。
 
@@ -84,7 +105,7 @@ Retrieval-only → Vanilla → Harness-NoReplan → Full Harness
 
 固定模型、语料、search backend，只改 Harness 变量。
 
-### L4 Ablation
+### L5 Ablation
 
 ```text
 V0 Vanilla          Query → single agent → tools → Answer
@@ -165,7 +186,8 @@ python tests/eval/run_eval.py --live --variant full --fixture --limit 5
 ```text
 PR CI     L0 unit + L1 component + L2 scenario dry-run  < 2 min
 Nightly   20 条 live scenario × Full + NoReplan（可选 1～3 repeat）
-Release   BrowseComp 50 × Vanilla / NoReplan / Full + 官方 judge
+Release   L3 Production-Fidelity + Release Smoke
+Benchmark BrowseComp 50 × Vanilla / NoReplan / Full + 官方 judge
 ```
 
 ## 命令

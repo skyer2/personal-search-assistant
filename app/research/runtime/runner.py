@@ -185,6 +185,8 @@ def _emit(
     task_id: str | None = None,
     attempt: int | None = None,
     attributes: dict[str, Any] | None = None,
+    input_refs: list[dict[str, Any]] | None = None,
+    output_refs: list[dict[str, Any]] | None = None,
 ) -> None:
     try:
         from app.observability import get_recorder
@@ -200,6 +202,8 @@ def _emit(
                 task_id=task_id,
                 attempt=attempt,
                 attributes=attributes or {},
+                input_refs=input_refs,
+                output_refs=output_refs,
             )
     except Exception:
         logger.debug("observability emit skipped", exc_info=True)
@@ -954,99 +958,307 @@ class ResearchGraphRunner:
             },
         )
 
-    async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.execution.synthesis_executor import SynthesisExecutor, SynthesisRequest
+    def _synthesis_budget_attributes(self, session: RunSession, executor: Any) -> dict[str, Any]:
+        manager = getattr(session, "budget_manager", None)
+        snapshot = manager.snapshot() if manager is not None and callable(getattr(manager, "snapshot", None)) else None
+        token_limit = int(getattr(snapshot, "token_limit", 0) or 0)
+        used_tokens = int(getattr(snapshot, "used_tokens", 0) or 0)
+        reserved_tokens = int(getattr(snapshot, "reserved_tokens", 0) or 0)
+        remaining_run_sec = (
+            float(manager.remaining_run_sec())
+            if manager is not None and callable(getattr(manager, "remaining_run_sec", None))
+            else 0.0
+        )
+        timeout_method = getattr(executor, "_timeout_sec", None)
+        synthesis_timeout_sec = (
+            float(timeout_method())
+            if callable(timeout_method)
+            else float(getattr(self.harness.harness_config, "synthesis_step_timeout_sec", 0) or 0)
+        )
+        return {
+            "remaining_run_tokens": max(0, token_limit - used_tokens - reserved_tokens) if token_limit else 0,
+            "remaining_run_sec": max(0.0, remaining_run_sec),
+            "synthesis_reserve_tokens": int(getattr(snapshot, "synthesis_reserve_tokens", 0) or 0),
+            "synthesis_timeout_sec": synthesis_timeout_sec,
+        }
+
+    def _start_synthesis_span(
+        self,
+        session: RunSession,
+        *,
+        attempt: int,
+        mode: str,
+        attributes: dict[str, Any],
+    ) -> str:
+        try:
+            from app.observability import get_recorder
+
+            recorder = get_recorder()
+            if not recorder.is_active:
+                return ""
+            return recorder.start_span(
+                "synthesis.execute",
+                phase=WorkflowPhase.SYNTHESIS.value,
+                attempt=attempt,
+                attributes={**attributes, "mode": mode},
+            )
+        except Exception as exc:
+            _emit(
+                session,
+                "observability.internal_error",
+                phase=WorkflowPhase.SYNTHESIS.value,
+                status="warning",
+                attributes={"operation": "synthesis_start_span", "error_type": type(exc).__name__},
+            )
+            return ""
+
+    def _end_synthesis_span(
+        self,
+        session: RunSession,
+        span_key: str,
+        *,
+        status: str,
+        duration_ms: int,
+    ) -> None:
+        if not span_key:
+            return
+        try:
+            from app.observability import get_recorder
+
+            get_recorder().end_span(span_key, status=status, duration_ms=duration_ms)
+        except Exception as exc:
+            _emit(
+                session,
+                "observability.internal_error",
+                phase=WorkflowPhase.SYNTHESIS.value,
+                status="warning",
+                attributes={"operation": "synthesis_end_span", "error_type": type(exc).__name__},
+            )
+
+    async def _synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        import app.research.execution.synthesis_executor as synthesis_executor_module
+        from app.agent.harness.token_counter import estimate_tokens
+        from app.research.delivery.partial_renderer import render_partial_delivery
+        from app.research.delivery.synthesis_context import SynthesisContextBuilder
         from app.research.runtime.worker import ResearchContext
 
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
         decision = dict(gstate.get("control_decision") or {})
         delivery = dict(gstate.get("delivery_readiness") or {})
-        mode = str(decision.get("mode") or delivery.get("mode") or "")
-        evidence_refs = [str(item) for item in gstate.get("evidence_refs") or []]
-        limitations = [str(item) for item in delivery.get("limitations") or []]
+        mode = str(decision.get("mode") or delivery.get("mode") or "degraded")
+        if mode not in {"normal", "degraded"}:
+            mode = "degraded"
         progress = dict(gstate.get("progress_assessment") or {})
         evidence = dict(gstate.get("evidence_assessment") or {})
         conflicts = [
             *[str(item) for item in progress.get("unresolved_conflicts") or []],
             *[str(item) for item in evidence.get("unresolved_conflicts") or []],
         ]
-        request = SynthesisRequest(
-            mode=mode,
-            evidence_refs=evidence_refs,
-            limitations=limitations,
+        builder = SynthesisContextBuilder(self.harness, session)
+        context = builder.build(
+            gstate,
+            limitations=[str(item) for item in delivery.get("limitations") or []],
             unresolved_conflicts=conflicts,
-            research_summary=self._research_summary(gstate),
         )
-        _emit(
-            session,
-            "synthesis.started",
-            phase=WorkflowPhase.SYNTHESIS.value,
-            status="start",
-            attributes={"mode": mode, "evidence_count": len(evidence_refs), "evidence_ids": evidence_refs},
+        executor = synthesis_executor_module.SynthesisExecutor(self.harness, session)
+        research_context = ResearchContext(
+            run_id=session.run_id,
+            query=session.ctx.task_query,
+            user_id=session.ctx.user_id,
+            tenant_id=session.ctx.tenant_id,
+            project_id=session.ctx.project_id,
+            session_id=session.session_id,
         )
-        result = await SynthesisExecutor(self.harness, session).execute(
-            request,
-            ResearchContext(
-                run_id=session.run_id,
-                query=session.ctx.task_query,
-                user_id=session.ctx.user_id,
-                tenant_id=session.ctx.tenant_id,
-                project_id=session.ctx.project_id,
-                session_id=session.session_id,
-            ),
-        )
-        if result.ok:
-            manager = session.ctx.citation_manager
-            final_content = manager.build_cited_report(result.summary) if manager is not None else result.summary
-            session.state.final_content = final_content
+        evidence_refs = list(context.evidence_refs)
+        input_refs = [{"type": "evidence", "id": item} for item in evidence_refs]
+        answer_refs = [{"type": "answer", "id": "synthesis:latest"}]
+        attempts = 0
+        last_result = None
+        fallback_action = ""
+
+        while attempts < 2:
+            attempts += 1
+            request = synthesis_executor_module.SynthesisRequest(
+                mode=mode,
+                evidence_refs=evidence_refs,
+                limitations=list(context.limitations),
+                unresolved_conflicts=list(context.unresolved_conflicts),
+                research_summary=context.research_summary(),
+                evidence_digests=list(context.evidence_digests),
+                findings=list(context.findings),
+                worker_summaries=list(context.worker_summaries),
+                token_budget=context.token_budget,
+            )
+            estimate_input_tokens = getattr(executor, "estimate_input_tokens", None)
+            estimated_tokens = (
+                int(estimate_input_tokens(request, research_context))
+                if callable(estimate_input_tokens)
+                else estimate_tokens(request.research_summary)
+            )
+            budget_attrs = self._synthesis_budget_attributes(session, executor)
+            span_key = self._start_synthesis_span(
+                session,
+                attempt=attempts,
+                mode=mode,
+                attributes={"mode": mode, "attempt": attempts},
+            )
+            _emit(
+                session,
+                "synthesis.started",
+                phase=WorkflowPhase.SYNTHESIS.value,
+                status="start",
+                attempt=attempts,
+                attributes={
+                    "mode": mode,
+                    "attempt": attempts,
+                    "evidence_count": len(evidence_refs),
+                    "evidence_ids": evidence_refs,
+                    "input_tokens_estimated": estimated_tokens,
+                    **budget_attrs,
+                },
+                input_refs=input_refs,
+            )
+            result = await executor.execute(request, research_context)
+            last_result = result
+            if result.ok:
+                manager = session.ctx.citation_manager
+                final_content = (
+                    manager.build_cited_report(result.summary)
+                    if manager is not None
+                    else result.summary
+                )
+                session.state.final_content = final_content
+                if isinstance(session.state.metadata, dict):
+                    session.state.metadata.update(
+                        {
+                            "synthesis_attempted": True,
+                            "synthesis_attempts": attempts,
+                            "synthesis_mode": mode,
+                            "synthesis_status": result.status,
+                        }
+                    )
+                _emit(
+                    session,
+                    "synthesis.completed",
+                    phase=WorkflowPhase.SYNTHESIS.value,
+                    status="ok",
+                    duration_ms=result.duration_ms,
+                    attempt=attempts,
+                    attributes={
+                        "mode": mode,
+                        "attempt": attempts,
+                        "duration_ms": result.duration_ms,
+                        "input_tokens_estimated": estimated_tokens,
+                        "evidence_count": len(result.evidence_refs),
+                        "evidence_ids": result.evidence_refs,
+                        "content_chars": len(final_content),
+                    },
+                    input_refs=input_refs,
+                    output_refs=answer_refs,
+                )
+                self._end_synthesis_span(session, span_key, status="ok", duration_ms=result.duration_ms)
+                return transition_update(
+                    gstate,
+                    WorkflowPhase.SYNTHESIS,
+                    {"final_content": final_content, "draft_ref": "synthesis:latest", "quality_assessment": {}},
+                )
+
+            retryable = result.fail_reason in synthesis_executor_module.RETRYABLE_SYNTHESIS_FAILURES
+            can_retry = attempts < 2 and retryable
+            if result.fail_reason == "context_length_exceeded" and attempts < 2 and not context.compacted:
+                context = builder.compact(context)
+                fallback_action = "compact_retry"
+            elif can_retry:
+                fallback_action = "retry"
+            elif context.findings or context.evidence_digests:
+                fallback_action = "deterministic_partial_renderer"
+            else:
+                fallback_action = "explicit_failed_no_evidence"
+            _emit(
+                session,
+                "synthesis.failed",
+                phase=WorkflowPhase.SYNTHESIS.value,
+                status="failed",
+                duration_ms=result.duration_ms,
+                attempt=attempts,
+                attributes={
+                    "mode": mode,
+                    "attempt": attempts,
+                    "fail_reason": result.fail_reason,
+                    "duration_ms": result.duration_ms,
+                    "input_tokens_estimated": estimated_tokens,
+                    "evidence_count": len(result.evidence_refs),
+                    "evidence_ids": result.evidence_refs,
+                    "fallback_action": fallback_action,
+                },
+                input_refs=input_refs,
+                output_refs=answer_refs if fallback_action != "explicit_failed_no_evidence" else None,
+            )
+            self._end_synthesis_span(session, span_key, status="failed", duration_ms=result.duration_ms)
+            if fallback_action in {"retry", "compact_retry"}:
+                continue
+            break
+
+        fail_reason = str(getattr(last_result, "fail_reason", "") or "synthesis_failed")
+        if not (context.findings or context.evidence_digests):
             if isinstance(session.state.metadata, dict):
                 session.state.metadata.update(
                     {
                         "synthesis_attempted": True,
+                        "synthesis_attempts": attempts,
                         "synthesis_mode": mode,
-                        "synthesis_status": result.status,
+                        "synthesis_status": "failed",
+                        "synthesis_failed": True,
+                        "synthesis_fail_reason": fail_reason,
+                        "fallback_used": "",
                     }
                 )
-            _emit(
-                session,
-                "synthesis.completed",
-                phase=WorkflowPhase.SYNTHESIS.value,
-            status="ok",
-            duration_ms=result.duration_ms,
-            attributes={"mode": mode, "content_chars": len(final_content), "evidence_ids": result.evidence_refs},
-            )
-            return transition_update(
-                gstate,
-                WorkflowPhase.SYNTHESIS,
-                {
-                    "final_content": final_content,
-                    "draft_ref": "synthesis:latest",
-                    "quality_assessment": {},
-                },
-            )
+            return transition_update(gstate, WorkflowPhase.SYNTHESIS, {"quality_assessment": {}})
+
+        worker_failures = [
+            str(row.get("fail_reason") or row.get("status") or "")
+            for row in gstate.get("worker_results") or []
+            if isinstance(row, dict) and not bool(row.get("ok", True))
+        ]
+        fallback_content = render_partial_delivery(
+            objective=session.ctx.task_query,
+            findings=list(context.findings),
+            evidence_digests=list(context.evidence_digests),
+            worker_summaries=list(context.worker_summaries),
+            business_gaps=list(context.business_gaps),
+            limitations=list(context.limitations),
+            unresolved_conflicts=list(context.unresolved_conflicts),
+            worker_failure_reasons=worker_failures,
+            synthesis_failure_reason=fail_reason,
+        )
+        manager = session.ctx.citation_manager
+        final_content = (
+            manager.build_cited_report(fallback_content)
+            if manager is not None and fallback_content
+            else fallback_content
+        )
+        session.state.final_content = final_content
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
                 {
                     "synthesis_attempted": True,
+                    "synthesis_attempts": attempts,
                     "synthesis_mode": mode,
-                    "synthesis_status": result.status,
-                    "synthesis_fail_reason": result.fail_reason,
+                    "synthesis_status": "failed",
+                    "synthesis_failed": True,
+                    "synthesis_fail_reason": fail_reason,
+                    "fallback_used": "deterministic_partial_renderer",
                 }
             )
-        _emit(
-            session,
-            "synthesis.failed",
-            phase=WorkflowPhase.SYNTHESIS.value,
-            status="failed",
-            duration_ms=result.duration_ms,
-            attributes={"mode": mode, "fail_reason": result.fail_reason, "evidence_ids": result.evidence_refs},
-        )
         return transition_update(
             gstate,
             WorkflowPhase.SYNTHESIS,
-            {"quality_assessment": {}},
+            {"final_content": final_content, "draft_ref": "synthesis:fallback", "quality_assessment": {}},
         )
+
+    async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        return await self._synthesize(gstate)
 
     async def node_quality_gate(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.assessment.evidence import EvidenceStatus, assess_evidence
@@ -1179,7 +1391,10 @@ class ResearchGraphRunner:
             "run.terminated",
             phase=WorkflowPhase.FINALIZE.value,
             status=outcome,
-            attributes=termination_event_attributes(termination["termination"]),
+            attributes={
+                **termination_event_attributes(termination["termination"]),
+                "final_content_chars": len(session.state.final_content),
+            },
         )
         result = await self.harness._phase_finalize(
             session.state,

@@ -8,26 +8,44 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.api.tracing import build_run_config
+from app.agent.harness.token_counter import estimate_tokens
 from app.research.execution.llm_gateway import LLMGateway
 from app.research.execution.tool_gateway import ToolGateway
+from app.research.delivery.synthesis_context import EvidenceDigest
 from app.research.runtime.worker import ResearchContext, WorkerResult
+
+
+RETRYABLE_SYNTHESIS_FAILURES = frozenset(
+    {"synthesis_timeout", "provider_rate_limit", "stream_error", "provider_unavailable", "empty_content"}
+)
+NON_RETRYABLE_SYNTHESIS_FAILURES = frozenset(
+    {"provider_auth", "provider_bad_request", "budget_tokens", "budget_llm_calls"}
+)
 
 
 def _failure_reason(exc: Exception) -> str:
     message = str(exc).lower()
+    if "budget_tokens" in message:
+        return "budget_tokens"
+    if "budget_llm_calls" in message:
+        return "budget_llm_calls"
     if "sensitivecontentdetected" in message or "content_filter" in message:
         return "provider_content_filter"
     if "rate limit" in message or "ratelimit" in message:
         return "provider_rate_limit"
     if "usage limit" in message or "quota" in message:
         return "provider_usage_limit"
+    if "auth" in message or "401" in message or "permission" in message:
+        return "provider_auth"
+    if "bad request" in message or "400" in message:
+        return "provider_bad_request"
     if "context length" in message or "context_length_exceeded" in message:
         return "context_length_exceeded"
-    if "auth" in message:
-        return "provider_auth"
-    if "bad request" in message:
-        return "provider_bad_request"
-    return type(exc).__name__
+    if "unavailable" in message or "connection" in message or "503" in message:
+        return "provider_unavailable"
+    if "stream" in message or "incomplete" in message:
+        return "stream_error"
+    return "unknown_provider_error"
 
 
 @dataclass(frozen=True)
@@ -39,6 +57,10 @@ class SynthesisRequest:
     limitations: list[str] = field(default_factory=list)
     unresolved_conflicts: list[str] = field(default_factory=list)
     research_summary: str = ""
+    evidence_digests: list[EvidenceDigest] = field(default_factory=list)
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    worker_summaries: list[dict[str, Any]] = field(default_factory=list)
+    token_budget: int = 40_000
 
 
 class SynthesisExecutor:
@@ -96,7 +118,7 @@ class SynthesisExecutor:
                 started,
                 ok=False,
                 summary="synthesis_empty_content",
-                fail_reason="synthesis_empty_content",
+                fail_reason="empty_content",
                 evidence_refs=request.evidence_refs,
             )
         return self._result(
@@ -141,33 +163,45 @@ class SynthesisExecutor:
         return ""
 
     def _prompt(self, request: SynthesisRequest, context: ResearchContext) -> str:
-        evidence = "\n".join(f"- {item}" for item in request.evidence_refs[:80])
-        limitations = "\n".join(f"- {item}" for item in request.limitations[:20])
-        conflicts = "\n".join(f"- {item}" for item in request.unresolved_conflicts[:20])
         mode_instruction = (
             "基于完整证据输出可靠结论。"
             if request.mode == "normal"
             else "基于现有证据输出降级结论，明确说明覆盖不足和无法确认的部分，不得补写未证实内容。"
         )
-        return "\n".join(
-            part
-            for part in (
-                f"任务：{context.query}",
-                f"合成模式：{request.mode}",
-                f"要求：{mode_instruction}",
-                "硬性约束：只允许使用下方研究摘要和证据引用；禁止联网、读取文件或发明新证据。",
-                "研究摘要：",
-                request.research_summary[:80000],
-                "证据引用：",
-                evidence or "- 无",
-                "覆盖限制：",
-                limitations or "- 无",
-                "未解决冲突：",
-                conflicts or "- 无",
-                "输出要求：直接输出面向用户的报告正文；引用证据对应的原始来源；不要输出 JSON。",
+        lines = [
+            f"任务：{context.query}",
+            f"合成模式：{request.mode}",
+            f"要求：{mode_instruction}",
+            "硬性约束：只允许使用下方研究摘要和证据摘录；禁止联网、读取文件或发明新证据。",
+        ]
+        evidence_lines: list[str] = []
+        for digest in request.evidence_digests:
+            evidence_lines.append(
+                f"- {digest.evidence_id}｜{digest.title}｜{digest.locator}｜{digest.excerpt}"
             )
-            if str(part).strip()
+        if not evidence_lines:
+            evidence_lines.extend(f"- {item}" for item in request.evidence_refs[:80])
+        sections = (
+            ("研究摘要：", [request.research_summary] if request.research_summary else []),
+            ("证据摘录：", evidence_lines),
+            ("覆盖限制：", [f"- {item}" for item in request.limitations[:20]]),
+            ("未解决冲突：", [f"- {item}" for item in request.unresolved_conflicts[:20]]),
+            ("输出要求：", ["直接输出面向用户的报告正文；引用证据对应的原始来源；不要输出 JSON。"]),
         )
+        budget = max(1_000, request.token_budget)
+        for header, section_lines in sections:
+            candidate = [*lines, header]
+            for line in section_lines:
+                candidate.append(line)
+                if estimate_tokens("\n".join(candidate)) > budget:
+                    candidate.pop()
+                    break
+            if len(candidate) > len(lines):
+                lines = candidate
+        return "\n".join(line for line in lines if str(line).strip())
+
+    def estimate_input_tokens(self, request: SynthesisRequest, context: ResearchContext) -> int:
+        return estimate_tokens(self._prompt(request, context))
 
     def _timeout_sec(self) -> float:
         config = self.harness.harness_config
@@ -207,4 +241,9 @@ class SynthesisExecutor:
         )
 
 
-__all__ = ["SynthesisExecutor", "SynthesisRequest"]
+__all__ = [
+    "NON_RETRYABLE_SYNTHESIS_FAILURES",
+    "RETRYABLE_SYNTHESIS_FAILURES",
+    "SynthesisExecutor",
+    "SynthesisRequest",
+]

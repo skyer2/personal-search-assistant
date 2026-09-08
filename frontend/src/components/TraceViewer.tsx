@@ -735,16 +735,18 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     size="small"
                     columns={[
                       { title: "Type", dataIndex: "type", width: 160, key: "type" },
-                      { title: "Answer", dataIndex: "answer_id", width: 140, key: "answer_id" },
-                      { title: "Brief", dataIndex: "brief_id", width: 140, key: "brief_id" },
+                      { title: "Mode", dataIndex: "mode", width: 110, key: "mode" },
+                      { title: "Attempt", dataIndex: "attempt", width: 90, key: "attempt" },
+                      { title: "Duration", dataIndex: "duration_ms", width: 100, key: "duration_ms", render: (value: unknown) => (value == null ? "-" : `${asText(value)} ms`) },
+                      { title: "Input Tokens", dataIndex: "input_tokens_estimated", width: 130, key: "input_tokens_estimated" },
                       {
                         title: "Evidence",
                         dataIndex: "evidence_ids",
                         key: "evidence_ids",
                         render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
                       },
-                      { title: "Words", dataIndex: "word_count", width: 90, key: "word_count" },
-                      { title: "Ref", dataIndex: "answer_ref", key: "answer_ref" }
+                      { title: "Fail Reason", dataIndex: "fail_reason", width: 180, key: "fail_reason", render: (value: unknown) => <div className="table-wrap-cell">{asText(value) || "-"}</div> },
+                      { title: "Fallback", dataIndex: "fallback_action", width: 200, key: "fallback_action", render: (value: unknown) => <div className="table-wrap-cell">{asText(value) || "-"}</div> }
                     ]}
                   />
                 )}

@@ -59,6 +59,8 @@ def check_trace_integrity(
     failure_origin_stage = ""
     worker_evidence_ids: set[str] = set()
     synthesis_evidence_ids: set[str] = set()
+    evidence_statuses: list[str] = []
+    synthesis_failed_events: list[dict[str, Any]] = []
     worker_terminal_without_task_id = 0
     worker_attempt_keys: list[tuple[str, int, int]] = []
     progress_waves: list[int] = []
@@ -90,6 +92,8 @@ def check_trace_integrity(
             if not str(event.get("task_id") or attrs.get("task_id") or "").strip():
                 worker_terminal_without_task_id += 1
             worker_evidence_ids.update(str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip())
+        if event_type == "evidence.assessed":
+            evidence_statuses.append(str(attrs.get("status") or ""))
         if event_type == "worker.started":
             try:
                 started_task_id = str(event.get("task_id") or attrs.get("task_id") or "")
@@ -140,6 +144,9 @@ def check_trace_integrity(
         if "_recovery_recovery" in str(event.get("task_id") or ""):
             issues.append("recovery_of_recovery_task_id")
         if event_type == "synthesis.completed":
+            synthesis_evidence_ids.update(str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip())
+        if event_type == "synthesis.failed":
+            synthesis_failed_events.append(event)
             synthesis_evidence_ids.update(str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip())
         if event_type in {"run.failed", "run_summary"}:
             failure_origin_stage = str(
@@ -197,6 +204,7 @@ def check_trace_integrity(
         counts.get("run.failed", 0)
     )
     run_terminated = int(counts.get("run.terminated", 0))
+    synthesis_started = int(counts.get("synthesis.started", 0))
 
     duplicate_worker_keys = {
         key for key in worker_attempt_keys if worker_attempt_keys.count(key) > 1
@@ -264,7 +272,7 @@ def check_trace_integrity(
             termination.get("quality_attempted") is True
             or terminal_metadata.get("quality_attempted") is True
         )
-        quality_required = (
+        quality_required = not is_simple_fact_fast_path and (
             run_status in {"success", "completed", "ok", "done"}
             or quality_attempted
             or termination_stage in {"quality", "finalize"}
@@ -288,8 +296,8 @@ def check_trace_integrity(
     if synthesis_count > 0 and run_terminated == 0:
         issues.append("missing_run_terminated_event")
 
-    if worker_started > 0 and worker_done < worker_started:
-        issues.append(f"worker_mismatch:started={worker_started},done={worker_done}")
+    if worker_done > 0 and worker_started != worker_done:
+        issues.append(f"worker_lifecycle_mismatch:started={worker_started},done={worker_done}")
     if is_agent_mode and evidence_count > 0 and worker_done == 0:
         issues.append("evidence_without_worker_terminal")
     if run_status == "partial":
@@ -328,6 +336,24 @@ def check_trace_integrity(
         issues.append("artifact_evidence_disconnect")
     if worker_evidence_ids and synthesis_count == 0 and run_status in {"success", "partial", "completed"}:
         issues.append("artifact_evidence_without_synthesis")
+    if synthesis_started > 0:
+        if synthesis_count == 0:
+            issues.append("missing_synthesis_terminal_event")
+        root_span_ids = {
+            str(event.get("span_id"))
+            for event in events
+            if str(event.get("type") or event.get("event")) == "run.started"
+        }
+        synthesis_span_ids = {
+            str(event.get("span_id"))
+            for event in events
+            if str(event.get("type") or event.get("event")).startswith("synthesis.")
+        }
+        if not synthesis_span_ids or synthesis_span_ids.issubset(root_span_ids):
+            issues.append("missing_synthesis_span")
+    if synthesis_failed_events:
+        if any(not str((item.get("attributes") or {}).get("fail_reason") or "").strip() for item in synthesis_failed_events):
+            issues.append("synthesis_failure_reason_missing")
 
     terminated_event = next(
         (
@@ -362,6 +388,21 @@ def check_trace_integrity(
         if allowed and run_terminal_status and run_terminal_status not in allowed:
             issues.append(f"terminal_outcome_mismatch:{outcome}!={run_terminal_status}")
 
+    final_content_chars: int | None = None
+    for event in (terminated_event, terminal_run_event):
+        attrs = event.get("attributes") if isinstance(event.get("attributes"), dict) else {}
+        if attrs.get("final_content_chars") is not None:
+            try:
+                final_content_chars = int(attrs.get("final_content_chars"))
+            except (TypeError, ValueError):
+                final_content_chars = None
+            break
+    usable_evidence = bool(worker_evidence_ids) or any(
+        status in {"partial", "sufficient"} for status in evidence_statuses
+    )
+    if usable_evidence and final_content_chars == 0:
+        issues.append("usable_evidence_with_empty_final_content")
+
     # Seq uniqueness
     if seq_values:
         unique = set(seq_values)
@@ -377,6 +418,15 @@ def check_trace_integrity(
     from app.observability.journal import build_span_tree
 
     tree = build_span_tree(events) if include_tree else {"span_count": 0, "root_count": 0, "cycle_count": 0, "valid": None}
+    from app.observability.semantic import build_lineage_edges
+
+    lineage = build_lineage_edges(events) if include_tree else []
+    lineage_edges = len(lineage)
+    evidence_lineage_edges = sum(
+        1
+        for edge in lineage
+        if str(edge.get("from_type")) == "evidence" or str(edge.get("to_type")) == "evidence"
+    )
     span_count = int(tree.get("span_count") or 0)
     root_count = int(tree.get("root_count") or 0)
     cycle_count = int(tree.get("cycle_count") or 0)
@@ -385,6 +435,13 @@ def check_trace_integrity(
             issues.append("span_tree_no_root")
         if cycle_count > 0:
             issues.append(f"span_tree_cycles:{cycle_count}")
+    if is_agent_mode and is_terminal and not is_simple_fact_fast_path:
+        if span_count < 1:
+            issues.append("missing_root_span")
+        elif root_count < 1:
+            issues.append("missing_root_span")
+    if worker_evidence_ids and synthesis_started > 0 and evidence_lineage_edges == 0:
+        issues.append("missing_evidence_lineage")
 
     return {
         "passed": len(issues) == 0,
@@ -397,6 +454,7 @@ def check_trace_integrity(
             "worker_done": worker_done,
             "progress": progress_count,
             "synthesis": synthesis_count,
+            "synthesis_started": synthesis_started,
             "quality": quality_count,
             "control": control_count,
             "run_started": run_started,
@@ -410,4 +468,5 @@ def check_trace_integrity(
             "cycle_count": tree.get("cycle_count", 0),
             "valid": tree.get("valid", False),
         },
+        "lineage_edges": lineage_edges,
     }

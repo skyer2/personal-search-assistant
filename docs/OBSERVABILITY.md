@@ -30,7 +30,7 @@ Langfuse  TraceViewer / Metrics
 
 ## 事件词表
 
-`run.*` · `brief.compiled` · `plan.created/validated` · `worker.*` · `tool.*` · `retrieval.search` · `gen_ai.chat` · `evidence.registered` · `progress.assessed` · `replan.*` · `synthesis.*` · `recovery.*` · `context.*` · `checkpoint.*` · `budget.*` · `quality.assessed` · `eval.scored`
+`run.*` · `brief.compiled` · `plan.created/validated` · `worker.*` · `tool.*` · `retrieval.search` · `gen_ai.chat` · `evidence.registered` · `progress.assessed` · `replan.*` · `synthesis.*` · `recovery.*` · `context.*` · `checkpoint.*` · `budget.*` · `observability.internal_error` · `quality.assessed` · `eval.scored`
 
 每个重要事件可带：
 
@@ -99,6 +99,36 @@ JSONL/OTel 仍是 durable；EventBus 只负责跨进程 live delivery。
 **Gap closure（语义口径）**：`target_gap_ids` 在后续 `progress.assessed.resolved_gap_ids` 中出现才算 recovered。`harness_live_replan_recovered_total` 不再等于「有 replan + run success」。
 
 Trace summary 提供 `gap_closure_rate` / `replan_useful` / `failure_origin`（earliest evaluated failing stage）。
+
+## Trace Integrity
+
+`summarize_trace()` 的 `trace_integrity` 是生产门禁，不只是 UI 展示。除了原有 JSONL / projection 检查外，必须满足：
+
+- Worker run 必须同时有 `worker.started` 与 `worker.done`，不允许只有 done 的“幽灵完成”。
+- 每次执行必须有至少一个 root span；Worker 必须挂在 Research root / synthesis 相应 span 下。
+- Research synthesis 阶段必须有 synthesis span / event；失败时必须给出 `fail_reason`。
+- Evidence 引用必须形成 lineage；`synthesis.failed` 与 `evidence_ids` 也计入 lineage。
+- Simple Fact Fast Path 只校验 worker 生命周期与 root span，不错误要求 Research 图的 progress / synthesis 事件。
+- 存在可用 evidence 且 final content 为空时，Trace Integrity 必须失败，即使外层 run 没有抛异常。
+
+观测系统自身失败不能吞掉业务事件：Worker span 创建失败会 emit `observability.internal_error`，随后 `worker.started` / `worker.done` 仍按业务事实记录。
+
+## Synthesis 观测
+
+`synthesis.started` / `synthesis.completed` / `synthesis.failed` 携带：
+
+| 字段 | 含义 |
+|--|--|
+| `mode` | synthesis 输入模式（例如 full / compact） |
+| `attempt` / `attempts` | 当前尝试 / 总尝试次数 |
+| `duration_ms` | 单次执行耗时 |
+| `input_tokens_estimated` | 去重与裁剪后的估算输入 |
+| `evidence_count` | 进入 synthesis 的 evidence 数 |
+| `fail_reason` | provider / context / budget / empty 等失败分类 |
+| `fallback_action` | `deterministic_partial` 或 `none` |
+| `content_chars` | 最终 / 兜底内容长度 |
+
+Run metadata 同步暴露 `synthesis_attempts`、`synthesis_failed`、`synthesis_fail_reason`、`fallback_used`。Trace UI 的 Synthesis 页签展示上述字段，用于区分“模型临时失败但已部分交付”和“没有可信证据导致失败”。
 
 ## Eval 关联
 

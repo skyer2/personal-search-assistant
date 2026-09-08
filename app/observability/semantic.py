@@ -261,6 +261,7 @@ _LINEAGE_EVENT_TYPES = frozenset({
     "progress.assessed",
     "replan.applied",
     "synthesis.completed",
+    "synthesis.failed",
 })
 
 
@@ -285,6 +286,9 @@ def build_lineage_edges(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for key in ("answer_id", "patch_id", "evidence_id", "finding_id"):
                 if attrs.get(key):
                     out_ids.append({"type": key.replace("_id", ""), "id": attrs.get(key)})
+            for evidence_id in attrs.get("evidence_ids") or []:
+                if str(evidence_id).strip():
+                    out_ids.append({"type": "evidence", "id": str(evidence_id)})
             inputs = in_ids
             outputs = out_ids
 

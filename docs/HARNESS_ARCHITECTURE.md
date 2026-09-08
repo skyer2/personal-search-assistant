@@ -81,6 +81,24 @@ Worker 图更新只返回自己的 `tasks[task_id]` delta；`tasks` keyed reduce
 
 异步 SQLite checkpointer 由一次 Runner 执行独立创建并关闭；外部传入的 checkpointer 所有权不变。这样不会把 `aiosqlite` 连接线程泄漏到进程退出阶段。
 
+### Synthesis Context 与失败收敛
+
+Synthesis 是唯一把 Brief、Plan、Finding、Evidence、Worker Summary 汇成最终交付的阶段。它仍然禁止新增检索，并且必须满足三个生产约束：
+
+1. **上下文可追溯**：`SynthesisContextBuilder` 从 ArtifactStore / CitationManager 读取 evidence digest，不允许只把 opaque evidence id 交给模型。
+2. **输入有硬预算**：evidence refs、findings、worker summaries 先做确定性去重，再按项目 token counter 裁剪；prompt 与输入预算由 Runner 统一记录。
+3. **失败可交付**：Synthesis 网络失败不能让已有可信材料直接变成空结果。有 evidence / findings 时使用 deterministic partial renderer 生成非空 `partial` 交付；没有证据时保持 explicit `failed`，不允许编造事实性正文。
+
+Synthesis retry 由 Runner 控制，`SynthesisExecutor` 保持单次执行职责。最多执行 2 次尝试：
+
+| 失败类别 | 行为 |
+|--|--|
+| timeout / rate limit / stream error / provider unavailable / empty | 重试一次 |
+| context length exceeded | compact 输入后重试一次 |
+| auth / bad request / budget tokens / budget llm calls | 不重试，直接进入失败收敛 |
+
+终态 metadata 暴露 `synthesis_attempts`、`synthesis_failed`、`synthesis_fail_reason`、`fallback_used`。Trace 中每个 attempt 均记录 mode、duration、estimated input tokens、evidence count、failure reason 与 fallback action，保证可以从 UI 直接判断是模型失败、预算耗尽还是兜底交付。
+
 ### Simple Fact Fast Path
 
 `SIMPLE_FACT` is a product path, not a recommendation from the retired experiment router:

@@ -108,42 +108,51 @@ class WorkerExecutorV2:
             from app.observability import EventType, get_recorder
 
             recorder = get_recorder()
+            worker_attributes = worker_event_attributes(
+                objective=task.objective,
+                step_type=task.step_type,
+                worker_runtime="v2",
+                search_mode="agent",
+                task_shape="simple_fact" if simple_fact else "",
+                execution_path="fast_path" if simple_fact else "harness",
+                dispatch_wave_id=task.dispatch_wave_id,
+            )
             if recorder.is_active:
-                recorder_span = recorder.start_span(
-                    "worker.execute_v2",
-                    phase="execute",
-                    task_id=task.task_id,
-                    plan_version=task.plan_version,
-                    attempt=task.attempt,
-                    attributes=worker_event_attributes(
-                        objective=task.objective,
-                        step_type=task.step_type,
-                        worker_runtime="v2",
-                        search_mode="agent",
-                        task_shape="simple_fact" if simple_fact else "",
-                        execution_path="fast_path" if simple_fact else "harness",
-                        dispatch_wave_id=task.dispatch_wave_id,
-                    ),
-                )
-                recorder.emit(
-                    EventType.WORKER_STARTED,
-                    phase="execute",
-                    status="start",
-                    task_id=task.task_id,
-                    plan_version=task.plan_version,
-                    attempt=task.attempt,
-                    attributes=worker_event_attributes(
-                        objective=task.objective,
-                        step_type=task.step_type,
-                        worker_runtime="v2",
-                        search_mode="agent",
-                        task_shape="simple_fact" if simple_fact else "",
-                        execution_path="fast_path" if simple_fact else "harness",
-                        dispatch_wave_id=task.dispatch_wave_id,
-                    ),
-                    run_id=context.run_id,
-                    session_id=context.session_id,
-                )
+                try:
+                    recorder_span = recorder.start_span(
+                        "worker.execute_v2",
+                        phase="execute",
+                        task_id=task.task_id,
+                        plan_version=task.plan_version,
+                        attempt=task.attempt,
+                        attributes=worker_attributes,
+                    )
+                except Exception as exc:
+                    self._emit_observability_error(
+                        recorder,
+                        context,
+                        operation="start_span",
+                        error=exc,
+                    )
+                try:
+                    recorder.emit(
+                        EventType.WORKER_STARTED,
+                        phase="execute",
+                        status="start",
+                        task_id=task.task_id,
+                        plan_version=task.plan_version,
+                        attempt=task.attempt,
+                        attributes=worker_attributes,
+                        run_id=context.run_id,
+                        session_id=context.session_id,
+                    )
+                except Exception as exc:
+                    self._emit_observability_error(
+                        recorder,
+                        context,
+                        operation="worker_started",
+                        error=exc,
+                    )
         except Exception:
             recorder_span = ""
 
@@ -345,6 +354,30 @@ class WorkerExecutorV2:
                         )
             except Exception:
                 pass
+
+    def _emit_observability_error(
+        self,
+        recorder: Any,
+        context: ResearchContext,
+        *,
+        operation: str,
+        error: Exception,
+    ) -> None:
+        try:
+            recorder.emit(
+                "observability.internal_error",
+                phase="execute",
+                status="warning",
+                attributes={
+                    "operation": operation,
+                    "error_type": type(error).__name__,
+                    "error": str(error)[:500],
+                    "run_id": context.run_id,
+                    "session_id": context.session_id,
+                },
+            )
+        except Exception:
+            return
 
     async def _invoke_leaf(
         self,

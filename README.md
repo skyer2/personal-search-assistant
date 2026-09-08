@@ -106,3 +106,9 @@ python3 tests/test_hybrid_planning.py
 python3 tests/eval/test_eval_dry_run.py
 python3 tests/eval/run_eval.py --dry-run
 ```
+
+发布闭环（生产配置故障矩阵 + 4 条 release query）：
+
+```bash
+python scripts/release_smoke.py --q1-runs 3
+```
