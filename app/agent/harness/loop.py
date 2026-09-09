@@ -4,7 +4,7 @@ Agent Harness 主循环
 【Phase 3】per-step 执行 + Memory recall/remember + MCP 工具上下文。
 【Phase 4】harness.yml 配置 + JSONL 结构化日志 + budget 守卫。
 【Phase 5】HITL interrupt_on + step gate + Command(resume) 恢复。
-【Phase 6】Citation-First + HITL Edit-in-the-Loop + Dynamic Re-plan。
+【Phase 6】Citation-First + HITL Edit-in-the-Loop。
 【Phase 7】多 Agent 编排：检索并行 fan-out、步级 checkpoint、计划绑定、工人结构化回传。
 【Phase 8】混合 Planner（规则+LLM）、结构化重试、evidence digest 写报告整合。
 【Phase 9】可观测性快照 + JSONL 聚合 metrics API + Eval 扩展指标（JCR/OVR/tokens_saved）。
@@ -44,7 +44,6 @@ from app.agent.harness.planner import (
     apply_intent_clarification,
     apply_plan_edits,
     auto_resolve_clarification,
-    dynamic_replan,
     plan_to_editable_dict,
     should_request_plan_review,
 )
@@ -66,10 +65,6 @@ from app.agent.harness.orchestration import (
     validate_structured_worker_payload,
 )
 from app.agent.harness.worker_runtime import resolve_execute_target
-from app.agent.harness.guardrails import (
-    GuardrailAction,
-    evaluate_run_guardrails,
-)
 from app.agent.harness.step_budget import retrieval_budget
 from app.agent.harness.observability import build_observability_snapshot
 from app.agent.harness.planner_llm import build_plan_for_intent, understand_intent
@@ -1222,22 +1217,6 @@ class AgentHarness:
                     step.metadata["hitl_edited"] = True
                 if edited.get("steps") and state.plan:
                     state.plan = apply_plan_edits(state.plan, edited["steps"])
-                    state.replan_count += 1
-                if edited.get("replan") and self.harness_config.hitl_allow_replan and state.plan:
-                    state.plan = dynamic_replan(
-                        state.plan,
-                        max(step_index, 0),
-                        "user_replan",
-                    )
-                    state.replan_count += 1
-                    self._report_phase(
-                        Phase.REPLAN,
-                        "done",
-                        state=state,
-                        step_index=step_index,
-                        reason="user_replan",
-                        new_steps=len(state.plan.steps),
-                    )
         return state
 
     def _memory_identity(self, state: LoopState) -> MemoryIdentity:
@@ -2162,8 +2141,8 @@ class AgentHarness:
         lowered = str(reason or "").lower()
         if "budget" in lowered or "deadline" in lowered:
             decision = "abort"
-        elif "replan" in lowered or "gap" in lowered:
-            decision = "replan"
+        elif "gap" in lowered:
+            decision = "supervisor"
         elif "checkpoint" in lowered or "resume" in lowered:
             decision = "resume"
         try:
@@ -2475,7 +2454,7 @@ class AgentHarness:
                 "memory_trust_filtered": getattr(state, "obs_memory_trust_filtered", 0),
                 "memory_sources_recorded": getattr(state, "obs_memory_sources_recorded", 0),
                 "step_validation_results": state.step_validation_results,
-                "replan_count": state.replan_count,
+                "supervisor_iterations": state.supervisor_iterations,
                 "citation_coverage_rate": state.citation_coverage_rate,
                 "numeric_citation_coverage": getattr(state, "numeric_citation_coverage", 0.0),
                 "entity_retention_avg": round(
@@ -2556,116 +2535,6 @@ class AgentHarness:
         except Exception:
             pass
         return max(content_est, usage_tokens)
-
-    def _apply_run_guardrails(
-        self,
-        state: LoopState,
-        run_started: float,
-        budget_manager: Any,
-    ) -> bool:
-        """【Phase 13】每步前评估护栏（三态）。
-
-        - CONTINUE：返回 False，继续执行；
-        - DEGRADE ：资源触顶 → 停止剩余检索步、标记 force_synthesis，返回 False
-          （主循环会跳过已标记 skipped 的检索步，让合成步基于已有证据交付）；
-        - ABORT   ：仅不可恢复错误才返回 True 并写入 abort_reason。
-        """
-        mgr = budget_manager
-        mgr.sync_from_usage(session_id=state.session_id or "", tool_calls=state.tool_calls_count)
-        snap = mgr.snapshot()
-        if isinstance(state.metadata, dict):
-            state.metadata["budget_snapshot"] = snap.to_dict()
-            state.metadata["llm_calls_used"] = snap.llm_calls
-            # Research 触顶：不直接 abort，标记强制进入 synthesis
-            if snap.force_synthesis and not state.abort_reason:
-                state.metadata["force_synthesis"] = True
-
-        decision = evaluate_run_guardrails(
-            state,
-            self.harness_config,
-            elapsed_sec=time.perf_counter() - run_started,
-            estimated_tokens=self._estimate_run_tokens(state),
-        )
-        exact_reason = mgr.exhaustion_reason()
-        if snap.force_synthesis and exact_reason:
-            decision.reason = exact_reason
-            decision.message = f"预算触顶：{exact_reason}"
-        if decision.action == GuardrailAction.DEGRADE:
-            # 资源耗尽 ≠ 系统失败：停止研究、保留合成交付能力
-            if isinstance(state.metadata, dict):
-                state.metadata["force_synthesis"] = True
-                state.metadata["budget_degrade_reason"] = decision.reason
-                state.metadata["budget_degrade_message"] = decision.message
-            if state.plan is not None:
-                for pending_step in state.plan.steps:
-                    if str(pending_step.step_type or "") not in RETRIEVAL_STEP_TYPES:
-                        continue
-                    if str(pending_step.metadata.get("status") or "pending") not in {
-                        "pending",
-                        "running",
-                    }:
-                        continue
-                    pending_step.metadata["status"] = StepStatus.SKIPPED.value
-                    pending_step.metadata["skip_reason"] = f"budget_degraded:{decision.reason}"
-            try:
-                from app.observability import EventType, get_recorder
-
-                recorder = get_recorder()
-                if recorder.is_active:
-                    budget_event = recorder.emit(
-                        EventType.BUDGET_EXHAUSTED,
-                        phase="run",
-                        status="degrade",
-                        attributes={
-                            "fail_reason": str(decision.reason or "budget_exhausted"),
-                            "message": str(decision.message or "")[:240],
-                            "decision": "degrade",
-                            "remaining_budget": self.remaining_budget(state),
-                            "budget_snapshot": snap.to_dict(),
-                        },
-                    )
-                    state.metadata["budget_exhausted_event_id"] = str(
-                        getattr(budget_event, "event_id", "") or ""
-                    )
-            except Exception:
-                import logging as _log
-                _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
-            return False
-        if not decision.abort:
-            return False
-        state.abort_reason = decision.reason
-        state.abort_message = decision.message
-        try:
-            from app.observability import EventType, get_recorder
-
-            recorder = get_recorder()
-            if recorder.is_active:
-                recorder.emit(
-                    EventType.BUDGET_EXHAUSTED,
-                    phase="run",
-                    status=str(decision.reason or "budget_exhausted"),
-                    attributes={
-                        "fail_reason": str(decision.reason or "budget_exhausted"),
-                        "message": str(decision.message or "")[:240],
-                        "remaining_budget": self.remaining_budget(state),
-                        "budget_snapshot": snap.to_dict(),
-                        "failure.origin_stage": "runtime",
-                        "failure.detected_stage": "runtime",
-                    },
-                )
-        except Exception:
-            import logging as _log
-            _log.getLogger("observability").debug("obs emit skipped", exc_info=True)
-        return True
-
-    def _budget_exceeded(self, state: LoopState) -> bool:
-        """向后兼容：预算触顶（degrade 或 abort）均视为 exceeded。"""
-        return evaluate_run_guardrails(
-            state,
-            self.harness_config,
-            elapsed_sec=0.0,
-            estimated_tokens=self._estimate_run_tokens(state),
-        ).action != GuardrailAction.CONTINUE
 
     def remaining_budget(self, state: LoopState) -> dict[str, int]:
         run_budget = {}

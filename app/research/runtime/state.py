@@ -5,8 +5,9 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, NotRequired, TypedDict
 
-from app.research.domain.contracts import LifecycleStatus, WorkflowPhase, new_action_budget
+from app.research.domain.contracts import LifecycleStatus, WorkflowPhase
 from app.research.runtime.reducers import merge_dicts
+from app.research.runtime.reducers import merge_findings
 from app.research.runtime.reducers import merge_records
 from app.research.runtime.reducers import merge_strings
 from app.research.runtime.reducers import merge_semantic_waves
@@ -25,8 +26,6 @@ class BudgetState(TypedDict):
     max_parallel_workers: int
     max_replan_count: int
     max_task_attempts: int
-    max_gap_fill_attempts: int
-    max_expand_plan_attempts: int
     max_semantic_stall_cycles: int
     max_active_tasks: int
     exhausted: bool
@@ -49,6 +48,12 @@ class ResearchState(TypedDict):
     resolved_query: str
     search_cards: list[dict[str, Any]]
 
+    brief: dict[str, Any]
+    fast_path: bool
+    supervisor: dict[str, Any]
+    supervisor_action: dict[str, Any]
+    coverage_judgement: dict[str, Any]
+
     research_spec: dict[str, Any]
     coverage_contract: dict[str, Any]
     coverage_state: dict[str, Any]
@@ -64,13 +69,12 @@ class ResearchState(TypedDict):
     plan_version: int
     tasks: Annotated[dict[str, dict[str, Any]], merge_dicts]
     worker_results: Annotated[list[dict[str, Any]], operator.add]
-    findings: Annotated[list[dict[str, Any]], operator.add]
+    findings: Annotated[list[dict[str, Any]], merge_findings]
     evidence_refs: Annotated[list[str], merge_strings]
     artifacts: list[str]
 
     budget: BudgetState
     budget_status: str
-    action_budget: dict[str, int]
     dispatch_wave_id: int
 
     draft_ref: str | None
@@ -146,6 +150,11 @@ def empty_research_state(
         "conversation_summary": "",
         "resolved_query": task_query,
         "search_cards": [],
+        "brief": {},
+        "fast_path": False,
+        "supervisor": {"iteration": 0, "last_action": "", "reasoning_summary": ""},
+        "supervisor_action": {},
+        "coverage_judgement": {},
         "research_spec": {},
         "coverage_contract": {},
         "coverage_state": {},
@@ -175,20 +184,12 @@ def empty_research_state(
             "max_parallel_workers": 3,
             "max_replan_count": max_replan_count,
             "max_task_attempts": 2,
-            "max_gap_fill_attempts": 4,
-            "max_expand_plan_attempts": 2,
             "max_semantic_stall_cycles": 2,
             "max_active_tasks": 3,
             "exhausted": False,
             "low": False,
         },
         "budget_status": "available",
-        "action_budget": new_action_budget(
-            max_retry=2,
-            max_gap_fill=4,
-            max_expand_plan=2,
-            max_replan=max_replan_count,
-        ),
         "dispatch_wave_id": 0,
         "draft_ref": None,
         "final_ref": None,

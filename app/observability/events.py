@@ -22,13 +22,9 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "claim.extracted",
     "claim.conflict_detected",
     "claim.conflict_resolved",
-    "semantic_gap.opened",
-    "semantic_gap.closed",
     "semantic_gain.assessed",
     "plan.created",
     "plan.validated",
-    "plan.expanded",
-    "plan.gap_fill_applied",
     "worker.started",
     "worker.completed",
     "worker.failed",
@@ -44,13 +40,14 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "delivery.assessed",
     "control.decided",
     "task.transitioned",
-    "replan.proposed",
-    "replan.applied",
-    "replan.rejected",
     "synthesis.started",
     "synthesis.completed",
     "synthesis.failed",
     "recovery.decided",
+    "topology.decided",
+    "supervisor.started",
+    "supervisor.decided",
+    "finding.compressed",
     "recovery.completed",
     "context.built",
     "context.compressed",
@@ -82,13 +79,9 @@ class EventType:
     CLAIM_EXTRACTED = "claim.extracted"
     CLAIM_CONFLICT_DETECTED = "claim.conflict_detected"
     CLAIM_CONFLICT_RESOLVED = "claim.conflict_resolved"
-    SEMANTIC_GAP_OPENED = "semantic_gap.opened"
-    SEMANTIC_GAP_CLOSED = "semantic_gap.closed"
     SEMANTIC_GAIN_ASSESSED = "semantic_gain.assessed"
     PLAN_CREATED = "plan.created"
     PLAN_VALIDATED = "plan.validated"
-    PLAN_EXPANDED = "plan.expanded"
-    PLAN_GAP_FILL_APPLIED = "plan.gap_fill_applied"
     WORKER_STARTED = "worker.started"
     WORKER_COMPLETED = "worker.completed"
     WORKER_FAILED = "worker.failed"
@@ -104,13 +97,14 @@ class EventType:
     DELIVERY_ASSESSED = "delivery.assessed"
     CONTROL_DECIDED = "control.decided"
     TASK_TRANSITIONED = "task.transitioned"
-    REPLAN_PROPOSED = "replan.proposed"
-    REPLAN_APPLIED = "replan.applied"
-    REPLAN_REJECTED = "replan.rejected"
     SYNTHESIS_STARTED = "synthesis.started"
     SYNTHESIS_COMPLETED = "synthesis.completed"
     SYNTHESIS_FAILED = "synthesis.failed"
     RECOVERY_DECIDED = "recovery.decided"
+    TOPOLOGY_DECIDED = "topology.decided"
+    SUPERVISOR_STARTED = "supervisor.started"
+    SUPERVISOR_DECIDED = "supervisor.decided"
+    FINDING_COMPRESSED = "finding.compressed"
     RECOVERY_COMPLETED = "recovery.completed"
     CONTEXT_BUILT = "context.built"
     CONTEXT_COMPRESSED = "context.compressed"

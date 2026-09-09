@@ -58,7 +58,7 @@ function EventIcon({ event, phase }: { event: string; phase?: string }) {
   if (event === "tool_error") {
     return <CloseCircleOutlined aria-hidden />;
   }
-  if (event === "worker" || event === "replan" || event === "progress") {
+  if (event === "worker" || event === "supervisor" || event === "progress") {
     return <BranchesOutlined aria-hidden />;
   }
   if (event === "session_created") {

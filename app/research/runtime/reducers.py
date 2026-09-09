@@ -27,6 +27,7 @@ def merge_records(left: list[Any] | None, right: list[Any] | None) -> list[Any]:
         record_id = str(
             row.get("evidence_id")
             or row.get("claim_id")
+            or row.get("finding_id")
             or row.get("edge_id")
             or row.get("gap_id")
             or row.get("candidate_id")
@@ -41,13 +42,18 @@ def merge_records(left: list[Any] | None, right: list[Any] | None) -> list[Any]:
     return merged
 
 
+def merge_findings(left: list[Any] | None, right: list[Any] | None) -> list[Any]:
+    """Merge compressed findings by stable finding_id."""
+    return merge_records(left, right)
+
+
 def merge_strings(left: list[str] | None, right: list[str] | None) -> list[str]:
     return list(dict.fromkeys([*(left or []), *(right or [])]))
 
 
 def merge_semantic_waves(
-    left: list[dict[str, Any]] | None,
-    right: list[dict[str, Any]] | None,
+    left: list[Any] | None,
+    right: list[Any] | None,
     *,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
@@ -57,7 +63,16 @@ def merge_semantic_waves(
         if not isinstance(row, dict):
             continue
         wave_id = row.get("wave_id")
-        key = int(wave_id) if isinstance(wave_id, (int, float)) or str(wave_id).isdigit() else str(wave_id)
+        if isinstance(wave_id, bool):
+            key: int | str = str(wave_id)
+        elif isinstance(wave_id, int):
+            key = wave_id
+        elif isinstance(wave_id, float):
+            key = int(wave_id)
+        elif isinstance(wave_id, str) and wave_id.isdigit():
+            key = int(wave_id)
+        else:
+            key = str(wave_id or "")
         merged[key] = row
     return sorted(
         merged.values(),

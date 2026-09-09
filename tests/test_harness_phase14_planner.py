@@ -85,12 +85,12 @@ def test_planner_config_phase14():
 
 
 def test_intent_tasks_golden_dry():
-    from tests.eval.runners.component import run_planner_eval
+    from tests.eval.runners.component import run_brief_eval
 
-    results = run_planner_eval()
+    results = run_brief_eval()
     failed = [row.task_id for row in results if not row.success]
-    assert not failed, f"planner component failed: {failed}"
-    print(f"[OK] all {len(results)} planner_v2 cases")
+    assert not failed, f"brief component failed: {failed}"
+    print(f"[OK] all {len(results)} brief_v1 cases")
 
 
 if __name__ == "__main__":

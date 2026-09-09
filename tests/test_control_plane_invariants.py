@@ -38,7 +38,7 @@ def test_parallel_worker_leases_cannot_overcommit_research_pool() -> None:
         phase_plan=PhaseBudgetPlan(
             understand_plan=0.0,
             research=0.6,
-            replan=0.0,
+            supervisor=0.0,
             synthesis=0.4,
             quality=0.0,
         ),
@@ -80,7 +80,7 @@ def test_exact_token_exhaustion_reason_is_not_wall_deadline() -> None:
         phase_plan=PhaseBudgetPlan(
             understand_plan=0.0,
             research=0.6,
-            replan=0.0,
+            supervisor=0.0,
             synthesis=0.4,
             quality=0.0,
         ),
@@ -236,7 +236,7 @@ def test_quality_failure_routes_conditionally_and_partial_is_preserved() -> None
                 },
             }
         )
-        == "repair_synthesis"
+        == "synthesize"
     )
     assert (
         route_after_quality(

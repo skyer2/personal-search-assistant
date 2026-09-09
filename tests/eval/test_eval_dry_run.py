@@ -22,9 +22,9 @@ def test_dry_eval_runs():
     assert payload["regression_summary"]["component"] == {"total": 20, "passed": 20}
     assert payload["regression_summary"]["capability"] == {"total": 20, "passed": 20}
     assert payload["regression_summary"]["scenario"] == {"total": 20, "passed": 20}
-    assert payload["regression_summary"]["by_component"]["planner"] == {"total": 5, "passed": 5}
-    assert payload["regression_summary"]["by_component"]["progress"] == {"total": 6, "passed": 6}
-    assert payload["regression_summary"]["by_component"]["replan"] == {"total": 5, "passed": 5}
+    assert payload["regression_summary"]["by_component"]["brief"] == {"total": 5, "passed": 5}
+    assert payload["regression_summary"]["by_component"]["coverage"] == {"total": 6, "passed": 6}
+    assert payload["regression_summary"]["by_component"]["supervisor"] == {"total": 5, "passed": 5}
     assert payload["regression_summary"]["by_component"]["evidence"] == {"total": 4, "passed": 4}
     assert set(payload["regression_summary"]["by_capability"]) == {
         "single_fact", "filtered_aggregation", "comparison", "explicit_multi_hop",

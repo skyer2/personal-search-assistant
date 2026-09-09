@@ -1,0 +1,5 @@
+{"case_id":"brief_01","category":"brief","query":"GPT-4 是什么时候发布的？","expected":{"user_intent":"atomic_fact","fast_path":true,"primary_required":true,"deliverable_format":"text","deliverable_depth":"brief"}}
+{"case_id":"brief_02","category":"brief","query":"你觉得目前 Agent 的发展关注点是什么？未来1年可预期的进展和技术路径是什么？","expected":{"user_intent":"trend_forecast","fast_path":false,"freshness_required":true,"deliverable_format":"markdown","deliverable_depth":"long"}}
+{"case_id":"brief_03","category":"brief","query":"对比 GPT、Gemini、DeepSeek 的 Agent 能力。","expected":{"user_intent":"comparison","fast_path":false,"explicit_subjects":["GPT","Gemini","DeepSeek"],"min_independent_sources":2}}
+{"case_id":"brief_04","category":"brief","query":"写一份 2026 年脑机接口商业化前景深度报告。","expected":{"user_intent":"structured_report","fast_path":false,"deliverable_format":"markdown","deliverable_depth":"long"}}
+{"case_id":"brief_05","category":"brief","query":"不同报告对 Agent ROI 的说法为什么冲突？","expected":{"user_intent":"conflict_analysis","fast_path":false,"min_independent_sources":2}}

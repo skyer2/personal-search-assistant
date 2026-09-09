@@ -1,7 +1,7 @@
 """
 评测指标计算
 
-支持 dry-run（仅 planner）与 live（完整 Harness）两种模式的结果聚合。
+支持 dry-run（仅组件回归）与 live（完整 Harness）两种模式的结果聚合。
 Phase 3：补全 SSR / ATC / AL / CR / MRH 共 8 项指标。
 Phase 6：CCR / Hallucination Rate / Trajectory Similarity。
 """
@@ -74,8 +74,8 @@ class TaskEvalResult:
     trajectory_score: float | None = None
     failure_stage: str = ""
     failure_type: str = ""
-    replan_count: int = 0
-    replan_useful: bool | None = None
+    supervisor_iterations: int = 0
+    coverage_gap_closed: bool | None = None
     tokens: int = 0
     cost_usd: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -125,27 +125,27 @@ class EvalReport:
         return _percentile(values, 0.95)
 
     @property
-    def replan_trigger_rate(self) -> float | None:
+    def supervisor_iteration_rate(self) -> float | None:
         if not self.results:
             return None
-        triggered = sum(1 for r in self.results if r.replan_count > 0)
-        return triggered / len(self.results)
+        iterated = sum(1 for r in self.results if r.supervisor_iterations > 1)
+        return iterated / len(self.results)
 
     @property
-    def replan_recovery_rate(self) -> float | None:
-        triggered = [r for r in self.results if r.replan_count > 0]
-        if not triggered:
+    def supervisor_recovery_rate(self) -> float | None:
+        iterated = [r for r in self.results if r.supervisor_iterations > 1]
+        if not iterated:
             return None
-        recovered = sum(1 for r in triggered if r.success or r.replan_useful)
-        return recovered / len(triggered)
+        recovered = sum(1 for r in iterated if r.success or r.coverage_gap_closed)
+        return recovered / len(iterated)
 
     @property
-    def replan_trigger_precision(self) -> float | None:
-        judged = [r for r in self.results if r.replan_useful is not None]
+    def coverage_gap_closure_rate(self) -> float | None:
+        judged = [r for r in self.results if r.coverage_gap_closed is not None]
         if not judged:
             return None
-        useful = sum(1 for r in judged if r.replan_useful)
-        return useful / len(judged)
+        closed = sum(1 for r in judged if r.coverage_gap_closed)
+        return closed / len(judged)
 
     @property
     def failure_distribution(self) -> dict[str, int]:
@@ -298,7 +298,7 @@ class EvalReport:
             "scenario": _summary(scenario),
             "by_component": {
                 variant: _summary([r for r in component if r.variant == variant])
-                for variant in ("planner", "progress", "replan", "evidence")
+                for variant in ("brief", "coverage", "supervisor", "evidence")
             },
             "by_capability": {
                 variant: _summary([r for r in capability if r.variant == variant])
@@ -358,7 +358,7 @@ class EvalReport:
                     "trajectory_score": r.trajectory_score,
                     "failure_stage": r.failure_stage,
                     "failure_type": r.failure_type,
-                    "replan_count": r.replan_count,
+                    "supervisor_iterations": r.supervisor_iterations,
                     "error": r.error,
                 }
                 for r in self.results
@@ -408,15 +408,15 @@ class EvalReport:
             payload["trajectory_score"] = round(traj, 3)
         payload["latency_p50_ms"] = round(self.latency_p50_ms, 1)
         payload["latency_p95_ms"] = round(self.latency_p95_ms, 1)
-        trigger = self.replan_trigger_rate
+        trigger = self.supervisor_iteration_rate
         if trigger is not None:
-            payload["replan_trigger_rate"] = round(trigger, 3)
-        recovery = self.replan_recovery_rate
+            payload["supervisor_iteration_rate"] = round(trigger, 3)
+        recovery = self.supervisor_recovery_rate
         if recovery is not None:
-            payload["replan_recovery_rate"] = round(recovery, 3)
-        precision = self.replan_trigger_precision
+            payload["supervisor_recovery_rate"] = round(recovery, 3)
+        precision = self.coverage_gap_closure_rate
         if precision is not None:
-            payload["replan_trigger_precision"] = round(precision, 3)
+            payload["coverage_gap_closure_rate"] = round(precision, 3)
         dist = self.failure_distribution
         if dist:
             payload["failure_distribution"] = dist
@@ -472,8 +472,8 @@ def compare_with_baseline(
         "grounding_score",
         "trajectory_score",
         "plan_validation_pass_rate",
-        "replan_trigger_rate",
-        "replan_recovery_rate",
+        "supervisor_iteration_rate",
+        "supervisor_recovery_rate",
         "avg_tool_calls",
         "avg_latency_ms",
         "latency_p95_ms",
@@ -494,7 +494,7 @@ def compare_with_baseline(
         regressions.append("Gate pass rate dropped > 5%")
     pvr = current.get("plan_validation_pass_rate")
     if isinstance(pvr, (int, float)) and pvr < 1.0:
-        regressions.append("Planner/component invariants failed")
+        regressions.append("Brief/Coverage/Supervisor component invariants failed")
 
     return {
         "baseline_generated_at": baseline.get("generated_at"),

@@ -1,8 +1,8 @@
 """Product routing and experiment-mode resolution.
 
 `agent` remains the production graph mode and `direct` remains the explicit
-experiment baseline. Inside the agent mode, task shape decides whether a
-simple fact takes the deterministic fast path or the full research graph.
+experiment baseline. This router does not classify research semantics; fast
+path eligibility is decided after the canonical StructuredResearchBrief.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def route(
     conversation_summary: str = "",
     attachments: list[str] | None = None,
 ) -> RouteDecision:
-    """Resolve experiment mode and the production execution path."""
+    """Resolve only the experiment/product mode."""
     _ = (conversation_summary, attachments)
     requested = canonicalize_mode(user_mode)
     if requested == "direct":
@@ -86,20 +86,13 @@ def route(
             execution_path="experiment_direct",
         )
 
-    from app.research.routing.task_shape import classify_task_shape
-
-    decision = classify_task_shape(query)
-    fast_path = decision.shape.value == "simple_fact"
-    signals = [f"task_shape:{decision.shape.value}"]
-    if fast_path:
-        signals.append("simple_fact_fast_path")
     return RouteDecision(
         mode="agent",
-        confidence=decision.confidence,
-        signals=signals,
+        confidence=1.0,
+        signals=["agent"],
         user_override=False,
-        task_shape=decision.shape.value,
-        execution_path="fast_path" if fast_path else "harness",
+        task_shape="",
+        execution_path="harness",
     )
 
 

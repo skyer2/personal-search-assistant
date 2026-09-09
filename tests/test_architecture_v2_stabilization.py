@@ -15,15 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.agent.harness.state import ExecutionPlan, PlanStep
-from app.research.control.policy import decide_control
-from app.research.domain.contracts import ControlAction
 from app.research.planning.candidate import Candidate, build_candidate_set, stable_candidate_id
-from app.research.planning.validator import (
-    PlanMutationProposal,
-    PlanMutationRejected,
-    commit_plan_mutation,
-    validate_plan_mutation,
-)
 from app.research.runtime.semantic_ingest import ingest_semantics
 from app.research.runtime.state import empty_research_state
 from app.research.spec.compiler import compile_research_spec
@@ -118,89 +110,6 @@ def test_candidate_admission_requires_evidence_and_rejects_random_facts():
     assert candidate.candidate_id == stable_candidate_id("月之暗面")
 
 
-def test_invalid_plan_mutation_does_not_commit():
-    state = empty_research_state(run_id="r", session_id="s", task_query=LANDSCAPE_QUERY)
-    state["plan"] = _discovery_plan().to_dict()
-    state["plan_version"] = 1
-    state["tasks"] = {"t_discovery": {"task_id": "t_discovery", "execution_status": "succeeded"}}
-    duplicate_step = PlanStep(
-        step_type="research",
-        task_id="t_duplicate",
-        description="duplicate",
-        objective="duplicate",
-        metadata={"allowed_sources": ["web"], "task_kind": "deep_dive"},
-    )
-    proposal = PlanMutationProposal(
-        mutation_type="expand_plan",
-        proposed_plan=ExecutionPlan(steps=[duplicate_step, duplicate_step], plan_version=2),
-        proposed_tasks={},
-        metadata={"reason": "forced_duplicate"},
-    )
-    issues = validate_plan_mutation(proposal, state)
-    assert "duplicate_task_id" in issues
-    with pytest.raises(PlanMutationRejected):
-        commit_plan_mutation(proposal, state)
-    assert state["plan"] == _discovery_plan().to_dict()
-    assert state["plan_version"] == 1
-    assert state["tasks"]["t_discovery"]["execution_status"] == "succeeded"
-
-
-def test_expand_plan_only_marks_candidate_set_expanded_after_validation():
-    state = empty_research_state(run_id="r", session_id="s", task_query=LANDSCAPE_QUERY)
-    spec = compile_research_spec(LANDSCAPE_QUERY)
-    state["research_spec"] = spec.to_dict()
-    state["plan"] = _discovery_plan().to_dict()
-    state["plan_version"] = 1
-    candidate = Candidate(name="月之暗面", confidence=0.86, evidence_ids=["ev_discovery"])
-    candidate_set = {
-        "candidate_set_id": "candidate_set_primary",
-        "status": "complete",
-        "candidates": [candidate.to_dict()],
-        "source_task_ids": ["t_discovery"],
-        "available": True,
-        "expanded": False,
-    }
-    step = PlanStep(
-        step_type="research",
-        task_id=f"t_{candidate.candidate_id}_technology",
-        description="deep dive",
-        objective="deep dive",
-        metadata={
-            "allowed_sources": ["web"],
-            "task_kind": "deep_dive",
-            "subject_id": f"candidate:{candidate.candidate_id}",
-            "coverage_keys": ["technology"],
-            "coverage_ids": ["coverage_technology"],
-            "candidate_id": candidate.candidate_id,
-        },
-    )
-    proposal = PlanMutationProposal(
-        mutation_type="expand_plan",
-        proposed_plan=ExecutionPlan(steps=[step], plan_version=2),
-        proposed_tasks={"t_discovery": {"task_id": "t_discovery", "execution_status": "succeeded"}},
-        proposed_candidate_set=candidate_set,
-        proposed_coverage_contract={"contract_id": "contract", "spec_id": spec.spec_id, "version": 1, "units": []},
-        metadata={"reason": "candidate_ready"},
-    )
-    assert validate_plan_mutation(proposal, state) == []
-    assert candidate_set["expanded"] is False
-    update = commit_plan_mutation(proposal, state)
-    assert update["plan_version"] == 2
-    assert update["candidate_set"]["expanded"] is True
-    assert update["candidate_set"]["expanded_plan_version"] == 2
-
-
-def test_plan_validation_failure_is_not_user_cancel():
-    state = empty_research_state(run_id="r", session_id="s", task_query=LANDSCAPE_QUERY)
-    state["abort_reason"] = "plan_validation_failed:duplicate_task_id"
-    state["evidence_assessment"] = {"status": "partial", "evidence_count": 1}
-    state["evidence_records"] = [{"evidence_id": "ev_1", "authority_score": 0.8}]
-    state["claims"] = [{"claim_id": "claim_1", "evidence_ids": ["ev_1"], "confidence": 0.7}]
-    decision = decide_control(state)
-    assert decision["action"] != ControlAction.CANCEL.value
-    assert decision["action"] == ControlAction.DELIVER_PARTIAL.value
-
-
 def test_timeout_with_evidence_is_stopped_partial_timeout():
     from app.research.domain.task_state import worker_result_lifecycle
 
@@ -223,7 +132,7 @@ def test_evidence_never_finishes_with_empty_content():
 
     state = empty_research_state(run_id="r", session_id="s", task_query=LANDSCAPE_QUERY)
     state["research_spec"] = compile_research_spec(LANDSCAPE_QUERY).to_dict()
-    state["phase"] = "assess"
+    state["phase"] = "coverage_judge"
     state["evidence_records"] = [{"evidence_id": "ev_1", "authority_score": 0.8}]
     state["claims"] = [{"claim_id": "claim_1", "text": "Company A has funding.", "evidence_ids": ["ev_1"]}]
     state["coverage_state"] = {
@@ -232,13 +141,15 @@ def test_evidence_never_finishes_with_empty_content():
         "conflicted_ids": [],
     }
     state["evidence_assessment"] = {"status": "partial", "evidence_count": 1}
+    state["control_decision"] = {"action": "deliver_partial"}
     update = synthesize_node(state)
     content = str(update["final_content"])
     assert content.strip()
-    assert "部分研究结果" in content
-    assert "已确认" in content
-    assert "证据" in content
-    assert "执行限制" in content
+    assert "Company A has funding." in content
+    assert "ev_1" in content
+    assert "部分交付" in content
+    assert "已准入证据" in content
+    assert "不能视为完整成功" in content
 
 
 def test_semantic_wave_gains_accumulate():

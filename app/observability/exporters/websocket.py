@@ -56,15 +56,11 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
             "progress",
             f"[progress] {attrs.get('status') or event.status or ''}",
         ),
-        EventType.REPLAN_PROPOSED: (
-            "replan",
-            f"[replan] proposed {attrs.get('reason') or ''}".strip(),
+        EventType.SUPERVISOR_STARTED: ("supervisor", "[supervisor] start"),
+        EventType.SUPERVISOR_DECIDED: (
+            "supervisor",
+            f"[supervisor] {attrs.get('action') or event.status or ''}",
         ),
-        EventType.REPLAN_APPLIED: (
-            "replan",
-            f"[replan] {attrs.get('from_plan_version')}→{attrs.get('to_plan_version')}",
-        ),
-        EventType.REPLAN_REJECTED: ("replan", "[replan] rejected"),
         EventType.HITL_INTERRUPT: ("hitl_interrupt", "等待人工审批"),
         EventType.RUN_FAILED: ("error", str(attrs.get("error") or "任务失败")),
         EventType.RUN_COMPLETED: ("task_result", "任务执行完成"),

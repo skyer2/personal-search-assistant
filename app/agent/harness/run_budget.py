@@ -15,7 +15,7 @@ class PhaseBudgetPlan:
 
     understand_plan: float = 0.05
     research: float = 0.55
-    replan: float = 0.10
+    supervisor: float = 0.10
     synthesis: float = 0.25
     quality: float = 0.05
 
@@ -23,7 +23,7 @@ class PhaseBudgetPlan:
         return max(0, int(total * self.synthesis))
 
     def research_cap_tokens(self, total: int) -> int:
-        return max(0, int(total * (self.research + self.replan)))
+        return max(0, int(total * (self.research + self.supervisor)))
 
 
 @dataclass
@@ -176,6 +176,15 @@ class RunBudgetManager:
             self._llm_calls = max(self._llm_calls, calls)
             self._tool_calls = max(self._tool_calls, int(tool_calls or 0))
             self._maybe_force_synthesis_locked()
+
+    def cap_tool_calls(self, limit: int) -> None:
+        with self._lock:
+            new_limit = max(0, int(limit or 0))
+            if new_limit <= 0:
+                return
+            if self.tool_call_limit <= 0 or new_limit < self.tool_call_limit:
+                self.tool_call_limit = new_limit
+                self._maybe_force_synthesis_locked()
 
     def commit_tokens(self, tokens: int) -> None:
         with self._lock:

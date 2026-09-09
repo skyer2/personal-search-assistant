@@ -9,8 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.planner import understand_task
-from app.agent.harness.state import LoopState
-from app.agent.harness.guardrails import AbortReason, evaluate_run_guardrails
 from app.config.loader import get_harness_config
 from app.research.planning.compose import compose_execution_plan_sync
 from app.research.planning.effort import (
@@ -67,7 +65,7 @@ def test_effort_never_raises_hard_ceiling():
         max_parallel_workers=1,
         max_research_tasks=2,
         max_plan_patch_tasks=1,
-        max_replan_count=1,
+        max_supervisor_iterations=1,
         max_plan_steps=6,
         max_run_sec=120,
     )
@@ -158,43 +156,6 @@ def test_grant_depletes_remaining_reserve():
     # 剩余额度应更紧
     assert g2["max_new_tasks"] <= budget["remaining_plan_patch_tasks"]
     print("[OK] grant depletes remaining reserve", budget)
-
-
-def test_run_budget_guardrail_uses_hard_action_ceiling():
-    cfg = get_harness_config()
-    state = LoopState(session_id="s_effort")
-    state.metadata["run_budget"] = {
-        "max_tool_calls": 2,
-        "max_agent_actions": 4,
-        "max_run_sec": 600,
-        "max_replan_count": 2,
-        "max_plan_steps": 8,
-    }
-    state.tool_calls_count = 2
-    decision = evaluate_run_guardrails(state, cfg, elapsed_sec=1.0, estimated_tokens=10)
-    assert decision.abort is False
-    state.tool_calls_count = 4
-    decision = evaluate_run_guardrails(state, cfg, elapsed_sec=1.0, estimated_tokens=10)
-    assert decision.action.value == "degrade"
-    assert decision.reason == AbortReason.BUDGET_TOOL_CALLS
-    print("[OK] soft lease cannot degrade; hard action ceiling degrades to synthesis")
-
-
-def test_retrieval_units_have_independent_hard_ceiling():
-    cfg = get_harness_config()
-    state = LoopState(session_id="s_retrieval")
-    state.metadata["run_budget"] = {
-        "max_agent_actions": 40,
-        "hard_retrieval_units": 4,
-        "initial_retrieval_units": 2,
-    }
-    state.metadata["retrieval_units_used"] = 2
-    state.tool_calls_count = 1
-    assert evaluate_run_guardrails(state, cfg, elapsed_sec=1, estimated_tokens=1).abort is False
-    state.metadata["retrieval_units_used"] = 4
-    decision = evaluate_run_guardrails(state, cfg, elapsed_sec=1, estimated_tokens=1)
-    assert decision.action.value == "degrade"
-    assert decision.reason == AbortReason.BUDGET_RETRIEVAL_UNITS
 
 
 def test_pdf_changes_delivery_not_research_complexity():

@@ -1,4 +1,4 @@
-"""L4 Ablation：Vanilla / No-Replan / Full，固定模型与语料只改一个变量。"""
+"""L4 Ablation：Vanilla / Single-iteration / Full，固定模型与语料只改一个变量。"""
 
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ VARIANTS = Path(__file__).resolve().parents[1] / "variants"
 
 VARIANT_PRESETS: dict[str, dict[str, Any]] = {
     "vanilla": {"mode": "direct", "max_replan": 0, "progress_eval": False, "parallel": False},
-    "no_replan": {"mode": "agent", "max_replan": 0, "progress_eval": True, "parallel": True},
+    "single_iteration": {"mode": "agent", "max_replan": 0, "progress_eval": True, "parallel": True},
     "full": {"mode": "agent", "max_replan": 2, "progress_eval": True, "parallel": True},
 }
 
 
 def load_variant(name: str) -> dict[str, Any]:
     key = str(name or "full").strip().lower()
-    aliases = {"v0": "vanilla", "v1": "no_replan", "v2": "full", "full_harness": "full"}
+    aliases = {"v0": "vanilla", "v1": "single_iteration", "v2": "full", "full_harness": "full"}
     key = aliases.get(key, key)
     path = VARIANTS / f"{key}.yml"
     preset = dict(VARIANT_PRESETS.get(key) or VARIANT_PRESETS["full"])

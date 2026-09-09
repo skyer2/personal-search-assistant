@@ -1,168 +1,122 @@
-# Contract-Driven Research Harness Architecture
+# Semantic Research Agent Harness Architecture
 
-This document is the repository architecture authority. Older Brief/Business Gap/replacement-recovery descriptions are historical.
+This document is the repository architecture authority. Legacy `ResearchSpec`, `CoverageContract`, and semantic action modules are projections or deprecated adapters; they do not control the production workflow.
 
 ## Position
 
-The system is a **Contract-Driven Adaptive Deep Research Agent Harness**. Given an open research question, it compiles the user's intent into a verifiable success contract, plans and executes evidence collection, assesses semantic coverage, adapts through bounded control actions, and produces a cited answer.
-
-## Canonical Loop
+The system is a **Deep Research Agent Harness**. It gives open-ended research reasoning to a Brief compiler and Supervisor, while a thin deterministic runtime owns budgets, execution safety, evidence grounding, observability, and evaluation.
 
 ```text
-ResearchSpec
+User Query
   ↓
-CoverageContract
+StructuredResearchBrief
   ↓
-Adaptive Plan
+Supervisor research action
   ↓
-Research Execution
+Isolated Researchers
   ↓
-Admitted Evidence + Claims
+Evidence-backed compressed findings
   ↓
-Coverage Assessment
-  ↓
-Semantic Gap
-  ↓
-Bounded Adaptive Control
+Coverage Judgement
   ↓
 Grounded Synthesis
   ↓
 Quality Gate
+  ↓
+Cited Final / Partial / Failed
 ```
 
 ## Authority Model
 
 | Concern | Authority | Non-authority |
 |---|---|---|
-| What success means | `ResearchSpec` + `CoverageContract` | Plan, task status, Worker summary |
-| How to execute | `ExecutionPlan` + task state | ResearchSpec |
-| Whether evidence is admitted | `app/research/evidence/admission.py` | Worker payload |
-| Whether semantics are covered | `CoverageState` from Spec + Claims + Evidence | task completion count |
-| What the runtime does next | `ControlPolicy` | Planner, Worker, Scheduler |
-| What can be delivered | Coverage, conflict, citation, grounding gates | synthesis confidence |
-| What happened | `AgentTelemetry` and `RunStore` projections | frontend state |
+| What the user wants | `StructuredResearchBrief` | raw query, TaskShape, plan |
+| What research to do next | `Supervisor` | Worker, planner adapter, ControlPolicy |
+| Whether evidence is admitted | evidence admission | Worker payload |
+| Whether research is enough | Coverage Judge + Brief | task completion count |
+| Whether an action can execute | `RuntimePolicy` | Supervisor, Worker |
+| What can be delivered | citation and grounding gates | synthesis confidence |
+| What happened | `AgentTelemetry` and `RunStore` | frontend state |
 
-## Four Control Actions
+## Eight-node Runtime
 
-- `RETRY`: same task scope, same strategy, new attempt after a transient execution failure.
-- `GAP_FILL`: focused new tasks bound to explicit `SemanticGap.gap_id`.
-- `EXPAND_PLAN`: consume a materialized `CandidateSet`, replace the transient `candidate_set` coverage unit with concrete candidate × dimension units.
-- `REPLAN`: change the strategy fingerprint and supersede the old strategy; it is not a retry or a directional prompt patch.
+```text
+brief
+supervisor
+researcher
+ingest_findings
+coverage_judge
+synthesize
+quality_gate
+finalize
+```
 
-Each action has an independent budget and telemetry event. `ActionBudget` is the canonical state counter.
+Fast path is not a separate workflow. `brief` derives strict eligibility and can send an atomic fact directly to `researcher`; all other research enters the Supervisor loop.
 
-## TaskShape Versus Capability
+## Supervisor Contract
 
-TaskShape is only a topology selector:
+The Supervisor can return only:
 
-- `SIMPLE_FACT`
-- `DETERMINISTIC_PIPELINE`
-- `SINGLE_TOPIC_DEEP_DIVE`
-- `BREADTH_HEAVY`
-- `DYNAMIC_DISCOVERY`
-- `HYBRID_CONFLICT`
+- `THINK`
+- `CONDUCT_RESEARCH`
+- `COMPLETE`
 
-Comparison, filtering, freshness, multilingual support, strict citations, conflict handling, and multi-hop needs live in `ResearchSpec` requirements. The system must not create one TaskShape per capability.
+It receives the Brief, compressed findings, Coverage Judgement, and budget state. It does not receive infinite raw tool history and cannot bypass RuntimePolicy.
 
-## ResearchSpec
+## Deterministic Runtime
 
-`ResearchSpec` contains:
+RuntimePolicy owns:
 
-- objective, subjects, dimensions, and language hints
-- reasoning requirements
-- evidence and source requirements
-- freshness policy
-- interaction requirements and assumptions
-- premises and ambiguity state
-- delivery requirements
-- measurable success criteria
+- tool, token, worker, time, and iteration budgets;
+- deterministic retry;
+- worker lease and timeout;
+- partial delivery eligibility;
+- terminal-state validity.
 
-It is serializable, stable for identical objectives, and versioned across follow-up turns. A contradicted premise or blocking ambiguity stops normal research entry.
+It contains no semantic actions such as `GAP_FILL`, `EXPAND_PLAN`, or `REPLAN`.
 
-## Coverage Model
+## Evidence and Findings
 
-`compile_coverage_contract(spec)` derives required `CoverageUnit` records from the spec. Each unit declares:
+Workers return raw results. The findings boundary:
 
-- subject and dimension
-- minimum evidence and independent-source count
-- authority threshold
-- freshness policy
-- conflict policy
-
-`assess_coverage(contract, claims, evidence, conflicts, resolutions)` is deterministic and recomputable. Covered, partial, missing, stale, conflicted, and waived states belong to semantic state, not task state.
-
-For discovery, the initial contract contains a transient `candidate_set` unit. After candidates are materialized, the expanded contract removes that unit and creates concrete candidate units; an unsatisfiable discovery unit cannot remain forever.
-
-## Evidence and Claims
-
-Workers return raw results only. The semantic ingest boundary:
-
-1. admits evidence;
-2. extracts claims;
-3. binds claim IDs to admitted evidence IDs;
-4. detects and resolves conflicts;
-5. materializes candidate sets;
-6. recomputes coverage;
-7. opens and closes semantic gaps;
-8. records marginal semantic gain.
+1. compresses worker results;
+2. preserves claims, evidence IDs, confidence, limitations, and unresolved questions;
+3. rejects unsupported findings as sufficient evidence;
+4. feeds Coverage Judge and synthesis.
 
 Unadmitted evidence can never support a final claim.
 
 ## Quality and Delivery
 
-Normal success requires:
-
-- minimum required coverage satisfied;
-- blocking conflicts resolved or disclosed under an allowed partial mode;
-- every final claim bound to existing admitted evidence;
-- citations resolvable and precise;
-- grounding evidence sufficient for the delivered claim set.
-
-Budget or timeout stop is an execution condition, not automatically a quality failure. With usable partial evidence, the runtime may deliver a clearly bounded partial result.
+| Outcome | Meaning |
+|---|---|
+| `success` | coverage, citation, grounding, and content gates pass |
+| `partial` | usable evidence exists but coverage or quality remains incomplete; limitations are disclosed |
+| `failed` | no usable semantic result or a required gate fails |
+| `cancelled` | user or policy cancellation |
 
 ## State and Durability
 
-`ResearchState` is the only workflow truth and is checkpointed through LangGraph. It contains canonical semantic state:
+`ResearchState` is the workflow truth and is checkpointed through LangGraph. Legacy fields such as `research_spec`, `coverage_contract`, and `coverage_state` are projections for adapters and observability. Task state records execution facts only.
+
+## Observability
+
+Canonical events include:
 
 ```text
-research_spec
-coverage_contract
-coverage_state
-claims
-claim_conflicts
-claim_resolutions
-evidence_records
-semantic_gaps
-candidate_set
-marginal_gain
+brief.compiled
+topology.decided
+supervisor.decided
+plan.created
+finding.compressed
+coverage.assessed
+progress.assessed
+quality.assessed
+run.terminated
 ```
 
-Task state records execution facts such as pending, running, succeeded, failed, stopped, superseded, attempt, lease, and failure classification. `STOPPED` and `FAILED` are distinct. The old replacement-recovery snapshot and task-owned business-gap authority are removed.
+See [OBSERVABILITY.md](./OBSERVABILITY.md).
 
-## Code Map
+## Evaluation
 
-| Concept | Code |
-|---|---|
-| Spec model/compiler/validator | `app/research/spec/` |
-| Coverage model/compiler/assessor/gaps | `app/research/coverage/` |
-| Semantic ingest | `app/research/runtime/semantic_ingest.py` |
-| Planning operators | `app/research/planning/` |
-| Control authority | `app/research/control/policy.py` |
-| StateGraph | `app/research/runtime/graph.py` |
-| Runtime nodes | `app/research/runtime/runner.py` |
-| Evidence admission | `app/research/evidence/admission.py` |
-| Claim reconciliation | `app/research/claims/` |
-| Quality gates | `app/research/runtime/graph.py` |
-| Observability | `app/observability/` |
-| Evaluation | `tests/eval/` |
-
-## ADRs
-
-- [ADR-001 ResearchSpec authority](architecture/adr/ADR-001-research-spec-authority.md)
-- [ADR-002 Coverage-derived state](architecture/adr/ADR-002-coverage-derived-state.md)
-- [ADR-003 Semantic control actions](architecture/adr/ADR-003-semantic-control-actions.md)
-- [ADR-004 StateGraph node granularity](architecture/adr/ADR-004-stategraph-node-granularity.md)
-
-## Non-goals
-
-No self-evolving agent, new memory system, MCP platform, multimodal pipeline, UI expansion, new PDF capability, or benchmark-specific runtime behavior.
+Component regression covers Brief, Coverage, Supervisor, and Evidence. Production fidelity, live scenarios, and BrowseComp-Plus are separate layers. See [EVALUATION.md](./EVALUATION.md).

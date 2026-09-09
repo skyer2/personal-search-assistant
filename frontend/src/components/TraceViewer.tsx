@@ -273,8 +273,11 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
       .map((item) => item.step_index)
   ), [citations, highlightSourceId]);
   const workers = summary.workers || [];
+  const topology = summary.topology || null;
+  const supervisorDecisions = summary.supervisor_decisions || [];
+  const findings = summary.findings || [];
+  const coverageJudgements = summary.coverage_judgements || [];
   const progress = summary.progress || [];
-  const replans = summary.replans || [];
   const evals = summary.evals || [];
   const plans = summary.plans || [];
   const synthesis = summary.synthesis || [];
@@ -283,7 +286,6 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
   const failureOrigin = summary.failure_origin || null;
   const integrity = summary.trace_integrity || null;
   const progressCount = summary.progress_count ?? progress.length;
-  const replanCount = summary.replan_count ?? 0;
 
   return (
     <div className="trace-viewer">
@@ -324,7 +326,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
       {error ? <Alert message={error} showIcon type="error" /> : null}
 
       {/* 语义流水线 → 产物证据 → 运行时/调试：
-          Overview → Understanding → Plan → Worker → 进度/Replan → Synthesis →
+          Overview → Understanding → Strategy → Worker → Supervisor/Coverage → Synthesis →
           证据链 → Lineage → 因果树 → Eval → JSONL → Langfuse */}
       <Tabs
         activeKey={activeTab}
@@ -370,19 +372,13 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                   <Alert message="本 run 暂无语义 failure origin" showIcon style={{ marginBottom: 12 }} type="success" />
                 )}
                 <Typography.Paragraph>
-                  Gap closure:{" "}
-                  {progressCount < 1
-                    ? "N/A — progress not evaluated"
-                    : summary.gap_closure_rate == null
-                      ? "N/A"
-                      : Number(summary.gap_closure_rate).toFixed(2)}
+                  Topology: {asText(topology?.topology, "unknown")}
                   {" · "}
-                  Replan useful:{" "}
-                  {summary.replan_attempted === false || (summary.replan_count ?? 0) === 0
-                    ? "N/A — replan not attempted"
-                    : summary.replan_useful
-                      ? "yes"
-                      : "no"}
+                  Supervisor decisions: {supervisorDecisions.length}
+                  {" · "}
+                  Findings: {findings.length}
+                  {" · "}
+                  Coverage: {coverageJudgements.length ? asText(coverageJudgements[coverageJudgements.length - 1].status, "unknown") : "not assessed"}
                   {" · "}
                   Lineage edges: {lineageTotal}
                 </Typography.Paragraph>
@@ -412,7 +408,13 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       { key: "depth", field: "depth", value: asText(brief.depth) },
                       { key: "freshness", field: "freshness", value: asText(brief.freshness) },
                       { key: "deliverable", field: "deliverable", value: asText(brief.deliverable) },
-                      { key: "brief_ref", field: "brief_ref", value: asText(brief.brief_ref) }
+                      { key: "brief_ref", field: "brief_ref", value: asText(brief.brief_ref) },
+                      { key: "topology", field: "topology", value: asText(topology?.topology) },
+                      {
+                        key: "topology_reasons",
+                        field: "topology_reasons",
+                        value: asText((topology?.reasons as string[] | undefined)?.join("; "))
+                      }
                     ]}
                     pagination={false}
                     size="small"
@@ -534,20 +536,13 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
             )
           },
           {
-            key: "replan",
-            label: `进度 (${loadState === "loaded" ? progressCount : "—"}) / Replan (${loadState === "loaded" ? replanCount : "—"})`,
+            key: "supervisor",
+            label: `Supervisor (${loadState === "loaded" ? supervisorDecisions.length : "—"}) / Coverage (${loadState === "loaded" ? coverageJudgements.length : "—"})`,
             children: (
               <Card size="small">
-                {progress.length === 0 && replans.length === 0 ? (
+                {supervisorDecisions.length === 0 && coverageJudgements.length === 0 ? (
                   <Alert
-                    message="尚未写入 progress.assessed。第二波 Worker 可能只是计划内 READY 任务按 max_parallel 分批执行，不一定经过 PlanPatch。"
-                    showIcon
-                    type="info"
-                  />
-                ) : null}
-                {progress.length > 0 && replanCount === 0 ? (
-                  <Alert
-                    message="进度已评估但未应用 PlanPatch。status=sufficient，或 gap 但被 max_replan / validator 拦住时，后续 Worker 仍是原计划 READY 队列。"
+                    message={loadState === "loaded" ? "已加载：尚未写入 supervisor.decided / coverage.assessed" : "Trace 未加载，Supervisor 状态未知"}
                     showIcon
                     type="info"
                   />
@@ -560,9 +555,149 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     type={String(summary.termination.outcome || "") === "failed" ? "error" : "info"}
                   />
                 ) : null}
+                <Typography.Title level={5}>Supervisor 决策</Typography.Title>
+                {supervisorDecisions.length === 0 ? (
+                  <Typography.Text type="secondary">没有 supervisor.decided 事件。</Typography.Text>
+                ) : (
+                  <ResizableTable
+                    dataSource={supervisorDecisions.map((row, index) => ({ ...row, key: `sd-${index}` }))}
+                    pagination={{ pageSize: 8 }}
+                    size="small"
+                    columns={[
+                      {
+                        title: "Action",
+                        dataIndex: "action",
+                        width: 150,
+                        key: "action",
+                        render: (value: unknown) => <Tag color={statusColor(value)}>{asText(value)}</Tag>
+                      },
+                      {
+                        title: "Runtime",
+                        dataIndex: "runtime_action",
+                        width: 120,
+                        key: "runtime_action",
+                        render: (value: unknown) => <Tag color={statusColor(value)}>{asText(value)}</Tag>
+                      },
+                      {
+                        title: "Reason",
+                        dataIndex: "reason",
+                        width: 280,
+                        key: "reason",
+                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
+                      },
+                      { title: "Tasks", dataIndex: "task_count", width: 80, key: "task_count" },
+                      { title: "Source", dataIndex: "source", width: 130, key: "source" },
+                      {
+                        title: "Runtime Reasons",
+                        dataIndex: "runtime_reasons",
+                        width: 260,
+                        key: "runtime_reasons",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
+                      },
+                      {
+                        title: "Plan",
+                        dataIndex: "plan_version",
+                        width: 80,
+                        key: "plan_version",
+                        render: (version: unknown) => (version == null || version === "" ? "-" : `v${version}`)
+                      },
+                      { title: "Time", dataIndex: "timestamp", width: 220, key: "timestamp", render: (value: unknown) => asText(value, "-") }
+                    ]}
+                  />
+                )}
+                <Typography.Title level={5}>压缩发现</Typography.Title>
+                {findings.length === 0 ? (
+                  <Typography.Text type="secondary">没有 finding.compressed 事件。</Typography.Text>
+                ) : (
+                  <ResizableTable
+                    dataSource={findings.map((row, index) => ({ ...row, key: `f-${index}` }))}
+                    pagination={{ pageSize: 8 }}
+                    size="small"
+                    columns={[
+                      { title: "Finding", dataIndex: "finding_id", width: 150, key: "finding_id" },
+                      { title: "Task", dataIndex: "task_id", width: 160, key: "task_id" },
+                      { title: "Claims", dataIndex: "claim_count", width: 90, key: "claim_count" },
+                      { title: "Confidence", dataIndex: "confidence", width: 110, key: "confidence" },
+                      {
+                        title: "Evidence",
+                        dataIndex: "evidence_ids",
+                        key: "evidence_ids",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
+                      },
+                      {
+                        title: "Limitations",
+                        dataIndex: "limitations",
+                        key: "limitations",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join("; ") : asText(value)}</div>
+                      }
+                    ]}
+                  />
+                )}
+                <Typography.Title level={5}>Coverage 判断</Typography.Title>
+                {coverageJudgements.length === 0 ? (
+                  <Typography.Text type="secondary">没有 coverage.assessed 事件。</Typography.Text>
+                ) : (
+                  <ResizableTable
+                    dataSource={coverageJudgements.map((row, index) => ({ ...row, key: `cj-${index}` }))}
+                    pagination={false}
+                    size="small"
+                    columns={[
+                      {
+                        title: "Status",
+                        dataIndex: "status",
+                        width: 110,
+                        key: "status",
+                        render: (value: unknown) => <Tag color={statusColor(value)}>{asText(value)}</Tag>
+                      },
+                      {
+                        title: "Enough",
+                        dataIndex: "sufficient",
+                        width: 90,
+                        key: "sufficient",
+                        render: (value: unknown) => <Tag color={value === true ? "green" : "orange"}>{value === true ? "yes" : "no"}</Tag>
+                      },
+                      {
+                        title: "Missing",
+                        dataIndex: "missing",
+                        width: 300,
+                        key: "missing",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join("; ") : asText(value)}</div>
+                      },
+                      {
+                        title: "Next Questions",
+                        dataIndex: "recommended_next_questions",
+                        width: 340,
+                        key: "recommended_next_questions",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join("; ") : asText(value)}</div>
+                      },
+                      {
+                        title: "Weak Claims",
+                        dataIndex: "weak_claims",
+                        width: 220,
+                        key: "weak_claims",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
+                      },
+                      {
+                        title: "Conflicts",
+                        dataIndex: "conflicts",
+                        width: 220,
+                        key: "conflicts",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join("; ") : asText(value, "0")}</div>
+                      },
+                      { title: "Source", dataIndex: "source", width: 120, key: "source" },
+                      {
+                        title: "Plan",
+                        dataIndex: "plan_version",
+                        width: 80,
+                        key: "plan_version",
+                        render: (version: unknown) => (version == null || version === "" ? "-" : `v${version}`)
+                      }
+                    ]}
+                  />
+                )}
+                <Typography.Title level={5}>Progress 投影</Typography.Title>
                 {progress.length > 0 ? (
                   <>
-                    <Typography.Title level={5}>进度评估</Typography.Title>
                     <ResizableTable
                       dataSource={progress.map((row, index) => ({ ...row, key: `p-${index}` }))}
                       pagination={false}
@@ -589,15 +724,15 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                           key: "reason_codes",
                           render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
                         },
-                        {
-                          title: "Gap IDs",
-                          dataIndex: "gap_ids",
-                          width: 200,
-                          key: "gap_ids",
-                          render: (value: unknown) => <div className="table-wrap-cell">{asText(value, "0")}</div>
-                        },
-                        {
-                          title: "Unresolved",
+                      {
+                        title: "Actionable Gaps",
+                        dataIndex: "semantic_gap_ids",
+                        width: 280,
+                        key: "semantic_gap_ids",
+                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value, "0")}</div>
+                      },
+                      {
+                        title: "Unresolved",
                           dataIndex: "unresolved_gap_count",
                           width: 100,
                           key: "unresolved_gap_count",
@@ -610,22 +745,8 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                           key: "dispatch_wave_id",
                           render: (value: unknown) => asText(value, "-")
                         },
-                        {
-                          title: "Coverage Gaps",
-                          width: 280,
-                          dataIndex: "coverage_gaps",
-                          key: "coverage_gaps",
-                          render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
-                        },
-                        {
-                          title: "Missing Dimensions",
-                          dataIndex: "missing_dimensions",
-                          width: 260,
-                          key: "missing_dimensions",
-                          render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
-                        },
-                        {
-                          title: "Conflicts",
+                      {
+                        title: "Conflicts",
                           dataIndex: "unresolved_conflicts",
                           width: 220,
                           key: "unresolved_conflicts",
@@ -635,89 +756,6 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     />
                   </>
                 ) : null}
-                <Typography.Title level={5}>Replan</Typography.Title>
-                {replans.length === 0 ? (
-                  <Typography.Text type="secondary">没有 replan.applied / replan.failed 事件。</Typography.Text>
-                ) : (
-                  <ResizableTable
-                    dataSource={replans.map((row, index) => ({ ...row, key: `r-${index}` }))}
-                    pagination={false}
-                    size="small"
-                    columns={[
-                      { title: "Event", dataIndex: "type", width: 150, key: "type" },
-                      {
-                        title: "Version",
-                        width: 140,
-                        key: "version",
-                        render: (_, row) => `${asText(row.from_plan_version)} → ${asText(row.to_plan_version)}`
-                      },
-                      {
-                        title: "Reason",
-                        dataIndex: "reason",
-                        width: 280,
-                        key: "reason",
-                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
-                      },
-                      {
-                        title: "Issues",
-                        dataIndex: "issues",
-                        width: 320,
-                        key: "issues",
-                        render: (value: unknown) => (
-                          <div className="table-wrap-cell">
-                            {Array.isArray(value) && value.length > 0
-                              ? value.map((item) => asText(item)).join("; ")
-                              : "-"}
-                          </div>
-                        )
-                      },
-                      {
-                        title: "Gap IDs",
-                        dataIndex: "target_gap_ids",
-                        width: 180,
-                        key: "target_gap_ids",
-                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
-                      },
-                      {
-                        title: "Superseded",
-                        dataIndex: "superseded_task_ids",
-                        width: 200,
-                        key: "superseded_task_ids",
-                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
-                      },
-                      {
-                        title: "Replacement",
-                        dataIndex: "added_task_ids",
-                        width: 220,
-                        key: "added_task_ids",
-                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
-                      },
-                      {
-                        title: "Generation",
-                        dataIndex: "recovery_generation",
-                        width: 100,
-                        key: "recovery_generation",
-                        render: (value: unknown) => asText(value)
-                      },
-                      {
-                        title: "Budget",
-                        width: 130,
-                        key: "budget",
-                        render: (_, row) => {
-                          const attempted = Number(row.attempted ?? 0);
-                          const maxAttempts = Number(row.max_attempts ?? 0);
-                          return `${Number.isFinite(attempted) ? attempted : 0}/${Number.isFinite(maxAttempts) ? maxAttempts : 0} · 剩 ${Math.max(0, (Number.isFinite(maxAttempts) ? maxAttempts : 0) - (Number.isFinite(attempted) ? attempted : 0))}`;
-                        }
-                      },
-                      {
-                        title: "Added",
-                        width: 240,
-                        key: "added_tasks",
-                        render: (_, row) => <div className="table-wrap-cell">{asText(row.added_tasks)}</div>
-                      }
-                    ]}
-                  />
-                )}
               </Card>
             )
           },

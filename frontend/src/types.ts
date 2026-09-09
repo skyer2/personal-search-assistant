@@ -13,7 +13,7 @@ export type MonitorEventName =
   | "phase"
   | "worker"
   | "progress"
-  | "replan"
+  | "supervisor"
   | "evidence"
   | "plan"
   | "hitl_interrupt"
@@ -151,7 +151,7 @@ export interface EvalReport {
   grounding_score?: number;
   trajectory_score?: number;
   plan_validation_pass_rate?: number;
-  replan_recovery_rate?: number;
+  supervisor_recovery_rate?: number;
   pass_at_1?: number;
   pass_at_k?: number;
   pass_hat_k?: number;
@@ -270,10 +270,13 @@ export interface TraceSummary {
     variant?: string;
   };
   brief?: Record<string, unknown> | null;
+  topology?: Record<string, unknown> | null;
+  supervisor_decisions?: Array<Record<string, unknown>>;
   plans?: Array<Record<string, unknown>>;
+  findings?: Array<Record<string, unknown>>;
+  coverage_judgements?: Array<Record<string, unknown>>;
   workers?: Array<Record<string, unknown>>;
   progress?: Array<Record<string, unknown>>;
-  replans?: Array<Record<string, unknown>>;
   evidence?: Array<Record<string, unknown>>;
   synthesis?: Array<Record<string, unknown>>;
   recoveries?: Array<Record<string, unknown>>;
@@ -300,11 +303,14 @@ export interface TraceSummary {
   };
   event_count?: number;
   worker_count?: number;
+  finding_count?: number;
+  supervisor_decision_count?: number;
+  coverage_judgement_count?: number;
   progress_count?: number;
-  replan_count?: number;
+  supervisor_iterations?: number;
   gap_closure_rate?: number | null;
-  replan_useful?: boolean | null;
-  replan_attempted?: boolean;
+  supervisor_recovery?: boolean;
+  coverage_attempted?: boolean;
   progress_attempted?: boolean;
   trace_integrity?: {
     passed?: boolean | null;

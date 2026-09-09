@@ -8,13 +8,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.agent.harness.guardrails import can_replan
 from app.agent.harness.state import LoopState, TaskIntent
 from app.agent.harness.validator import ResultValidator
-from app.config.loader import get_harness_config
 from app.research.claims import reconcile_worker_results
 from app.research.claims.extract import extract_claims_from_worker_results
-from app.agent.harness.state import ExecutionPlan, PlanStep
 
 
 def _rows_cross_worker_revenue_conflict():
@@ -162,23 +159,9 @@ def test_authority_prefers_primary_over_secondary():
     print("[OK] authority resolve", result.resolved_labels[:2])
 
 
-def test_can_replan_independent_of_retry_budget():
-    cfg = get_harness_config()
-    state = LoopState(session_id="s_replan")
-    state.plan = ExecutionPlan(steps=[PlanStep(step_type="research", description="x", task_id="t1")])
-    state.retry_count = state.max_retries  # format retries exhausted
-    state.replan_count = 0
-    state.metadata["run_budget"] = {"max_replan_count": 2, "max_plan_steps": 8}
-    assert can_replan(state, cfg) is True
-    state.replan_count = 2
-    assert can_replan(state, cfg) is False
-    print("[OK] retry vs replan budgets decoupled")
-
-
 if __name__ == "__main__":
     test_extract_and_detect_cross_worker_conflict()
     test_scope_mismatch_is_expected_disagreement()
     test_progress_merges_global_reconciliation()
     test_conflict_disclosure_gate()
-    test_can_replan_independent_of_retry_budget()
     print("all claim conflict tests passed")

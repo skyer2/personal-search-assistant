@@ -1,116 +1,97 @@
-# Contract-Driven Research StateGraph Runtime
+# Semantic Research StateGraph Runtime
 
-The research StateGraph is the only product control path. `ControlPolicy` decides routing; graph edges only execute that decision.
+The research StateGraph is the only product control path. It deliberately keeps semantic authority in two LLM-facing components and hard execution authority in `RuntimePolicy`.
+
+```text
+StructuredResearchBrief = user-intent authority
+Supervisor             = research-strategy authority
+RuntimePolicy          = budget / retry / safety / terminal authority
+```
 
 ## Nodes
 
 ```text
 START
-  → compile_spec
-  → spec_gate
-      → clarify → compile_spec
-      → plan
-  → plan_validate
-  → dispatch
-      → research_worker × N
-      → dispatch_barrier
-      → ingest_semantics
-      → assess
-      → retry / gap_fill / expand_plan / replan
-          → plan_validate or dispatch
+  → brief
+      → researcher                # simple-fact fast path
+      → supervisor                 # open research loop
+          → researcher × N
+          → ingest_findings
+          → coverage_judge
+              → supervisor         # actionable coverage gap
+              → synthesize         # enough evidence
       → synthesize
       → quality_gate
-          → repair_synthesis
-          → gap_fill / replan
+          → synthesize             # bounded repairable retry
           → finalize
   → END
 ```
 
 Named graph nodes:
 
-1. `compile_spec`
-2. `spec_gate`
-3. `clarify`
-4. `plan`
-5. `plan_validate`
-6. `dispatch`
-7. `research_worker`
-8. `dispatch_barrier`
-9. `ingest_semantics`
-10. `assess`
-11. `retry`
-12. `gap_fill`
-13. `expand_plan`
-14. `replan`
-15. `synthesize`
-16. `quality_gate`
-17. `repair_synthesis`
-18. `finalize`
+1. `brief`
+2. `supervisor`
+3. `researcher`
+4. `ingest_findings`
+5. `coverage_judge`
+6. `synthesize`
+7. `quality_gate`
+8. `finalize`
 
-The node count intentionally exceeds the SDD's approximate 14-node target. See [ADR-004](architecture/adr/ADR-004-stategraph-node-granularity.md): separate plan operators preserve deterministic action budgets, strategy fingerprints, and observable control semantics.
+## Authority Boundaries
 
-## Phase and Transition Rules
+- `brief` compiles the query, conversation delta, entities, key questions, source constraints, freshness, and deliverable into a `StructuredResearchBrief`.
+- Fast-path eligibility is derived from the Brief. A simple fact does not bypass the main graph; it branches after `brief`.
+- `supervisor` turns the Brief and the latest Coverage Judgement into `THINK`, `CONDUCT_RESEARCH`, or `COMPLETE` actions. It owns task granularity and research strategy.
+- `researcher` executes one isolated task attempt and returns raw results. It cannot declare coverage complete.
+- `ingest_findings` compresses worker results into evidence-backed findings.
+- `coverage_judge` compares findings with Brief requirements and emits actionable missing questions, weak claims, and conflicts.
+- `synthesize` consumes Brief, findings, admitted evidence, claims, conflicts, and limitations. It cannot search or mutate coverage.
+- `quality_gate` validates citation, grounding, coverage, and final content. It can only request a bounded synthesis retry or finalize.
+- `finalize` is the only terminal transition and records `success`, `partial`, `failed`, or `cancelled`.
 
-- `transition_update()` is the only phase transition helper.
-- `compile_spec` writes `ResearchSpec` and initial `CoverageContract`.
-- `spec_gate` blocks empty objectives, blocking ambiguity, and contradicted premises.
-- `plan_validate` enforces plan invariants, task granularity, coverage binding, and candidate-set dependency.
-- `dispatch_barrier` is a side-effect-free join; one wave enters one semantic ingest.
-- `ingest_semantics` is the only worker-result → semantic-state boundary.
-- `assess` produces deterministic assessments and calls `ControlPolicy`.
-- `quality_gate` may only repair synthesis, perform a gap-bound control action, or finalize.
-- `finalize` is the only terminal transition.
+## Runtime Policy
+
+`RuntimePolicy` is deterministic and intentionally contains no semantic actions. It decides only:
+
+- dispatch, retry, synthesize, partial delivery, wait, or stop;
+- iteration, worker, tool-call, token, and time budgets;
+- whether terminal metadata is valid;
+- whether partial delivery is allowed because usable evidence exists.
+
+The configuration key `max_replan_count` is retained only as the storage name for the supervisor iteration limit. It does not create a semantic Replan action.
 
 ## Worker Contract
 
-Workers own execution, not research completion. Each worker result is scoped to:
+Workers own execution, not research completion. Each result is scoped to:
 
-- one task ID and plan version
-- one attempt
-- one dispatch wave
-- its own task delta and raw payload
+- one task ID and plan version;
+- one attempt;
+- one dispatch wave;
+- its own raw payload and evidence IDs.
 
-Workers can return findings, facts, candidates, sources, evidence IDs, and confidence. They cannot mutate coverage, close gaps, mark research complete, or decide the next control action.
+Workers can return findings, facts, candidates, sources, evidence IDs, and confidence. They cannot mutate coverage, mark research complete, or choose the next strategy.
 
-## Candidate Expansion
-
-```text
-discovery task
-  → CandidateSet materialized
-  → ControlPolicy.EXPAND_PLAN
-  → expanded CoverageContract
-  → candidate × dimension tasks
-```
-
-Before expansion, `candidate_set` is a required discovery unit. After expansion, that transient unit is removed. This prevents a permanently unsatisfiable candidate obligation after concrete candidates exist.
-
-## Synthesis Contract
-
-Synthesis consumes semantic digest records:
-
-- spec objective and delivery requirements
-- coverage summary
-- admitted evidence digests
-- claims and conflict resolutions
-- explicit limitations
-
-It cannot search, mutate coverage, add claims, or close gaps. A synthesis timeout may trigger a bounded retry or deterministic partial fallback, but never a silent success.
-
-## Stop and Terminal Semantics
+## Stop Semantics
 
 | Condition | Meaning |
 |---|---|
-| `SUCCESS` | all semantic and quality gates pass |
-| `PARTIAL` | bounded useful evidence exists, but full coverage or quality is not met |
-| `FAILED` | no usable semantic result or a required gate fails |
-| `CANCELLED` | user or policy cancellation |
+| `success` | coverage, synthesis, citation, and grounding gates pass |
+| `partial` | useful evidence exists, but coverage or quality remains incomplete; output must disclose the limitation |
+| `failed` | no usable semantic result or a required gate fails |
+| `cancelled` | user or policy cancellation |
 
-Budget stop, timeout, and worker `STOPPED` do not automatically map to `FAILED`. ControlPolicy chooses synthesis, partial delivery, or failure from semantic state.
+Budget stop, timeout, and worker `STOPPED` do not automatically map to `failed`. RuntimePolicy chooses partial delivery or failure from actual evidence state.
 
 ## Runtime Files
 
-- `app/research/runtime/graph.py` — graph topology and pure default nodes
-- `app/research/runtime/runner.py` — production runtime nodes and telemetry
+- `app/research/brief/` — user-intent authority
+- `app/research/supervisor/` — research-strategy authority
+- `app/research/findings/` — compressed, evidence-backed findings
+- `app/research/coverage/judge.py` — coverage judgement
+- `app/research/control/runtime_policy.py` — deterministic execution policy
+- `app/research/control/transitions.py` — phase transitions
+- `app/research/domain/termination.py` — terminal-state policy
+- `app/research/runtime/graph.py` — eight-node graph topology
+- `app/research/runtime/runner.py` — production graph nodes and telemetry
 - `app/research/runtime/state.py` — canonical state schema
-- `app/research/runtime/semantic_ingest.py` — semantic admission boundary
-- `app/research/control/policy.py` — sole routing authority

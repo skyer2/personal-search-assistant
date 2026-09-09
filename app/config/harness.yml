@@ -113,8 +113,6 @@ harness:
     fast_synthesis_threshold_sec: 45
     emergency_context_budget_sec: 10
     worker_idle_timeout_sec: 75
-    replan_context_overhead_sec: 30
-    replan_checkpoint_overhead_sec: 2
     max_replan_count: 3
     max_plan_steps: 12
     max_llm_calls_per_run: 80
@@ -122,7 +120,7 @@ harness:
 
   effort:
     adaptive_enabled: true
-    note: "static ceiling + adaptive allocation + evidence-driven stop/replan"
+    note: "static ceiling + adaptive allocation + evidence-driven Supervisor stop"
 
   experiment:
     default_mode: agent
@@ -173,7 +171,6 @@ harness:
     timeout_sec: 600
     plan_review_enabled: false
     allow_edit: true
-    allow_replan: true
     interrupt_on:
       generate_markdown: true
       convert_md_to_pdf: true

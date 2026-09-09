@@ -15,7 +15,6 @@ from app.agent.harness.planner import (
     apply_plan_edits,
     build_plan,
     detect_multi_intent,
-    dynamic_replan,
     understand_task,
 )
 from app.agent.harness.state import ExecutionPlan, PlanStep
@@ -58,18 +57,16 @@ def test_trajectory_diff():
     print("[OK] trajectory diff")
 
 
-def test_planner_multi_intent_and_replan():
+def test_planner_multi_intent_and_user_edit():
     intent = understand_task("结合公开资料和上传附件，整理机器人行业报告并生成PDF")
     assert detect_multi_intent(intent) is True
     plan = build_plan(intent)
-    replanned = dynamic_replan(plan, 1, "search_empty")
-    assert len(replanned.steps) > len(plan.steps)
     edited = apply_plan_edits(
         plan,
         [{"step_type": "network_search", "description": "用户编辑后的搜索", "subagent": "网络搜索助手"}],
     )
     assert edited.steps[0].description == "用户编辑后的搜索"
-    print("[OK] planner replan + edit")
+    print("[OK] planner multi-intent + edit")
 
 
 def test_hitl_edit_decision_flow():
@@ -100,7 +97,6 @@ def test_hitl_edit_decision_flow():
                                 "subagent": "网络搜索助手",
                             }
                         ],
-                        "replan": True,
                     },
                 }
             ],
@@ -136,7 +132,7 @@ if __name__ == "__main__":
     test_citation_manager_registers_and_builds_report()
     test_citation_validate_finalize()
     test_trajectory_diff()
-    test_planner_multi_intent_and_replan()
+    test_planner_multi_intent_and_user_edit()
     test_hitl_edit_decision_flow()
     test_phase6_config()
     test_dry_eval_with_trajectory()

@@ -443,7 +443,7 @@ uv run python tests/test_research_harness.py
 
 1. 左侧 WebSocket 为「已连接」。
 2. 输入研究任务，可附文件；发送固定 `mode=agent`。
-3. 对话区走 Brief → Plan → Workers → Progress / Replan → 答案。
+3. 对话区走 Brief → Supervisor → Workers → Findings / Coverage → 答案。
 4. 产物在 `output/` 下对应 session 目录。
 5. 侧栏 Eval / Trace 给研究者看机制，不是搜索产品功能。
 6. 「新建任务」换 `thread_id`。同一会话再提交会取消旧任务。

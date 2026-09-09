@@ -36,22 +36,6 @@ def extract_trajectory_dry(planned_steps: list[str], planned_agents: list[str] |
     return traj
 
 
-def extract_trajectory_live(
-    trace: list[Any],
-    assistants_called: list[str] | None = None,
-    replan_count: int = 0,
-) -> list[str]:
-    """live 模式：execute 步 + recover/replan 标记 + 助手调用。"""
-    traj = extract_trajectory_from_trace(trace)
-    if replan_count > 0:
-        traj.extend(["replan"] * replan_count)
-    for agent in assistants_called or []:
-        marker = f"agent:{agent}"
-        if marker not in traj:
-            traj.append(marker)
-    return traj
-
-
 def compare_trajectories(
     actual: list[str],
     expected: list[str],

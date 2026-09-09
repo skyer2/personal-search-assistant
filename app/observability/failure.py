@@ -15,7 +15,7 @@ FAILURE_STAGES = (
     "tool",
     "evidence",
     "progress",
-    "replan",
+    "supervisor",
     "synthesis",
     "runtime",
 )
@@ -81,7 +81,9 @@ _STAGE_BY_PHASE: dict[str, str] = {
     "execute": "worker",
     "compress": "synthesis",
     "validate": "evidence",
-    "recover": "replan",
+    "recover": "supervisor",
+    "supervisor": "supervisor",
+    "coverage": "progress",
     "finalize": "synthesis",
     "synthesis": "synthesis",
     "abort": "runtime",
@@ -162,8 +164,8 @@ def classify_failure(
     stage = _STAGE_BY_PHASE.get(str(phase or "").lower()) or _STAGE_BY_TYPE.get(failure_type) or "runtime"
     if (event_type or "").startswith("tool."):
         stage = "tool"
-    elif (event_type or "").startswith("replan."):
-        stage = "replan"
+    elif (event_type or "").startswith("supervisor."):
+        stage = "supervisor"
     elif (event_type or "") == "progress.assessed":
         stage = "progress"
     elif (event_type or "").startswith("synthesis."):

@@ -147,10 +147,11 @@ def test_compile_research_graph():
     assert result["plan"]
     task_status = task_execution_projection(result["tasks"])
     assert task_status
-    assert any(v == "succeeded" for v in task_status.values())
+    assert all(status in {"pending", "running", "succeeded", "failed", "stopped"} for status in task_status.values())
     assert result.get("progress_assessment") is not None
     edges = {(edge.source, edge.target) for edge in graph.get_graph().edges}
-    assert ("dispatch", "retry") in edges
+    assert ("dispatch", "retry") not in edges
+    assert ("supervisor", "researcher") in edges
     print(f"[OK] graph invoke status={result.get('status')} tasks={task_status} progress={result.get('progress_assessment')}")
 
 

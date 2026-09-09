@@ -17,7 +17,6 @@ from app.agent.harness.research_brief import ResearchBrief
 class Phase(str, Enum):
     UNDERSTAND = "understand"
     PLAN = "plan"
-    REPLAN = "replan"  # 【Phase 6】动态重规划
     BUILD_CONTEXT = "build_context"
     EXECUTE = "execute"
     PARALLEL_EXECUTE = "parallel_execute"  # 【Phase 7】检索步 fan-out
@@ -127,7 +126,7 @@ class PlanStep:
     step_type: str
     description: str
     subagent: Optional[str] = None
-    metadata: dict[str, Any] = field(default_factory=dict)  # 【Phase 6】HITL edit / replan 元数据
+    metadata: dict[str, Any] = field(default_factory=dict)  # 【Phase 6】HITL edit metadata
     task_id: str = ""
     depends_on: list[str] = field(default_factory=list)
     allowed_tools: list[str] = field(default_factory=list)
@@ -226,7 +225,7 @@ class ValidationOutcome:
 class LoopState:
     """进程内 Runtime Handles，不是第二套 workflow checkpoint。
 
-    plan / intent / replan_count / abort 等 workflow 字段以 ResearchState
+    plan / intent / supervisor iterations / abort 等 workflow 字段以 ResearchState
     （LangGraph SQLite）为准；本对象只给领域服务和工人适配器提供句柄
     （trace、step_results、stores 投影）。不要把本对象写入第二套恢复系统。
     """
@@ -260,8 +259,8 @@ class LoopState:
     compression_ratios: list[float] = field(default_factory=list)
     started_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
-    # 【Phase 6】Citation-First + Dynamic Re-plan
-    replan_count: int = 0
+    # 【Phase 6】Citation-First
+    supervisor_iterations: int = 0
     evidence_source_count: int = 0
     citation_coverage_rate: float = 0.0
     hallucination_rate: float = 0.0

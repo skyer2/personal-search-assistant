@@ -235,41 +235,6 @@ def test_node_research_worker_handles_timeout_without_crashing(monkeypatch):
     print("[OK] node handles timeout WorkerResult")
 
 
-def test_node_dispatch_publishes_fresh_control_decision():
-    state = LoopState(session_id="s_dispatch_contract")
-    state.plan = ExecutionPlan(
-        steps=[PlanStep(step_type="research", description="collect", task_id="t_dispatch")],
-        summary="dispatch contract",
-    )
-    session = FakeSession(state, FakeBudget(True))
-    runner_module.bind_session(session)
-    graph_runner = runner_module.ResearchGraphRunner(FakeHarness())
-    try:
-        update = asyncio.run(
-            graph_runner.node_dispatch(
-                {
-                    "run_id": session.run_id,
-                    "phase": "assess",
-                    "plan": state.plan.to_dict(),
-                    "tasks": {
-                        "t_dispatch": {
-                            "task_id": "t_dispatch",
-                            "execution_status": "pending",
-                            "result_status": "none",
-                            "attempt": 1,
-                        }
-                    },
-                    "control_decision": {"action": "retry", "task_ids": ["t_dispatch"]},
-                }
-            )
-        )
-    finally:
-        runner_module.drop_session(session.run_id)
-    assert update["phase"] == "dispatch"
-    assert update["control_decision"]["action"] == "dispatch"
-    assert update["control_decision"]["task_ids"] == ["t_dispatch"]
-
-
 def test_node_research_worker_rejects_dict_contract(monkeypatch):
     state = LoopState(session_id="s_node_dict")
     state.plan = ExecutionPlan(

@@ -6,14 +6,14 @@ from pathlib import Path
 
 from tests.eval.runners.experiment import VARIANT_PRESETS
 
-BROWSECOMP_VARIANTS = ("retrieval", "vanilla", "no_replan", "full")
+BROWSECOMP_VARIANTS = ("retrieval", "vanilla", "single_iteration", "full")
 
 
 def recommended_ablation() -> list[str]:
     return [
         "retrieval-only",
         "vanilla",
-        "no_replan",
+        "single_iteration",
         "full",
     ]
 

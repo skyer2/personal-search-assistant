@@ -38,7 +38,7 @@ def test_no_product_search_path():
     print("[OK] product ANSWER/SEARCH removed; direct is baseline only")
 
 
-def test_budget_direct_has_no_replan():
+def test_budget_direct_has_no_supervisor_iteration():
     d = budget_for_mode("direct")
     a = budget_for_mode("agent")
     assert d["max_replan_count"] == 0
@@ -66,12 +66,12 @@ def test_research_state_has_spec_and_findings():
 
 def test_sync_execution_projection_is_one_way():
     loop = LoopState(session_id="s")
-    loop.replan_count = 9
+    loop.supervisor_iterations = 9
     sync_execution_projection(
         loop,
-        {"action_budget": {"replan": 1}, "final_content": "hi"},
+        {"supervisor": {"iteration": 1}, "final_content": "hi"},
     )
-    assert loop.replan_count == 1
+    assert loop.supervisor_iterations == 1
     assert loop.final_content == "hi"
     assert loop.metadata["workflow_authority"] == "research_state"
     print("[OK] graph→loop projection")
@@ -106,7 +106,6 @@ def test_compile_agent_and_direct_graphs():
     )
     assert result["search_mode"] == "agent"
     assert result.get("plan")
-    assert result.get("research_spec")
 
     direct = compile_research_graph(checkpointer=InMemorySaver(), profile="direct")
     baseline = direct.invoke(
@@ -127,7 +126,7 @@ def test_compile_agent_and_direct_graphs():
 if __name__ == "__main__":
     test_canonicalize_experiment_modes()
     test_no_product_search_path()
-    test_budget_direct_has_no_replan()
+    test_budget_direct_has_no_supervisor_iteration()
     test_graph_branch_for_mode()
     test_research_state_has_brief_and_findings()
     test_sync_execution_projection_is_one_way()

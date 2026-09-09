@@ -31,7 +31,7 @@ def test_run_centric_jsonl_layout():
         tel.emit(EventType.CONTEXT_BUILT, phase="execute", status="ok", attributes={"after_tokens": 120})
         tel.emit(EventType.RECOVERY_DECIDED, phase="recover", status="decided", attributes={"decision": "retry"})
         tel.emit(EventType.CHECKPOINT_SAVED, phase="execute", status="ok", attributes={"checkpoint_id": "ck1"})
-        tel.finish_run(status="success", duration_ms=12, metadata={"replan_count": 0})
+        tel.finish_run(status="success", duration_ms=12, metadata={"supervisor_iterations": 0})
         run_path = log_dir / "sess_rc" / "run_rc_1.jsonl"
         assert run_path.exists()
         rows = exporter.read("sess_rc", run_id="run_rc_1")

@@ -13,10 +13,20 @@ def sync_execution_projection(loop: LoopState, gstate: dict[str, Any]) -> LoopSt
     This function never reconstructs task state and never writes workflow
     authority fields. LoopState remains an execution view, not a control plane.
     """
+    brief = gstate.get("brief")
     intent = gstate.get("intent")
-    if isinstance(intent, dict) and intent:
+    if isinstance(brief, dict) and brief:
+        deliverable = dict(brief.get("deliverable") or {})
+        requested_format = str(deliverable.get("format") or "text")
+        loop.intent = TaskIntent(
+            raw_query=str(brief.get("raw_query") or brief.get("objective") or gstate.get("task_query") or ""),
+            summary=str(brief.get("objective") or gstate.get("task_query") or ""),
+            needs_network=True,
+            deliverable="pdf" if requested_format == "pdf" else "md" if requested_format in {"markdown", "md"} else "text",
+        )
+    elif isinstance(intent, dict) and intent:
         loop.intent = TaskIntent.from_dict(intent)
-    elif getattr(loop, "intent", None) is None and isinstance(gstate.get("research_spec"), dict):
+    elif isinstance(gstate.get("research_spec"), dict):
         spec = dict(gstate["research_spec"])
         delivery = dict(spec.get("delivery_requirements") or {})
         requested_format = str(delivery.get("format") or "markdown")
@@ -32,17 +42,16 @@ def sync_execution_projection(loop: LoopState, gstate: dict[str, Any]) -> LoopSt
         loop.plan = ExecutionPlan.from_dict(plan)
 
     budget = gstate.get("budget")
-    action_budget = gstate.get("action_budget")
-    if isinstance(budget, dict) or isinstance(action_budget, dict):
+    if isinstance(budget, dict):
         metadata_budget = dict(loop.metadata.get("run_budget") or {})
-        if isinstance(budget, dict):
-            for key in ("max_parallel_workers", "max_replan_count"):
-                if budget.get(key) is not None:
-                    metadata_budget[key] = max(0, int(budget[key]))
-        if isinstance(action_budget, dict):
-            metadata_budget["replan_applied"] = max(0, int(action_budget.get("replan") or 0))
-            loop.replan_count = metadata_budget["replan_applied"]
+        for key in ("max_parallel_workers", "max_replan_count"):
+            if budget.get(key) is not None:
+                metadata_budget[key] = max(0, int(budget[key]))
         loop.metadata["run_budget"] = metadata_budget
+
+    supervisor = gstate.get("supervisor")
+    if isinstance(supervisor, dict):
+        loop.supervisor_iterations = max(0, int(supervisor.get("iteration") or 0))
 
     final = gstate.get("final_content")
     if isinstance(final, str):

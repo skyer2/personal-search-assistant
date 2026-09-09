@@ -1,51 +1,47 @@
-# Contract-Driven Research Agent Harness
+# Semantic Research Agent Harness
 
 A controllable and evaluable harness for long-running research agents.
 
 ```text
 Query
-  → ResearchSpec
-  → CoverageContract
-  → Adaptive Plan
-  → Workers
-  → Evidence / Claims
-  → Coverage Assessment
-  → Semantic Gaps
-  → ControlPolicy
-  → Grounded Synthesis
-  → Quality Gate
+  → Structured Research Brief
+  → Supervisor research actions
+  → Researcher workers
+  → Evidence-backed compressed findings
+  → Coverage judgement
+  → Grounded synthesis
+  → Quality gate
 ```
 
-This project is not a search engine. Search is only an environment tool. The harness studies contract compilation, adaptive control, evidence admission, semantic coverage, grounded synthesis, durability, and evaluation.
+This project is not a search engine. Search is only an environment tool. The harness studies user-intent compilation, LLM research strategy, evidence admission, coverage judgement, grounded synthesis, durability, and evaluation.
 
 ## Core Rules
 
-- `ResearchSpec` is the only success contract. A plan explains how to research, not when research is complete.
-- `CoverageContract` and evidence-derived `CoverageState` decide semantic completion.
+- `StructuredResearchBrief` is the only user-intent authority.
+- `Supervisor` is the only research-strategy authority.
+- `RuntimePolicy` is the only budget, retry, safety, and terminal-state authority.
 - Task state is execution state only. All workers finishing does not imply coverage.
-- `ControlPolicy` is the only routing authority.
-- `RETRY`, `GAP_FILL`, `EXPAND_PLAN`, and `REPLAN` are separate bounded actions.
-- `SemanticGap` IDs are stable and independent of task or claim IDs.
+- Coverage is judged from evidence-backed findings against the Brief, not from task completion.
 - Synthesis consumes semantic digests and cannot change coverage.
 - The final answer must pass coverage, conflict, citation, and grounding gates.
 
 ## Execution Path
 
 ```text
-Simple Fact → Fast Path → Source Gate → Answer
+Simple fact → Brief fast path → researcher → answer
 
 Other Research
-  → compile_spec → spec_gate
-  → plan → plan_validate → dispatch
-  → research_worker × N → dispatch_barrier
-  → ingest_semantics → assess
-  → ControlPolicy
-       dispatch / retry / gap_fill / expand_plan / replan
-       synthesize / partial delivery / finalize
-  → quality_gate → finalize
+  → brief
+  → supervisor
+  → researcher × N
+  → ingest findings
+  → coverage judge
+  → synthesize
+  → quality gate
+  → finalize
 ```
 
-`direct` is only an ablation baseline. It is not a product route.
+The production graph has eight nodes. `direct` is only an ablation baseline, not a product route.
 
 ## Evaluation
 
@@ -67,6 +63,7 @@ Production fidelity, live scenarios, and BrowseComp-Plus are documented in [docs
 - [StateGraph runtime](docs/HARNESS_ARCHITECTURE.md)
 - [Observability contract](docs/OBSERVABILITY.md)
 - [Evaluation system](docs/EVALUATION.md)
+- [Semantic simplification result](docs/architecture/semantic-simplification-result.md)
 - [BrowseComp-Plus](docs/BROWSECOMP_PLUS_EVAL.md)
 - [Context and memory boundaries](docs/CONTEXT_SYSTEM.md)
 - [Deployment](docs/OPENEULER_BARE_METAL.md)

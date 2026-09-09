@@ -119,8 +119,6 @@ class HarnessConfig:
     fast_synthesis_threshold_sec: float = 45.0
     emergency_context_budget_sec: float = 10.0
     worker_idle_timeout_sec: float = 75.0
-    replan_context_overhead_sec: float = 30.0
-    replan_checkpoint_overhead_sec: float = 2.0
     max_replan_count: int = 3
     max_plan_steps: int = 12
     max_llm_calls_per_run: int = 30
@@ -137,7 +135,6 @@ class HarnessConfig:
     hitl_step_gate_types: list[str] = field(default_factory=list)
     hitl_plan_review_enabled: bool = True
     hitl_allow_edit: bool = True
-    hitl_allow_replan: bool = True
 
     citations_enabled: bool = True
     citations_min_coverage_rate: float = 0.2
@@ -520,18 +517,6 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
                 budget.get("worker_idle_timeout_sec", 75),
             )
         ),
-        replan_context_overhead_sec=float(
-            os.getenv(
-                "HARNESS_REPLAN_CONTEXT_OVERHEAD_SEC",
-                budget.get("replan_context_overhead_sec", 30),
-            )
-        ),
-        replan_checkpoint_overhead_sec=float(
-            os.getenv(
-                "HARNESS_REPLAN_CHECKPOINT_OVERHEAD_SEC",
-                budget.get("replan_checkpoint_overhead_sec", 2),
-            )
-        ),
         max_replan_count=int(budget.get("max_replan_count", 3)),
         max_plan_steps=int(budget.get("max_plan_steps", 12)),
         personal_search=dict(personal),
@@ -556,10 +541,6 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         hitl_allow_edit=_env_bool(
             "HARNESS_HITL_ALLOW_EDIT",
             bool(hitl.get("allow_edit", True)),
-        ),
-        hitl_allow_replan=_env_bool(
-            "HARNESS_HITL_ALLOW_REPLAN",
-            bool(hitl.get("allow_replan", True)),
         ),
         citations_enabled=_env_bool(
             "HARNESS_CITATIONS_ENABLED",

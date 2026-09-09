@@ -13,7 +13,8 @@ _STAGE_ALIAS = {
     "worker": "worker",
     "compress": "worker",
     "progress": "progress",
-    "replan": "progress",
+    "supervisor": "planning",
+    "coverage": "progress",
     "synthesis": "synthesis",
     "finalize": "synthesis",
     "validate": "quality",
@@ -64,10 +65,6 @@ def check_trace_integrity(
     worker_terminal_without_task_id = 0
     worker_attempt_keys: list[tuple[str, int, int]] = []
     progress_waves: list[int] = []
-    last_unresolved_gap_count: int | None = None
-    gap_baseline_after_replan: int | None = None
-    superseded_task_ids: set[str] = set()
-    superseded_worker_attempts: list[str] = []
 
     for event in events:
         event_type = str(event.get("type") or event.get("event") or "")
@@ -104,8 +101,6 @@ def check_trace_integrity(
                         int(event.get("attempt") or attrs.get("attempt") or 0),
                     )
                 )
-                if started_task_id in superseded_task_ids:
-                    superseded_worker_attempts.append(started_task_id)
             except (TypeError, ValueError):
                 pass
         if event_type == "progress.assessed":
@@ -119,21 +114,6 @@ def check_trace_integrity(
                 gap_count = int(attrs.get("unresolved_gap_count") or 0)
             except (TypeError, ValueError):
                 gap_count = 0
-            if gap_baseline_after_replan is not None and gap_count > gap_baseline_after_replan:
-                issues.append("business_gap_growth")
-            gap_baseline_after_replan = None
-            last_unresolved_gap_count = gap_count
-        if event_type in {"replan.applied", "replan.rejected"}:
-            superseded_task_ids.update(str(item) for item in attrs.get("superseded_task_ids") or [])
-            try:
-                attempted = int(attrs.get("attempted") or 0)
-                maximum = int(attrs.get("max_attempts") or 0)
-            except (TypeError, ValueError):
-                attempted, maximum = 0, 0
-            if maximum and attempted > maximum:
-                issues.append("replan_budget_exceeded")
-            if last_unresolved_gap_count is not None:
-                gap_baseline_after_replan = last_unresolved_gap_count
         if event_type == "synthesis.completed":
             synthesis_evidence_ids.update(str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip())
         if event_type == "synthesis.failed":
@@ -205,8 +185,6 @@ def check_trace_integrity(
     duplicate_progress_waves = {wave for wave in progress_waves if progress_waves.count(wave) > 1}
     if duplicate_progress_waves:
         issues.append(f"duplicate_progress_for_wave:{len(duplicate_progress_waves)}")
-    if superseded_worker_attempts:
-        issues.append("superseded_task_still_active")
     if any(
         "graphrecursion" in " ".join(
             [

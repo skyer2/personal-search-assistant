@@ -5,9 +5,9 @@ import { fetchEvalBaseline, fetchEvalLatest, runEvalDryRun } from "../lib/api";
 import type { EvalReport, RegressionSummary } from "../types";
 
 const COMPONENT_LABELS: Array<{ key: string; label: string }> = [
-  { key: "planner", label: "Planner" },
-  { key: "progress", label: "Progress" },
-  { key: "replan", label: "Replan" },
+  { key: "brief", label: "Brief" },
+  { key: "coverage", label: "Coverage" },
+  { key: "supervisor", label: "Supervisor" },
   { key: "evidence", label: "Evidence" }
 ];
 

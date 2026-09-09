@@ -86,8 +86,11 @@ class WorkerExecutorV2:
                 summary="budget_blocked:budget_manager_unavailable",
                 fail_reason="budget_manager_unavailable",
             )
-        resolve_parallel = getattr(self.session, "_resolve_max_workers", None)
-        parallel_workers = int(resolve_parallel() if callable(resolve_parallel) else 3)
+        active_wave_size = getattr(self.session, "active_wave_size", None)
+        if active_wave_size is None:
+            resolve_parallel = getattr(self.session, "_resolve_max_workers", None)
+            active_wave_size = resolve_parallel() if callable(resolve_parallel) else 3
+        parallel_workers = max(1, int(active_wave_size))
         lease_id, block_reason = reserve_worker_lease(
             task.task_id,
             parallel_workers=parallel_workers,

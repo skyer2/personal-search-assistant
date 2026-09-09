@@ -26,9 +26,9 @@ def test_gap_attempts_survive_reassessment():
         ],
     }
     previous = build_semantic_gaps(coverage)
-    previous[0].attempted_actions.append("GAP_FILL")
+    previous[0].attempted_actions.append("CONDUCT_RESEARCH")
     previous[0].attempt_count = 1
     reassessed = build_semantic_gaps(coverage, previous_gaps=[previous[0].to_dict()])
     assert reassessed[0].gap_id == previous[0].gap_id
-    assert reassessed[0].attempted_actions == ["GAP_FILL"]
+    assert reassessed[0].attempted_actions == ["CONDUCT_RESEARCH"]
     assert reassessed[0].attempt_count == 1

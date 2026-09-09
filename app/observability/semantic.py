@@ -158,7 +158,7 @@ def earliest_failure_origin(events: list[dict[str, Any]]) -> dict[str, Any] | No
         "retrieval": 35,
         "evidence": 40,
         "progress": 50,
-        "replan": 60,
+        "supervisor": 60,
         "synthesis": 70,
         "quality": 80,
         "runtime": 90,
@@ -208,48 +208,43 @@ def earliest_failure_origin(events: list[dict[str, Any]]) -> dict[str, Any] | No
     return {k: v for k, v in best.items() if k not in {"rank"}}
 
 
-def compute_replan_gap_closure(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Replan useful iff targeted gaps later appear in resolved_gap_ids.
+def compute_supervisor_gap_closure(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Measure whether a research action reduced the actionable Brief gap."""
+    supervisor_decisions = 0
+    research_actions = 0
+    coverage_assessments = 0
+    initial_missing: list[str] = []
+    remaining_missing: list[str] = []
+    final_sufficient = False
 
-    未执行 Progress / Replan 时返回 None，避免 UI 显示成 “no”。
-    """
-    targeted: list[str] = []
-    resolved: set[str] = set()
-    applied = 0
-    progress_n = 0
     for event in events:
         event_type = str(event.get("type") or event.get("event") or "")
         attrs = event.get("attributes") if isinstance(event.get("attributes"), dict) else {}
-        if event_type == "replan.applied":
-            applied += 1
-            for gap_id in attrs.get("target_gap_ids") or []:
-                if gap_id:
-                    targeted.append(str(gap_id))
-        if event_type == "progress.assessed":
-            progress_n += 1
-            for gap_id in attrs.get("resolved_gap_ids") or []:
-                if gap_id:
-                    resolved.add(str(gap_id))
-    unique_targets = list(dict.fromkeys(targeted))
-    closed = [gap_id for gap_id in unique_targets if gap_id in resolved]
-    waste = [gap_id for gap_id in unique_targets if gap_id not in resolved]
-    closure_rate = (len(closed) / len(unique_targets)) if unique_targets else None
-    if applied == 0:
-        replan_useful: bool | None = None
-    else:
-        replan_useful = bool(closed) if unique_targets else False
+        if event_type == "supervisor.decided":
+            supervisor_decisions += 1
+            if str(attrs.get("action") or event.get("status") or "") == "CONDUCT_RESEARCH":
+                research_actions += 1
+        elif event_type == "coverage.assessed":
+            coverage_assessments += 1
+            missing = [str(item) for item in attrs.get("missing") or [] if str(item).strip()]
+            if not initial_missing:
+                initial_missing = missing
+            remaining_missing = missing
+            final_sufficient = bool(attrs.get("sufficient"))
+
+    closed = [item for item in initial_missing if item not in remaining_missing]
+    closure_rate = (len(closed) / len(initial_missing)) if initial_missing else None
+    supervisor_recovery = research_actions > 0 and (final_sufficient or bool(closed))
     return {
-        "replan_applied": applied,
-        "progress_assessed": progress_n,
-        "target_gap_ids": unique_targets,
-        "resolved_gap_ids": sorted(resolved),
-        "closed_gap_ids": closed,
-        "waste_gap_ids": waste,
+        "supervisor_decisions": supervisor_decisions,
+        "supervisor_research_actions": research_actions,
+        "coverage_assessments": coverage_assessments,
+        "initial_missing": initial_missing,
+        "remaining_missing": remaining_missing,
+        "closed_missing": closed,
         "gap_closure_rate": closure_rate,
-        "replan_useful": replan_useful,
-        "needless_replan": bool(applied and not unique_targets),
-        "replan_attempted": applied > 0,
-        "progress_attempted": progress_n > 0,
+        "supervisor_recovery": supervisor_recovery,
+        "coverage_attempted": coverage_assessments > 0,
     }
 
 
@@ -259,7 +254,7 @@ _LINEAGE_EVENT_TYPES = frozenset({
     "worker.completed",
     "evidence.registered",
     "progress.assessed",
-    "replan.applied",
+    "supervisor.decided",
     "synthesis.completed",
     "synthesis.failed",
 })

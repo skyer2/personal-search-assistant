@@ -1,6 +1,6 @@
 """LangGraph 上的 Research Harness 可执行表示。
 
-Imports stay lazy to avoid control-policy / runtime circular initialization.
+Imports stay lazy to keep graph construction lightweight.
 """
 
 from typing import Any

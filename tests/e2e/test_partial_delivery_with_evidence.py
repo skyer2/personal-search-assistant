@@ -13,7 +13,7 @@ def test_partial_delivery_keeps_usable_evidence_and_discloses_limits():
     state = empty_research_state(run_id="e2e-partial", session_id="s", task_query=QUERY)
     state.update(
         {
-            "phase": "assess",
+            "phase": "coverage_judge",
             "research_spec": spec.to_dict(),
             "control_decision": {"action": "deliver_partial"},
             "coverage_state": {
@@ -58,7 +58,7 @@ def test_partial_delivery_keeps_usable_evidence_and_discloses_limits():
     assert "不能视为完整成功" in content
 
     state.update(quality_gate_node(state))
-    assert "coverage_gate_failed" in state["quality_assessment"]["issues"]
+    assert "coverage_gap" in state["quality_assessment"]["issues"]
     state.update(finalize_node(state))
     assert state["final_content"].strip()
     assert state["termination"]["outcome"] == "partial"

@@ -20,7 +20,7 @@ from app.observability.replay import load_events, merge_events
 from app.observability.events import EVENT_VOCABULARY
 from app.observability.semantic_events import control_decision_event_attributes, progress_event_attributes
 from app.observability.semantic import (
-    compute_replan_gap_closure,
+    compute_supervisor_gap_closure,
     earliest_failure_origin,
     materialize_gap_items,
     stable_gap_id,
@@ -111,12 +111,10 @@ def test_semantic_event_vocabulary_and_control_lineage():
         "claim.extracted",
         "claim.conflict_detected",
         "claim.conflict_resolved",
-        "semantic_gap.opened",
-        "semantic_gap.closed",
         "semantic_gain.assessed",
-        "plan.expanded",
-        "plan.gap_fill_applied",
         "control.decided",
+        "supervisor.started",
+        "supervisor.decided",
     }
     assert required <= set(EVENT_VOCABULARY)
     attributes = control_decision_event_attributes(
@@ -210,7 +208,7 @@ def test_plan_links_to_brief_and_worker_lineage():
     print("[OK] plan/worker/evidence/synthesis lineage")
 
 
-def test_progress_gap_has_stable_gap_id_and_replan_targets():
+def test_progress_gap_has_stable_gap_id_and_supervisor_targets():
     gaps = materialize_gap_items(
         missing_dimensions=["regulation"],
         coverage_gaps=["empty:t1:obj"],
@@ -234,15 +232,11 @@ def test_progress_gap_has_stable_gap_id_and_replan_targets():
             },
         },
         {
-            "type": "replan.applied",
+            "type": "coverage.assessed",
             "seq": 2,
             "attributes": {
-                "patch_id": "patch_01",
-                "triggered_by": "progress_01",
-                "target_gap_ids": [gid],
-                "added_tasks": ["t_regulation"],
-                "from_plan_version": 1,
-                "to_plan_version": 2,
+                "sufficient": False,
+                "missing": [gid],
             },
         },
         {
@@ -257,14 +251,28 @@ def test_progress_gap_has_stable_gap_id_and_replan_targets():
             },
         },
     ]
-    closure = compute_replan_gap_closure(events)
-    assert closure["replan_useful"] is True
+    events.append(
+        {
+            "type": "supervisor.decided",
+            "seq": 3,
+            "attributes": {"action": "CONDUCT_RESEARCH", "task_count": 1},
+        }
+    )
+    events.append(
+        {
+            "type": "coverage.assessed",
+            "seq": 4,
+            "attributes": {"sufficient": True, "missing": []},
+        }
+    )
+    closure = compute_supervisor_gap_closure(events)
+    assert closure["supervisor_recovery"] is True
     assert closure["gap_closure_rate"] == 1.0
-    assert gid in closure["closed_gap_ids"]
+    assert gid in closure["closed_missing"]
     summary = summarize_trace(events)
-    assert summary["replan_useful"] is True
-    assert summary["replans"][0]["target_gap_ids"] == [gid]
-    print("[OK] gap_id + replan gap closure")
+    assert summary["supervisor_recovery"] is True
+    assert summary["supervisor_iterations"] == 1
+    print("[OK] gap_id + supervisor gap closure")
 
 
 def test_eval_targets_span_and_failure_origin_earliest():
@@ -426,7 +434,7 @@ def test_failure_origin_prefers_understand_over_late_worker():
 if __name__ == "__main__":
     test_brief_event_and_payload_ref()
     test_plan_links_to_brief_and_worker_lineage()
-    test_progress_gap_has_stable_gap_id_and_replan_targets()
+    test_progress_gap_has_stable_gap_id_and_supervisor_targets()
     test_eval_targets_span_and_failure_origin_earliest()
     test_replay_merges_memory_and_jsonl_dedupe()
     test_reference_mode_emits_payload_ref_not_prompt()

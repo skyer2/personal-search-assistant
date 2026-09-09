@@ -270,42 +270,6 @@ def apply_plan_edits(plan: ExecutionPlan, steps_payload: list[dict]) -> Executio
     return finalize_plan(ExecutionPlan(steps=new_steps, summary=summary))
 
 
-def dynamic_replan(
-    plan: ExecutionPlan,
-    insert_after_index: int,
-    reason: str,
-    extra_steps: list[PlanStep] | None = None,
-) -> ExecutionPlan:
-    from app.research.planning.policy import tools_for_sources
-
-    steps = list(plan.steps)
-    inserts: list[PlanStep] = list(extra_steps or [])
-    if not inserts:
-        if reason in {"search_empty", "wrong_subagent", "citation_coverage_low"}:
-            inserts.append(
-                PlanStep(
-                    step_type="network_search",
-                    description="【动态重规划】补充公开资料交叉验证",
-                    subagent="网络搜索助手",
-                    allowed_tools=tools_for_sources(["web"]),
-                    metadata={"replan_reason": reason},
-                )
-            )
-        elif reason == "user_replan":
-            inserts.append(
-                PlanStep(
-                    step_type="summarize",
-                    description="【动态重规划】按用户编辑重新汇总",
-                    metadata={"replan_reason": reason},
-                )
-            )
-    pos = min(max(insert_after_index + 1, 0), len(steps))
-    for offset, step in enumerate(inserts):
-        steps.insert(pos + offset, step)
-    summary = " → ".join(step.description for step in steps)
-    return finalize_plan(ExecutionPlan(steps=steps, summary=summary))
-
-
 def plan_to_editable_dict(plan: ExecutionPlan) -> list[dict]:
     return [
         {

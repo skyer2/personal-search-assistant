@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 from app.agent.harness.citations import SourceTier
 from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep
@@ -13,7 +13,7 @@ from app.research.assessment.delivery import assess_delivery
 from app.research.assessment.evidence import assess_evidence
 from app.research.assessment.execution_health import assess_execution_health
 from app.research.assessment.progress import assess_progress
-from app.research.control.policy import decide_control
+from app.research.control.runtime_policy import decide_control
 from app.research.control.terminal_policy import terminal_update
 from app.research.control.transitions import transition_update
 from app.research.domain.contracts import (
@@ -32,7 +32,7 @@ from app.research.domain.task_state import (
     worker_result_lifecycle,
 )
 from app.research.runtime.project import sync_execution_projection
-from app.research.runtime.state import empty_research_state
+from app.research.runtime.state import ResearchState, empty_research_state
 from app.observability.semantic_events import (
     brief_event_attributes,
     control_decision_event_attributes,
@@ -69,6 +69,7 @@ class RunSession:
         self.budget_manager = ctx.budget_manager
         self.result: Any = None
         self.worker_sem = asyncio.Semaphore(self._resolve_max_workers())
+        self.active_wave_size = 1
 
     def _resolve_max_workers(self) -> int:
         hard = max(1, int(getattr(self.harness.harness_config, "max_parallel_workers", 3) or 3))
@@ -263,7 +264,7 @@ def _interrupt_payloads(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 class ResearchGraphRunner:
-    """Compile and execute the graph; semantic routing stays in ControlPolicy."""
+    """Compile and execute the graph; semantic routing stays in Supervisor."""
 
     RECURSION_LIMIT = 64
 
@@ -296,8 +297,14 @@ class ResearchGraphRunner:
                 int(budget_cfg["max_replan_count"]),
                 max(0, int(harness_replan_limit)),
             )
-        if route_decision.execution_path == "fast_path":
+        brief = await self._compile_initial_brief(session)
+        from app.research.brief.models import FastPathEligibility
+
+        fast_path = FastPathEligibility.from_brief(brief).eligible
+        if fast_path:
             budget_cfg = {**budget_cfg, "max_tool_calls": 3, "max_replan_count": 0, "parallel": False}
+            if hasattr(session.budget_manager, "cap_tool_calls"):
+                session.budget_manager.cap_tool_calls(3)
         payload = empty_research_state(
             run_id=session.run_id,
             session_id=session.session_id,
@@ -309,6 +316,8 @@ class ResearchGraphRunner:
             max_replan_count=int(budget_cfg["max_replan_count"]),
             search_mode=profile,
         )
+        payload["brief"] = brief.to_dict()
+        payload["fast_path"] = fast_path
         payload["budget"]["max_parallel_workers"] = session._resolve_max_workers()
         from app.agent.harness.usage_tracker import reset_current_budget_manager, set_current_budget_manager
 
@@ -317,8 +326,6 @@ class ResearchGraphRunner:
         active_checkpointer = checkpointer
         owns_checkpointer = False
         try:
-            if route_decision.execution_path == "fast_path":
-                return await self._execute_simple_fact_fast_path(session, route_decision)
             if active_checkpointer is None:
                 active_checkpointer = await _default_checkpointer()
                 owns_checkpointer = True
@@ -344,6 +351,320 @@ class ResearchGraphRunner:
                 from app.research.runtime.checkpointer import close_async_checkpointer
 
                 await close_async_checkpointer(active_checkpointer)
+
+    async def _compile_initial_brief(self, session: RunSession) -> Any:
+        from app.research.brief.compiler import compile_structured_brief_with_llm
+
+        return await compile_structured_brief_with_llm(
+            session.ctx.task_query,
+            agent=getattr(self.harness, "agent", None),
+            budget_manager=session.budget_manager,
+            conversation_delta=str(getattr(session.ctx, "conversation_summary", "") or ""),
+            session_id=session.session_id,
+        )
+
+    async def node_brief(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.brief.models import FastPathEligibility, StructuredResearchBrief
+        from app.research.brief.validator import validate_structured_brief
+        from app.research.runtime.graph import brief_node
+
+        session = _require_session(gstate)
+        sync_execution_projection(session.state, gstate)
+        state = dict(gstate)
+        if not isinstance(state.get("brief"), dict) or not state.get("brief"):
+            brief = await self._compile_initial_brief(session)
+            state["brief"] = brief.to_dict()
+        update = brief_node(cast(ResearchState, state))
+        brief = StructuredResearchBrief.from_dict(update.get("brief"))
+        eligibility = FastPathEligibility.from_brief(brief)
+        issues = validate_structured_brief(brief)
+        if eligibility.eligible:
+            session.active_wave_size = 1
+        sync_execution_projection(session.state, {**gstate, **update})
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata.update(
+                {
+                    "brief": brief.to_dict(),
+                    "brief_id": brief.brief_id,
+                    "brief_version": brief.version,
+                    "user_intent": brief.user_intent,
+                    "task_shape": brief.user_intent,
+                    "execution_path": "fast_path" if eligibility.eligible else "harness",
+                    "route_signals": update.get("route_signals") or [],
+                }
+            )
+        _emit(
+            session,
+            "brief.compiled",
+            phase=WorkflowPhase.BRIEF.value,
+            status="warning" if issues else "ok",
+            attributes={
+                **brief_event_attributes(brief.to_dict()),
+                "entities": list(brief.explicit_subjects),
+                "dimensions": list(brief.key_questions),
+                "validation_issues": issues,
+                "compiler_source": brief.compiler_source,
+            },
+            input_refs=[{"type": "query", "id": session.run_id}],
+            output_refs=[{"type": "brief", "id": brief.brief_id}],
+        )
+        _emit(
+            session,
+            "topology.decided",
+            phase=WorkflowPhase.BRIEF.value,
+            status="ok",
+            attributes={
+                "topology": "fast_path" if eligibility.eligible else "supervisor_loop",
+                "eligible": eligibility.eligible,
+                "reasons": list(eligibility.reasons),
+            },
+            input_refs=[{"type": "brief", "id": brief.brief_id}],
+        )
+        return update
+
+    async def node_supervisor(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.brief.models import StructuredResearchBrief
+        from app.research.coverage.judge import CoverageJudgement
+        from app.research.supervisor.agent import SupervisorAgent
+        from app.research.supervisor.models import ResearchTaskRequest
+
+        session = _require_session(gstate)
+        sync_execution_projection(session.state, gstate)
+        state = _sync_assessments(session, dict(gstate))
+        brief = StructuredResearchBrief.from_dict(state.get("brief"))
+        findings = [row for row in state.get("findings") or [] if isinstance(row, dict)]
+        judgement_raw = state.get("coverage_judgement")
+        judgement = CoverageJudgement.from_dict(judgement_raw) if isinstance(judgement_raw, dict) and judgement_raw else None
+        budget = state.get("budget") if isinstance(state.get("budget"), dict) else {}
+        _emit(
+            session,
+            "supervisor.started",
+            phase=WorkflowPhase.SUPERVISOR.value,
+            status="start",
+            attributes={
+                "iteration": int((state.get("supervisor") or {}).get("iteration") or 0) + 1,
+                "finding_count": len(findings),
+                "coverage_status": judgement.status if judgement else "unknown",
+            },
+        )
+        supervisor = SupervisorAgent(getattr(self.harness, "agent", None), session.budget_manager)
+        action = await supervisor.decide(brief, findings, judgement, budget)
+        action = supervisor.resolve_action(action, judgement, brief)
+        payload: dict[str, Any] = {
+            "supervisor_action": action.to_dict(),
+            "supervisor": {
+                "iteration": int((state.get("supervisor") or {}).get("iteration") or 0) + 1,
+                "last_action": action.action,
+                "reasoning_summary": action.reason,
+            },
+        }
+        if action.action == "CONDUCT_RESEARCH" and action.research_tasks:
+            task_requests = [ResearchTaskRequest.from_dict(item.to_dict()) for item in action.research_tasks]
+            steps = [
+                PlanStep(
+                    step_type="research",
+                    description=item.objective,
+                    objective=item.objective,
+                    task_id=item.task_id,
+                    allowed_tools=["internet_search", "fetch_url"],
+                    metadata={
+                        "kind": "research_task",
+                        "task_kind": "supervisor_research",
+                        "priority": item.priority,
+                        "expected_evidence": item.expected_evidence,
+                        "source_hints": list(item.source_hints),
+                        "required": True,
+                        "optional": False,
+                    },
+                )
+                for item in task_requests
+            ]
+            plan = ExecutionPlan(
+                steps=steps,
+                summary="Supervisor research action",
+                plan_version=int(state.get("plan_version") or 1) + (1 if state.get("plan") else 0),
+                planning_mode="supervisor_action",
+            )
+            session.state.plan = plan
+            session.active_wave_size = max(1, len(plan.steps))
+            payload.update(
+                {
+                    "plan": plan.to_dict(),
+                    "plan_version": plan.plan_version,
+                    "tasks": initialize_tasks(plan),
+                    "dispatch_wave_id": int(state.get("dispatch_wave_id") or 0) + 1,
+                }
+            )
+            _emit(
+                session,
+                "plan.created",
+                phase=WorkflowPhase.SUPERVISOR.value,
+                status="ok",
+                plan_version=plan.plan_version,
+                attributes=plan_event_attributes(
+                    plan,
+                    brief.to_dict(),
+                    run_id=session.run_id,
+                    planner_source="supervisor_action",
+                ),
+            )
+        decision = decide_control({**state, **payload})
+        control_decision = {
+            "action": decision.action,
+            "reason_codes": list(decision.reason_codes),
+            "task_ids": list(decision.task_ids),
+            "policy_version": "runtime-policy.v1",
+        }
+        if decision.action == "retry":
+            tasks = state.get("tasks")
+            for task_id in decision.task_ids:
+                tasks = retry_task(tasks, task_id)
+            payload["tasks"] = tasks
+            session.active_wave_size = max(1, len(decision.task_ids))
+        payload["control_decision"] = control_decision
+        _emit(
+            session,
+            "control.decided",
+            phase=WorkflowPhase.SUPERVISOR.value,
+            status=decision.action,
+            attributes=control_decision_event_attributes(control_decision),
+        )
+        sync_execution_projection(session.state, {**gstate, **payload})
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata.update(
+                {
+                    "supervisor": payload["supervisor"],
+                    "supervisor_action": action.to_dict(),
+                    "control_decision": control_decision,
+                    "supervisor_iterations": payload["supervisor"]["iteration"],
+                }
+            )
+        _emit(
+            session,
+            "supervisor.decided",
+            phase=WorkflowPhase.SUPERVISOR.value,
+            status=action.action,
+            attributes={
+                "action": action.action,
+                "reason": action.reason,
+                "task_count": len(action.research_tasks),
+                "source": action.source,
+                "runtime_action": decision.action,
+                "runtime_reasons": list(decision.reason_codes),
+            },
+            output_refs=[{"type": "supervisor_action", "id": payload["supervisor"]["last_action"]}],
+        )
+        return transition_update(gstate, WorkflowPhase.SUPERVISOR, payload)
+
+    async def node_researcher(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        return await self.node_research_worker(gstate)
+
+    async def node_ingest_findings(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.brief.models import StructuredResearchBrief
+        from app.research.findings.compress import compress_worker_results
+        from app.research.runtime.legacy import project_research_spec
+        from app.research.runtime.semantic_ingest import ingest_semantics
+
+        session = _require_session(gstate)
+        sync_execution_projection(session.state, gstate)
+        brief = StructuredResearchBrief.from_dict(gstate.get("brief"))
+        projected_state = {**gstate, "research_spec": project_research_spec(brief).to_dict()}
+        update = ingest_semantics(projected_state)
+        update.pop("findings", None)
+        findings = [item.to_dict() for item in compress_worker_results(gstate.get("worker_results") or [])]
+        update["findings"] = findings
+        sync_execution_projection(session.state, {**gstate, **update})
+        for finding in findings:
+            _emit(
+                session,
+                "finding.compressed",
+                phase=WorkflowPhase.INGEST_FINDINGS.value,
+                status="ok",
+                task_id=str(finding.get("task_id") or ""),
+                attributes={
+                    "finding_id": finding.get("finding_id"),
+                    "evidence_ids": finding.get("evidence_ids") or [],
+                    "claim_count": len(finding.get("claims") or []),
+                    "confidence": finding.get("confidence"),
+                    "limitations": finding.get("limitations") or [],
+                },
+                output_refs=[{"type": "finding", "id": str(finding.get("finding_id") or "")}],
+            )
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata.update(
+                {
+                    "findings": findings,
+                    "research_spec": update.get("research_spec") or {},
+                    "coverage_contract": update.get("coverage_contract") or {},
+                    "coverage_state": update.get("coverage_state") or {},
+                }
+            )
+        return transition_update(gstate, WorkflowPhase.INGEST_FINDINGS, update)
+
+    async def node_coverage_judge(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.brief.models import StructuredResearchBrief
+        from app.research.coverage.judge import CoverageJudge
+
+        session = _require_session(gstate)
+        sync_execution_projection(session.state, gstate)
+        state = _sync_assessments(session, dict(gstate))
+        brief = StructuredResearchBrief.from_dict(state.get("brief"))
+        findings = [row for row in state.get("findings") or [] if isinstance(row, dict)]
+        conflicts = [row for row in state.get("claim_conflicts") or [] if isinstance(row, dict)]
+        judgement = await CoverageJudge(getattr(self.harness, "agent", None), session.budget_manager).evaluate(
+            brief,
+            findings,
+            claim_conflicts=conflicts,
+        )
+        progress_projection = {
+            "status": judgement.status,
+            "coverage_ratio": 1.0 if judgement.sufficient else 0.0,
+            "unresolved_conflicts": list(judgement.conflicts),
+            "missing": list(judgement.missing),
+            "missing_ids": list(judgement.missing),
+            "semantic_gap_ids": list(judgement.missing),
+            "reason_codes": [] if judgement.sufficient else ["coverage_gap"],
+        }
+        update = {
+            "coverage_judgement": judgement.to_dict(),
+            "progress_assessment": progress_projection,
+            "control_decision": {},
+        }
+        sync_execution_projection(session.state, {**gstate, **update})
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata.update(
+                {
+                    "coverage_judgement": judgement.to_dict(),
+                    "progress_assessment": progress_projection,
+                }
+            )
+        _emit(
+            session,
+            "coverage.assessed",
+            phase=WorkflowPhase.COVERAGE_JUDGE.value,
+            status=judgement.status,
+            attributes={
+                "sufficient": judgement.sufficient,
+                "missing": list(judgement.missing),
+                "conflicts": list(judgement.conflicts),
+                "weak_claims": list(judgement.weak_claims),
+                "recommended_next_questions": list(judgement.recommended_next_questions),
+                "source": judgement.source,
+                "reason": judgement.reason,
+            },
+        )
+        _emit(
+            session,
+            "progress.assessed",
+            phase=WorkflowPhase.COVERAGE_JUDGE.value,
+            status=judgement.status,
+            plan_version=int(gstate.get("plan_version") or 1),
+            attributes=progress_event_attributes(
+                progress_projection,
+                dispatch_wave_id=int(gstate.get("dispatch_wave_id") or 0),
+            ),
+        )
+        return transition_update(gstate, WorkflowPhase.COVERAGE_JUDGE, update)
 
     async def _bridge_interrupts(self, result: dict[str, Any], session: RunSession) -> Any:
         from app.agent.harness.hitl import hitl_coordinator
@@ -371,164 +692,6 @@ class ResearchGraphRunner:
         except TimeoutError:
             return {"_timeout": True}
 
-    async def _execute_simple_fact_fast_path(self, session: RunSession, route_decision: Any) -> Any:
-        from app.research.execution.worker_executor import WorkerExecutorV2
-        from app.research.coverage.compiler import compile_coverage_contract
-        from app.research.domain.task_state import TaskExecutionStatus, initialize_tasks, transition_task
-        from app.research.runtime.semantic_ingest import ingest_semantics
-        from app.research.runtime.simple_fact import render_simple_fact_answer
-        from app.research.spec.compiler import compile_research_spec
-        from app.research.runtime.worker import ResearchContext, ResearchTask, WorkerResult
-
-        state = session.state
-        spec = compile_research_spec(
-            session.ctx.task_query,
-            conversation_delta=str(getattr(session.ctx, "conversation_summary", "") or ""),
-        )
-        contract = compile_coverage_contract(spec)
-        state.plan = ExecutionPlan(
-            steps=[PlanStep(step_type="network_search", description="检索并确认单一事实", task_id="simple_fact:search", allowed_tools=["internet_search"], metadata={"simple_fact_fast_path": True, "task_kind": "lookup", "subject_id": spec.subjects[0].subject_id if spec.subjects else "general", "coverage_keys": [unit.dimension_id for unit in contract.units], "coverage_ids": [unit.coverage_id for unit in contract.units]})],
-            summary="Simple fact fast path",
-            planning_mode="simple_fact_fast_path",
-        )
-        state.metadata.update(
-            {
-                "task_shape": "simple_fact",
-                "execution_path": "fast_path",
-                "planner_calls": 0,
-                "synthesis_calls": 0,
-                "replan_count": 0,
-                "workers": 1,
-                "route_signals": list(route_decision.signals),
-            }
-        )
-        task = ResearchTask(task_id="simple_fact:search", objective=session.ctx.task_query, step_type="network_search", step_index=0, description="检索并确认单一事实", allowed_tools=["internet_search"], plan_version=1)
-        context = ResearchContext(run_id=session.run_id, query=session.ctx.task_query, user_id=session.ctx.user_id, tenant_id=session.ctx.tenant_id, project_id=session.ctx.project_id, session_id=session.session_id)
-        worker_result = await WorkerExecutorV2(self.harness, session).execute(task, context)
-        if worker_result.raw is not None:
-            state.step_results.append(worker_result.raw)
-        semantic_state = empty_research_state(
-            run_id=session.run_id,
-            session_id=session.session_id,
-            task_query=session.ctx.task_query,
-            user_id=session.ctx.user_id,
-            tenant_id=session.ctx.tenant_id,
-            project_id=session.ctx.project_id,
-        )
-        semantic_state.update(
-            {
-                "research_spec": spec.to_dict(),
-                "coverage_contract": contract.to_dict(),
-                "plan": state.plan.to_dict(),
-                "tasks": transition_task(
-                    transition_task(initialize_tasks(state.plan), "simple_fact:search", execution_status=TaskExecutionStatus.RUNNING),
-                    "simple_fact:search",
-                    execution_status=TaskExecutionStatus.SUCCEEDED,
-                    evidence_refs=worker_result.evidence_refs,
-                ),
-            }
-        )
-        semantic_state.update(
-            ingest_semantics(
-                {
-                    **semantic_state,
-                    "worker_results": [
-                        {
-                            "task_id": "simple_fact:search",
-                            "task_metadata": dict(state.plan.steps[0].metadata or {}),
-                            "ok": worker_result.ok,
-                            "status": worker_result.status,
-                            "summary": worker_result.summary,
-                            "payload": {
-                                "facts": worker_result.facts,
-                                "sources": worker_result.sources,
-                                "findings": worker_result.findings,
-                                "evidence_ids": worker_result.evidence_refs,
-                                "confidence": 0.9 if worker_result.ok else 0.0,
-                            },
-                        }
-                    ],
-                }
-            )
-        )
-        manager = session.ctx.citation_manager
-        answer = render_simple_fact_answer(query=session.ctx.task_query, worker_result=worker_result, citation_manager=manager) if manager is not None else None
-        source_counts = manager.source_counts_by_tier() if manager is not None else {}
-        progress_assessment = assess_progress(semantic_state)
-        evidence_assessment = assess_evidence(semantic_state)
-        passed = bool(worker_result.ok and answer is not None and answer.sufficient and progress_assessment["status"] == "sufficient")
-        if passed and manager is not None and answer is not None:
-            state.final_content = manager.build_cited_report(answer.content)
-        else:
-            state.final_content = "未能从一手来源或两个独立高质量来源确认该事实。"
-            state.abort_reason = state.abort_reason or "insufficient_trusted_evidence"
-        state.metadata.update(
-            {
-                "quality": {"verdict": "pass" if passed else "fail", "issues": [] if passed else ["insufficient_trusted_evidence"], "attempts": 1},
-                "quality_attempted": True,
-                "source_counts": source_counts,
-                "answer_grounded": passed,
-                "planner_calls": 0,
-                "synthesis_calls": 0,
-                "workers": 1,
-                "research_spec": semantic_state["research_spec"],
-                "coverage_contract": semantic_state["coverage_contract"],
-                "coverage_state": semantic_state["coverage_state"],
-                "progress_assessment": progress_assessment,
-            }
-        )
-        if manager is not None:
-            manager.save_evidence_json(session.ctx.run_dir, run_id=session.run_id)
-        terminal = terminal_update(
-            {
-                "cancel_reason": "",
-                "abort_reason": state.abort_reason,
-                "quality_assessment": {"verdict": "pass" if passed else "fail"},
-                "progress_assessment": progress_assessment,
-                "evidence_assessment": evidence_assessment,
-                "final_content": state.final_content,
-            },
-            reason="simple_fact_fast_path",
-            stage=WorkflowPhase.FINALIZE.value,
-            research_completed=passed,
-            synthesis_attempted=False,
-            quality_attempted=True,
-        )
-        outcome = str(terminal["termination"]["outcome"])
-        if isinstance(state.metadata, dict):
-            state.metadata["termination"] = terminal["termination"]
-        result = await self.harness._phase_finalize(
-            state,
-            session.ctx.session_dir,
-            success=outcome == "success",
-            started_at=session.ctx.run_started,
-            deliverable_dir=session.ctx.deliverable_dir,
-        )
-        session.result = result
-        if isinstance(result.metadata, dict):
-            result.metadata.update(
-                {
-                    "task_shape": "simple_fact",
-                    "execution_path": "fast_path",
-                    "planner_calls": 0,
-                    "synthesis_calls": 0,
-                    "replan_count": 0,
-                    "workers": 1,
-                    "tool_calls_count": int(state.tool_calls_count or 0),
-                    "source_counts": source_counts,
-                    "primary_sources": int(source_counts.get(SourceTier.PRIMARY.value, 0)),
-                    "budget_reservation_errors": 0 if worker_result.ok else 1,
-                    "partial_renderer_called": False,
-                    "quality": "pass" if passed else "fail",
-                    "coverage_ratio": float(semantic_state["coverage_state"].get("coverage_ratio") or 0.0),
-                    "progress_assessment": progress_assessment,
-                    "evidence_assessment": evidence_assessment,
-                    "outcome": outcome,
-                    "termination": terminal["termination"],
-                }
-            )
-        return result
-
     async def node_vanilla_agent(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.isolation import worker_row
         from app.research.runtime.worker import LangChainWorkerRuntime, ResearchContext, ResearchTask
@@ -550,127 +713,6 @@ class ResearchGraphRunner:
             {"final_content": session.state.final_content, "worker_results": [row], "evidence_refs": result.evidence_refs, "quality_assessment": {"verdict": "pass" if result.ok else "fail", "grounding": False}},
         )
 
-    async def node_compile_spec(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import compile_spec_node
-
-        session = _require_session(gstate)
-        update = compile_spec_node(gstate)
-        spec = dict(update.get("research_spec") or {})
-        _emit(
-            session,
-            "spec.compiled",
-            phase=WorkflowPhase.COMPILE_SPEC.value,
-            status="ok",
-            attributes={
-                "spec_id": spec.get("spec_id"),
-                "task_shape": spec.get("task_shape"),
-                "objective": spec.get("objective"),
-                "entities": [
-                    str(row.get("name") or row.get("subject_id") or "")
-                    for row in spec.get("subjects") or []
-                    if isinstance(row, dict)
-                ],
-                "dimensions": [
-                    str(row.get("dimension_id") or "")
-                    for row in spec.get("dimensions") or []
-                    if isinstance(row, dict)
-                ],
-                "deliverable": (spec.get("delivery_requirements") or {}).get("format"),
-                "prefer_primary": (spec.get("evidence_requirements") or {}).get("prefer_primary"),
-                "coverage_unit_count": len((update.get("coverage_contract") or {}).get("units") or []),
-            },
-        )
-        contract = dict(update.get("coverage_contract") or {})
-        _emit(
-            session,
-            "coverage.compiled",
-            phase=WorkflowPhase.COMPILE_SPEC.value,
-            status="ok",
-            attributes={
-                "contract_id": contract.get("contract_id"),
-                "spec_id": spec.get("spec_id"),
-                "version": contract.get("version"),
-                "unit_count": len(contract.get("units") or []),
-                "unit_ids": [str(row.get("coverage_id")) for row in contract.get("units") or []],
-            },
-        )
-        return update
-
-    async def node_spec_gate(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import spec_gate_node
-
-        session = _require_session(gstate)
-        update = spec_gate_node(gstate)
-        spec = dict(gstate.get("research_spec") or {})
-        _emit(
-            session,
-            "spec.validated",
-            phase=WorkflowPhase.SPEC_GATE.value,
-            status="needs_clarification" if update.get("needs_clarification") else "ok",
-            attributes={"spec_id": spec.get("spec_id"), "needs_clarification": update.get("needs_clarification")},
-        )
-        return update
-
-    async def node_clarify(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import clarify_node
-
-        return clarify_node(gstate)
-
-    async def node_plan(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.planning.planner import plan_for_spec
-        from app.research.runtime.graph import plan_node
-
-        session = _require_session(gstate)
-        update = plan_node(gstate)
-        plan = ExecutionPlan.from_dict(update["plan"])
-        sync_execution_projection(session.state, update)
-        if isinstance(session.state.metadata, dict):
-            session.state.metadata["planner_source"] = "spec_driven"
-        _emit(
-            session,
-            "plan.created",
-            phase=WorkflowPhase.PLAN.value,
-            status="ok",
-            plan_version=plan.plan_version,
-            attributes=plan_event_attributes(
-                plan,
-                {"objective": (gstate.get("research_spec") or {}).get("objective") or gstate["task_query"]},
-                run_id=session.run_id,
-                planner_source="spec_driven",
-            ),
-        )
-        return update
-
-    async def node_plan_validate(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import plan_validate_node
-
-        return plan_validate_node(gstate)
-
-    async def node_dispatch(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import dispatch_node
-
-        session = _require_session(gstate)
-        sync_execution_projection(session.state, gstate)
-        state = _sync_assessments(session, dict(gstate))
-        update = dispatch_node(state)
-        decision = dict(update.get("control_decision") or {})
-        _emit(
-            session,
-            "control.decided",
-            phase=WorkflowPhase.DISPATCH.value,
-            status=str(decision.get("action") or "unknown"),
-            plan_version=int(state.get("plan_version") or 1),
-            attributes=control_decision_event_attributes(decision),
-        )
-        if isinstance(session.state.metadata, dict):
-            session.state.metadata.update({"control_decision": decision})
-        return {**update, "budget": state["budget"], "budget_status": state["budget_status"]}
-
-    async def node_retry(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import retry_node
-
-        return retry_node(gstate)
-
     async def node_research_worker(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from langgraph.types import interrupt
 
@@ -687,6 +729,7 @@ class ResearchGraphRunner:
         if plan is None or step_index >= len(plan.steps):
             failure = classify_failure("missing_step")
             return {
+                "phase": WorkflowPhase.EXECUTE.value,
                 "tasks": transition_task(gstate.get("tasks"), task_id, execution_status=TaskExecutionStatus.FAILED, result_status=ResultStatus.NONE, failure=failure, timestamp=_now()),
                 "worker_results": [{"task_id": task_id, "ok": False, "status": "failed", "summary": "missing_step"}],
             }
@@ -694,7 +737,7 @@ class ResearchGraphRunner:
         if self.harness.harness_config.hitl_enabled and step.step_type in set(self.harness.harness_config.hitl_step_gate_types):
             resume = interrupt({"kind": "step_gate", "step_index": step_index, "description": step.description})
             if isinstance(resume, dict) and resume.get("_timeout"):
-                return transition_update(gstate, WorkflowPhase.EXECUTE, {"cancel_reason": "user_cancelled"})
+                return {"phase": WorkflowPhase.EXECUTE.value, "cancel_reason": "user_cancelled"}
         current_task = normalize_tasks(gstate.get("tasks")).get(task_id)
         attempt = int((current_task or {}).get("attempt") or 0) + 1
         if current_task is not None and current_task["execution_status"] != TaskExecutionStatus.PENDING.value:
@@ -713,6 +756,7 @@ class ResearchGraphRunner:
                 },
             )
             return {
+                "phase": WorkflowPhase.EXECUTE.value,
                 "worker_results": [
                     {
                         "task_id": task_id,
@@ -722,7 +766,7 @@ class ResearchGraphRunner:
                         "summary": "duplicate task attempt suppressed",
                         "payload": {"duplicate": True},
                     }
-                ]
+                ],
             }
         dispatch_wave_id = int(gstate.get("dispatch_wave_id") or 0)
         task = ResearchTask(task_id=task_id, objective=str(step.objective or step.description), step_type=step.step_type, step_index=step_index, description=step.description, subagent=step.subagent or "", allowed_tools=list(step.allowed_tools or []), plan_version=int(gstate.get("plan_version") or 1), attempt=attempt, dispatch_wave_id=dispatch_wave_id)
@@ -781,176 +825,12 @@ class ResearchGraphRunner:
             )
         row["task_metadata"] = dict(step.metadata or {})
         return {
+            "phase": WorkflowPhase.EXECUTE.value,
             "tasks": {task_id: tasks[task_id]},
             "worker_results": [row],
             "evidence_refs": result.evidence_refs,
             "findings": normalized_findings,
         }
-
-    async def node_ingest_semantics(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.semantic_ingest import ingest_semantics
-
-        session = _require_session(gstate)
-        update = ingest_semantics(gstate)
-        sync_execution_projection(session.state, {**gstate, **update})
-        coverage = dict(update.get("coverage_state") or {})
-        contract = dict(update.get("coverage_contract") or {})
-        _emit(
-            session,
-            "coverage.assessed",
-            phase=WorkflowPhase.INGEST_SEMANTICS.value,
-            status=str(coverage.get("status") or "unknown"),
-            plan_version=int(gstate.get("plan_version") or 1),
-            attributes={
-                "contract_id": coverage.get("contract_id") or contract.get("contract_id"),
-                "coverage_ratio": coverage.get("coverage_ratio"),
-                "covered_count": len(coverage.get("covered_ids") or []),
-                "covered_ids": coverage.get("covered_ids") or [],
-                "partial_ids": coverage.get("partial_ids") or [],
-                "missing_ids": coverage.get("missing_ids") or [],
-                "conflicted_ids": coverage.get("conflicted_ids") or [],
-                "stale_ids": coverage.get("stale_ids") or [],
-            },
-        )
-        for claim in update.get("claims") or []:
-            _emit(
-                session,
-                "claim.extracted",
-                phase=WorkflowPhase.INGEST_SEMANTICS.value,
-                status="ok",
-                attributes={"claim_id": claim.get("claim_id"), "normalized_key": claim.get("normalized_key")},
-            )
-        for edge in update.get("claim_conflicts") or []:
-            _emit(
-                session,
-                "claim.conflict_detected",
-                phase=WorkflowPhase.INGEST_SEMANTICS.value,
-                status="ok",
-                attributes={
-                    "edge_id": edge.get("edge_id"),
-                    "left_claim_id": edge.get("left_id"),
-                    "right_claim_id": edge.get("right_id"),
-                    "kind": edge.get("kind"),
-                },
-            )
-        for resolution in update.get("claim_resolutions") or []:
-            _emit(
-                session,
-                "claim.conflict_resolved",
-                phase=WorkflowPhase.INGEST_SEMANTICS.value,
-                status=str(resolution.get("status") or "ok"),
-                attributes={
-                    "edge_id": resolution.get("edge_id"),
-                    "status": resolution.get("status"),
-                    "winner_claim_id": resolution.get("winner_id"),
-                    "evidence_ids": resolution.get("evidence_ids") or [],
-                },
-            )
-        candidate_set = update.get("candidate_set")
-        if isinstance(candidate_set, dict):
-            _emit(
-                session,
-                "candidate_set.materialized",
-                phase=WorkflowPhase.INGEST_SEMANTICS.value,
-                status=str(candidate_set.get("status") or "unknown"),
-                plan_version=int(gstate.get("plan_version") or 1),
-                attributes={
-                    "candidate_set_id": candidate_set.get("candidate_set_id"),
-                    "available": candidate_set.get("available"),
-                    "item_count": len(candidate_set.get("items") or []),
-                    "items": candidate_set.get("items") or [],
-                },
-            )
-        for gap_id in update.get("semantic_gaps") or {}:
-            _emit(
-                session,
-                "semantic_gap.opened",
-                phase=WorkflowPhase.INGEST_SEMANTICS.value,
-                status="ok",
-                attributes={"gap_id": gap_id},
-            )
-        for gap_id in set(gstate.get("semantic_gaps") or {}) - set(update.get("semantic_gaps") or {}):
-            _emit(
-                session,
-                "semantic_gap.closed",
-                phase=WorkflowPhase.INGEST_SEMANTICS.value,
-                status="ok",
-                attributes={"gap_id": gap_id},
-            )
-        _emit(
-            session,
-            "semantic_gain.assessed",
-            phase=WorkflowPhase.INGEST_SEMANTICS.value,
-            status="ok",
-            attributes=update.get("marginal_gain") or {},
-        )
-        return transition_update(gstate, WorkflowPhase.INGEST_SEMANTICS, update)
-
-    async def node_assess(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import assess_node
-
-        session = _require_session(gstate)
-        sync_execution_projection(session.state, gstate)
-        state = _sync_assessments(session, dict(gstate))
-        update = assess_node(state)
-        decision = dict(update.get("control_decision") or {})
-        _emit_assessments(session, {**state, **update}, decision, WorkflowPhase.ASSESS.value)
-        if isinstance(session.state.metadata, dict):
-            session.state.metadata.update(
-                {
-                    "progress_assessment": update.get("progress_assessment") or {},
-                    "evidence_assessment": update.get("evidence_assessment") or {},
-                    "execution_health": update.get("execution_health") or {},
-                    "delivery_readiness": update.get("delivery_readiness") or {},
-                    "control_decision": decision,
-                }
-            )
-        return {**update, "budget": state["budget"], "budget_status": state["budget_status"]}
-
-    async def node_gap_fill(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import gap_fill_node
-
-        session = _require_session(gstate)
-        update = gap_fill_node(gstate)
-        _emit(
-            session,
-            "plan.gap_fill_applied" if update.get("plan") else "plan.gap_fill_rejected",
-            phase=WorkflowPhase.GAP_FILL.value,
-            status="ok" if update.get("plan") else "no_op",
-            plan_version=int(update.get("plan_version") or gstate.get("plan_version") or 1),
-            attributes={"reason": update.get("abort_reason", "")},
-        )
-        return update
-
-    async def node_expand_plan(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import expand_plan_node
-
-        session = _require_session(gstate)
-        update = expand_plan_node(gstate)
-        _emit(
-            session,
-            "plan.expanded" if update.get("plan") else "plan.expansion_rejected",
-            phase=WorkflowPhase.EXPAND_PLAN.value,
-            status="ok" if update.get("plan") else "no_op",
-            plan_version=int(update.get("plan_version") or gstate.get("plan_version") or 1),
-            attributes={"reason": update.get("abort_reason", "")},
-        )
-        return update
-
-    async def node_replan(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import replan_node
-
-        session = _require_session(gstate)
-        update = replan_node(gstate)
-        _emit(
-            session,
-            "replan.applied" if update.get("plan") else "replan.rejected",
-            phase=WorkflowPhase.REPLAN.value,
-            status="ok" if update.get("plan") else "no_op",
-            plan_version=int(update.get("plan_version") or gstate.get("plan_version") or 1),
-            attributes={"reason": update.get("abort_reason", "")},
-        )
-        return update
 
     def _synthesis_budget_attributes(self, session: RunSession, executor: Any) -> dict[str, Any]:
         manager = getattr(session, "budget_manager", None)
@@ -1051,14 +931,92 @@ class ResearchGraphRunner:
     async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
         import app.research.execution.synthesis_executor as synthesis_executor_module
         from dataclasses import replace
+        from types import SimpleNamespace
         from app.research.delivery.synthesis_context import EvidenceDigest
+        from app.research.runtime.simple_fact import render_simple_fact_answer
         from app.research.runtime.worker import ResearchContext
 
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
+        if bool(gstate.get("fast_path")):
+            manager = getattr(session.ctx, "citation_manager", None)
+            worker_row = next(
+                (
+                    row
+                    for row in gstate.get("worker_results") or []
+                    if isinstance(row, dict) and str(row.get("task_id") or "") == "fast_path:search"
+                ),
+                {},
+            )
+            raw_payload = worker_row.get("payload")
+            payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
+            worker_result = SimpleNamespace(
+                facts=list(payload.get("facts") or []),
+                summary=str(worker_row.get("summary") or ""),
+            )
+            if manager is None:
+                answer: Any = SimpleNamespace(
+                    content=str(worker_result.summary or "未能从可信来源确认该事实。"),
+                    source_id="",
+                    source_tier="UNKNOWN",
+                    sufficient=bool(payload.get("evidence_ids")),
+                )
+                content = str(answer.content)
+            else:
+                answer = render_simple_fact_answer(
+                    query=str(gstate.get("task_query") or ""),
+                    worker_result=worker_result,
+                    citation_manager=manager,
+                )
+                content = manager.build_cited_report(answer.content)
+            session.state.final_content = content
+            if isinstance(session.state.metadata, dict):
+                session.state.metadata.update(
+                    {
+                        "synthesis_attempted": True,
+                        "synthesis_attempts": 1,
+                        "synthesis_mode": "brief_fast_path_deterministic",
+                        "synthesis_status": "ok" if answer.sufficient else "failed",
+                        "synthesis_failed": not answer.sufficient,
+                        "synthesis_fail_reason": "" if answer.sufficient else "insufficient_trusted_evidence",
+                        "fallback_used": "",
+                    }
+                )
+            _emit(
+                session,
+                "synthesis.completed" if answer.sufficient else "synthesis.failed",
+                phase=WorkflowPhase.SYNTHESIS.value,
+                status="ok" if answer.sufficient else "failed",
+                attempt=1,
+                attributes={
+                    "mode": "brief_fast_path_deterministic",
+                    "compact": False,
+                    "evidence_count": len(payload.get("evidence_ids") or []),
+                    "claim_count": len(payload.get("facts") or []),
+                    "fail_reason": "" if answer.sufficient else "insufficient_trusted_evidence",
+                    "fallback_action": "",
+                },
+            )
+            return transition_update(
+                gstate,
+                WorkflowPhase.SYNTHESIS,
+                {
+                    "final_content": content,
+                    "synthesis_attempts": 1,
+                    "synthesis_failed": not answer.sufficient,
+                    "quality_assessment": {},
+                },
+            )
         attempts_before = int(gstate.get("synthesis_attempts") or 0)
         compact = attempts_before >= 1
         decision = dict(gstate.get("control_decision") or {})
+        _emit(
+            session,
+            "control.decided",
+            phase=WorkflowPhase.SYNTHESIS.value,
+            status=str(decision.get("action") or "synthesize"),
+            attributes=control_decision_event_attributes(decision or {"action": "synthesize"}),
+        )
         mode = "degraded" if compact or decision.get("action") == "deliver_partial" else "normal"
         evidence_records = [dict(row) for row in gstate.get("evidence_records") or [] if isinstance(row, dict)]
         claims = [dict(row) for row in gstate.get("claims") or [] if isinstance(row, dict)]
@@ -1143,7 +1101,7 @@ class ResearchGraphRunner:
                     "reason_codes": [*decision.get("reason_codes", []), "synthesis_fallback"],
                 },
             }
-            content = str(synthesize_node(fallback_state).get("final_content") or "")
+            content = str(synthesize_node(cast(ResearchState, fallback_state)).get("final_content") or "")
         else:
             content = result.summary
         if not fallback:
@@ -1203,13 +1161,45 @@ class ResearchGraphRunner:
         )
 
     async def node_quality_gate(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import quality_gate_node
-
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
-        update = quality_gate_node(gstate)
-        assessment = dict(update.get("quality_assessment") or {})
-        decision = dict(update.get("control_decision") or {})
+        content = str(gstate.get("final_content") or "").strip()
+        judgement = dict(gstate.get("coverage_judgement") or {})
+        evidence_records = [row for row in gstate.get("evidence_records") or [] if isinstance(row, dict)]
+        issues: list[str] = []
+        if not content:
+            issues.append("no_content")
+        if bool(gstate.get("synthesis_failed")):
+            issues.append("synthesis_failed")
+        if not bool(judgement.get("sufficient")):
+            issues.append("coverage_gap")
+        if not evidence_records:
+            issues.append("no_usable_evidence")
+        citation_valid = True
+        citation_reason = ""
+        manager = session.ctx.citation_manager
+        if manager is not None and content:
+            citation_valid, citation_reason = manager.validate_citations(content)
+            if not citation_valid:
+                issues.append(citation_reason or "citation_validation_failed")
+        repairable = bool(content) and not citation_valid and int(gstate.get("synthesis_attempts") or 0) < 2
+        assessment = {
+            "verdict": "pass" if not issues else "fail",
+            "issues": issues,
+            "repairable": repairable,
+            "suggested_action": "repair" if repairable else "",
+            "grounding": bool(content and evidence_records and citation_valid),
+            "citation_metrics": {
+                "evidence_count": len(evidence_records),
+                "finding_count": len(gstate.get("findings") or []),
+                "citation_valid": citation_valid,
+            },
+        }
+        decision = {
+            "action": "repair_synthesis" if repairable else ("finalize_success" if assessment["verdict"] == "pass" else "finalize_failure"),
+            "reason_codes": issues or ["quality_pass"],
+        }
+        update = transition_update(gstate, WorkflowPhase.QUALITY, {"quality_assessment": assessment})
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
                 {
@@ -1235,18 +1225,13 @@ class ResearchGraphRunner:
         )
         return update
 
-    async def node_repair_synthesis(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.runtime.graph import repair_synthesis_node
-
-        return repair_synthesis_node(gstate)
-
     async def node_finalize(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.graph import finalize_node
 
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
         session.state.final_content = str(gstate.get("final_content") or "")
-        termination = finalize_node(gstate)
+        termination = finalize_node(cast(ResearchState, gstate))
         termination_payload = dict(termination.get("termination") or {})
         outcome = str(termination["termination"]["outcome"])
         if isinstance(session.state.metadata, dict):
@@ -1274,5 +1259,23 @@ class ResearchGraphRunner:
             started_at=session.ctx.run_started,
             deliverable_dir=session.ctx.deliverable_dir,
         )
+        if isinstance(result.metadata, dict):
+            brief = dict(gstate.get("brief") or {})
+            manager = getattr(session.ctx, "citation_manager", None)
+            source_counts = manager.source_counts_by_tier() if manager is not None else {}
+            result.metadata.update(
+                {
+                    "brief": brief,
+                    "brief_id": str(brief.get("brief_id") or ""),
+                    "brief_version": int(brief.get("version") or 1),
+                    "user_intent": str(brief.get("user_intent") or ""),
+                    "task_shape": str(brief.get("user_intent") or ""),
+                    "execution_path": "fast_path" if bool(gstate.get("fast_path")) else "supervisor_loop",
+                    "planner_calls": 0,
+                    "workers": len(gstate.get("tasks") or {}),
+                    "primary_sources": int(source_counts.get(SourceTier.PRIMARY.value, 0) or 0),
+                    "partial_renderer_called": str((gstate.get("control_decision") or {}).get("action") or "") == "deliver_partial",
+                }
+            )
         session.result = result
         return termination

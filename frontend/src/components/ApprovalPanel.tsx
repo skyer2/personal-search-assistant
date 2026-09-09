@@ -70,7 +70,6 @@ export function ApprovalPanel({
       } catch {
         edited.steps = payload.action_requests[0]?.args?.steps;
       }
-      edited.replan = true;
     } else if (isIntentClarification) {
       try {
         edited.intent = JSON.parse(intentJson) as Record<string, unknown>;

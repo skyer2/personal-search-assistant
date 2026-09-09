@@ -153,7 +153,7 @@ _SPAN_NAME_PRIORITY = (
     "plan.created",
     "synthesis.generate",
     "synthesis.completed",
-    "replan.applied",
+    "supervisor.decided",
     "progress.assessed",
     "retrieval.search",
     "tool.started",
@@ -267,16 +267,19 @@ def summarize_trace(
     """把 journal 收成 Agent-native 视图：identity / brief / plan / worker / lineage / eval。"""
     from app.observability.semantic import (
         build_lineage_edges,
-        compute_replan_gap_closure,
+        compute_supervisor_gap_closure,
         earliest_failure_origin,
     )
 
     identity: dict[str, Any] = {}
     brief: dict[str, Any] | None = None
+    topology: dict[str, Any] | None = None
+    supervisor_decisions: list[dict[str, Any]] = []
     plans: list[dict[str, Any]] = []
     workers_by_key: dict[tuple[str, int, int], dict[str, Any]] = {}
+    findings: list[dict[str, Any]] = []
+    coverage_judgements: list[dict[str, Any]] = []
     progress: list[dict[str, Any]] = []
-    replans: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
     synthesis: list[dict[str, Any]] = []
     recoveries: list[dict[str, Any]] = []
@@ -354,8 +357,43 @@ def summarize_trace(
                 "span_id": event.get("span_id"),
                 "timestamp": event.get("timestamp"),
             }
+        elif event_type == "topology.decided":
+            topology = {
+                "topology": attrs.get("topology"),
+                "eligible": attrs.get("eligible"),
+                "reasons": attrs.get("reasons") or [],
+                "span_id": event.get("span_id"),
+                "timestamp": event.get("timestamp"),
+            }
+        elif event_type == "supervisor.decided":
+            supervisor_decisions.append(
+                {
+                    "action": attrs.get("action"),
+                    "reason": attrs.get("reason"),
+                    "task_count": attrs.get("task_count"),
+                    "source": attrs.get("source"),
+                    "runtime_action": attrs.get("runtime_action"),
+                    "runtime_reasons": attrs.get("runtime_reasons") or [],
+                    "plan_version": event.get("plan_version") or attrs.get("plan_version"),
+                    "span_id": event.get("span_id"),
+                    "timestamp": event.get("timestamp"),
+                }
+            )
         elif event_type.startswith("worker."):
             _coalesce_worker_row(workers_by_key, event, attrs, event_type)
+        elif event_type == "finding.compressed":
+            findings.append(
+                {
+                    "finding_id": attrs.get("finding_id"),
+                    "task_id": event.get("task_id"),
+                    "evidence_ids": attrs.get("evidence_ids") or [],
+                    "claim_count": attrs.get("claim_count"),
+                    "confidence": attrs.get("confidence"),
+                    "limitations": attrs.get("limitations") or [],
+                    "span_id": event.get("span_id"),
+                    "timestamp": event.get("timestamp"),
+                }
+            )
         elif event_type == "plan.created":
             plans.append(
                 {
@@ -369,6 +407,22 @@ def summarize_trace(
                     "brief_coverage": attrs.get("brief_coverage") or {},
                     "plan_ref": attrs.get("plan_ref"),
                     "plan_hash": attrs.get("plan_hash"),
+                    "span_id": event.get("span_id"),
+                    "timestamp": event.get("timestamp"),
+                }
+            )
+        elif event_type == "coverage.assessed":
+            coverage_judgements.append(
+                {
+                    "status": attrs.get("status") or event.get("status"),
+                    "sufficient": attrs.get("sufficient"),
+                    "missing": attrs.get("missing") or [],
+                    "conflicts": attrs.get("conflicts") or [],
+                    "weak_claims": attrs.get("weak_claims") or [],
+                    "recommended_next_questions": attrs.get("recommended_next_questions") or [],
+                    "source": attrs.get("source"),
+                    "reason": attrs.get("reason"),
+                    "plan_version": event.get("plan_version") or attrs.get("plan_version"),
                     "span_id": event.get("span_id"),
                     "timestamp": event.get("timestamp"),
                 }
@@ -388,29 +442,6 @@ def summarize_trace(
                     "dispatch_wave_id": attrs.get("dispatch_wave_id"),
                     "unresolved_conflicts": attrs.get("unresolved_conflicts") or [],
                     "plan_version": event.get("plan_version") or attrs.get("plan_version"),
-                    "timestamp": event.get("timestamp"),
-                }
-            )
-        elif event_type.startswith("replan."):
-            replans.append(
-                {
-                    "type": event_type,
-                    "patch_id": attrs.get("patch_id"),
-                    "triggered_by": attrs.get("triggered_by"),
-                    "target_gap_ids": attrs.get("target_gap_ids") or [],
-                    "superseded_task_ids": attrs.get("superseded_task_ids") or [],
-                    "added_task_ids": attrs.get("added_task_ids") or [],
-                    "recovery_generation": attrs.get("recovery_generation"),
-                    "fingerprint": attrs.get("fingerprint"),
-                    "attempted": attrs.get("attempted"),
-                    "max_attempts": attrs.get("max_attempts"),
-                    "from_plan_version": attrs.get("from_plan_version"),
-                    "to_plan_version": attrs.get("to_plan_version") or event.get("plan_version"),
-                    "reason": attrs.get("reason"),
-                    "gaps": attrs.get("gaps") or [],
-                    "added_tasks": attrs.get("added_tasks") or [],
-                    "removed_tasks": attrs.get("removed_tasks") or [],
-                    "remaining_budget": attrs.get("remaining_budget") or {},
                     "timestamp": event.get("timestamp"),
                 }
             )
@@ -476,7 +507,7 @@ def summarize_trace(
                     "variant": attrs.get("variant"),
                     "accuracy": attrs.get("accuracy"),
                     "citation_score": attrs.get("citation_score") or attrs.get("citation_coverage_rate"),
-                    "replan_count": attrs.get("replan_count"),
+                    "supervisor_iterations": attrs.get("supervisor_iterations"),
                     "latency_ms": attrs.get("latency_ms") or event.get("duration_ms"),
                     "passed": attrs.get("passed"),
                     "reason": attrs.get("reason"),
@@ -488,7 +519,6 @@ def summarize_trace(
                     "tool_calls": attrs.get("tool_calls") or attrs.get("tool_calls_count"),
                     "tokens": attrs.get("total_tokens") or attrs.get("tokens"),
                     "progress": attrs.get("progress"),
-                    "replan": attrs.get("replan"),
                     "evidence": attrs.get("evidence") or attrs.get("evidence_ids") or [],
                     "target_span_id": attrs.get("target_span_id"),
                     "target_artifact_id": attrs.get("target_artifact_id"),
@@ -532,7 +562,7 @@ def summarize_trace(
         stage = str(row.get("origin_stage") or row.get("stage") or "runtime")
         failure_counts[stage] = failure_counts.get(stage, 0) + 1
     eval_matrix = _eval_variant_matrix(evals)
-    gap_closure = compute_replan_gap_closure(events)
+    gap_closure = compute_supervisor_gap_closure(events)
     failure_origin = earliest_failure_origin(events)
     if termination and str(termination.get("reason") or "") not in {"", "success"}:
         failure_origin = {
@@ -578,10 +608,13 @@ def summarize_trace(
     return {
         "identity": identity,
         "brief": brief,
+        "topology": topology,
+        "supervisor_decisions": supervisor_decisions,
         "plans": plans,
+        "findings": findings,
+        "coverage_judgements": coverage_judgements,
         "workers": workers,
         "progress": progress,
-        "replans": replans,
         "evidence": evidence,
         "synthesis": synthesis,
         "recoveries": recoveries,
@@ -596,12 +629,15 @@ def summarize_trace(
         "usage": usage,
         "event_count": len(events),
         "worker_count": len(workers),
+        "finding_count": len(findings),
+        "supervisor_decision_count": len(supervisor_decisions),
+        "coverage_judgement_count": len(coverage_judgements),
         "progress_count": len(progress),
-        "replan_count": sum(1 for row in replans if row.get("type") == "replan.applied"),
+        "supervisor_iterations": int(gap_closure.get("supervisor_decisions") or 0),
         "gap_closure_rate": gap_closure.get("gap_closure_rate"),
-        "replan_useful": gap_closure.get("replan_useful"),
-        "replan_attempted": bool(gap_closure.get("replan_attempted")),
-        "progress_attempted": bool(gap_closure.get("progress_attempted")),
+        "supervisor_recovery": gap_closure.get("supervisor_recovery"),
+        "coverage_attempted": bool(gap_closure.get("coverage_attempted")),
+        "progress_attempted": bool(progress),
         "trace_integrity": _check_integrity(events, identity, include_tree=include_tree_integrity),
     }
 
@@ -638,7 +674,7 @@ def _eval_variant_matrix(evals: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "accuracy": row.get("accuracy"),
             "citation": row.get("citation_score"),
             "latency_ms": row.get("latency_ms"),
-            "replan_count": row.get("replan_count"),
+            "supervisor_iterations": row.get("supervisor_iterations"),
             "tool_calls": row.get("tool_calls"),
             "tokens": row.get("tokens"),
             "passed": row.get("passed"),

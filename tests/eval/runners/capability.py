@@ -9,9 +9,7 @@ from typing import Any
 
 from app.research.coverage.assessor import assess_coverage
 from app.research.coverage.compiler import compile_coverage_contract
-from app.research.planning.expansion import expand_plan
 from app.research.planning.planner import plan_for_spec
-from app.research.planning.validator import commit_plan_mutation
 from app.research.planning.candidate import stable_candidate_id
 from app.research.spec.compiler import compile_research_spec
 from app.research.spec.models import Premise
@@ -135,33 +133,8 @@ def _grade_case(case: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
                 issues.append(f"expanded candidates: expected {expected_candidates}, got {actual_candidates}")
             if any(u.dimension_id == "candidate_set" for u in expanded_contract.units):
                 issues.append("expanded contract retained candidate_set unit")
-            candidate_set = {
-                "candidate_set_id": "candidate_set_regression",
-                "status": "complete",
-                "candidates": candidate_rows,
-            }
-            expansion = expand_plan(spec, candidate_set, plan_version=1)
-            if not expansion.applied or expansion.proposal is None:
-                issues.append(f"expansion rejected: {expansion.reason}")
-            else:
-                mutation_state = {
-                    "research_spec": spec.to_dict(),
-                    "candidate_set": candidate_set,
-                    "plan_version": 1,
-                    "tasks": {},
-                    "worker_results": [],
-                }
-                try:
-                    mutation_update = commit_plan_mutation(expansion.proposal, mutation_state)
-                except Exception as error:
-                    issues.append(f"expansion commit rejected: {error}")
-                else:
-                    if mutation_update.get("plan_version") != 2:
-                        issues.append("candidate expansion did not increment plan version")
-                    if not mutation_update["candidate_set"].get("expanded"):
-                        issues.append("candidate expansion was not committed")
-                    if mutation_update["candidate_set"].get("expanded_plan_version") != 2:
-                        issues.append("candidate expansion did not record plan version")
+            if not candidate_rows:
+                issues.append("candidate set was not materialized as a research artifact")
 
         plan = plan_for_spec(spec, contract)
         task_kinds = [str((step.metadata or {}).get("task_kind") or "") for step in plan.steps]

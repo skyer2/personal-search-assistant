@@ -36,7 +36,7 @@ def run_scenario_dry_eval(
         constraint = grade_constraints(
             events,
             case.get("constraints"),
-            counts={"replan_count": 0, "tool_calls": 0, "workers": plan_grade["independent_research"]},
+            counts={"supervisor_iterations": 0, "tool_calls": 0, "workers": plan_grade["independent_research"]},
         )
         # dry-run 只把门禁放在 planner invariants；因果 if/then 留给 live
         gates = grade_gates(

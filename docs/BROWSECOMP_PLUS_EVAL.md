@@ -113,14 +113,14 @@ uv run python scripts_evaluation/evaluate_run.py \
 
 1. `Retrieval-only`：确认 Recall/nDCG，不把 Retriever 差错归咎于 Agent；
 2. `Vanilla Agent`：`direct` 单 Agent + tools，无 Brief/Plan/Progress；
-3. `Harness-NoReplan`：完整控制面但 `max_replan=0`；
-4. `Full Harness`：SemanticGap → GapFill / Expand / Replan。
+3. `Harness-Single-Iteration`：完整控制面但 Coverage gap 不触发下一轮 Supervisor；
+4. `Full Harness`：Coverage gap 可触发下一轮 Supervisor 研究。
 
-可选：`Harness-NoCompression`。Parallel/Sequential 优先级低于 Replan ablation。
+可选：`Harness-NoCompression`。Parallel/Sequential 优先级低于 Supervisor iteration ablation。
 
 ```bash
 uv run python tests/eval/run_eval.py --live --variant vanilla
-uv run python tests/eval/run_eval.py --live --variant no_replan
+uv run python tests/eval/run_eval.py --live --variant single_iteration
 uv run python tests/eval/run_eval.py --live --variant full
 ```
 

@@ -32,13 +32,17 @@ def decide_terminal_outcome(state: dict[str, Any]) -> FinalOutcome:
         return FinalOutcome.FAILED
     verdict = str(quality.get("verdict") or "")
     if verdict == "pass":
+        decision = state.get("control_decision")
+        degraded_delivery = bool(state.get("synthesis_failed")) or (
+            isinstance(decision, dict) and str(decision.get("action") or "") == "deliver_partial"
+        )
+        if degraded_delivery and bool(str(state.get("final_content") or "").strip()) and usable_evidence:
+            return FinalOutcome.PARTIAL
         return FinalOutcome.SUCCESS
-    evidence = state.get("evidence_assessment")
-    evidence_status = str(evidence.get("status") or "") if isinstance(evidence, dict) else ""
     if (
         verdict == "fail"
         and bool(state.get("final_content"))
-        and evidence_status in {"partial", "sufficient"}
+        and usable_evidence
     ):
         return FinalOutcome.PARTIAL
     return FinalOutcome.FAILED

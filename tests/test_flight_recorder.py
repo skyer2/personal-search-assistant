@@ -40,12 +40,8 @@ def test_recorder_emits_once_and_builds_tree():
             attributes={"tool_name": "internet_search"},
         )
         tel.emit_phase("execute", "done", task_id="t1", attempt=1, duration_ms=80)
-        tel.emit(
-            EventType.REPLAN_APPLIED,
-            phase="recover",
-            attributes={"from_plan_version": 1, "to_plan_version": 2, "reason": "missing_dimension", "added_tasks": ["t4"]},
-        )
-        tel.finish_run(status="success", duration_ms=500, metadata={"tool_calls_count": 1, "replan_count": 1})
+        tel.emit(EventType.SUPERVISOR_STARTED, phase="supervisor", attributes={"iteration": 1})
+        tel.finish_run(status="success", duration_ms=500, metadata={"tool_calls_count": 1, "supervisor_iterations": 1})
         events = tel._jsonl.read("s_tree") if tel._jsonl else []
         types = [item.get("type") or item.get("event") for item in events]
         assert "run.started" in types
@@ -55,7 +51,7 @@ def test_recorder_emits_once_and_builds_tree():
         assert tree["event_count"] == len(events)
         assert tree["span_count"] >= 1
         snap = tel.metrics.snapshot()
-        assert snap["counters"].get("harness.replan.applied", 0) >= 1
+        assert snap["counters"].get("harness.supervisor.iteration", 0) >= 1
         assert snap["histograms"]["harness.run.duration_ms"]["count"] >= 1
         print("[OK] recorder journal + tree + live metrics")
 
@@ -85,7 +81,7 @@ def test_parallel_phase_spans_and_intermediate_status():
     tel.emit_phase("execute", "done", task_id="t2", attempt=1, duration_ms=18)
     assert alias_t1 not in tel._spans
     assert alias_t2 not in tel._spans
-    tel.finish_run(status="success", duration_ms=40, metadata={"replan_count": 0})
+    tel.finish_run(status="success", duration_ms=40, metadata={"supervisor_iterations": 0})
     print("[OK] parallel execute spans survive context_built")
 
 
@@ -99,7 +95,7 @@ def test_recorder_run_summary_is_scanned():
         tel.finish_run(
             status="success",
             duration_ms=900,
-            metadata={"tool_calls_count": 5, "replan_count": 1},
+            metadata={"tool_calls_count": 5, "supervisor_iterations": 1},
         )
         summaries = collect_run_summaries(log_dir, window_hours=24)
         assert len(summaries) == 1
@@ -107,7 +103,7 @@ def test_recorder_run_summary_is_scanned():
         print("[OK] recorder run_summary collected")
 
 
-def test_summarize_trace_workers_and_replan():
+def test_summarize_trace_workers_and_supervisor():
     events = [
         {"type": "run.started", "session_id": "s1", "run_id": "r1", "trace_id": "t1", "attributes": {"git_sha": "abc"}},
         {
@@ -129,12 +125,11 @@ def test_summarize_trace_workers_and_replan():
             },
         },
         {
-            "type": "replan.applied",
+            "type": "supervisor.decided",
             "attributes": {
-                "from_plan_version": 1,
-                "to_plan_version": 2,
+                "action": "CONDUCT_RESEARCH",
                 "reason": "missing_dimension",
-                "added_tasks": ["t4"],
+                "task_count": 1,
             },
         },
         {"type": "gen_ai.chat", "attributes": {"total_tokens": 100, "cost_usd": 0.01}},
@@ -156,7 +151,7 @@ def test_summarize_trace_workers_and_replan():
     assert worker["objective"] == "下一跳预测"
     assert summary["progress_count"] == 1
     assert summary["progress"][0]["status"] == "sufficient"
-    assert summary["replan_count"] == 1
+    assert summary["supervisor_iterations"] == 1
     assert summary["usage"]["total_tokens"] == 100
     assert summary["evals"][0]["type"] == "quality.assessed"
     assert summary["evals"][0]["passed"] is True
@@ -203,7 +198,7 @@ def test_summarize_trace_separates_same_task_across_plan_versions():
     ]
 
 
-def test_summarize_trace_progress_without_replan():
+def test_summarize_trace_progress_without_supervisor_iteration():
     events = [
         {
             "type": "worker.started",
@@ -245,10 +240,10 @@ def test_summarize_trace_progress_without_replan():
     assert summary["workers"][0]["duration_ms"] == 115797
     assert summary["workers"][2]["status"] == "start"
     assert summary["workers"][2]["objective"] == "进行中"
-    assert summary["replan_count"] == 0
+    assert summary["supervisor_iterations"] == 0
     assert summary["progress_count"] == 1
     assert summary["evals"] == []
-    print("[OK] summarize_trace progress without replan")
+    print("[OK] summarize_trace progress without supervisor iteration")
 
 
 def test_span_tree_omits_llm_usage():
@@ -438,8 +433,8 @@ if __name__ == "__main__":
     test_parallel_phase_spans_and_intermediate_status()
     test_recorder_run_summary_is_scanned()
     test_eval_score_attaches_to_existing_trace()
-    test_summarize_trace_workers_and_replan()
-    test_summarize_trace_progress_without_replan()
+    test_summarize_trace_workers_and_supervisor()
+    test_summarize_trace_progress_without_supervisor_iteration()
     test_span_tree_omits_llm_usage()
     test_bind_worker_isolates_span_context()
     test_run_sequence_is_shared_and_unique()

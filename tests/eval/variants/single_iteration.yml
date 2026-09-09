@@ -1,0 +1,8 @@
+# V1 Harness with one Supervisor action: no second research iteration
+name: single_iteration
+mode: agent
+progress_eval: true
+max_replan: 0
+parallel: true
+compression: true
+description: Brief → Supervisor → Workers → Findings → Coverage → Answer

@@ -21,9 +21,10 @@ from app.agent.harness.validator import ResultValidator
 from app.config.loader import get_harness_config
 from app.observability import get_recorder
 from app.run_store import get_run_store, reset_run_store
+from app.agent.harness.run_budget import RunBudgetManager
+from app.research.brief.compiler import compile_structured_brief
+from app.research.brief.models import FastPathEligibility
 from app.research.runtime import runner as runner_module
-from app.research.routing.mode_router import route
-from app.research.routing.task_shape import TaskShape, execution_profile_for_shape
 from app.research.evidence.policy import registrable_domain
 from app.research.runtime.simple_fact import render_simple_fact_answer
 
@@ -106,44 +107,35 @@ def test_simple_fact_release_gate(query, url, content, expected, monkeypatch, tm
     assert result.status == "success"
     assert expected in result.content
     assert "[1]" in result.content
-    assert result.metadata["task_shape"] == "simple_fact"
+    assert result.metadata["task_shape"] == "atomic_fact"
     assert result.metadata["execution_path"] == "fast_path"
     assert result.metadata["planner_calls"] == 0
-    assert result.metadata["replan_count"] == 0
-    assert result.metadata["synthesis_calls"] == 0
+    assert result.metadata["supervisor_iterations"] == 0
+    assert result.metadata["synthesis_attempts"] == 1
+    assert result.metadata["synthesis_failed"] is False
     assert result.metadata["workers"] == 1
     assert result.metadata["tool_calls_count"] <= 3
     assert result.metadata["primary_sources"] >= 1
-    assert result.metadata["budget_reservation_errors"] == 0
     assert result.metadata["partial_renderer_called"] is False
-    assert result.metadata["outcome"] == "success"
-    assert result.metadata["quality"] == "pass"
+    assert result.metadata["termination"]["outcome"] == "success"
+    assert result.metadata["quality"]["verdict"] == "pass"
 
 
-@pytest.mark.parametrize(
-    ("query", "expected_shape"),
-    [(case[0], "simple_fact") for case in _CASES],
-)
-def test_product_router_selects_fast_path(query: str, expected_shape: str):
-    decision = route(query, user_mode="agent")
-    assert decision.mode == "agent"
-    assert decision.task_shape == expected_shape
-    assert decision.execution_path == "fast_path"
-    assert "task_shape:simple_fact" in decision.signals
+@pytest.mark.parametrize("query", [case[0] for case in _CASES])
+def test_brief_selects_unified_fast_path(query: str):
+    brief = compile_structured_brief(query)
+    eligibility = FastPathEligibility.from_brief(brief)
+    assert brief.user_intent == "atomic_fact"
+    assert eligibility.eligible is True
+    assert eligibility.reasons == ()
 
 
-def test_simple_fact_profile_has_deterministic_budget():
-    profile = execution_profile_for_shape(TaskShape.SIMPLE_FACT)
-    assert profile == {
-        "parallel_workers": 1,
-        "max_replan_count": 0,
-        "max_tool_calls": 3,
-        "max_search_queries": 2,
-        "planner": False,
-        "progress_eval": False,
-        "compression": False,
-        "synthesis_agent": False,
-    }
+def test_fast_path_budget_cap_only_lowers_limit():
+    manager = RunBudgetManager(tool_call_limit=10)
+    manager.cap_tool_calls(3)
+    assert manager.tool_call_limit == 3
+    manager.cap_tool_calls(8)
+    assert manager.tool_call_limit == 3
 
 
 @pytest.mark.parametrize(

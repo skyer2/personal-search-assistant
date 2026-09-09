@@ -29,7 +29,7 @@ jobs:
           uv run pytest -q
           tests/test_simple_fact_fast_path.py
           tests/test_control_plane_invariants.py
-          tests/test_architecture_v2_invariants.py
+          tests/test_semantic_simplification_architecture.py
           tests/test_architecture_v2_stabilization.py
 
       - name: Full unit and integration suite

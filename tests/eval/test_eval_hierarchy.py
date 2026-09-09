@@ -33,14 +33,14 @@ def test_constraint_grader_if_then():
 
     miss = grade_constraints(
         ["progress.assessed"],
-        {"if": {"progress.status": "gap"}, "then": {"required": ["replan.applied"]}},
+        {"if": {"progress.status": "gap"}, "then": {"required": ["supervisor.decided"]}},
         attributes={"progress.status": "gap"},
     )
     assert miss["ok"] is False
     hit = grade_constraints(
-        ["progress.assessed", "replan.applied"],
-        {"if": {"progress.status": "gap"}, "then": {"required": ["replan.applied"]}, "limits": {"replan_count": 2}},
-        counts={"replan_count": 1},
+        ["progress.assessed", "supervisor.decided"],
+        {"if": {"progress.status": "gap"}, "then": {"required": ["supervisor.decided"]}, "limits": {"supervisor_iterations": 2}},
+        counts={"supervisor_iterations": 1},
         attributes={"progress.status": "gap"},
     )
     assert hit["ok"] is True

@@ -15,7 +15,7 @@ Harness Eval 入口。
 
   # 对照实验
   python tests/eval/run_eval.py --live --variant vanilla --fixture
-  python tests/eval/run_eval.py --live --variant no_replan --fixture
+  python tests/eval/run_eval.py --live --variant single_iteration --fixture
 """
 
 from __future__ import annotations
@@ -66,45 +66,13 @@ def run_dry_eval(
     _ = min_trajectory_similarity
     if not tasks:
         return run_component_eval() + run_capability_dry_eval() + run_scenario_dry_eval()
-    if tasks and "case_id" in tasks[0]:
-        return run_scenario_dry_eval(cases=tasks)
-    # 兼容旧调用：只做 planner invariants，不再用 expected_agents / SequenceMatcher 判成败
-    from app.agent.harness.planner import understand_task
-    from app.research.planning.compose import compose_execution_plan_sync
-    from tests.eval.graders.deterministic import grade_plan_invariants
-
-    results: list[TaskEvalResult] = []
-    for task in tasks:
-        intent = understand_task(task["query"], bool(task.get("requires_upload")))
-        plan, issues = compose_execution_plan_sync(intent)
-        expect = {"acyclic": True, "has_synthesis": True}
-        if task.get("expected_deliverable"):
-            expect["deliverable"] = task["expected_deliverable"]
-        graded = grade_plan_invariants(plan, expect)
-        deliverable_ok = not task.get("expected_deliverable") or intent.deliverable == task.get(
-            "expected_deliverable"
-        )
-        ok = bool(graded["ok"] and deliverable_ok and not issues)
-        results.append(
-            TaskEvalResult(
-                task_id=str(task.get("id") or task.get("case_id")),
-                query=task["query"],
-                mode="dry-run",
-                success=ok,
-                gate_ok=ok,
-                plan_validation_ok=not issues,
-                intent_deliverable_ok=deliverable_ok,
-                intent_confidence=intent.intent_confidence,
-                metadata={"plan_grade": graded, "plan_issues": issues},
-            )
-        )
-    return results
+    return run_scenario_dry_eval(cases=tasks)
 
 
 def _events_from_harness(metadata: dict, trace: list) -> list[str]:
     events = ["run.started"]
-    if metadata.get("replan_count"):
-        events.append("replan.applied")
+    if int(metadata.get("supervisor_iterations") or 0) > 1:
+        events.append("supervisor.decided")
     if metadata.get("progress_assessment") or metadata.get("observability"):
         events.append("progress.assessed")
     for event in trace or []:
@@ -153,7 +121,7 @@ async def run_live_eval(
                         events,
                         task.get("constraints"),
                         counts={
-                            "replan_count": int(meta.get("replan_count") or 0),
+                            "supervisor_iterations": int(meta.get("supervisor_iterations") or 0),
                             "tool_calls": int(meta.get("tool_calls_count") or 0),
                         },
                         attributes={
@@ -221,7 +189,7 @@ async def run_live_eval(
                             run_id=str(meta.get("run_id") or session_id),
                             trace_id=str(meta.get("trace_id") or ""),
                             variant=str(variant.get("name") or variant_name),
-                            replan_count=int(meta.get("replan_count") or 0),
+                            supervisor_iterations=int(meta.get("supervisor_iterations") or 0),
                             failure_stage="" if success else str(taxonomy.get("stage") or "runtime"),
                             failure_type="" if success else ",".join(gates["failures"] or [taxonomy.get("type") or ""]),
                             metadata={
@@ -252,7 +220,7 @@ async def run_live_eval(
                                 "variant": variant.get("name"),
                                 "accuracy": quality.correctness,
                                 "citation_score": ccr,
-                                "replan_count": int(meta.get("replan_count") or 0),
+                                "supervisor_iterations": int(meta.get("supervisor_iterations") or 0),
                                 "latency_ms": int(meta.get("latency_ms") or 0),
                                 "repeat_index": repeat_index,
                                 "judge_source": quality.judge_source,
@@ -340,7 +308,7 @@ def write_comparison_markdown(
         "grounding_score": "Grounding",
         "trajectory_score": "Trajectory",
         "plan_validation_pass_rate": "Invariants",
-        "replan_recovery_rate": "Replan Recovery",
+        "supervisor_recovery_rate": "Supervisor Recovery",
         "avg_tool_calls": "Tool Calls",
         "latency_p95_ms": "P95(ms)",
     }
@@ -459,7 +427,7 @@ def main() -> None:
     elif args.component:
         results = run_component_eval()
         mode = "component"
-        dataset = "planner_v2+progress_v1+replan_v1+evidence_v1"
+        dataset = "brief_v1+coverage_v1+supervisor_v1+evidence_v1"
     else:
         if args.tasks:
             results = run_dry_eval(load_tasks(Path(args.tasks)))

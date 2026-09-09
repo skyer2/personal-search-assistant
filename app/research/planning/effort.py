@@ -44,7 +44,7 @@ class HardCeiling:
     max_parallel_workers: int = 3
     max_research_tasks: int = 5
     max_plan_patch_tasks: int = 2
-    max_replan_count: int = 2
+    max_supervisor_iterations: int = 2
     max_plan_steps: int = 8
     max_run_sec: int = 600
     max_total_tokens: int = 100_000
@@ -59,7 +59,7 @@ class HardCeiling:
             max_parallel_workers=int(getattr(config, "max_parallel_workers", 3) or 3),
             max_research_tasks=int(getattr(config, "planner_max_research_tasks", 5) or 5),
             max_plan_patch_tasks=int(getattr(config, "planner_max_plan_patch_tasks", 2) or 2),
-            max_replan_count=int(getattr(config, "max_replan_count", 2) or 2),
+            max_supervisor_iterations=int(getattr(config, "max_replan_count", 2) or 2),
             max_plan_steps=int(getattr(config, "max_plan_steps", 8) or 8),
             max_run_sec=int(getattr(config, "max_run_sec", 600) or 600),
             max_total_tokens=int(getattr(config, "max_total_tokens", 100_000) or 100_000),
@@ -87,7 +87,7 @@ class EffortPlan:
     suggested_workers: int = 1
     initial_session_tool_budget: int = 12
     per_worker_tool_budget: int = 4
-    replan_reserve_tasks: int = 1
+    supervisor_research_reserve_tasks: int = 1
     reserve_step_tool_calls: int = 2
     stop_criteria: tuple[str, ...] = ()
     signals: tuple[str, ...] = ()
@@ -101,7 +101,7 @@ class EffortPlan:
             "suggested_workers": self.suggested_workers,
             "initial_session_tool_budget": self.initial_session_tool_budget,
             "per_worker_tool_budget": self.per_worker_tool_budget,
-            "replan_reserve_tasks": self.replan_reserve_tasks,
+            "supervisor_research_reserve_tasks": self.supervisor_research_reserve_tasks,
             "reserve_step_tool_calls": self.reserve_step_tool_calls,
             "stop_criteria": list(self.stop_criteria),
             "signals": list(self.signals),
@@ -119,7 +119,7 @@ class EffectiveBudget:
     parallel_workers: int
     session_tool_calls: int
     step_tool_calls: int
-    replan_count: int
+    supervisor_iterations: int
     plan_patch_tasks: int
     reserved_step_tool_calls: int
     max_run_sec: int
@@ -131,7 +131,7 @@ class EffectiveBudget:
             "parallel_workers": self.parallel_workers,
             "session_tool_calls": self.session_tool_calls,
             "step_tool_calls": self.step_tool_calls,
-            "replan_count": self.replan_count,
+            "supervisor_iterations": self.supervisor_iterations,
             "plan_patch_tasks": self.plan_patch_tasks,
             "reserved_step_tool_calls": self.reserved_step_tool_calls,
             "max_run_sec": self.max_run_sec,
@@ -147,12 +147,12 @@ class EffectiveBudget:
             "max_tool_calls": self.hard.max_tool_calls,
             "max_agent_actions": self.hard.max_tool_calls,
             "hard_retrieval_units": self.hard.max_tool_calls,
-            # Adaptive values are initial research leases. Exhaustion asks the
-            # progress controller to synthesize/replan; it never aborts a run.
+            # Adaptive values are initial research leases.
+            # Supervisor may request more research; it never raises the hard ceiling.
             "initial_retrieval_units": self.session_tool_calls,
             "remaining_initial_retrieval_units": self.session_tool_calls,
             "max_step_tool_calls": self.step_tool_calls,
-            "max_replan_count": self.replan_count,
+            "max_replan_count": self.supervisor_iterations,
             "max_plan_steps": self.max_plan_steps,
             "max_run_sec": self.max_run_sec,
             "max_plan_patch_tasks": self.plan_patch_tasks,
@@ -162,7 +162,7 @@ class EffectiveBudget:
             # Incremental grant：剩余可发放额度（GAP 时消耗，不抬硬顶）
             "remaining_plan_patch_tasks": self.plan_patch_tasks,
             "remaining_reserve_step_tool_calls": self.reserved_step_tool_calls,
-            "remaining_replan_count": self.replan_count,
+            "remaining_supervisor_iterations": self.supervisor_iterations,
         }
 
 
@@ -254,7 +254,7 @@ def estimate_complexity(intent: Any) -> EffortPlan:
             suggested_workers=1,
             initial_session_tool_budget=8,
             per_worker_tool_budget=3,
-            replan_reserve_tasks=0,
+            supervisor_research_reserve_tasks=0,
             reserve_step_tool_calls=0,
             stop_criteria=("single_pass_enough",),
             signals=tuple(signals),
@@ -269,7 +269,7 @@ def estimate_complexity(intent: Any) -> EffortPlan:
             suggested_workers=2,
             initial_session_tool_budget=16,
             per_worker_tool_budget=4,
-            replan_reserve_tasks=1,
+            supervisor_research_reserve_tasks=1,
             reserve_step_tool_calls=2,
             stop_criteria=("coverage_ok", "no_major_conflict"),
             signals=tuple(signals),
@@ -290,7 +290,7 @@ def estimate_complexity(intent: Any) -> EffortPlan:
             suggested_workers=min(3, max(2, entity_n)),
             initial_session_tool_budget=28,
             per_worker_tool_budget=6,
-            replan_reserve_tasks=2,
+            supervisor_research_reserve_tasks=2,
             reserve_step_tool_calls=4,
             stop_criteria=("entity_coverage", "cross_compare_done"),
             signals=tuple(signals),
@@ -305,7 +305,7 @@ def estimate_complexity(intent: Any) -> EffortPlan:
             suggested_workers=2,
             initial_session_tool_budget=24,
             per_worker_tool_budget=7,
-            replan_reserve_tasks=2,
+            supervisor_research_reserve_tasks=2,
             reserve_step_tool_calls=4,
             stop_criteria=("primary_sources", "chain_covered"),
             signals=tuple(signals),
@@ -320,7 +320,7 @@ def estimate_complexity(intent: Any) -> EffortPlan:
             suggested_workers=3,
             initial_session_tool_budget=32,
             per_worker_tool_budget=6,
-            replan_reserve_tasks=2,
+            supervisor_research_reserve_tasks=2,
             reserve_step_tool_calls=4,
             stop_criteria=("diminishing_returns", "budget_reserve_ok"),
             signals=tuple(signals),
@@ -334,12 +334,12 @@ def apply_effort_to_hard_ceiling(effort: EffortPlan, hard: HardCeiling) -> Effec
     parallel_workers = max(1, min(effort.suggested_workers, hard.max_parallel_workers))
     session_tool_calls = max(1, min(effort.initial_session_tool_budget, hard.max_tool_calls))
     step_tool_calls = max(1, min(effort.per_worker_tool_budget, hard.max_step_tool_calls))
-    if effort.tier == "shallow" and effort.replan_reserve_tasks <= 0:
-        replan_count = 0
+    if effort.tier == "shallow" and effort.supervisor_research_reserve_tasks <= 0:
+        supervisor_iterations = 0
     else:
-        desired_replan = max(effort.replan_reserve_tasks, 1)
-        replan_count = max(0, min(hard.max_replan_count, desired_replan))
-    plan_patch_tasks = max(0, min(effort.replan_reserve_tasks, hard.max_plan_patch_tasks))
+        desired_iterations = max(effort.supervisor_research_reserve_tasks, 1)
+        supervisor_iterations = max(0, min(hard.max_supervisor_iterations, desired_iterations))
+    plan_patch_tasks = max(0, min(effort.supervisor_research_reserve_tasks, hard.max_plan_patch_tasks))
     reserved = max(0, min(effort.reserve_step_tool_calls, hard.max_step_tool_calls))
     return EffectiveBudget(
         effort=effort,
@@ -348,7 +348,7 @@ def apply_effort_to_hard_ceiling(effort: EffortPlan, hard: HardCeiling) -> Effec
         parallel_workers=parallel_workers,
         session_tool_calls=session_tool_calls,
         step_tool_calls=step_tool_calls,
-        replan_count=replan_count,
+        supervisor_iterations=supervisor_iterations,
         plan_patch_tasks=plan_patch_tasks,
         reserved_step_tool_calls=reserved,
         max_run_sec=hard.max_run_sec,
@@ -365,7 +365,7 @@ def _full_ceiling_effort(hard: HardCeiling) -> EffortPlan:
         suggested_workers=hard.max_parallel_workers,
         initial_session_tool_budget=hard.max_tool_calls,
         per_worker_tool_budget=hard.max_step_tool_calls,
-        replan_reserve_tasks=hard.max_plan_patch_tasks,
+            supervisor_research_reserve_tasks=hard.max_plan_patch_tasks,
         reserve_step_tool_calls=hard.max_step_tool_calls,
         stop_criteria=("hard_ceiling_only",),
         signals=("adaptive_disabled",),
@@ -523,13 +523,20 @@ def apply_grant_to_run_budget(
         )
         - used_retrieval,
     )
-    rem_replan = max(
+    remaining_iterations = max(
         0,
-        int(budget.get("remaining_replan_count", budget.get("max_replan_count", 0)) or 0) - 1,
+        int(
+            budget.get(
+                "remaining_supervisor_iterations",
+                budget.get("max_replan_count", 0),
+            )
+            or 0
+        )
+        - 1,
     )
     budget["remaining_plan_patch_tasks"] = rem_tasks
     budget["remaining_reserve_step_tool_calls"] = rem_retrieval
-    budget["remaining_replan_count"] = rem_replan
+    budget["remaining_supervisor_iterations"] = remaining_iterations
     return {k: int(v) if isinstance(v, (int, float)) else v for k, v in budget.items()}
 
 

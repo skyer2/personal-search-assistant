@@ -55,12 +55,8 @@ def test_ai_startup_query_adaptive_control_is_bounded_and_deterministic(
         assert result.artifacts
         assert result.metadata["termination"]["outcome"] in {"partial", "success"}
 
-        gap_fills = sum(event["type"] == "plan.gap_fill_applied" for event in events)
-        expansions = sum(event["type"] == "plan.expanded" for event in events)
-        replans = sum(event["type"] == "replan.applied" for event in events)
-        assert gap_fills <= 4, (run_index, gap_fills)
-        assert expansions <= 2, (run_index, expansions)
-        assert replans <= 2, (run_index, replans)
+        supervisor_iterations = int(result.metadata.get("supervisor_iterations") or 0)
+        assert supervisor_iterations <= 2, (run_index, supervisor_iterations)
 
         worker_keys = [
             (row["task_id"], row["plan_version"], row["attempt"])
@@ -75,6 +71,6 @@ def test_ai_startup_query_adaptive_control_is_bounded_and_deterministic(
             for event in events
         )
         assert not any("GraphRecursion" in str(event.get("error") or "") for event in events)
-        signatures.append((result.status, gap_fills, expansions, replans, len(result.artifacts)))
+        signatures.append((result.status, supervisor_iterations, len(result.artifacts)))
 
     assert len(set(signatures)) == 1, signatures

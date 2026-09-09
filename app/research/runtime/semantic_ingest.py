@@ -80,8 +80,8 @@ def _build_evidence_rows(
             continue
         row = dict(raw)
         task_id = str(row.get("task_id") or "")
-        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-        payload = dict(payload)
+        raw_payload = row.get("payload")
+        payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
         raw_sources = list(payload.get("sources") or row.get("sources") or [])
         requested_ids = [str(item) for item in payload.get("evidence_ids") or [] if str(item).strip()]
         locators = [_source_locator(source) for source in raw_sources if _source_locator(source).strip()]
@@ -184,7 +184,8 @@ def ingest_semantics(state: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(row, dict)
             ]
     else:
-        existing = state.get("candidate_set") if isinstance(state.get("candidate_set"), dict) else {}
+        raw_candidate_set = state.get("candidate_set")
+        existing = dict(raw_candidate_set) if isinstance(raw_candidate_set, dict) else {}
         if existing.get("available"):
             candidate_ids = [
                 Candidate.from_dict(row).candidate_id
@@ -200,9 +201,10 @@ def ingest_semantics(state: dict[str, Any]) -> dict[str, Any]:
         claim_conflicts=[edge.to_dict() for edge in edges],
         claim_resolutions=[row.to_dict() for row in reconciliation.resolutions],
     )
-    candidate_payload = candidate_update.get("candidate_set") or (
-        state.get("candidate_set") if isinstance(state.get("candidate_set"), dict) else {}
-    )
+    raw_candidate_payload = candidate_update.get("candidate_set")
+    if not isinstance(raw_candidate_payload, dict):
+        raw_candidate_payload = state.get("candidate_set")
+    candidate_payload = dict(raw_candidate_payload) if isinstance(raw_candidate_payload, dict) else {}
     candidate_available = bool(candidate_payload.get("available"))
     gaps = build_semantic_gaps(
         coverage,
@@ -210,7 +212,8 @@ def ingest_semantics(state: dict[str, Any]) -> dict[str, Any]:
         discovery_required=spec.reasoning_requirements.discovery,
         previous_gaps=list((state.get("semantic_gaps") or {}).values()),
     )
-    previous_coverage = state.get("coverage_state") if isinstance(state.get("coverage_state"), dict) else {}
+    raw_previous_coverage = state.get("coverage_state")
+    previous_coverage = dict(raw_previous_coverage) if isinstance(raw_previous_coverage, dict) else {}
     previous_high_quality = {
         str(row.get("evidence_id"))
         for row in state.get("evidence_records") or []

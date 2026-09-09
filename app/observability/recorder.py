@@ -205,10 +205,10 @@ class AgentTelemetry:
                 ),
             },
         )
-        replan_count = int((metadata or {}).get("replan_count") or 0)
-        if replan_count > 0:
+        supervisor_iterations = int((metadata or {}).get("supervisor_iterations") or 0)
+        if supervisor_iterations > 1:
             try:
-                from app.observability.semantic import compute_replan_gap_closure
+                from app.observability.semantic import compute_supervisor_gap_closure
 
                 run_events = []
                 if ctx is not None:
@@ -216,19 +216,19 @@ class AgentTelemetry:
                         event.to_dict()
                         for event in self.journal.events_for_run(ctx.session_id, ctx.run_id)
                     ]
-                closure = compute_replan_gap_closure(run_events)
-                if closure.get("replan_useful"):
-                    self.metrics.inc("harness.replan.recovered")
+                closure = compute_supervisor_gap_closure(run_events)
+                if closure.get("supervisor_recovery"):
+                    self.metrics.inc("harness.supervisor.recovered")
                 elif event_type != EventType.RUN_COMPLETED:
-                    self.metrics.inc("harness.replan.waste")
+                    self.metrics.inc("harness.supervisor.waste")
                 if closure.get("gap_closure_rate") is not None:
                     self.metrics.observe(
-                        "harness.replan.gap_closure_rate",
+                        "harness.supervisor.gap_closure_rate",
                         float(closure["gap_closure_rate"]),
                     )
             except Exception:
                 if event_type != EventType.RUN_COMPLETED:
-                    self.metrics.inc("harness.replan.waste")
+                    self.metrics.inc("harness.supervisor.waste")
         if ctx and ctx.root_span_id:
             self.end_span(
                 span_identity("research.run", span_id=ctx.root_span_id),
@@ -638,10 +638,8 @@ class AgentTelemetry:
             self.metrics.inc("harness.plan.validation_failed")
         if event.type == EventType.QUALITY_ASSESSED and event.status == "fail":
             self.metrics.inc("harness.quality.failed")
-        if event.type == EventType.REPLAN_APPLIED:
-            self.metrics.inc("harness.replan.applied")
-        if event.type == EventType.REPLAN_REJECTED:
-            self.metrics.inc("harness.replan.rejected")
+        if event.type == EventType.SUPERVISOR_STARTED:
+            self.metrics.inc("harness.supervisor.iteration")
         if event.type == EventType.PROGRESS_ASSESSED and str(event.status or "") == "gap":
             self.metrics.inc("harness.progress.gap")
         if event.type == EventType.GEN_AI_CHAT:

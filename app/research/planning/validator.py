@@ -1,35 +1,15 @@
-"""Plan and semantic action validation: DAG, budget, and source policy."""
+"""Execution-plan projection validation: DAG, budget, and source policy."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
 from app.agent.harness.state import ExecutionPlan, PlanStep, TaskIntent
-from app.research.domain.task_state import initialize_tasks
-from app.research.planning.candidate import CandidateSet
 from app.research.planning.granularity import analyze_task_granularity
 from app.research.planning.priority import match_coverage_keys
 from app.research.planning.policy import SOURCE_TOOLS, SourcePolicy, parse_source_policy
 
 RESEARCH_TYPES = frozenset({"research", "network_search", "file_read"})
-
-
-@dataclass
-class PlanMutationProposal:
-    mutation_type: str
-    proposed_plan: ExecutionPlan
-    proposed_tasks: dict[str, dict[str, Any]] | None = None
-    proposed_coverage_contract: Any | None = None
-    proposed_candidate_set: dict[str, Any] | None = None
-    proposed_semantic_gaps: dict[str, dict[str, Any]] | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-class PlanMutationRejected(RuntimeError):
-    def __init__(self, issues: list[str]):
-        super().__init__(";".join(issues))
-        self.issues = issues
 
 
 def _covers_source(plan: ExecutionPlan, source: str) -> bool:
@@ -393,96 +373,7 @@ def validate_execution_plan(
     return issues
 
 
-def validate_plan_mutation(proposal: PlanMutationProposal, state: dict[str, Any]) -> list[str]:
-    """Validate a proposal against committed state without mutating either side."""
-    issues: list[str] = []
-    if proposal.mutation_type not in {"gap_fill", "expand_plan", "replan"}:
-        issues.append(f"unknown_mutation_type:{proposal.mutation_type}")
-    if proposal.proposed_plan.plan_version != int(state.get("plan_version") or 1) + 1:
-        issues.append("plan_version_not_incremented")
-
-    candidate_set = proposal.proposed_candidate_set
-    if candidate_set is None:
-        raw = state.get("candidate_set")
-        candidate_set = dict(raw) if isinstance(raw, dict) else {}
-    else:
-        candidate_set = dict(candidate_set)
-    if proposal.mutation_type == "expand_plan":
-        parsed = CandidateSet.from_dict(candidate_set)
-        if not parsed.available:
-            issues.append("candidate_set_unavailable")
-        if parsed.expanded:
-            issues.append("candidate_set_already_expanded")
-        candidate_set["expanded"] = True
-
-    coverage_contract = (
-        proposal.proposed_coverage_contract
-        if proposal.proposed_coverage_contract is not None
-        else state.get("coverage_contract")
-    )
-    issues.extend(
-        validate_execution_plan(
-            proposal.proposed_plan,
-            spec=state.get("research_spec"),
-            coverage_contract=coverage_contract,
-            candidate_set=candidate_set,
-        )
-    )
-    return list(dict.fromkeys(issues))
-
-
-def commit_plan_mutation(proposal: PlanMutationProposal, state: dict[str, Any]) -> dict[str, Any]:
-    """Atomically project a validated proposal into a ResearchState update."""
-    issues = validate_plan_mutation(proposal, state)
-    if issues:
-        raise PlanMutationRejected(issues)
-
-    tasks = dict(state.get("tasks") or {})
-    if proposal.proposed_tasks is not None:
-        tasks.update(proposal.proposed_tasks)
-    tasks.update(initialize_tasks(proposal.proposed_plan))
-
-    candidate_set = (
-        dict(proposal.proposed_candidate_set)
-        if proposal.proposed_candidate_set is not None
-        else dict(state.get("candidate_set") or {})
-    )
-    if proposal.mutation_type == "expand_plan":
-        candidate_set["expanded"] = True
-        candidate_set["expanded_plan_version"] = proposal.proposed_plan.plan_version
-
-    coverage_contract = proposal.proposed_coverage_contract
-    coverage_update = (
-        coverage_contract.to_dict()
-        if hasattr(coverage_contract, "to_dict")
-        else dict(coverage_contract or {})
-        if coverage_contract is not None
-        else {}
-    )
-
-    update: dict[str, Any] = {
-        "plan": proposal.proposed_plan.to_dict(),
-        "plan_version": proposal.proposed_plan.plan_version,
-        "tasks": tasks,
-        "candidate_set": candidate_set,
-        "planning_failure": {},
-        "abort_reason": "",
-        "route_signals": [
-            *(state.get("route_signals") or []),
-            f"plan_mutation_committed:{proposal.mutation_type}",
-        ],
-        **({"coverage_contract": coverage_update} if coverage_update else {}),
-    }
-    if proposal.proposed_semantic_gaps is not None:
-        update["semantic_gaps"] = proposal.proposed_semantic_gaps
-    return update
-
-
 __all__ = [
-    "PlanMutationProposal",
-    "PlanMutationRejected",
-    "commit_plan_mutation",
     "validate_artifact_dependencies",
     "validate_execution_plan",
-    "validate_plan_mutation",
 ]

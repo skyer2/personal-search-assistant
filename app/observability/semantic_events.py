@@ -43,12 +43,18 @@ def brief_event_attributes(
 ) -> dict[str, Any]:
     value = dict(brief or {})
     brief_id = str(value.get("brief_id") or f"brief:{run_id}")
+    entities = _strings(value.get("entities"))
+    if not entities:
+        entities = _strings(value.get("explicit_subjects"))
+    dimensions = _strings(value.get("dimensions"))
+    if not dimensions:
+        dimensions = _strings(value.get("key_questions"))
     return {
         "brief_id": brief_id,
         "brief_version": _optional_int(value.get("brief_version")) or 1,
         "objective": str(value.get("objective") or value.get("raw_query") or ""),
-        "entities": _strings(value.get("entities")),
-        "dimensions": _strings(value.get("dimensions")),
+        "entities": entities,
+        "dimensions": dimensions,
         "depth": str(value.get("depth") or ""),
         "freshness": str(value.get("freshness") or ""),
         "deliverable": str(value.get("deliverable") or ""),

@@ -232,7 +232,7 @@ def run_query(
         "duration_ms": duration_ms,
         "llm_calls": max(provider.calls, _usage_value(usage, "calls")),
         "tokens": max(provider.estimated_tokens, _usage_value(usage, "total_tokens")),
-        "replans": int(result.metadata.get("replan_count") or 0),
+        "supervisor_iterations": int(result.metadata.get("supervisor_iterations") or 0),
         "workers": len(summary.get("workers") or []),
         "worker_started": int(integrity["counts"].get("worker_started") or 0),
         "worker_done": int(integrity["counts"].get("worker_done") or 0),
@@ -255,7 +255,7 @@ def print_rows(rows: list[dict[str, Any]]) -> None:
         "duration_ms",
         "llm_calls",
         "tokens",
-        "replans",
+        "supervisor_iterations",
         "workers",
         "worker_started",
         "worker_done",
@@ -338,8 +338,8 @@ def main() -> int:
             failures.append(f"missing root span: {row['query']}")
         if not str(next(item["content"] for item in rows_with_content if item["query"] == row["query"])).strip():
             failures.append(f"empty output: {row['query']}")
-        if row["replans"] > get_harness_config().max_replan_count:
-            failures.append(f"replan ceiling exceeded: {row['query']}")
+        if row["supervisor_iterations"] > get_harness_config().max_replan_count:
+            failures.append(f"supervisor iteration ceiling exceeded: {row['query']}")
 
     q1_rows = [row for row in rows_with_content if row["query"] == RELEASE_QUERIES[0]]
     if any(row["outcome"] not in {"partial", "success"} for row in q1_rows):

@@ -48,7 +48,7 @@ DEFAULT_STAGE_BUDGETS: dict[str, int] = {
 }
 
 SYNTHESIS_STAGES = frozenset({"generate_markdown", "summarize", "convert_pdf"})
-PLANNER_STAGES = frozenset({"understand", "plan", "replan", "planner"})
+PLANNER_STAGES = frozenset({"understand", "plan", "planner", "supervisor"})
 VERIFIER_STAGES = frozenset({"validate", "verify", "citation_verify"})
 COMPRESS_STAGES = frozenset({"compress"})
 

@@ -12,54 +12,24 @@ class InvalidTransition(RuntimeError):
 
 
 _ALLOWED: dict[WorkflowPhase, frozenset[WorkflowPhase]] = {
-    WorkflowPhase.BOOTSTRAP: frozenset({WorkflowPhase.DIRECT, WorkflowPhase.COMPILE_SPEC}),
-    WorkflowPhase.DIRECT: frozenset({WorkflowPhase.FINALIZE}),
-    WorkflowPhase.COMPILE_SPEC: frozenset({WorkflowPhase.SPEC_GATE}),
-    WorkflowPhase.SPEC_GATE: frozenset({WorkflowPhase.CLARIFY, WorkflowPhase.PLAN}),
-    WorkflowPhase.CLARIFY: frozenset({WorkflowPhase.COMPILE_SPEC}),
-    WorkflowPhase.PLAN: frozenset({WorkflowPhase.PLAN_VALIDATED}),
-    WorkflowPhase.PLAN_VALIDATED: frozenset({WorkflowPhase.DISPATCH}),
-    WorkflowPhase.DISPATCH: frozenset(
+    WorkflowPhase.BOOTSTRAP: frozenset({WorkflowPhase.BRIEF, WorkflowPhase.DIRECT}),
+    WorkflowPhase.BRIEF: frozenset({WorkflowPhase.SUPERVISOR, WorkflowPhase.EXECUTE}),
+    WorkflowPhase.SUPERVISOR: frozenset(
         {
             WorkflowPhase.EXECUTE,
-            WorkflowPhase.INGEST_SEMANTICS,
-            WorkflowPhase.GAP_FILL,
-            WorkflowPhase.EXPAND_PLAN,
-            WorkflowPhase.REPLAN,
+            WorkflowPhase.COVERAGE_JUDGE,
             WorkflowPhase.SYNTHESIS,
             WorkflowPhase.FINALIZE,
         }
     ),
-    WorkflowPhase.EXECUTE: frozenset({WorkflowPhase.INGEST_SEMANTICS}),
-    WorkflowPhase.INGEST_SEMANTICS: frozenset({WorkflowPhase.ASSESS}),
-    WorkflowPhase.ASSESS: frozenset(
-        {
-            WorkflowPhase.DISPATCH,
-            WorkflowPhase.GAP_FILL,
-            WorkflowPhase.EXPAND_PLAN,
-            WorkflowPhase.REPLAN,
-            WorkflowPhase.SYNTHESIS,
-            WorkflowPhase.FINALIZE,
-            WorkflowPhase.TERMINATED,
-        }
-    ),
-    WorkflowPhase.GAP_FILL: frozenset({WorkflowPhase.PLAN_VALIDATED}),
-    WorkflowPhase.EXPAND_PLAN: frozenset({WorkflowPhase.PLAN_VALIDATED}),
-    WorkflowPhase.REPLAN: frozenset({WorkflowPhase.PLAN_VALIDATED}),
-    WorkflowPhase.SYNTHESIS: frozenset({WorkflowPhase.QUALITY, WorkflowPhase.REPAIR_SYNTHESIS}),
-    WorkflowPhase.REPAIR_SYNTHESIS: frozenset({WorkflowPhase.SYNTHESIS}),
-    WorkflowPhase.QUALITY: frozenset(
-        {
-            WorkflowPhase.FINALIZE,
-            WorkflowPhase.REPAIR_SYNTHESIS,
-            WorkflowPhase.REPLAN,
-            WorkflowPhase.GAP_FILL,
-        }
-    ),
+    WorkflowPhase.EXECUTE: frozenset({WorkflowPhase.INGEST_FINDINGS}),
+    WorkflowPhase.INGEST_FINDINGS: frozenset({WorkflowPhase.COVERAGE_JUDGE}),
+    WorkflowPhase.COVERAGE_JUDGE: frozenset({WorkflowPhase.SUPERVISOR, WorkflowPhase.SYNTHESIS}),
+    WorkflowPhase.SYNTHESIS: frozenset({WorkflowPhase.QUALITY}),
+    WorkflowPhase.QUALITY: frozenset({WorkflowPhase.SYNTHESIS, WorkflowPhase.FINALIZE}),
     WorkflowPhase.FINALIZE: frozenset({WorkflowPhase.TERMINATED}),
     WorkflowPhase.TERMINATED: frozenset(),
 }
-
 
 def transition_allowed(current: WorkflowPhase | str, target: WorkflowPhase | str) -> bool:
     try:

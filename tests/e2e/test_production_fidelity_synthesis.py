@@ -407,7 +407,7 @@ def test_l3_release_blocker_research_cap_synthesis_timeout_yields_partial(
     assert result.metadata["synthesis_fail_reason"] == "synthesis_timeout"
     assert result.metadata["fallback_used"] == "semantic_digest"
     assert result.content.strip()
-    assert result.metadata["replan_count"] <= get_harness_config().max_replan_count
+    assert result.metadata["supervisor_iterations"] <= get_harness_config().max_replan_count
     assert not any("GraphRecursion" in str(event.get("error") or "") for event in events)
 
     integrity = summary["trace_integrity"]
