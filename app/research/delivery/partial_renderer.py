@@ -32,12 +32,12 @@ def render_partial_delivery(
         "",
         objective.strip() or "（未记录）",
         "",
-        "## 已获得的信息",
+        "## 已确认的信息",
         "",
     ]
     if findings:
         for finding in findings[:24]:
-            claim = str(finding.get("claim") or finding.get("summary") or "").strip()
+            claim = str(finding.get("claim") or finding.get("text") or finding.get("summary") or "").strip()
             if not claim:
                 continue
             evidence_ids = ", ".join(

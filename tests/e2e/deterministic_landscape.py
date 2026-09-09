@@ -32,6 +32,26 @@ def deterministic_search(**kwargs: Any) -> dict[str, Any]:
                 "raw_content": "Candidate AI startups and their recent funding milestones.",
             }
         ],
+        "candidates": [
+            {
+                "name": "月之暗面",
+                "aliases": ["Moonshot AI"],
+                "confidence": 0.9,
+                "selection_reason": "AI startup with recent funding and product signals",
+            },
+            {
+                "name": "智谱AI",
+                "aliases": ["Zhipu AI"],
+                "confidence": 0.88,
+                "selection_reason": "AI startup with commercialization signal",
+            },
+            {
+                "name": "DeepSeek",
+                "aliases": ["深度求索"],
+                "confidence": 0.92,
+                "selection_reason": "AI startup with technology and market signal",
+            },
+        ],
     }
 
 
@@ -92,14 +112,37 @@ class DeterministicAgent:
                 "messages": [
                     AIMessage(
                         content=json.dumps(
-                            {
-                                "ok": True,
-                                "summary": "Collected one landscape source.",
-                                "facts": ["Candidate AI startups have recent funding signals."],
-                                "sources": [card["url"]],
-                                "evidence_ids": [card["artifact_id"]],
-                                "artifact_ids": [card["artifact_id"]],
-                            },
+                        {
+                            "ok": True,
+                            "summary": "Collected one landscape source.",
+                            "facts": ["Candidate AI startups have recent funding signals."],
+                            "sources": [card["url"]],
+                            "evidence_ids": [card["artifact_id"]],
+                            "artifact_ids": [card["artifact_id"]],
+                            "candidates": [
+                                {
+                                    "name": "月之暗面",
+                                    "aliases": ["Moonshot AI"],
+                                    "confidence": 0.9,
+                                    "evidence_ids": [card["artifact_id"]],
+                                    "selection_reason": "AI startup with recent funding and product signals",
+                                },
+                                {
+                                    "name": "智谱AI",
+                                    "aliases": ["Zhipu AI"],
+                                    "confidence": 0.88,
+                                    "evidence_ids": [card["artifact_id"]],
+                                    "selection_reason": "AI startup with commercialization signal",
+                                },
+                                {
+                                    "name": "DeepSeek",
+                                    "aliases": ["深度求索"],
+                                    "confidence": 0.92,
+                                    "evidence_ids": [card["artifact_id"]],
+                                    "selection_reason": "AI startup with technology and market signal",
+                                },
+                            ],
+                        },
                             ensure_ascii=False,
                         )
                     )

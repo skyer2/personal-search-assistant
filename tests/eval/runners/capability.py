@@ -11,6 +11,8 @@ from app.research.coverage.assessor import assess_coverage
 from app.research.coverage.compiler import compile_coverage_contract
 from app.research.planning.expansion import expand_plan
 from app.research.planning.planner import plan_for_spec
+from app.research.planning.validator import commit_plan_mutation
+from app.research.planning.candidate import stable_candidate_id
 from app.research.spec.compiler import compile_research_spec
 from app.research.spec.models import Premise
 from app.research.spec.validator import validate_research_spec
@@ -111,7 +113,19 @@ def _grade_case(case: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
             issues.append("conflict policy missing")
 
         if case.get("candidate_names"):
-            expanded_contract = compile_coverage_contract(spec, candidate_names=list(case["candidate_names"]))
+            candidate_rows = [
+                {
+                    "name": name,
+                    "confidence": 0.9,
+                    "evidence_ids": [f"evidence_{index}"],
+                }
+                for index, name in enumerate(case["candidate_names"])
+            ]
+            candidate_ids = [
+                stable_candidate_id(str(candidate["name"]))
+                for candidate in candidate_rows
+            ]
+            expanded_contract = compile_coverage_contract(spec, candidate_ids=candidate_ids)
             expected_expanded = int(coverage_expect.get("expanded_unit_count", 0) or 0)
             if expected_expanded and len(expanded_contract.units) != expected_expanded:
                 issues.append(f"expanded coverage units: expected {expected_expanded}, got {len(expanded_contract.units)}")
@@ -124,13 +138,30 @@ def _grade_case(case: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
             candidate_set = {
                 "candidate_set_id": "candidate_set_regression",
                 "status": "complete",
-                "candidates": [{"name": name} for name in case["candidate_names"]],
+                "candidates": candidate_rows,
             }
             expansion = expand_plan(spec, candidate_set, plan_version=1)
-            if not expansion.applied:
+            if not expansion.applied or expansion.proposal is None:
                 issues.append(f"expansion rejected: {expansion.reason}")
-            if expansion.candidate_set.get("expanded_plan_version") != 2:
-                issues.append("candidate expansion did not increment plan version")
+            else:
+                mutation_state = {
+                    "research_spec": spec.to_dict(),
+                    "candidate_set": candidate_set,
+                    "plan_version": 1,
+                    "tasks": {},
+                    "worker_results": [],
+                }
+                try:
+                    mutation_update = commit_plan_mutation(expansion.proposal, mutation_state)
+                except Exception as error:
+                    issues.append(f"expansion commit rejected: {error}")
+                else:
+                    if mutation_update.get("plan_version") != 2:
+                        issues.append("candidate expansion did not increment plan version")
+                    if not mutation_update["candidate_set"].get("expanded"):
+                        issues.append("candidate expansion was not committed")
+                    if mutation_update["candidate_set"].get("expanded_plan_version") != 2:
+                        issues.append("candidate expansion did not record plan version")
 
         plan = plan_for_spec(spec, contract)
         task_kinds = [str((step.metadata or {}).get("task_kind") or "") for step in plan.steps]

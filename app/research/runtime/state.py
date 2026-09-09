@@ -9,6 +9,7 @@ from app.research.domain.contracts import LifecycleStatus, WorkflowPhase, new_ac
 from app.research.runtime.reducers import merge_dicts
 from app.research.runtime.reducers import merge_records
 from app.research.runtime.reducers import merge_strings
+from app.research.runtime.reducers import merge_semantic_waves
 from app.research.runtime.reducers import keep_last
 
 
@@ -80,6 +81,11 @@ class ResearchState(TypedDict):
     termination: dict[str, Any] | None
     cancel_reason: str
     abort_reason: str
+    planning_failure: dict[str, Any]
+    internal_error: dict[str, Any]
+    stop_reason: str
+    quality_failure: dict[str, Any]
+    coverage_failure: dict[str, Any]
 
     needs_clarification: bool
     needs_plan_review: bool
@@ -93,7 +99,7 @@ class ResearchState(TypedDict):
     synthesis_failed: bool
     candidate_set: Annotated[dict[str, Any], merge_dicts]
     marginal_gain: dict[str, Any]
-    semantic_wave_gains: list[dict[str, Any]]
+    semantic_wave_gains: Annotated[list[dict[str, Any]], merge_semantic_waves]
     semantic_stall: int
 
 
@@ -192,6 +198,11 @@ def empty_research_state(
         "termination": None,
         "cancel_reason": "",
         "abort_reason": "",
+        "planning_failure": {},
+        "internal_error": {},
+        "stop_reason": "",
+        "quality_failure": {},
+        "coverage_failure": {},
         "needs_clarification": False,
         "needs_plan_review": False,
         "progress_assessment": {},

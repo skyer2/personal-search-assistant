@@ -153,7 +153,14 @@ def test_inv_08_expand_plan_consumes_candidate_set():
     candidate_set = {
         "candidate_set_id": "candidate_set_01",
         "status": "complete",
-        "candidates": [{"candidate_id": "alpha", "name": "Alpha"}],
+        "candidates": [
+            {
+                "candidate_id": "alpha",
+                "name": "Alpha",
+                "confidence": 0.9,
+                "evidence_ids": ["evidence_alpha"],
+            }
+        ],
         "items": ["Alpha"],
         "available": True,
     }

@@ -13,6 +13,9 @@ class ResearchSubject:
     subject_id: str
     name: str
     aliases: list[str] = field(default_factory=list)
+    subject_type: str = "entity"
+    domain: str = ""
+    geography: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -24,6 +27,9 @@ class ResearchSubject:
             subject_id=str(row.get("subject_id") or ""),
             name=str(row.get("name") or ""),
             aliases=[str(item) for item in row.get("aliases") or []],
+            subject_type=str(row.get("subject_type") or "entity"),
+            domain=str(row.get("domain") or ""),
+            geography=str(row.get("geography") or ""),
         )
 
 

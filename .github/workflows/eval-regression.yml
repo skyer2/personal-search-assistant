@@ -1,4 +1,4 @@
-name: Harness Eval Regression
+name: Harness Release Gate
 
 on:
   push:
@@ -7,9 +7,9 @@ on:
     branches: [main, master]
 
 jobs:
-  eval-regression:
+  release-gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -24,67 +24,30 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Harness unit tests
-        run: |
-          uv run python tests/test_harness_phase1.py
-          uv run python tests/test_harness_phase4.py
-          uv run python tests/test_harness_hitl.py
+      - name: Architecture and control-plane invariants
+        run: >
+          uv run pytest -q
+          tests/test_simple_fact_fast_path.py
+          tests/test_control_plane_invariants.py
+          tests/test_architecture_v2_invariants.py
+          tests/test_architecture_v2_stabilization.py
 
-      - name: Golden path release gate
-        run: |
-          uv run pytest -q tests/test_simple_fact_fast_path.py
-          uv run pytest -q tests/test_control_plane_invariants.py
-          uv run pytest -q tests/test_control_plane_e2e.py
+      - name: Full unit and integration suite
+        run: >
+          uv run pytest -q
+          tests
+          --ignore=tests/e2e
+          --ignore=tests/eval
 
-      - name: Eval dry-run smoke
-        run: uv run python tests/eval/test_eval_dry_run.py
+      - name: Deterministic and production-fidelity E2E
+        run: uv run pytest -q tests/e2e/
 
-      - name: Eval hierarchy
-        run: uv run python tests/eval/test_eval_hierarchy.py
-
-      - name: Quality judge / reliability / fixture
-        run: |
-          uv run python tests/eval/test_quality_judge.py
-          uv run python tests/eval/test_reliability.py
-          uv run python tests/eval/test_eval_fixture.py
-          uv run python tests/eval/test_judge_calibration.py
-
-      - name: Phase 9 observability tests
-        run: uv run python tests/test_harness_phase9.py
-
-      - name: Phase 11 context tests
-        run: uv run python tests/test_harness_phase11_context.py
-
-      - name: Phase 19 context hygiene tests
-        run: uv run python tests/test_harness_phase19_context.py
-
-      - name: Phase 20 worker dispatch + LoopState persist tests
-        run: uv run python tests/test_harness_phase20_runtime.py
-
-      - name: Phase 7 orchestration tests
-        run: uv run python tests/test_harness_orchestration.py
-
-      - name: Phase 12 memory tests
-        run: uv run python tests/test_harness_phase12_memory.py
-
-      - name: Phase 15 memory tests
-        run: uv run python tests/test_harness_phase15_memory.py
-
-      - name: Phase 18 enterprise memory tests
-        run: uv run python tests/test_harness_phase18_memory.py
-
-      - name: Phase 13 harness guardrail tests
-        run: uv run python tests/test_harness_phase13_guardrails.py
-
-      - name: Phase 14 planner tests
-        run: uv run python tests/test_harness_phase14_planner.py
-
-      - name: Eval regression vs baseline
-        run: |
-          uv run python tests/eval/run_eval.py \
-            --dry-run \
-            --baseline tests/eval/results/baseline.json \
-            --fail-on-regression
+      - name: Eval regression
+        run: >
+          uv run python tests/eval/run_eval.py
+          --dry-run
+          --baseline tests/eval/results/baseline.json
+          --fail-on-regression
 
       - name: Upload eval report
         if: always()

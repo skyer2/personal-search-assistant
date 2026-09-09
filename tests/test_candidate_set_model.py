@@ -2,13 +2,23 @@ from app.research.planning.candidate import CandidateSet
 
 
 def test_candidate_set_roundtrip_and_lifecycle_fields():
-    payload = CandidateSet(
-        candidate_set_id="cs1",
-        status="complete",
-        candidates=[],
-        source_task_ids=["t_discovery"],
-    ).to_dict()
-    payload["items"] = ["Alpha", "Beta"]
+    payload = {
+        "candidate_set_id": "cs1",
+        "status": "complete",
+        "candidates": [
+            {
+                "name": "Alpha",
+                "confidence": 0.9,
+                "evidence_ids": ["evidence_alpha"],
+            },
+            {
+                "name": "Beta",
+                "confidence": 0.9,
+                "evidence_ids": ["evidence_beta"],
+            },
+        ],
+        "source_task_ids": ["t_discovery"],
+    }
     candidate_set = CandidateSet.from_dict(payload)
     assert candidate_set.available
     assert candidate_set.items == ["Alpha", "Beta"]

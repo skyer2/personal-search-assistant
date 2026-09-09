@@ -13,6 +13,8 @@ from app.research.coverage.compiler import compile_coverage_contract
 from app.research.control.policy import decide_control
 from app.research.control.terminal_policy import terminal_update
 from app.research.control.transitions import transition_update
+from app.research.delivery.partial_renderer import render_partial_delivery
+from app.research.delivery.synthesis_context import EvidenceDigest
 from app.research.domain.contracts import ControlAction, WorkflowPhase, action_budget_from_state
 from app.research.domain.task_state import (
     ResultStatus,
@@ -25,7 +27,11 @@ from app.research.planning.expansion import expand_plan
 from app.research.planning.gap_fill import gap_fill
 from app.research.planning.planner import plan_for_spec
 from app.research.planning.replan import replan
-from app.research.planning.validator import validate_execution_plan
+from app.research.planning.validator import (
+    PlanMutationRejected,
+    commit_plan_mutation,
+    validate_execution_plan,
+)
 from app.research.runtime.semantic_ingest import ingest_semantics
 from app.research.runtime.state import ResearchState, empty_research_state
 from app.research.routing.mode_router import canonicalize_mode
@@ -127,7 +133,10 @@ def plan_validate_node(state: ResearchState) -> dict[str, Any]:
     ) if plan is not None else ["missing_plan"]
     payload: dict[str, Any] = {}
     if issues:
+        payload["planning_failure"] = _planning_failure("plan_validation_failed", issues, "plan_validate")
         payload["abort_reason"] = f"plan_validation_failed:{','.join(issues)}"
+    elif isinstance(state.get("planning_failure"), dict) and state.get("planning_failure"):
+        payload["planning_failure"] = state["planning_failure"]
     return transition_update(state, WorkflowPhase.PLAN_VALIDATED, payload)
 
 
@@ -229,7 +238,11 @@ def research_worker_node(state: ResearchState) -> dict[str, Any]:
     if str(metadata.get("task_kind") or "") == "discovery":
         target_items = max(1, int(metadata.get("target_items") or 4))
         candidates = [
-            {"candidate_id": f"candidate_{index}", "name": f"Candidate {index}"}
+            {
+                "name": f"Candidate {index}",
+                "confidence": 0.8,
+                "evidence_ids": evidence_ids,
+            }
             for index in range(1, target_items + 1)
         ]
     return {
@@ -314,6 +327,16 @@ def _increment_action(state: ResearchState, action: str) -> dict[str, int]:
     return budget
 
 
+def _planning_failure(reason: str, issues: list[str] | None = None, origin_stage: str = "plan_validate") -> dict[str, Any]:
+    return {
+        "code": "plan_validation_failed" if issues else reason,
+        "message": reason,
+        "origin_stage": origin_stage,
+        "detected_stage": origin_stage,
+        "issues": list(issues or []),
+    }
+
+
 def gap_fill_node(state: ResearchState) -> dict[str, Any]:
     budget = action_budget_from_state(dict(state))
     result = gap_fill(
@@ -323,18 +346,33 @@ def gap_fill_node(state: ResearchState) -> dict[str, Any]:
         max_tasks=max(0, int(budget["max_gap_fill"] - budget["gap_fill"])),
     )
     if not result.applied:
-        return transition_update(state, WorkflowPhase.GAP_FILL, {"abort_reason": result.reason})
-    tasks = {**state.get("tasks", {}), **initialize_tasks(result.plan)}
+        return transition_update(
+            state,
+            WorkflowPhase.GAP_FILL,
+            {"planning_failure": _planning_failure(result.reason, origin_stage="gap_fill"), "abort_reason": result.reason},
+        )
+    if result.mutation is None:
+        return transition_update(
+            state,
+            WorkflowPhase.GAP_FILL,
+            {"planning_failure": _planning_failure("missing_mutation_proposal", origin_stage="gap_fill")},
+        )
+    try:
+        update = commit_plan_mutation(result.mutation, dict(state))
+    except PlanMutationRejected as exc:
+        return transition_update(
+            state,
+            WorkflowPhase.GAP_FILL,
+            {
+                "planning_failure": _planning_failure("plan_validation_failed", exc.issues, "gap_fill"),
+                "abort_reason": f"plan_validation_failed:{','.join(exc.issues)}",
+            },
+        )
+    update["action_budget"] = _increment_action(state, "gap_fill")
     return transition_update(
         state,
         WorkflowPhase.GAP_FILL,
-        {
-            "plan": result.plan.to_dict(),
-            "plan_version": result.plan.plan_version,
-            "tasks": tasks,
-            "semantic_gaps": result.semantic_gaps,
-            "action_budget": _increment_action(state, "gap_fill"),
-        },
+        update,
     )
 
 
@@ -345,19 +383,33 @@ def expand_plan_node(state: ResearchState) -> dict[str, Any]:
         plan_version=int(state.get("plan_version") or 1),
     )
     if not result.applied:
-        return transition_update(state, WorkflowPhase.EXPAND_PLAN, {"abort_reason": result.reason})
-    tasks = {**state.get("tasks", {}), **initialize_tasks(result.plan)}
+        return transition_update(
+            state,
+            WorkflowPhase.EXPAND_PLAN,
+            {"planning_failure": _planning_failure(result.reason, origin_stage="expand_plan"), "abort_reason": result.reason},
+        )
+    if result.proposal is None:
+        return transition_update(
+            state,
+            WorkflowPhase.EXPAND_PLAN,
+            {"planning_failure": _planning_failure("missing_mutation_proposal", origin_stage="expand_plan")},
+        )
+    try:
+        update = commit_plan_mutation(result.proposal, dict(state))
+    except PlanMutationRejected as exc:
+        return transition_update(
+            state,
+            WorkflowPhase.EXPAND_PLAN,
+            {
+                "planning_failure": _planning_failure("plan_validation_failed", exc.issues, "expand_plan"),
+                "abort_reason": f"plan_validation_failed:{','.join(exc.issues)}",
+            },
+        )
+    update["action_budget"] = _increment_action(state, "expand_plan")
     return transition_update(
         state,
         WorkflowPhase.EXPAND_PLAN,
-        {
-            "candidate_set": result.candidate_set,
-            "coverage_contract": result.coverage_contract.to_dict(),
-            "plan": result.plan.to_dict(),
-            "plan_version": result.plan.plan_version,
-            "tasks": tasks,
-            "action_budget": _increment_action(state, "expand_plan"),
-        },
+        update,
     )
 
 
@@ -371,18 +423,33 @@ def replan_node(state: ResearchState) -> dict[str, Any]:
         plan_version=int(state.get("plan_version") or 1),
     )
     if not result.applied:
-        return transition_update(state, WorkflowPhase.REPLAN, {"abort_reason": result.reason})
-    tasks = {**result.tasks, **initialize_tasks(result.plan)}
+        return transition_update(
+            state,
+            WorkflowPhase.REPLAN,
+            {"planning_failure": _planning_failure(result.reason, origin_stage="replan"), "abort_reason": result.reason},
+        )
+    if result.mutation is None:
+        return transition_update(
+            state,
+            WorkflowPhase.REPLAN,
+            {"planning_failure": _planning_failure("missing_mutation_proposal", origin_stage="replan")},
+        )
+    try:
+        update = commit_plan_mutation(result.mutation, dict(state))
+    except PlanMutationRejected as exc:
+        return transition_update(
+            state,
+            WorkflowPhase.REPLAN,
+            {
+                "planning_failure": _planning_failure("plan_validation_failed", exc.issues, "replan"),
+                "abort_reason": f"plan_validation_failed:{','.join(exc.issues)}",
+            },
+        )
+    update["action_budget"] = _increment_action(state, "replan")
     return transition_update(
         state,
         WorkflowPhase.REPLAN,
-        {
-            "plan": result.plan.to_dict(),
-            "plan_version": result.plan.plan_version,
-            "tasks": tasks,
-            "semantic_gaps": result.semantic_gaps,
-            "action_budget": _increment_action(state, "replan"),
-        },
+        update,
     )
 
 
@@ -418,7 +485,49 @@ def _semantic_digest(state: ResearchState, *, compact: bool) -> str:
 
 def synthesize_node(state: ResearchState) -> dict[str, Any]:
     compact = int(state.get("synthesis_attempts") or 0) >= 1
-    content = _semantic_digest(state, compact=compact)
+    progress = assess_progress(dict(state))
+    decision = _state_decision(state)
+    degraded = progress["status"] != "sufficient" or decision.get("action") == ControlAction.DELIVER_PARTIAL.value
+    if degraded:
+        claims = [row for row in state.get("claims") or [] if isinstance(row, dict)]
+        evidence_records = [row for row in state.get("evidence_records") or [] if isinstance(row, dict)]
+        evidence_ids = {str(row.get("evidence_id") or "") for row in evidence_records}
+        digests = [
+            EvidenceDigest(
+                evidence_id=str(row.get("evidence_id") or ""),
+                title=str(row.get("source_id") or row.get("locator") or row.get("evidence_id") or ""),
+                locator=str(row.get("locator") or ""),
+                excerpt=str(row.get("excerpt_ref") or ""),
+                supported_claims=tuple(
+                    str(claim.get("text") or claim.get("claim") or "")
+                    for claim in claims
+                    if str(row.get("evidence_id") or "") in [str(item) for item in claim.get("evidence_ids") or []]
+                ),
+            )
+            for row in evidence_records[:24]
+        ]
+        worker_failure_reasons = [
+            str(task.get("failure", {}).get("code") or "")
+            for task in dict(state.get("tasks") or {}).values()
+            if isinstance(task, dict) and task.get("failure")
+        ]
+        content = render_partial_delivery(
+            objective=ResearchSpec.from_dict(state.get("research_spec")).objective,
+            findings=claims,
+            evidence_digests=digests,
+            worker_summaries=[row for row in state.get("worker_results") or [] if isinstance(row, dict)],
+            semantic_gaps=[str(item) for item in dict(state.get("semantic_gaps") or {}).keys()],
+            limitations=[
+                *[f"Uncovered coverage unit: {item}" for item in (state.get("coverage_state") or {}).get("missing_ids") or []],
+                *( [f"Planning failure: {state['planning_failure'].get('code')}"] if state.get("planning_failure") else [] ),
+                *( [f"Stop reason: {state.get('stop_reason')}"] if state.get("stop_reason") else [] ),
+            ],
+            unresolved_conflicts=[str(item) for item in (state.get("coverage_state") or {}).get("conflicted_ids") or []],
+            worker_failure_reasons=worker_failure_reasons,
+            synthesis_failure_reason="synthesis_failed" if state.get("synthesis_failed") else "",
+        )
+    else:
+        content = _semantic_digest(state, compact=compact)
     return transition_update(
         state,
         WorkflowPhase.SYNTHESIS,
@@ -510,12 +619,26 @@ def repair_synthesis_node(state: ResearchState) -> dict[str, Any]:
 
 def finalize_node(state: ResearchState) -> dict[str, Any]:
     progress = assess_progress(dict(state))
+    planning_failure = state.get("planning_failure") if isinstance(state.get("planning_failure"), dict) else {}
+    quality = state.get("quality_assessment") if isinstance(state.get("quality_assessment"), dict) else {}
+    reason = (
+        str(planning_failure.get("code") or "")
+        or str(state.get("stop_reason") or "")
+        or ("quality_failed" if quality.get("verdict") == "fail" else "")
+        or ("coverage_incomplete" if progress["status"] != "sufficient" else "")
+        or str((state.get("termination") or {}).get("outcome") or "incomplete")
+    )
+    origin_stage = str(planning_failure.get("origin_stage") or "") or (
+        "worker" if state.get("stop_reason") in {"timeout", "budget", "policy"} else "finalize"
+    )
     terminal = terminal_update(
         state,
-        reason=str((state.get("termination") or {}).get("outcome") or "incomplete"),
+        reason=reason,
         stage="finalize",
+        detected_stage="finalize",
+        origin_stage=origin_stage,
         research_completed=progress["status"] == "sufficient",
-        synthesis_attempted=bool(state.get("final_content")),
+        synthesis_attempted=bool(state.get("final_content")) or int(state.get("synthesis_attempts") or 0) > 0,
         quality_attempted=bool(state.get("quality_assessment")),
     )
     return {

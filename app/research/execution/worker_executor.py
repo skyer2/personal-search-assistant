@@ -285,6 +285,7 @@ class WorkerExecutorV2:
                     pass
             try:
                 from app.observability import EventType, get_recorder
+                from app.research.domain.task_state import worker_result_lifecycle
 
                 recorder = get_recorder()
                 if recorder.is_active:
@@ -292,23 +293,24 @@ class WorkerExecutorV2:
                     if worker_result is None:
                         execution_status = "failed"
                         result_status = "none"
+                        stop_reason = "none"
                     elif worker_result.ok:
                         execution_status = "succeeded"
                         result_status = "complete"
+                        stop_reason = "none"
                     elif worker_result.status == "skipped":
                         execution_status = "skipped"
                         result_status = "none"
+                        stop_reason = "none"
                     else:
-                        execution_status = "failed"
-                        result_status = (
-                            "partial"
-                            if worker_result.evidence_refs or worker_result.findings
-                            else "none"
-                        )
+                        lifecycle_status, lifecycle_result, lifecycle_stop, _ = worker_result_lifecycle(worker_result)
+                        execution_status = lifecycle_status.value
+                        result_status = lifecycle_result.value
+                        stop_reason = lifecycle_stop.value
                     recorder.emit(
                         EventType.WORKER_COMPLETED if worker_ok else EventType.WORKER_FAILED,
                         phase="execute",
-                        status="ok" if worker_ok else "failed",
+                        status=execution_status,
                         task_id=task.task_id,
                         plan_version=task.plan_version,
                         attempt=task.attempt,
@@ -323,6 +325,7 @@ class WorkerExecutorV2:
                             dispatch_wave_id=task.dispatch_wave_id,
                             execution_status=execution_status,
                             result_status=result_status,
+                            stop_reason=stop_reason,
                             fail_reason=(
                                 worker_result.fail_reason
                                 if worker_result is not None
@@ -707,7 +710,8 @@ class WorkerExecutorV2:
         evidence_refs = list(salvaged.get("evidence_refs") or [])
         sources = list(salvaged.get("sources") or [])
         facts = list(salvaged.get("facts") or [])
-        if not findings and not evidence_refs and not sources and not facts:
+        candidates = list(salvaged.get("candidates") or [])
+        if not findings and not evidence_refs and not sources and not facts and not candidates:
             return self._result(
                 task,
                 started,
@@ -724,6 +728,7 @@ class WorkerExecutorV2:
             "sources": sources,
             "findings": findings,
             "artifact_ids": evidence_refs,
+            "candidates": candidates,
             "error_code": fail_reason,
             "worker": step.subagent or "",
             "step_type": step.step_type,

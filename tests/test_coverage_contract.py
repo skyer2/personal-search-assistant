@@ -1,16 +1,20 @@
 from app.research.coverage.assessor import assess_coverage
 from app.research.coverage.compiler import compile_coverage_contract
+from app.research.planning.candidate import stable_candidate_id
 from app.research.spec.compiler import compile_research_spec
 
 
 def test_landscape_contract_expands_after_candidate_discovery():
     spec = compile_research_spec("国内有哪些值得关注的 AI 初创公司？")
     initial = compile_coverage_contract(spec)
-    expanded = compile_coverage_contract(spec, candidate_names=["Alpha", "Beta"])
+    candidate_ids = [stable_candidate_id("Alpha"), stable_candidate_id("Beta")]
+    expanded = compile_coverage_contract(spec, candidate_ids=candidate_ids)
     assert any(unit.dimension_id == "candidate_set" for unit in initial.units)
     assert not any(unit.dimension_id == "candidate_set" for unit in expanded.units)
     assert len(expanded.units) > len(initial.units)
-    assert {u.subject_id for u in expanded.units} >= {"candidate:Alpha", "candidate:Beta"}
+    assert {u.subject_id for u in expanded.units} >= {
+        f"candidate:{candidate_id}" for candidate_id in candidate_ids
+    }
 
 
 def test_coverage_is_recomputed_from_claims_and_evidence():

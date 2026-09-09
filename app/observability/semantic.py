@@ -280,6 +280,16 @@ def build_lineage_edges(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 continue
             in_ids = []
             out_ids = []
+            if event_type == "evidence.registered":
+                task_id = str(event.get("task_id") or attrs.get("task_id") or "")
+                if task_id:
+                    in_ids.append({"type": "task", "id": task_id})
+            if event_type in {"synthesis.completed", "synthesis.failed"}:
+                in_ids.extend(
+                    {"type": "evidence", "id": str(evidence_id)}
+                    for evidence_id in attrs.get("evidence_ids") or []
+                    if str(evidence_id).strip()
+                )
             for key in ("brief_id", "plan_id", "progress_id"):
                 if attrs.get(key):
                     in_ids.append({"type": key.replace("_id", ""), "id": attrs.get(key)})
@@ -289,6 +299,8 @@ def build_lineage_edges(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for evidence_id in attrs.get("evidence_ids") or []:
                 if str(evidence_id).strip():
                     out_ids.append({"type": "evidence", "id": str(evidence_id)})
+            if event_type in {"synthesis.completed", "synthesis.failed"} and in_ids:
+                out_ids.append({"type": "synthesis", "id": str(event.get("span_id") or event.get("event_id") or "")})
             inputs = in_ids
             outputs = out_ids
 

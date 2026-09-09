@@ -18,7 +18,7 @@ from app.research.coverage.gaps import build_semantic_gaps
 from app.research.evidence.admission import admit_evidence
 from app.research.evidence.models import EvidenceRecord
 from app.research.evidence.policy import registrable_domain
-from app.research.planning.candidate import build_candidate_set
+from app.research.planning.candidate import Candidate, build_candidate_set
 from app.research.spec.models import ResearchSpec
 
 
@@ -158,7 +158,7 @@ def ingest_semantics(state: dict[str, Any]) -> dict[str, Any]:
     reconciliation = resolve_edges(claims, edges)
 
     candidate_update: dict[str, Any] = {}
-    candidate_names: list[str] | None = None
+    candidate_ids: list[str] | None = None
     discovery_steps = [
         step
         for step in (plan.steps if plan else [])
@@ -178,13 +178,21 @@ def ingest_semantics(state: dict[str, Any]) -> dict[str, Any]:
         )
         candidate_update = {"candidate_set": candidate_payload}
         if candidate_payload.get("available"):
-            candidate_names = [str(item) for item in candidate_payload.get("items") or []]
+            candidate_ids = [
+                Candidate.from_dict(row).candidate_id
+                for row in candidate_payload.get("candidates") or []
+                if isinstance(row, dict)
+            ]
     else:
         existing = state.get("candidate_set") if isinstance(state.get("candidate_set"), dict) else {}
         if existing.get("available"):
-            candidate_names = [str(item) for item in existing.get("items") or []]
+            candidate_ids = [
+                Candidate.from_dict(row).candidate_id
+                for row in existing.get("candidates") or []
+                if isinstance(row, dict)
+            ]
 
-    contract = compile_coverage_contract(spec, candidate_names=candidate_names)
+    contract = compile_coverage_contract(spec, candidate_ids=candidate_ids)
     coverage = assess_coverage(
         contract,
         claims=[claim.to_dict() for claim in claims],
@@ -247,7 +255,10 @@ def ingest_semantics(state: dict[str, Any]) -> dict[str, Any]:
         "claim_resolutions": [row.to_dict() for row in reconciliation.resolutions],
         "semantic_gaps": {gap.gap_id: gap.to_dict() for gap in gaps},
         "findings": [claim.to_dict() for claim in claims],
-        "semantic_wave_gains": [wave_gain.to_dict()],
+        "semantic_wave_gains": [
+            *(state.get("semantic_wave_gains") or []),
+            wave_gain.to_dict(),
+        ],
         "marginal_gain": marginal.to_dict(),
         "semantic_stall": 2 if marginal.stalled else 0,
         **candidate_update,

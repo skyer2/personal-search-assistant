@@ -14,8 +14,19 @@ class FinalOutcome(StrEnum):
 
 
 def decide_terminal_outcome(state: dict[str, Any]) -> FinalOutcome:
-    if str(state.get("cancel_reason") or state.get("abort_reason") or "") in {"cancelled", "user_cancelled"}:
+    if str(state.get("cancel_reason") or "") in {"cancelled", "user_cancelled"}:
         return FinalOutcome.CANCELLED
+    evidence = state.get("evidence_assessment")
+    evidence_status = str(evidence.get("status") or "") if isinstance(evidence, dict) else ""
+    usable_evidence = evidence_status in {"partial", "sufficient"} or bool(
+        [row for row in state.get("evidence_records") or [] if isinstance(row, dict)]
+    )
+    typed_failure = any(
+        isinstance(state.get(key), dict) and state.get(key)
+        for key in ("planning_failure", "internal_error")
+    ) or str(state.get("stop_reason") or "") in {"timeout", "budget"}
+    if typed_failure and bool(str(state.get("final_content") or "").strip()) and usable_evidence:
+        return FinalOutcome.PARTIAL
     quality = state.get("quality_assessment")
     if not isinstance(quality, dict):
         return FinalOutcome.FAILED

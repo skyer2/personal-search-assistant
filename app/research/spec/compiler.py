@@ -53,6 +53,19 @@ def _shape(query: str) -> str:
 def _subjects(query: str, shape: str) -> list[ResearchSubject]:
     if not query.strip():
         return []
+    if shape == "DYNAMIC_DISCOVERY":
+        lowered = query.lower()
+        domain = "AI startup" if ("ai" in lowered or "人工智能" in query) else "general landscape"
+        geography = "China" if any(marker in query for marker in ("国内", "中国")) else "global"
+        return [
+            ResearchSubject(
+                subject_id=f"company_landscape:{domain.lower().replace(' ', '_')}:{geography.lower()}",
+                name=f"{geography} {domain}" if geography == "China" else f"{domain} candidates",
+                subject_type="company_landscape",
+                domain=domain,
+                geography=geography,
+            )
+        ]
     if shape == "BREADTH_HEAVY":
         fragments = [
             fragment.strip()
@@ -72,11 +85,19 @@ def _dimensions(query: str, shape: str) -> list[ResearchDimension]:
     if not query.strip():
         return []
     if shape in {"BREADTH_HEAVY", "DYNAMIC_DISCOVERY"}:
-        return [
+        dimensions = [
             ResearchDimension("candidate_set", "候选集", "Discovery output", True),
             ResearchDimension("commercialization", "商业化", "Business viability", True),
             ResearchDimension("technology", "技术", "Technical capability", True),
+            ResearchDimension("team", "团队", "Founder and execution team", True),
+            ResearchDimension("funding", "融资", "Funding and investor signal", True),
+            ResearchDimension("market_position", "市场位置", "Market position and competition", True),
+            ResearchDimension("career_opportunity", "职业机会", "Career growth and joining value", True),
+            ResearchDimension("risk", "风险", "Business, technology, and policy risk", True),
         ]
+        if shape == "BREADTH_HEAVY":
+            dimensions = [dimension for dimension in dimensions if dimension.dimension_id != "candidate_set"]
+        return dimensions
     dimensions = [ResearchDimension("key_fact", "关键事实", "Query-centered fact", True)]
     if shape in {"SINGLE_TOPIC_DEEP_DIVE", "DETERMINISTIC_PIPELINE"}:
         for dimension_id, hints in _DIMENSION_HINTS:

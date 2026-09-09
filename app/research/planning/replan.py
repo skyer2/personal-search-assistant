@@ -10,6 +10,7 @@ from typing import Any
 from app.agent.harness.state import ExecutionPlan, PlanStep
 from app.research.coverage.gaps import SemanticGap
 from app.research.domain.task_state import supersede_task
+from app.research.planning.validator import PlanMutationProposal
 from app.research.spec.models import ResearchSpec
 
 
@@ -31,6 +32,7 @@ class ReplanResult:
     plan: ExecutionPlan
     tasks: dict[str, dict[str, Any]]
     semantic_gaps: dict[str, dict[str, Any]]
+    mutation: PlanMutationProposal | None = None
 
 
 def strategy_fingerprint(plan: ExecutionPlan | dict[str, Any] | None) -> str:
@@ -177,6 +179,17 @@ def replan(
             tasks=updated_tasks,
             semantic_gaps={},
         )
+    mutation = PlanMutationProposal(
+        mutation_type="replan",
+        proposed_plan=new_plan,
+        proposed_tasks=updated_tasks,
+        proposed_semantic_gaps=updated_gaps,
+        metadata={
+            "reason": "strategy_changed",
+            "failed_strategy": proposal.failed_strategy,
+            "new_strategy": proposal.new_strategy,
+        },
+    )
     return ReplanResult(
         applied=True,
         reason="strategy_changed",
@@ -184,6 +197,7 @@ def replan(
         plan=new_plan,
         tasks=updated_tasks,
         semantic_gaps=updated_gaps,
+        mutation=mutation,
     )
 
 

@@ -93,6 +93,8 @@ def _decision(
     decision_id = hashlib.sha256(
         json.dumps(fingerprint, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
     ).hexdigest()[:20]
+
+
     return ControlDecision(
         decision_id=decision_id,
         action=action.value,
@@ -119,11 +121,53 @@ def _decision(
     )
 
 
+def _usable_evidence(state: dict[str, Any]) -> bool:
+    assessment = state.get("evidence_assessment")
+    if isinstance(assessment, dict):
+        if str(assessment.get("status") or "") in {EvidenceStatus.PARTIAL.value, EvidenceStatus.SUFFICIENT.value}:
+            return True
+        if int(assessment.get("evidence_count") or 0) > 0:
+            return True
+    return bool([row for row in state.get("evidence_records") or [] if isinstance(row, dict)])
+
+
 def decide_control(state: dict[str, Any]) -> ControlDecision:
     if str(state.get("cancel_reason") or ""):
         return _decision(state, ControlAction.CANCEL, reasons=["user_cancelled"])
-    if str(state.get("abort_reason") or ""):
-        return _decision(state, ControlAction.CANCEL, reasons=["policy_stop"])
+
+    internal_error = state.get("internal_error")
+    if isinstance(internal_error, dict) and internal_error:
+        if _usable_evidence(state):
+            return _decision(state, ControlAction.DELIVER_PARTIAL, mode=DeliveryMode.PARTIAL_ONLY.value, reasons=["internal_error", "usable_partial_evidence"])
+        return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=["internal_error"])
+
+    planning_failure = state.get("planning_failure")
+    abort_reason = str(state.get("abort_reason") or "")
+    if not isinstance(planning_failure, dict) or not planning_failure:
+        if abort_reason.startswith("plan_validation_failed"):
+            planning_failure = {
+                "code": "plan_validation_failed",
+                "message": abort_reason,
+                "origin_stage": "plan_validate",
+                "detected_stage": "plan_validate",
+            }
+        else:
+            planning_failure = {}
+    if isinstance(planning_failure, dict) and planning_failure:
+        if _usable_evidence(state):
+            return _decision(state, ControlAction.DELIVER_PARTIAL, mode=DeliveryMode.PARTIAL_ONLY.value, reasons=["planning_failed", "usable_partial_evidence"])
+        return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=["planning_failed"])
+
+    stop_reason = str(state.get("stop_reason") or "")
+    if stop_reason in {"timeout", "budget"}:
+        if _usable_evidence(state):
+            return _decision(
+                state,
+                ControlAction.DELIVER_PARTIAL,
+                mode=DeliveryMode.PARTIAL_ONLY.value,
+                reasons=[f"{stop_reason}_stop", "usable_partial_evidence"],
+            )
+        return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=[f"{stop_reason}_stop", "no_usable_evidence"])
 
     quality = assess_quality(state)
     if quality["verdict"] != QualityVerdict.UNKNOWN.value:

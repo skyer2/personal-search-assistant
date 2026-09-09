@@ -90,6 +90,11 @@ def compact_search_payload(
     cards: list[dict[str, Any]] = []
     artifact_ids: list[str] = []
     limit = max(1, contract.max_rows)
+    structured_candidates = [
+        dict(item)
+        for item in data.get("candidates") or []
+        if isinstance(item, dict)
+    ]
     for item in results[:limit]:
         if not isinstance(item, dict):
             item = {"content": str(item)}
@@ -108,6 +113,7 @@ def compact_search_payload(
             metadata={
                 "tool_name": tool_name,
                 "score": item.get("score"),
+                **({"candidates": structured_candidates} if structured_candidates else {}),
                 **({"task_id": worker_task_id} if worker_task_id else {}),
                 **({"step_index": step_index} if step_index >= 0 else {}),
                 **({"run_id": run_id} if run_id else {}),

@@ -19,7 +19,17 @@ _ALLOWED: dict[WorkflowPhase, frozenset[WorkflowPhase]] = {
     WorkflowPhase.CLARIFY: frozenset({WorkflowPhase.COMPILE_SPEC}),
     WorkflowPhase.PLAN: frozenset({WorkflowPhase.PLAN_VALIDATED}),
     WorkflowPhase.PLAN_VALIDATED: frozenset({WorkflowPhase.DISPATCH}),
-    WorkflowPhase.DISPATCH: frozenset({WorkflowPhase.EXECUTE, WorkflowPhase.INGEST_SEMANTICS}),
+    WorkflowPhase.DISPATCH: frozenset(
+        {
+            WorkflowPhase.EXECUTE,
+            WorkflowPhase.INGEST_SEMANTICS,
+            WorkflowPhase.GAP_FILL,
+            WorkflowPhase.EXPAND_PLAN,
+            WorkflowPhase.REPLAN,
+            WorkflowPhase.SYNTHESIS,
+            WorkflowPhase.FINALIZE,
+        }
+    ),
     WorkflowPhase.EXECUTE: frozenset({WorkflowPhase.INGEST_SEMANTICS}),
     WorkflowPhase.INGEST_SEMANTICS: frozenset({WorkflowPhase.ASSESS}),
     WorkflowPhase.ASSESS: frozenset(

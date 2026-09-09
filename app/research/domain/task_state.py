@@ -187,6 +187,47 @@ def transition_task(
     return normalized
 
 
+def worker_result_lifecycle(result: Any) -> tuple[TaskExecutionStatus, ResultStatus, StopReason, dict[str, Any]]:
+    """Map an executor result onto orthogonal execution and result statuses."""
+    from app.research.domain.failure import classify_failure
+
+    ok = bool(getattr(result, "ok", False))
+    status = str(getattr(result, "status", "") or "").lower()
+    fail_reason = str(getattr(result, "fail_reason", "") or status or "unknown_failure")
+    evidence = list(getattr(result, "evidence_refs", None) or [])
+    findings = list(getattr(result, "findings", None) or [])
+    has_partial_result = bool(evidence or findings)
+    failure = dict(classify_failure(fail_reason))
+
+    if ok:
+        return TaskExecutionStatus.SUCCEEDED, ResultStatus.COMPLETE, StopReason.NONE, {}
+    if status == "skipped":
+        return TaskExecutionStatus.SKIPPED, ResultStatus.NONE, StopReason.NONE, {}
+
+    lowered = fail_reason.lower()
+    if "timeout" in lowered:
+        if has_partial_result:
+            return TaskExecutionStatus.STOPPED, ResultStatus.PARTIAL, StopReason.TIMEOUT, failure
+        return TaskExecutionStatus.FAILED, ResultStatus.NONE, StopReason.TIMEOUT, failure
+    if "budget" in lowered or "token_cap" in lowered or "deadline" in lowered:
+        if has_partial_result:
+            return TaskExecutionStatus.STOPPED, ResultStatus.PARTIAL, StopReason.BUDGET, failure
+        return TaskExecutionStatus.FAILED, ResultStatus.NONE, StopReason.BUDGET, failure
+    if status == "blocked" or "policy" in lowered or "resource" in lowered or "source_restricted" in lowered:
+        return (
+            TaskExecutionStatus.STOPPED,
+            ResultStatus.PARTIAL if has_partial_result else ResultStatus.NONE,
+            StopReason.POLICY,
+            failure,
+        )
+    return (
+        TaskExecutionStatus.FAILED,
+        ResultStatus.PARTIAL if has_partial_result else ResultStatus.NONE,
+        StopReason.NONE,
+        failure,
+    )
+
+
 def task_readiness(
     step: Any,
     tasks: Any,
@@ -247,4 +288,5 @@ __all__ = [
     "task_execution_projection",
     "task_readiness",
     "transition_task",
+    "worker_result_lifecycle",
 ]

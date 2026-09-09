@@ -70,8 +70,18 @@ def structured_evidence_from_artifact(artifact: Any) -> dict[str, Any]:
         for key in ("results", "items", "data", "documents"):
             collect(value.get(key))
 
+    metadata = getattr(artifact, "metadata", {}) or {}
+    structured_candidates = [
+        dict(item)
+        for item in metadata.get("candidates") or []
+        if isinstance(item, dict)
+    ] if isinstance(metadata, dict) else []
+    parsed: Any = None
     try:
-        collect(json.loads(raw_content))
+        parsed = json.loads(raw_content)
+        collect(parsed)
+        if isinstance(parsed, dict) and isinstance(parsed.get("candidates"), list):
+            structured_candidates = [dict(item) for item in parsed["candidates"] if isinstance(item, dict)]
     except (TypeError, ValueError, json.JSONDecodeError):
         fragments = []
     if not fragments and summary_content and summary_content != raw_content:
@@ -97,6 +107,7 @@ def structured_evidence_from_artifact(artifact: Any) -> dict[str, Any]:
         "title": title[:200],
         "excerpt": summary,
         "facts": evidence_facts,
+        "candidates": structured_candidates,
         "trust": "external_extracted",
         "instruction_free": True,
     }

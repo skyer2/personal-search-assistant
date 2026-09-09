@@ -97,6 +97,7 @@ def worker_row(task_id: str, step: PlanStep, ok: bool, result: StepResult | None
             "confidence": float(payload.get("confidence") or (1.0 if ok else 0.0)),
             "findings": list(payload.get("findings") or [])[:12],
             "evidence_ids": list(payload.get("evidence_ids") or [])[:20],
+            "candidates": list(payload.get("candidates") or [])[:16],
         },
     }
 

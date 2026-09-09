@@ -9,6 +9,7 @@ from typing import Any
 
 from app.agent.harness.state import ExecutionPlan, PlanStep
 from app.research.coverage.gaps import SemanticGap
+from app.research.planning.validator import PlanMutationProposal
 from app.research.spec.models import ResearchSpec
 
 
@@ -18,6 +19,7 @@ class GapFillResult:
     reason: str
     plan: ExecutionPlan
     semantic_gaps: dict[str, dict[str, Any]]
+    mutation: PlanMutationProposal | None = None
 
 
 def _task_id(gap: SemanticGap) -> str:
@@ -98,11 +100,18 @@ def gap_fill(
         plan_version=plan_version + 1,
         planning_mode="semantic_gap_fill",
     )
+    mutation = PlanMutationProposal(
+        mutation_type="gap_fill",
+        proposed_plan=plan,
+        proposed_semantic_gaps=updated,
+        metadata={"reason": "focused_gap_tasks_created"},
+    )
     return GapFillResult(
         applied=True,
         reason="focused_gap_tasks_created",
         plan=plan,
         semantic_gaps=updated,
+        mutation=mutation,
     )
 
 

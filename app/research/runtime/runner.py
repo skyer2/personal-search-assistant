@@ -29,6 +29,7 @@ from app.research.domain.task_state import (
     normalize_tasks,
     retry_task,
     transition_task,
+    worker_result_lifecycle,
 )
 from app.research.runtime.project import sync_execution_projection
 from app.research.runtime.state import empty_research_state
@@ -542,7 +543,7 @@ class ResearchGraphRunner:
             ResearchContext(run_id=session.run_id, query=query, user_id=session.ctx.user_id, tenant_id=session.ctx.tenant_id, project_id=session.ctx.project_id, session_id=session.session_id),
         )
         session.state.final_content = result.summary or query
-        row = worker_row("vanilla", step, result.ok, getattr(result.raw, "result", None)) if result.raw is not None else {"task_id": "vanilla", "ok": result.ok, "summary": result.summary, "step_type": "research", "payload": {}}
+        row = worker_row("vanilla", step, result.ok, result.raw) if result.raw is not None else {"task_id": "vanilla", "ok": result.ok, "summary": result.summary, "step_type": "research", "payload": {}}
         return transition_update(
             gstate,
             WorkflowPhase.DIRECT,
@@ -732,26 +733,11 @@ class ResearchGraphRunner:
             raise TypeError("WorkerRuntime.execute must return WorkerResult")
         if result.raw is not None:
             session.state.step_results.append(result.raw)
-        row = worker_row(task_id, step, result.ok, getattr(result.raw, "result", None)) if result.raw is not None else {"task_id": task_id, "ok": result.ok, "summary": result.summary, "step_type": step.step_type, "payload": {"facts": result.facts, "sources": result.sources, "findings": result.findings, "evidence_ids": result.evidence_refs}}
+        row = worker_row(task_id, step, result.ok, result.raw) if result.raw is not None else {"task_id": task_id, "ok": result.ok, "summary": result.summary, "step_type": step.step_type, "payload": {"facts": result.facts, "sources": result.sources, "findings": result.findings, "evidence_ids": result.evidence_refs, "candidates": result.candidates}}
         row.update(status=result.status, fail_reason=result.fail_reason, queue_ms=result.queue_ms, execution_ms=result.execution_ms)
         normalized_findings, _ = normalize_findings(result.findings, task_id=task_id, subject_id=str(step.metadata.get("subject_id") or "general"), dimension=str((step.metadata.get("coverage_keys") or ["general"])[0]))
         row["payload"] = {**(row.get("payload") or {}), "findings": normalized_findings, "evidence_ids": result.evidence_refs}
-        if result.ok:
-            execution_status = TaskExecutionStatus.SUCCEEDED
-            result_status = ResultStatus.COMPLETE
-            failure = None
-        elif result.status == "blocked":
-            execution_status = TaskExecutionStatus.STOPPED
-            result_status = ResultStatus.PARTIAL
-            failure = classify_failure(result.fail_reason or result.status)
-        elif result.status == "skipped":
-            execution_status = TaskExecutionStatus.SKIPPED
-            result_status = ResultStatus.NONE
-            failure = None
-        else:
-            execution_status = TaskExecutionStatus.FAILED
-            result_status = ResultStatus.PARTIAL if result.evidence_refs or result.findings else ResultStatus.NONE
-            failure = classify_failure(result.fail_reason or result.status)
+        execution_status, result_status, stop_reason, failure = worker_result_lifecycle(result)
         tasks = transition_task(
             running,
             task_id,
@@ -759,7 +745,7 @@ class ResearchGraphRunner:
             result_status=result_status,
             attempt=attempt,
             failure=failure,
-            stop_reason=StopReason.BUDGET.value if execution_status == TaskExecutionStatus.STOPPED else "",
+            stop_reason=stop_reason.value,
             evidence_refs=result.evidence_refs,
             timestamp=_now(),
         )
@@ -1145,8 +1131,21 @@ class ResearchGraphRunner:
                 token_budget=20_000,
             )
             result = await executor.execute(request, context)
-        fallback = not result.ok
-        content = self._semantic_synthesis_digest(gstate, compact=True) if fallback else result.summary
+        fallback = not result.ok or not str(result.summary or "").strip()
+        if fallback:
+            from app.research.runtime.graph import synthesize_node
+
+            fallback_state = {
+                **gstate,
+                "control_decision": {
+                    **decision,
+                    "action": "deliver_partial",
+                    "reason_codes": [*decision.get("reason_codes", []), "synthesis_fallback"],
+                },
+            }
+            content = str(synthesize_node(fallback_state).get("final_content") or "")
+        else:
+            content = result.summary
         if not fallback:
             missing_evidence_ids = [
                 evidence_id
@@ -1185,6 +1184,7 @@ class ResearchGraphRunner:
             attributes={
                 "mode": mode,
                 "compact": compact or retried,
+                "evidence_ids": list(evidence_refs),
                 "evidence_count": len(evidence_refs),
                 "claim_count": len(claims),
                 "fail_reason": result.fail_reason,

@@ -139,7 +139,7 @@ def check_trace_integrity(
         if event_type == "synthesis.failed":
             synthesis_failed_events.append(event)
             synthesis_evidence_ids.update(str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip())
-        if event_type in {"run.failed", "run_summary"}:
+        if event_type in {"run.failed", "run_summary", "run.terminated"}:
             failure_origin_stage = str(
                 attrs.get("failure.origin_stage")
                 or ((attrs.get("metadata") or {}).get("failure.origin_stage") if isinstance(attrs.get("metadata"), dict) else "")

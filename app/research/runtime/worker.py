@@ -126,6 +126,7 @@ def salvage_worker_evidence(
     evidence_refs: list[str] = []
     sources: list[str] = []
     facts: list[str] = []
+    candidates: list[dict[str, Any]] = []
     for artifact in artifacts:
         evidence_refs.append(artifact.artifact_id)
         locator = artifact.locator or artifact.ref()
@@ -135,6 +136,23 @@ def salvage_worker_evidence(
         for fact in list(evidence.get("facts") or []):
             if fact and fact not in facts:
                 facts.append(str(fact))
+        for raw_candidate in list(evidence.get("candidates") or []):
+            if not isinstance(raw_candidate, dict) or not str(raw_candidate.get("name") or "").strip():
+                continue
+            bound_evidence = [
+                str(item)
+                for item in list(raw_candidate.get("evidence_ids") or []) + [artifact.artifact_id]
+                if str(item).strip()
+            ]
+            candidates.append(
+                {
+                    "name": str(raw_candidate.get("name") or ""),
+                    "aliases": [str(item) for item in raw_candidate.get("aliases") or []],
+                    "confidence": float(raw_candidate.get("confidence") or 0.0),
+                    "selection_reason": str(raw_candidate.get("selection_reason") or ""),
+                    "evidence_ids": list(dict.fromkeys(bound_evidence)),
+                }
+            )
         findings.append(
             {
                 "task_id": task_id,
@@ -154,6 +172,7 @@ def salvage_worker_evidence(
         "evidence_refs": evidence_refs,
         "sources": sources,
         "facts": facts,
+        "candidates": candidates,
     }
 
 
@@ -194,6 +213,7 @@ class WorkerResult:
     evidence_refs: list[str] = field(default_factory=list)
     facts: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
+    candidates: list[dict[str, Any]] = field(default_factory=list)
     raw: Any = None
     fail_reason: str = ""
     queue_ms: int = 0

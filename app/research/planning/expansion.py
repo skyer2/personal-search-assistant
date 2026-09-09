@@ -10,6 +10,7 @@ from app.research.coverage.compiler import compile_coverage_contract
 from app.research.coverage.models import CoverageContract
 from app.research.planning.candidate import CandidateSet
 from app.research.planning.planner import _candidate_steps
+from app.research.planning.validator import PlanMutationProposal
 from app.research.spec.models import ResearchSpec
 
 
@@ -20,6 +21,7 @@ class ExpandPlanResult:
     plan: ExecutionPlan
     candidate_set: dict[str, Any]
     coverage_contract: CoverageContract
+    proposal: PlanMutationProposal | None = None
 
 
 def expand_plan(
@@ -53,13 +55,14 @@ def expand_plan(
     selected_candidates = CandidateSet(
         candidate_set_id=candidates.candidate_set_id,
         status=candidates.status,
-        candidates=candidates.candidates[: max(1, 12 // dimension_count)],
+        candidates=candidates.admitted_candidates[: max(1, 12 // dimension_count)],
         source_task_ids=candidates.source_task_ids,
         context=candidates.context,
         query=candidates.query,
         fallback=candidates.fallback,
     )
-    contract = compile_coverage_contract(value, candidate_names=selected_candidates.items)
+    candidate_ids = [candidate.candidate_id for candidate in selected_candidates.candidates]
+    contract = compile_coverage_contract(value, candidate_ids=candidate_ids)
     steps = _candidate_steps(value, contract, selected_candidates, expanded=True)
     if not steps:
         return ExpandPlanResult(
@@ -69,21 +72,26 @@ def expand_plan(
             candidate_set=candidates.to_dict(),
             coverage_contract=contract,
         )
-    candidates.candidates = selected_candidates.candidates
-    candidates.expanded = True
-    candidates.expanded_plan_version = plan_version + 1
     plan = ExecutionPlan(
         steps=steps,
         summary=f"Deep-dive plan for candidate set {candidates.candidate_set_id}",
         plan_version=plan_version + 1,
         planning_mode="candidate_expansion",
     )
+    proposal = PlanMutationProposal(
+        mutation_type="expand_plan",
+        proposed_plan=plan,
+        proposed_candidate_set=selected_candidates.to_dict(),
+        proposed_coverage_contract=contract,
+        metadata={"reason": "candidate_deep_dive_created"},
+    )
     return ExpandPlanResult(
         applied=True,
         reason="candidate_deep_dive_created",
         plan=plan,
-        candidate_set=candidates.to_dict(),
+        candidate_set=selected_candidates.to_dict(),
         coverage_contract=contract,
+        proposal=proposal,
     )
 
 

@@ -48,6 +48,18 @@ class DeterministicWorkerExecutor:
             evidence_refs=evidence_refs,
             facts=facts,
             sources=locators,
+            candidates=[
+                {
+                    "name": "DeepSeek",
+                    "confidence": 0.9,
+                    "evidence_ids": evidence_refs,
+                },
+                {
+                    "name": "Moonshot AI",
+                    "confidence": 0.88,
+                    "evidence_ids": evidence_refs,
+                },
+            ],
         )
 
 

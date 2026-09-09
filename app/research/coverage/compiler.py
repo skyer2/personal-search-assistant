@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import unicodedata
+
 from typing import Any
 
 from app.research.coverage.models import CoverageContract, CoverageUnit, stable_coverage_id
@@ -12,21 +15,25 @@ def compile_coverage_contract(
     spec: ResearchSpec | dict[str, Any] | None,
     *,
     candidate_names: list[str] | None = None,
+    candidate_ids: list[str] | None = None,
 ) -> CoverageContract:
     value = spec if isinstance(spec, ResearchSpec) else ResearchSpec.from_dict(spec)
     units: list[CoverageUnit] = []
     dimensions = [dimension for dimension in value.dimensions if dimension.required]
     if value.task_shape in {"BREADTH_HEAVY", "DYNAMIC_DISCOVERY"}:
         subjects = [value.subjects[0]] if value.subjects else []
-        if not candidate_names:
+        if not candidate_names and not candidate_ids:
             discovery_dimensions = [dimension for dimension in dimensions if dimension.dimension_id == "candidate_set"]
             if not discovery_dimensions:
                 discovery_dimensions = dimensions[:1]
             for subject in subjects:
                 for dimension in discovery_dimensions:
                     units.append(_unit(value, subject.subject_id, dimension.dimension_id, dimension.name))
-        for candidate in candidate_names or []:
-            subject_id = f"candidate:{candidate}"
+        selected_ids = candidate_ids or [
+            _legacy_candidate_id(candidate) for candidate in candidate_names or []
+        ]
+        for candidate_id in selected_ids:
+            subject_id = f"candidate:{candidate_id}"
             for dimension in dimensions:
                 if dimension.dimension_id == "candidate_set":
                     continue
@@ -41,6 +48,12 @@ def compile_coverage_contract(
         version=value.version,
         units=units,
     )
+
+
+def _legacy_candidate_id(name: str) -> str:
+    normalized = " ".join(unicodedata.normalize("NFKC", str(name)).strip().split()).casefold()
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"cand_{digest}"
 
 
 def _unit(spec: ResearchSpec, subject_id: str, dimension_id: str, dimension_name: str) -> CoverageUnit:

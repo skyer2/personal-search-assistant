@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -11,17 +13,44 @@ from app.agent.harness.state import ExecutionPlan, PlanStep
 
 _DISCOVERY_MARKERS = ("候选", "发现", "landscape", "全景", "扫描", "候选池", "值得加入")
 _DEEP_DIVE_MARKERS = ("深挖", "单家", "单公司", "专项分析")
-_ITEM_SPLIT = re.compile(r"[、,，;；\n]")
+_MIN_CANDIDATE_CONFIDENCE = 0.50
+
+
+def _normalized_name(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", str(value)).strip().split()).casefold()
+
+
+def stable_candidate_id(name: str) -> str:
+    """Return a process-independent identity for a human-readable name."""
+    normalized = _normalized_name(name)
+    if not normalized:
+        return ""
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"cand_{digest}"
 
 
 @dataclass
 class Candidate:
-    candidate_id: str
     name: str
+    candidate_id: str = ""
     aliases: list[str] = field(default_factory=list)
     score: float = 0.0
+    confidence: float = 0.0
     selection_reason: str = ""
     evidence_ids: list[str] = field(default_factory=list)
+    source_task_ids: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("candidate_name_empty")
+        if not self.candidate_id:
+            self.candidate_id = stable_candidate_id(self.name)
+        self.candidate_id = self.candidate_id or stable_candidate_id(self.name)
+        self.confidence = self.confidence or self.score
+
+    @property
+    def admitted(self) -> bool:
+        return bool(self.evidence_ids) and self.confidence >= _MIN_CANDIDATE_CONFIDENCE
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -31,12 +60,14 @@ class Candidate:
         row = data or {}
         name = str(row.get("name") or row.get("candidate_id") or "")
         return cls(
-            candidate_id=str(row.get("candidate_id") or f"candidate_{abs(hash(name)) % 10_000_000}"),
             name=name,
+            candidate_id=str(row.get("candidate_id") or ""),
             aliases=[str(item) for item in row.get("aliases") or []],
             score=max(0.0, min(1.0, float(row.get("score") or 0.0))),
+            confidence=max(0.0, min(1.0, float(row.get("confidence") or row.get("score") or 0.0))),
             selection_reason=str(row.get("selection_reason") or ""),
             evidence_ids=[str(item) for item in row.get("evidence_ids") or []],
+            source_task_ids=[str(item) for item in row.get("source_task_ids") or []],
         )
 
 
@@ -54,11 +85,15 @@ class CandidateSet:
 
     @property
     def available(self) -> bool:
-        return bool(self.candidates)
+        return any(candidate.admitted for candidate in self.candidates)
+
+    @property
+    def admitted_candidates(self) -> list[Candidate]:
+        return [candidate for candidate in self.candidates if candidate.admitted]
 
     @property
     def items(self) -> list[str]:
-        return [candidate.name for candidate in self.candidates]
+        return [candidate.name for candidate in self.admitted_candidates]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,18 +108,13 @@ class CandidateSet:
             "context": self.context,
             "query": self.query,
             "fallback": self.fallback,
+            "admitted_count": len(self.admitted_candidates),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "CandidateSet":
         row = data or {}
         raw_candidates = list(row.get("candidates") or [])
-        if not raw_candidates:
-            raw_candidates = [
-                {"candidate_id": item, "name": item}
-                for item in row.get("items") or []
-                if isinstance(item, str) and item.strip()
-            ]
         candidates = [
             Candidate.from_dict(item if isinstance(item, dict) else {"name": str(item)})
             for item in raw_candidates
@@ -92,7 +122,7 @@ class CandidateSet:
         expanded_version = row.get("expanded_plan_version")
         return cls(
             candidate_set_id=str(row.get("candidate_set_id") or "candidate_set_default"),
-            status=str(row.get("status") or ("fallback" if not candidates else "complete")),
+            status=str(row.get("status") or ("degraded" if not candidates else "partial")),
             candidates=candidates,
             source_task_ids=[str(item) for item in row.get("source_task_ids") or []],
             expanded=bool(row.get("expanded")),
@@ -191,41 +221,49 @@ def promote_artifact_producers(plan: ExecutionPlan) -> ExecutionPlan:
     return plan
 
 
-def _candidate_items_from_rows(rows: list[dict[str, Any]]) -> list[str]:
-    items: list[str] = []
-    seen: set[str] = set()
+def _structured_candidates(rows: list[dict[str, Any]]) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    by_id: dict[str, Candidate] = {}
     for row in rows:
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-        fragments: list[str] = []
-        structured = [
-            str(item.get("name") if isinstance(item, dict) else item)
-            for item in payload.get("candidates") or []
-            if item
-        ]
-        if structured:
-            return structured[:16]
-        fragments.extend(str(item) for item in payload.get("facts") or [])
-        fragments.extend(
-            str(item)
-            for finding in payload.get("findings") or []
-            if isinstance(finding, dict)
-            for item in finding.get("facts") or []
-        )
-        fragments.extend(
-            str(item.get("summary") or "")
-            for item in payload.get("findings") or []
-            if isinstance(item, dict)
-        )
-        fragments.append(str(payload.get("summary") or ""))
-        for fragment in fragments:
-            for part in _ITEM_SPLIT.split(fragment):
-                item = part.strip(" \t\r\n.。；;：:")
-                if 2 <= len(item) <= 120 and item.lower() not in seen:
-                    seen.add(item.lower())
-                    items.append(item)
-                if len(items) >= 16:
-                    return items
-    return items
+        task_id = str(row.get("task_id") or "")
+        row_evidence = [str(item) for item in payload.get("evidence_ids") or [] if str(item).strip()]
+        row_confidence = float(payload.get("confidence") or 0.0)
+        for raw in payload.get("candidates") or []:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or "").strip()
+            if not name:
+                continue
+            evidence_ids = [
+                str(item)
+                for item in raw.get("evidence_ids") or row_evidence
+                if str(item).strip()
+            ]
+            confidence = float(raw.get("confidence") or row_confidence or 0.0)
+            candidate = Candidate(
+                name=name,
+                candidate_id=str(raw.get("candidate_id") or ""),
+                aliases=[str(item) for item in raw.get("aliases") or []],
+                confidence=confidence,
+                selection_reason=str(raw.get("selection_reason") or ""),
+                evidence_ids=evidence_ids,
+                source_task_ids=[task_id],
+            )
+            existing = by_id.get(candidate.candidate_id)
+            if existing is None:
+                by_id[candidate.candidate_id] = candidate
+                candidates.append(candidate)
+                continue
+            existing.aliases = list(dict.fromkeys([*existing.aliases, *candidate.aliases]))
+            existing.evidence_ids = list(dict.fromkeys([*existing.evidence_ids, *candidate.evidence_ids]))
+            existing.source_task_ids = list(dict.fromkeys([*existing.source_task_ids, *candidate.source_task_ids]))
+            existing.confidence = max(existing.confidence, candidate.confidence)
+            if not existing.selection_reason:
+                existing.selection_reason = candidate.selection_reason
+        if len(candidates) >= 16:
+            break
+    return candidates[:16]
 
 
 def build_candidate_set(
@@ -255,42 +293,33 @@ def build_candidate_set(
         for row in worker_rows
         if str(row.get("task_id") or "") in discovery_ids
     ]
-    items = _candidate_items_from_rows(rows)
+    raw_candidates = _structured_candidates(rows)
+    candidates = [candidate for candidate in raw_candidates if candidate.admitted]
     any_done = any(
         task_status.get(step.task_id or "", "") in {"done", "succeeded"}
         for step in discovery_steps
     )
-    any_failed = any(
-        task_status.get(step.task_id or "", "") == "failed" for step in discovery_steps
-    )
-    if items and any_done:
+    if candidates and len(candidates) == len(raw_candidates):
         status = "complete"
-    elif items:
+    elif candidates:
         status = "partial"
     else:
-        status = "fallback"
-
-    if not items:
-        brief_payload = brief if isinstance(brief, dict) else {}
-        items = [
-            str(item)
-            for item in brief_payload.get("entities") or []
-            if str(item).strip() and not str(item).strip().lower().startswith("国内")
-        ][:12]
+        status = "degraded"
 
     context = (
-        "CandidateSet（%s）：\n- %s" % (status, "\n- ".join(items[:12]))
-        if items
-        else "CandidateSet fallback：Discovery 未产出结构化候选。"
+        "CandidateSet（%s）：\n- %s"
+        % (status, "\n- ".join(candidate.name for candidate in candidates[:12]))
+        if candidates
+        else "CandidateSet degraded：Discovery 未产出通过证据准入的结构化候选。"
     )
     return CandidateSet(
         candidate_set_id="candidate_set_primary",
         status=status,
-        candidates=[Candidate(candidate_id=item, name=item) for item in items[:12]],
+        candidates=candidates[:12],
         source_task_ids=sorted(tid for tid in discovery_ids if tid),
         context=context,
         query=query,
-        fallback=status == "fallback",
+        fallback=not candidates,
     ).to_dict()
 
 

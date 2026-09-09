@@ -136,16 +136,16 @@ def _candidate_steps(
             units = [
                 unit
                 for unit in contract.units
-                if unit.subject_id == f"candidate:{candidate.name}"
+            if unit.subject_id == f"candidate:{candidate.candidate_id}"
                 and unit.dimension_id == dimension.dimension_id
             ]
             if not units:
                 continue
             steps.append(
                 _step(
-                    task_id=f"t_{_slug(candidate.name)}_{_slug(dimension.dimension_id)}",
+                    task_id=f"t_{candidate.candidate_id}_{dimension.dimension_id}",
                     objective=f"深挖 {candidate.name} 的 {dimension.name}，并给出可引用证据",
-                    subject_id=f"candidate:{candidate.name}",
+                    subject_id=f"candidate:{candidate.candidate_id}",
                     coverage_ids=[unit.coverage_id for unit in units],
                     dimensions=[dimension.dimension_id],
                     task_kind="deep_dive",

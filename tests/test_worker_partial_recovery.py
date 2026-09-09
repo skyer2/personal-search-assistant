@@ -160,8 +160,10 @@ async def test_partial_worker_result_maps_to_failed_partial_canonical_state(monk
 
     update = await graph_runner.node_research_worker(gstate)
     task = update["tasks"]["t_timeout"]
-    assert task["execution_status"] == "failed"
+    assert task["execution_status"] == "stopped"
     assert task["result_status"] == "partial"
+    assert task["failure"]["code"] == "worker_timeout"
+    assert task["stop_reason"] == "timeout"
     assert task["failure"]["code"] == "worker_timeout"
     assert task["evidence_refs"] == ["art-web-1"]
     assert update["evidence_refs"] == ["art-web-1"]
