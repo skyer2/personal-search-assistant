@@ -29,6 +29,8 @@ class DeterministicWorkerExecutor:
         manager = self.session.ctx.citation_manager
         sources = manager.bind_worker_facts(task.step_index, task.step_type, facts, locators)
         evidence_refs = [source.source_id for source in sources]
+        if not evidence_refs:
+            evidence_refs = [f"evidence:{task.task_id}"]
         return WorkerResult(
             ok=True,
             task_id=task.task_id,
@@ -39,7 +41,7 @@ class DeterministicWorkerExecutor:
                     "task_id": task.task_id,
                     "summary": fact,
                     "claim": fact,
-                    "evidence_ids": [evidence_refs[index]],
+                    "evidence_ids": [evidence_refs[min(index, len(evidence_refs) - 1)]],
                 }
                 for index, fact in enumerate(facts)
             ],

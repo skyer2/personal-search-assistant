@@ -1,4 +1,4 @@
-"""Plan / PlanPatch 校验：DAG、预算、来源策略（个人版 web + file）。"""
+"""Plan and semantic action validation: DAG, budget, and source policy."""
 
 from __future__ import annotations
 
@@ -296,4 +296,76 @@ def validate_hybrid_plan(
         if not _covers_source(plan, "file"):
             issues.append("missing_file_read")
 
+    return issues
+
+
+def validate_execution_plan(
+    plan: Any,
+    *,
+    spec: Any | None = None,
+    coverage_contract: Any | None = None,
+    candidate_set: Any | None = None,
+    max_tasks: int = 12,
+) -> list[str]:
+    """Structural and semantic validation for the canonical spec-driven plan."""
+    issues: list[str] = []
+    steps = list(getattr(plan, "steps", None) or [])
+    if not steps:
+        return ["empty_plan"]
+    if any(step.step_type not in RESEARCH_TYPES for step in steps):
+        issues.append("non_research_step")
+    ids = [step.task_id for step in steps]
+    if any(not task_id for task_id in ids):
+        issues.append("missing_task_id")
+    if len(ids) != len(set(ids)):
+        issues.append("duplicate_task_id")
+    id_set = set(ids)
+    for step in steps:
+        for dependency in step.depends_on or []:
+            if dependency not in id_set:
+                issues.append(f"missing_dependency:{step.task_id}")
+    if _has_cycle(steps):
+        issues.append("cycle_in_dependencies")
+    if len(steps) > max_tasks:
+        issues.append("too_many_tasks")
+    if any("web" not in (step.metadata or {}).get("allowed_sources", ["web"]) for step in steps):
+        issues.append("forbidden_source")
+
+    units = list(getattr(coverage_contract, "units", None) or [])
+    required_coverage_ids = {
+        str(getattr(unit, "coverage_id", "") or (unit.get("coverage_id") if isinstance(unit, dict) else ""))
+        for unit in units
+    }
+    owned_coverage_ids = {
+        str(item)
+        for step in steps
+        for item in (step.metadata or {}).get("coverage_ids", [])
+    }
+    shape = str(getattr(spec, "task_shape", "") or (spec.get("task_shape") if isinstance(spec, dict) else ""))
+    if shape not in {"BREADTH_HEAVY", "DYNAMIC_DISCOVERY"}:
+        missing = required_coverage_ids - owned_coverage_ids
+        if missing:
+            issues.append(f"required_coverage_without_owner:{len(missing)}")
+    else:
+        discovery = [
+            step
+            for step in steps
+            if str((step.metadata or {}).get("task_kind") or "") == "discovery"
+        ]
+        expanded = bool(candidate_set.get("expanded")) if isinstance(candidate_set, dict) else bool(getattr(candidate_set, "expanded", False))
+        if not discovery and not expanded:
+            issues.append("landscape_missing_discovery_contract")
+        if discovery and not any((step.metadata or {}).get("produces_artifact") == "candidate_set" for step in discovery):
+            issues.append("discovery_missing_candidate_artifact")
+
+    for step in steps:
+        metadata = step.metadata or {}
+        if str(metadata.get("task_kind") or "") == "gap_fill":
+            if not metadata.get("resolves_gap_ids"):
+                issues.append(f"gap_fill_missing_gap_binding:{step.task_id}")
+            if not metadata.get("coverage_ids") and not metadata.get("coverage_keys"):
+                issues.append(f"gap_fill_missing_coverage:{step.task_id}")
+        if str(metadata.get("task_kind") or "") == "deep_dive" and shape in {"BREADTH_HEAVY", "DYNAMIC_DISCOVERY"}:
+            if not metadata.get("subject_id", "").startswith("candidate:"):
+                issues.append(f"landscape_deep_dive_missing_candidate:{step.task_id}")
     return issues

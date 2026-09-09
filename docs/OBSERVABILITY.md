@@ -26,15 +26,39 @@ Langfuse  TraceViewer / Metrics
 | `session_id` | 前端 thread / 工作目录 `session_*` |
 | `run_id` | 本次 harness run（16 位独立 ID，同一 thread 多轮互不覆盖） |
 | `trace_id` | 因果树根 ID（与 `run_id` 一起写入 LoopState / eval metadata） |
-| `span_id` / `parent_span_id` | 并行 Worker 用 `bind_worker()` 复制 context，span key = `phase + task_id + attempt` |
+| `span_id` / `parent_span_id` | 并行 Worker 用 `bind_worker()` 复制 context，span key = `phase + task_id + plan_version + attempt` |
 
 ## 事件词表
 
-`run.*` · `brief.compiled` · `plan.created/validated` · `worker.*` · `tool.*` · `retrieval.search` · `gen_ai.chat` · `evidence.registered` · `progress.assessed` · `replan.*` · `synthesis.*` · `recovery.*` · `context.*` · `checkpoint.*` · `budget.*` · `observability.internal_error` · `quality.assessed` · `eval.scored`
+Canonical semantic events:
+
+```text
+spec.compiled / spec.validated
+coverage.compiled / coverage.assessed
+candidate_set.materialized
+claim.extracted
+claim.conflict_detected / claim.conflict_resolved
+semantic_gap.opened / semantic_gap.closed
+semantic_gain.assessed
+plan.created / plan.validated
+plan.expanded / plan.gap_fill_applied
+replan.applied / replan.rejected
+control.decided
+```
+
+Execution and delivery events:
+
+```text
+run.* · worker.* · task.transitioned · tool.* · retrieval.search
+gen_ai.chat · evidence.registered · progress.assessed
+evidence.assessed · execution_health.assessed · delivery.assessed
+synthesis.* · quality.assessed · checkpoint.* · budget.*
+recovery.decided · context.* · observability.internal_error · eval.scored
+```
 
 每个重要事件可带：
 
-- `input_refs` / `output_refs`：语义产物血缘（Brief → Plan → Finding → Evidence → Answer）
+- `input_refs` / `output_refs`：语义产物血缘（Query → Spec → CoverageContract → Plan → Task → Evidence → Claim → Coverage → Gap → ControlDecision → Synthesis → Answer）
 - `*_ref` / `*_hash`：完整 payload 落在 `logs/traces/payloads/{run_id}/`，事件本身只保留引用
 
 ## 看哪里
@@ -44,7 +68,7 @@ Langfuse  TraceViewer / Metrics
 | 实时 UI | 提问后的过程框 / 执行过程（WebSocket `monitor_event`）。刷新后走 `GET /api/sessions/{id}/bootstrap`，WS `subscribe.after_seq` replay，按 `(run_id, seq)` 去重 |
 | Run 投影 | `RunStore` SQLite：query / status / result / HITL / timestamps / 文件 metadata。不要从 Trace 重建业务状态 |
 | 因果树 | 阶段与 Worker 的父子 span。默认不展示 `llm_usage` / `gen_ai.chat`（仍在 JSONL）。`GET /api/traces/tree/{session_id}` |
-| Understanding / Plan / Synthesis | Trace 查看器页签；`summary.brief` / `summary.plans` / `summary.synthesis` / `summary.lineage` |
+| Spec / Plan / Synthesis | Trace 查看器页签；`spec.compiled` 汇总为 semantic brief，另有 `summary.plans` / `summary.synthesis` / `summary.lineage` |
 | Worker / 进度 / Replan / Eval | Trace 查看器对应页签；JSONL/tree 响应里的 `summary` |
 | Semantic payload | `GET /api/traces/payloads/{run_id}/{name}` |
 | JSONL | 该 session 全部事件时间线，含每次 LLM 调用。用来对耗时、重试、abort |
@@ -90,13 +114,15 @@ REDIS_URL=redis://...
 
 JSONL/OTel 仍是 durable；EventBus 只负责跨进程 live delivery。
 
-## Replan 指标
+## Control and Gap 指标
 
-`replan.applied` / `replan.rejected` 记录 `target_gap_ids` / `superseded_task_ids` / `added_task_ids` / `recovery_generation` / `fingerprint` / `attempted` / `max_attempts` / `from_plan_version` / `to_plan_version` / `reason`。
+`control.decided` 携带 `decision_id`、`action`、`reasons`、`task_ids`、`gap_ids`、`candidate_set_id`、`strategy_fingerprint`、`state_version`、`assessment_refs` 和 `policy_version`。
 
-`progress.assessed` 记录 `gap_ids` / `resolved_gap_ids` / `unresolved_gap_count` / `dispatch_wave_id`。Trace UI 在进度页展示稳定 Gap、替换关系、恢复代数、剩余预算和停止原因。
+`replan.applied` / `replan.rejected` 记录策略变化、旧策略、新增/替代任务、预算和 plan version。`plan.gap_fill_applied` 必须携带 gap 绑定。`plan.expanded` 必须携带 candidate set 与新 plan version。
 
-**Gap closure（语义口径）**：`target_gap_ids` 在后续 `progress.assessed.resolved_gap_ids` 中出现才算 recovered。`harness_live_replan_recovered_total` 不再等于「有 replan + run success」。
+`progress.assessed` 记录 `gap_ids` / `resolved_gap_ids` / `unresolved_gap_count` / `dispatch_wave_id`。`semantic_gap.opened` 与 `semantic_gap.closed` 是 gap 生命周期事件；闭合必须来自重新评估后的 Coverage，而不是任务完成。
+
+**Gap closure（语义口径）**：`target_gap_ids` 在后续 `semantic_gap.closed` / `progress.assessed.resolved_gap_ids` 中出现才算 recovered。`harness_live_replan_recovered_total` 不再等于「有 replan + run success」。
 
 Trace summary 提供 `gap_closure_rate` / `replan_useful` / `failure_origin`（earliest evaluated failing stage）。
 

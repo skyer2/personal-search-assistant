@@ -5,13 +5,15 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, TypedDict
 
+from app.research.domain.contracts import StopReason
+
 
 class TaskExecutionStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
-    CANCELLED = "cancelled"
+    STOPPED = "stopped"
     SKIPPED = "skipped"
     SUPERSEDED = "superseded"
 
@@ -37,6 +39,7 @@ class TaskExecutionState(TypedDict):
     started_at: str
     ended_at: str
     failure: dict[str, Any]
+    stop_reason: str
     skip_reason: str
     evidence_refs: list[str]
     artifact_refs: list[str]
@@ -51,6 +54,7 @@ def new_task_state(task_id: str) -> TaskExecutionState:
         started_at="",
         ended_at="",
         failure={},
+        stop_reason=StopReason.NONE.value,
         skip_reason="",
         evidence_refs=[],
         artifact_refs=[],
@@ -60,6 +64,8 @@ def new_task_state(task_id: str) -> TaskExecutionState:
 def normalize_task_state(raw: Any, task_id: str) -> TaskExecutionState:
     value = dict(raw) if isinstance(raw, dict) else {}
     execution_status = str(value.get("execution_status") or TaskExecutionStatus.PENDING.value)
+    if execution_status == "cancelled":
+        execution_status = TaskExecutionStatus.STOPPED.value
     if execution_status not in {item.value for item in TaskExecutionStatus}:
         raise ValueError(f"invalid task execution status: {execution_status}")
     result_status = str(value.get("result_status") or ResultStatus.NONE.value)
@@ -74,6 +80,7 @@ def normalize_task_state(raw: Any, task_id: str) -> TaskExecutionState:
         started_at=str(value.get("started_at") or ""),
         ended_at=str(value.get("ended_at") or ""),
         failure=dict(failure) if isinstance(failure, dict) else {},
+        stop_reason=str(value.get("stop_reason") or (StopReason.CANCELLED.value if execution_status == TaskExecutionStatus.STOPPED.value else StopReason.NONE.value)),
         skip_reason=str(value.get("skip_reason") or ""),
         evidence_refs=[str(item) for item in value.get("evidence_refs") or []],
         artifact_refs=[str(item) for item in value.get("artifact_refs") or []],
@@ -123,6 +130,7 @@ def transition_task(
     result_status: ResultStatus | None = None,
     attempt: int | None = None,
     failure: dict[str, Any] | None = None,
+    stop_reason: str = "",
     skip_reason: str = "",
     evidence_refs: list[str] | None = None,
     artifact_refs: list[str] | None = None,
@@ -139,17 +147,25 @@ def transition_task(
         raise ValueError(f"illegal transition from {previous_status.value} to {execution_status.value}")
     if previous_status == TaskExecutionStatus.FAILED and execution_status != TaskExecutionStatus.RUNNING:
         raise ValueError("failed tasks may only be retried by starting a new execution")
+    if previous_status == TaskExecutionStatus.STOPPED and execution_status != TaskExecutionStatus.STOPPED:
+        raise ValueError("stopped tasks cannot automatically become failed")
     if previous_status == TaskExecutionStatus.PENDING and execution_status not in {
         TaskExecutionStatus.RUNNING,
         TaskExecutionStatus.SKIPPED,
-        TaskExecutionStatus.CANCELLED,
+        TaskExecutionStatus.STOPPED,
     }:
         raise ValueError("pending tasks must start, skip, or cancel before terminal execution")
+    if previous_status == TaskExecutionStatus.RUNNING and execution_status not in {
+        TaskExecutionStatus.SUCCEEDED,
+        TaskExecutionStatus.FAILED,
+        TaskExecutionStatus.STOPPED,
+    }:
+        raise ValueError("running tasks must finish, fail, or stop")
     resolved_result = result_status or (
         ResultStatus.COMPLETE
         if execution_status == TaskExecutionStatus.SUCCEEDED
         else ResultStatus.PARTIAL
-        if failure or evidence_refs or artifact_refs
+        if failure or evidence_refs or artifact_refs or execution_status == TaskExecutionStatus.STOPPED
         else ResultStatus.NONE
     )
     current.update(
@@ -157,6 +173,7 @@ def transition_task(
         result_status=resolved_result.value,
         attempt=(int(current.get("attempt") or 0) + 1) if attempt is None else int(attempt),
         failure=failure or ({} if execution_status != TaskExecutionStatus.FAILED else current.get("failure") or {}),
+        stop_reason=str(stop_reason or skip_reason or current.get("stop_reason") or StopReason.NONE.value),
         skip_reason=skip_reason or current.get("skip_reason") or "",
         evidence_refs=list(dict.fromkeys([*(current.get("evidence_refs") or []), *(evidence_refs or [])])),
         artifact_refs=list(dict.fromkeys([*(current.get("artifact_refs") or []), *(artifact_refs or [])])),

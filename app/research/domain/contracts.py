@@ -9,13 +9,17 @@ from typing import Any, TypedDict
 class WorkflowPhase(StrEnum):
     BOOTSTRAP = "bootstrap"
     DIRECT = "direct"
-    UNDERSTAND = "understand"
+    COMPILE_SPEC = "compile_spec"
+    SPEC_GATE = "spec_gate"
     CLARIFY = "clarify"
     PLAN = "plan"
     PLAN_VALIDATED = "plan_validated"
     DISPATCH = "dispatch"
     EXECUTE = "execute"
+    INGEST_SEMANTICS = "ingest_semantics"
     ASSESS = "assess"
+    GAP_FILL = "gap_fill"
+    EXPAND_PLAN = "expand_plan"
     REPLAN = "replan"
     SYNTHESIS = "synthesis"
     REPAIR_SYNTHESIS = "repair_synthesis"
@@ -47,6 +51,8 @@ class ControlAction(StrEnum):
     DISPATCH = "dispatch"
     WAIT = "wait"
     RETRY = "retry"
+    GAP_FILL = "gap_fill"
+    EXPAND_PLAN = "expand_plan"
     REPLAN = "replan"
     SYNTHESIZE = "synthesize"
     REPAIR_SYNTHESIS = "repair_synthesis"
@@ -56,18 +62,25 @@ class ControlAction(StrEnum):
     CANCEL = "cancel"
 
 
-class ReplanBudget(TypedDict):
-    attempted: int
-    applied: int
-    max_attempts: int
+class StopReason(StrEnum):
+    NONE = "none"
+    BUDGET = "budget"
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+    MARGINAL_GAIN_LOW = "marginal_gain_low"
+    SUPERSEDED = "superseded"
+    POLICY = "policy"
 
 
-class RecoveryLimits(TypedDict):
-    max_replan_attempts: int
-    max_recovery_generation: int
-    max_same_gap_recovery: int
-    max_stalled_cycles: int
-    max_active_tasks: int
+class ActionBudget(TypedDict):
+    retry: int
+    gap_fill: int
+    expand_plan: int
+    replan: int
+    max_retry: int
+    max_gap_fill: int
+    max_expand_plan: int
+    max_replan: int
 
 
 class ControlDecision(TypedDict):
@@ -76,45 +89,51 @@ class ControlDecision(TypedDict):
     mode: str
     reason_codes: list[str]
     task_ids: list[str]
+    gap_ids: list[str]
+    candidate_set_id: str
+    strategy_fingerprint: str
     state_version: int
     plan_version: int
     assessment_refs: list[str]
     policy_version: str
 
 
-def new_replan_budget(max_attempts: int) -> ReplanBudget:
-    return ReplanBudget(attempted=0, applied=0, max_attempts=max(0, int(max_attempts)))
+def new_action_budget(
+    *,
+    max_retry: int = 2,
+    max_gap_fill: int = 4,
+    max_expand_plan: int = 2,
+    max_replan: int = 2,
+) -> ActionBudget:
+    return ActionBudget(
+        retry=0,
+        gap_fill=0,
+        expand_plan=0,
+        replan=0,
+        max_retry=max(0, int(max_retry)),
+        max_gap_fill=max(0, int(max_gap_fill)),
+        max_expand_plan=max(0, int(max_expand_plan)),
+        max_replan=max(0, int(max_replan)),
+    )
 
 
-def replan_budget_from_state(state: dict[str, Any]) -> ReplanBudget:
-    raw = state.get("replan_budget")
+def action_budget_from_state(state: dict[str, Any]) -> ActionBudget:
+    raw = state.get("action_budget")
     value = dict(raw) if isinstance(raw, dict) else {}
-    maximum = int(value.get("max_attempts") or 0)
-    if maximum <= 0:
-        budget = state.get("budget")
-        maximum = int(budget.get("max_replan_count") or 0) if isinstance(budget, dict) else 0
-    return ReplanBudget(
-        attempted=max(0, int(value.get("attempted") or 0)),
-        applied=max(0, int(value.get("applied") or 0)),
-        max_attempts=max(0, maximum),
-    )
-
-
-def replan_budget_exhausted(budget: ReplanBudget) -> bool:
-    return budget["attempted"] >= budget["max_attempts"]
-
-
-def recovery_limits_from_state(state: dict[str, Any]) -> RecoveryLimits:
     budget = state.get("budget")
-    value = dict(budget) if isinstance(budget, dict) else {}
-    replan_budget = replan_budget_from_state(state)
-    return RecoveryLimits(
-        max_replan_attempts=replan_budget["max_attempts"],
-        max_recovery_generation=max(0, int(value.get("max_recovery_generation") or 2)),
-        max_same_gap_recovery=max(0, int(value.get("max_same_gap_recovery") or 2)),
-        max_stalled_cycles=max(1, int(value.get("max_stalled_cycles") or 2)),
-        max_active_tasks=max(1, int(value.get("max_active_tasks") or 3)),
+    fallback = budget if isinstance(budget, dict) else {}
+    result: dict[str, int] = dict(
+        new_action_budget(
+            max_retry=int(fallback.get("max_task_attempts") or 2),
+            max_gap_fill=int(fallback.get("max_gap_fill_attempts") or 4),
+            max_expand_plan=int(fallback.get("max_expand_plan_attempts") or 2),
+            max_replan=int(fallback.get("max_replan_count") or 2),
+        )
     )
+    for key in result:
+        if key in value:
+            result[key] = max(0, int(value[key] or 0))
+    return result  # type: ignore[return-value]
 
 
 def budget_status(state: dict[str, Any]) -> BudgetStatus:
@@ -131,17 +150,15 @@ def budget_status(state: dict[str, Any]) -> BudgetStatus:
 
 
 __all__ = [
+    "ActionBudget",
     "BudgetStatus",
     "ControlAction",
     "ControlDecision",
     "LifecycleStatus",
     "OutcomeStatus",
-    "ReplanBudget",
-    "RecoveryLimits",
-    "recovery_limits_from_state",
+    "StopReason",
+    "action_budget_from_state",
+    "new_action_budget",
     "WorkflowPhase",
     "budget_status",
-    "new_replan_budget",
-    "replan_budget_exhausted",
-    "replan_budget_from_state",
 ]

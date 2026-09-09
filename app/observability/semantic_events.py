@@ -132,12 +132,14 @@ def progress_event_attributes(
     dispatch_wave_id: int = 0,
 ) -> dict[str, Any]:
     value = dict(assessment or {})
+    semantic_gap_ids = _strings(value.get("semantic_gap_ids"))
+    missing_ids = _strings(value.get("missing_ids"))
     identity = {
         "status": str(value.get("status") or "unknown"),
         "reason_codes": _strings(value.get("reason_codes")),
-        "coverage_gaps": _strings(value.get("coverage_gaps")),
-        "gap_ids": _strings(value.get("gap_ids")),
-        "missing_dimensions": _strings(value.get("missing_dimensions")),
+        "coverage_gaps": missing_ids,
+        "gap_ids": semantic_gap_ids,
+        "missing_dimensions": missing_ids,
         "unresolved_conflicts": _strings(value.get("unresolved_conflicts")),
     }
     return {
@@ -146,7 +148,7 @@ def progress_event_attributes(
         "stale_evidence": _strings(value.get("stale_evidence")),
         "unmet_success_criteria": _strings(value.get("unmet_success_criteria")),
         "resolved_gap_ids": _strings(value.get("resolved_gap_ids")),
-        "unresolved_gap_count": len(_strings(value.get("gap_ids"))),
+        "unresolved_gap_count": len(semantic_gap_ids),
         "dispatch_wave_id": _optional_int(dispatch_wave_id) or 0,
         "plan_version": _optional_int(value.get("plan_version")) or int(plan_version or 1),
         "progress_id": f"progress:{_digest(identity)}",
@@ -185,7 +187,7 @@ def execution_health_event_attributes(assessment: dict[str, Any] | None) -> dict
         "succeeded_tasks": _optional_int(value.get("succeeded_tasks")) or 0,
         "failed_tasks": _optional_int(value.get("failed_tasks")) or 0,
         "retryable_tasks": _strings(value.get("retryable_tasks")),
-        "stalled_cycles": _optional_int(value.get("stalled_cycles")) or 0,
+        "semantic_stall": _optional_int(value.get("semantic_stall")) or 0,
         "failures": [dict(item) for item in value.get("failures") or [] if isinstance(item, dict)],
     }
 
@@ -209,6 +211,11 @@ def control_decision_event_attributes(decision: dict[str, Any] | None) -> dict[s
         "mode": str(value.get("mode") or ""),
         "reasons": _strings(value.get("reason_codes") or value.get("reasons")),
         "task_ids": _strings(value.get("task_ids")),
+        "gap_ids": _strings(value.get("gap_ids")),
+        "candidate_set_id": str(value.get("candidate_set_id") or ""),
+        "strategy_fingerprint": str(value.get("strategy_fingerprint") or ""),
+        "state_version": _optional_int(value.get("state_version")),
+        "assessment_refs": _strings(value.get("assessment_refs")),
         "policy_version": str(value.get("policy_version") or ""),
         "plan_version": _optional_int(value.get("plan_version")),
     }

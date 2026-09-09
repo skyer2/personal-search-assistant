@@ -1,261 +1,168 @@
-# Research Agent Harness — 架构范围（框死）
+# Contract-Driven Research Harness Architecture
 
-> **A controllable and evaluable harness for long-running research agents.**
->
-> This project is not a search engine.
->
-> Search is only a tool environment used to study:
-> - planning
-> - multi-agent orchestration
-> - progress evaluation
-> - replanning
-> - context management
-> - durability
-> - evidence grounding
-> - evaluation
->
-> **Deep Research 只是 Agent Harness 的 workload。Search 只是 Agent 可调用的一种环境能力。**
->
-> 本文是本仓库的**唯一权威范围**。与本文冲突的旧文档（Personal Search、三档路由、Memory 主故事）一律视为历史。
+This document is the repository architecture authority. Older Brief/Business Gap/replacement-recovery descriptions are historical.
 
----
+## Position
 
-## 0. 研究问题（只这十个）
+The system is a **Contract-Driven Adaptive Deep Research Agent Harness**. Given an open research question, it compiles the user's intent into a verifiable success contract, plans and executes evidence collection, assesses semantic coverage, adapts through bounded control actions, and produces a cited answer.
 
-1. Agent 如何把复杂任务拆成稳定 Research Plan？
-2. 多 Worker 怎么并行且避免状态污染？
-3. Worker 都完成后，怎么判断任务真的完成？
-4. 什么情况下需要 Replan？
-5. Replan 怎么限制，防止无限自治？
-6. 长任务 Context 怎么控制？
-7. 原始 Evidence 怎么在不塞爆窗口的情况下保留？
-8. Agent 崩溃后如何恢复？
-9. 如何确定失败发生在 Planning / Retrieval / Worker / Synthesis 哪一层？
-10. Harness 的这些机制到底有没有实际增益？
-
-**Search 不是第 11 个研究问题。** 不研究排序、query rewrite、召回质量、搜索引擎对比、freshness 产品化。
-
----
-
-## 1. 四层：Search 不是一层
+## Canonical Loop
 
 ```text
-┌─────────────────────────────┐
-│ Research Domain             │
-│ Brief / Plan / Progress     │
-└──────────────┬──────────────┘
-               ▼
-┌─────────────────────────────┐
-│ Agent Runtime               │
-│ StateGraph / Budget /       │
-│ Checkpoint / Parallelism    │
-└──────────────┬──────────────┘
-               ▼
-┌─────────────────────────────┐
-│ Worker Runtime              │
-│ LangChain / DeepSeekHarness │
-└──────────────┬──────────────┘
-               ▼
-┌─────────────────────────────┐
-│ Environment                 │
-│ Search / Fetch / File       │
-│ Artifact / Evidence         │
-└─────────────────────────────┘
+ResearchSpec
+  ↓
+CoverageContract
+  ↓
+Adaptive Plan
+  ↓
+Research Execution
+  ↓
+Admitted Evidence + Claims
+  ↓
+Coverage Assessment
+  ↓
+Semantic Gap
+  ↓
+Bounded Adaptive Control
+  ↓
+Grounded Synthesis
+  ↓
+Quality Gate
 ```
 
-Search 相当于强化学习里的 environment：Agent 与外界交互的接口，不是研究主体。
+## Authority Model
 
-环境工具固定、尽量简单：
+| Concern | Authority | Non-authority |
+|---|---|---|
+| What success means | `ResearchSpec` + `CoverageContract` | Plan, task status, Worker summary |
+| How to execute | `ExecutionPlan` + task state | ResearchSpec |
+| Whether evidence is admitted | `app/research/evidence/admission.py` | Worker payload |
+| Whether semantics are covered | `CoverageState` from Spec + Claims + Evidence | task completion count |
+| What the runtime does next | `ControlPolicy` | Planner, Worker, Scheduler |
+| What can be delivered | Coverage, conflict, citation, grounding gates | synthesis confidence |
+| What happened | `AgentTelemetry` and `RunStore` projections | frontend state |
 
-```python
-search(query) -> SearchResult[]   # 标题 / URL / snippet
-fetch(url)    -> Artifact         # 正文外置，不进 Graph State
-file_read     -> Artifact         # 本地附件
-```
+## Four Control Actions
 
-实验时要：**same model + same search + same corpus**，只改变 Harness 机制。
+- `RETRY`: same task scope, same strategy, new attempt after a transient execution failure.
+- `GAP_FILL`: focused new tasks bound to explicit `SemanticGap.gap_id`.
+- `EXPAND_PLAN`: consume a materialized `CandidateSet`, replace the transient `candidate_set` coverage unit with concrete candidate × dimension units.
+- `REPLAN`: change the strategy fingerprint and supersede the old strategy; it is not a retry or a directional prompt patch.
 
----
+Each action has an independent budget and telemetry event. `ActionBudget` is the canonical state counter.
 
-## 2. 主路径只有 AGENT，Simple Fact 走受控旁路
+## TaskShape Versus Capability
 
-产品路径 **ANSWER / SEARCH 删除**。`agent` 是唯一产品模式；TaskShape 只决定执行拓扑。单一稳定事实走 `SIMPLE_FACT` fast path，其余任务进入完整 Research Graph。
+TaskShape is only a topology selector:
+
+- `SIMPLE_FACT`
+- `DETERMINISTIC_PIPELINE`
+- `SINGLE_TOPIC_DEEP_DIVE`
+- `BREADTH_HEAVY`
+- `DYNAMIC_DISCOVERY`
+- `HYBRID_CONFLICT`
+
+Comparison, filtering, freshness, multilingual support, strict citations, conflict handling, and multi-hop needs live in `ResearchSpec` requirements. The system must not create one TaskShape per capability.
+
+## ResearchSpec
+
+`ResearchSpec` contains:
+
+- objective, subjects, dimensions, and language hints
+- reasoning requirements
+- evidence and source requirements
+- freshness policy
+- interaction requirements and assumptions
+- premises and ambiguity state
+- delivery requirements
+- measurable success criteria
+
+It is serializable, stable for identical objectives, and versioned across follow-up turns. A contradicted premise or blocking ambiguity stops normal research entry.
+
+## Coverage Model
+
+`compile_coverage_contract(spec)` derives required `CoverageUnit` records from the spec. Each unit declares:
+
+- subject and dimension
+- minimum evidence and independent-source count
+- authority threshold
+- freshness policy
+- conflict policy
+
+`assess_coverage(contract, claims, evidence, conflicts, resolutions)` is deterministic and recomputable. Covered, partial, missing, stale, conflicted, and waived states belong to semantic state, not task state.
+
+For discovery, the initial contract contains a transient `candidate_set` unit. After candidates are materialized, the expanded contract removes that unit and creates concrete candidate units; an unsatisfiable discovery unit cannot remain forever.
+
+## Evidence and Claims
+
+Workers return raw results only. The semantic ingest boundary:
+
+1. admits evidence;
+2. extracts claims;
+3. binds claim IDs to admitted evidence IDs;
+4. detects and resolves conflicts;
+5. materializes candidate sets;
+6. recomputes coverage;
+7. opens and closes semantic gaps;
+8. records marginal semantic gain.
+
+Unadmitted evidence can never support a final claim.
+
+## Quality and Delivery
+
+Normal success requires:
+
+- minimum required coverage satisfied;
+- blocking conflicts resolved or disclosed under an allowed partial mode;
+- every final claim bound to existing admitted evidence;
+- citations resolvable and precise;
+- grounding evidence sufficient for the delivered claim set.
+
+Budget or timeout stop is an execution condition, not automatically a quality failure. With usable partial evidence, the runtime may deliver a clearly bounded partial result.
+
+## State and Durability
+
+`ResearchState` is the only workflow truth and is checkpointed through LangGraph. It contains canonical semantic state:
 
 ```text
-                    User Task
-                       │
-                       ▼
-                 Research Brief
-                       │
-                       ▼
-                    Planner
-                       │
-                 Objective DAG
-                       │
-          ┌────────────┼────────────┐
-          ▼            ▼            ▼
-       Worker 1     Worker 2     Worker N
-          │            │            │
-          └────── WorkerRuntime ─────┘
-                       │
-              dispatch barrier
-                       │
-              Minimal Capabilities
-               ├── web_search
-               ├── fetch_url
-               └── file_read
-                       │
-                       ▼
-              Artifact / Evidence
-                      │
-                      ▼
-              Pure Assessments
-               ├── Progress
-               ├── Evidence
-               ├── Execution Health
-               └── Delivery Readiness
-                       │
-                       ▼
-                  ControlPolicy
-          dispatch / retry / replan / synthesize
-          deliver partial / finalize
-                      │
-                   Synthesis
-                      │
-                Quality Gate
-                      │
-                 TerminalPolicy
-                       │
-                    Answer
+research_spec
+coverage_contract
+coverage_state
+claims
+claim_conflicts
+claim_resolutions
+evidence_records
+semantic_gaps
+candidate_set
+marginal_gain
 ```
 
-最多两档，且第二档**不是产品能力**：
+Task state records execution facts such as pending, running, succeeded, failed, stopped, superseded, attempt, lease, and failure classification. `STOPPED` and `FAILED` are distinct. The old replacement-recovery snapshot and task-owned business-gap authority are removed.
 
-| 档 | 用途 | 路径 |
-|----|------|------|
-| **agent + simple_fact** | 单一稳定事实 | 一个 Worker → 搜索 → 来源分级 → deterministic answer |
-| **agent + full graph** | 研究对象 | Brief → Plan → Workers → Progress / Replan → Answer |
-| **direct** | 对照实验 baseline | Query → single agent + search tool → Answer |
+## Code Map
 
-Direct 用来回答：
-
-> 同一个模型、同一个搜索工具，为什么增加 Agent Harness？增加以后得到了什么，又付出了什么？
-
----
-
-## 3. 保留 / 砍掉
-
-| 保留 | 为什么 |
-|------|--------|
-| Research Brief | 任务目标的稳定表示 |
-| Planner | semantic decomposition |
-| Objective DAG | multi-agent orchestration |
-| Parallel Worker | 并行执行 + 隔离 |
-| WorkerRuntime | Agent framework 解耦 |
-| Pure Assessments | 语义进展、证据、执行健康、交付就绪 |
-| ControlPolicy | 唯一 workflow routing authority |
-| TerminalPolicy | 唯一 final outcome authority |
-| Replan / PlanPatch | 动态规划 + 有界自治 |
-| Context Engineering | 长任务核心问题 |
-| Artifact / Evidence | 上下文外置和可追溯 |
-| Checkpoint | durability |
-| Budget / Guardrail | bounded autonomy（Hard Ceiling；其下 Adaptive Effort） |
-| Trace | failure attribution |
-| Eval / Ablation | 证明机制有效 |
-
-补充设计：[HARD_CEILING_ADAPTIVE_EFFORT.md](./HARD_CEILING_ADAPTIVE_EFFORT.md) —  
-**Global deterministic control, local agentic autonomy**；Retry ≠ Replan；Lead Planner 消费完整 Brief。
-
-| 砍掉或降到最低 | |
-|----------------|--|
-| ANSWER 产品路径 | × |
-| SEARCH 产品路径 | × |
-| Search ranking / query expansion / 召回优化 | × |
-| RAGFlow / DB / MCP plane / PDF | × |
-| Personal Search UX / 复杂前端产品 | × |
-| Cross-session Memory（Phase 2 课题） | 默认关闭 |
-
-**可以砍掉 SEARCH 产品路径，不要砍掉 search tool。**
-
-Memory：`Conversation History ≠ Context ≠ Long-term Memory`。UI 显示全部 Run，不等于全部进入模型上下文；ContextSelector 只取当前 Run、相关 RunSummary Top-K 和 Memory Top-K。长期记忆带 provenance / trust tier，并提供查看、单条遗忘、按 Run/Session 遗忘和用户级遗忘。
-
----
-
-## 4. 实验主线
-
-```text
-Vanilla Agent          vs          Full Harness          vs          Harness - Replan
-Query → single agent               Brief → Plan →                   关掉 PlanPatch
-     + search → answer             Workers → Progress               其余相同
-```
-
-控制：same model / same search tool / same corpus / same tasks / same prompt budget。
-
-观测：Accuracy、Citation、Success Rate、Tool Calls、Tokens、Latency，以及 Failure Attribution、Replan Trigger Rate、Recovery Rate、Context Consumption。
-
----
-
-## 5. 状态模型（不变）
-
-- **唯一 workflow truth**：`ResearchState` → LangGraph SQLite
-- **Business Gap truth**：Gap 使用稳定 `gap_id`；Replan 用 replacement task 继承 Gap，不把 Task ID 当 Gap，也不追加必需任务
-- **Task truth**：`TaskExecutionStatus` 与 `ResultStatus` 分离；`FAILED + PARTIAL` 是合法降级交付输入
-- **并行 barrier truth**：同一 `dispatch_wave_id` 的所有 Worker 先 join，再执行一次 Progress / ControlPolicy；Worker 只返回自己的 task delta
-- **Readiness truth**：`TaskReadiness` 是由 Plan dependency 与 resource 推导的临时值，不落成 Task 状态
-- **Run / UI projection truth**：`RunStore` SQLite（`app/run_store/`）。刷新、断线、HITL、计时、文件列表都从这里 hydrate，不从 Trace 反推业务状态
-- **删除语义**：删除 Run 会级联 RunStore 行、run 目录、Trace/Projection/Payload、Graph checkpoint、RunSummary 和 `provenance.run_id` 派生 Memory；删除 Session 会级联全部 Run
-- **Agent history / debug**：Flight Recorder `AgentEvent` journal + JSONL。WebSocket 是 tail：先 `after_seq` replay，再 live
-- **原文外置**：Artifact / Evidence（Claim → Evidence → Artifact → Source）
-- `LoopState` 只是进程内 handles
-- `active_tasks` / HITL `Future` / `RunJournal` 只是 execution cache
-- `WorkerRuntime` 是图与 Agent 框架的边界
-- 研究步允许 JIT 回读（`read_artifact` / `read_evidence`）；缺 JSON 时补 JSON，不整步重搜
-- 步内限制联网工具次数（`max_step_tool_calls`），会话预算拦下一步而不是步内连打
-- **部署不变量**：single backend process。不要用 `uvicorn --workers > 1`
-
-```text
-session_id / thread_id  = 一段会话（localStorage 只存这个）
-run_id                  = 一次 Agent 执行（POST /api/task 每次新建）
-turn_id                 = 前端一条用户问题（= run_id）
-```
-
-原则：
-
-> Frontend state is a projection, not a source of truth.
-> Persist before publish.
-> Checkpoint restores execution; RunStore restores UX; Event Journal restores history.
-
----
-
-## 6. 代码对应
-
-| 概念 | 代码 |
-|------|------|
-| Product route and experiment mode | `app/research/routing/mode_router.py` |
-| Task shape and fast-path budget | `app/research/routing/task_shape.py` |
-| Simple-fact deterministic renderer | `app/research/runtime/simple_fact.py` |
-| Source tier classification | `app/agent/harness/citations.py` |
+| Concept | Code |
+|---|---|
+| Spec model/compiler/validator | `app/research/spec/` |
+| Coverage model/compiler/assessor/gaps | `app/research/coverage/` |
+| Semantic ingest | `app/research/runtime/semantic_ingest.py` |
+| Planning operators | `app/research/planning/` |
+| Control authority | `app/research/control/policy.py` |
 | StateGraph | `app/research/runtime/graph.py` |
-| Pure assessments | `app/research/assessment/` |
-| ControlPolicy | `app/research/control/policy.py` |
-| TerminalPolicy | `app/research/control/terminal_policy.py` |
-| Task state / readiness | `app/research/domain/task_state.py` |
-| Failure model | `app/research/domain/failure.py` |
-| WorkerRuntime | `app/research/runtime/worker.py` |
-| Brief / Plan / Progress | `research_brief.py` / `planner.py` / `app/research/planning/` |
-| Environment search/fetch | `app/tools/`（`internet_search`、`fetch_url`） |
-| Artifact / Evidence | `artifacts.py`、`evidence_store.py` |
-| Run / UI projection | `app/run_store/` + `GET /api/sessions/{id}/bootstrap` |
-| Run / Session delete cascade | `app/run_store/deletion.py` + `DELETE /api/runs/{id}` / `DELETE /api/sessions/{id}` |
-| Long-term memory management | `app/agent/memory/` + `app/api/memory_routes.py` + Memory 面板 |
-| Event replay | `app/observability/replay.py` + WS `subscribe.after_seq` |
+| Runtime nodes | `app/research/runtime/runner.py` |
+| Evidence admission | `app/research/evidence/admission.py` |
+| Claim reconciliation | `app/research/claims/` |
+| Quality gates | `app/research/runtime/graph.py` |
+| Observability | `app/observability/` |
+| Evaluation | `tests/eval/` |
 
-补充文档（非范围权威）：
+## ADRs
 
-- [HARD_CEILING_ADAPTIVE_EFFORT.md](./HARD_CEILING_ADAPTIVE_EFFORT.md) — Hard Ceiling + Adaptive Effort + 面试叙事
-- [OBSERVABILITY.md](./OBSERVABILITY.md) — Agent Flight Recorder（统一 Trace / Replan / Eval）
-- [EVALUATION.md](./EVALUATION.md) — 五层 Eval 与 Vanilla / No-Replan / Full ablation
-- [HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md) — StateGraph 运行时细节
-- [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md) — Context / Artifact / Evidence
-- [BROWSECOMP_PLUS_EVAL.md](./BROWSECOMP_PLUS_EVAL.md) — 固定语料评测
-- [OPENEULER_BARE_METAL.md](./OPENEULER_BARE_METAL.md) — 裸机部署（非架构范围）
+- [ADR-001 ResearchSpec authority](architecture/adr/ADR-001-research-spec-authority.md)
+- [ADR-002 Coverage-derived state](architecture/adr/ADR-002-coverage-derived-state.md)
+- [ADR-003 Semantic control actions](architecture/adr/ADR-003-semantic-control-actions.md)
+- [ADR-004 StateGraph node granularity](architecture/adr/ADR-004-stategraph-node-granularity.md)
+
+## Non-goals
+
+No self-evolving agent, new memory system, MCP platform, multimodal pipeline, UI expansion, new PDF capability, or benchmark-specific runtime behavior.

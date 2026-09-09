@@ -1,197 +1,154 @@
-"""Research progress derived from active plan obligations and business gaps."""
+"""Coverage-derived progress assessment. Task state stays in execution health."""
 
 from __future__ import annotations
 
 from enum import StrEnum
 from typing import Any, TypedDict
 
-from app.agent.harness.state import ExecutionPlan
-from app.research.assessment.evidence import EvidenceStatus, assess_evidence
-from app.research.domain.gaps import active_research_steps, step_gap_ids
-from app.research.domain.task_state import (
-    ResultStatus,
-    TaskExecutionStatus,
-    normalize_tasks,
-)
+from app.research.spec.models import ResearchSpec
+from app.research.spec.validator import validate_research_spec
 
 
 class SemanticProgress(StrEnum):
     SUFFICIENT = "sufficient"
     GAP = "gap"
+    BLOCKED = "blocked"
     UNKNOWN = "unknown"
 
 
 class ProgressAssessment(TypedDict):
     status: str
-    gap_ids: list[str]
-    coverage_gaps: list[str]
-    missing_dimensions: list[str]
-    resolved_gap_ids: list[str]
+    coverage_ratio: float
+    covered_ids: list[str]
+    partial_ids: list[str]
+    missing_ids: list[str]
+    semantic_gap_ids: list[str]
     unresolved_conflicts: list[str]
-    low_confidence_claims: list[str]
-    stale_evidence: list[str]
-    unmet_success_criteria: list[str]
+    stale_units: list[str]
+    candidate_state: str
+    semantic_gain: float
+    marginal_gain: float
     reason_codes: list[str]
     plan_version: int
 
 
-def _plan_from_state(state: dict[str, Any]) -> ExecutionPlan | None:
-    raw = state.get("plan")
-    if not isinstance(raw, dict) or not raw:
-        return None
-    return ExecutionPlan.from_dict(raw)
-
-
-def _gap_label(step: Any) -> str:
-    metadata = getattr(step, "metadata", None) or {}
-    dimensions = [str(item) for item in metadata.get("coverage_keys") or [] if str(item).strip()]
-    if dimensions:
-        return dimensions[0]
-    return str(getattr(step, "objective", "") or getattr(step, "description", "") or "")[:120]
-
-
-def _active_gap_rows(
-    plan: ExecutionPlan,
-    tasks: dict[str, Any],
-) -> tuple[dict[str, list[str]], dict[str, str], list[str]]:
-    owners: dict[str, list[str]] = {}
-    labels: dict[str, str] = {}
-    required: list[str] = []
-    for index, step in active_research_steps(plan):
-        task_id = step.resolved_task_id(index)
-        metadata = dict(step.metadata or {})
-        if metadata.get("optional"):
-            continue
-        required.append(task_id)
-        for gap_id in step_gap_ids(step):
-            owners.setdefault(gap_id, []).append(task_id)
-            labels.setdefault(gap_id, _gap_label(step))
-    return owners, labels, required
-
-
 def assess_progress(state: dict[str, Any]) -> ProgressAssessment:
-    plan = _plan_from_state(state)
-    tasks = normalize_tasks(state.get("tasks"))
-    evidence = assess_evidence(state)
-    plan_version = int(state.get("plan_version") or getattr(plan, "plan_version", 1) or 1)
-    if str(state.get("abort_reason") or ""):
-        return ProgressAssessment(
-            status=SemanticProgress.UNKNOWN.value,
-            gap_ids=[],
-            coverage_gaps=[],
-            missing_dimensions=[],
-            resolved_gap_ids=[],
-            unresolved_conflicts=list(evidence["unresolved_conflicts"]),
-            low_confidence_claims=[],
-            stale_evidence=list(evidence["stale_sources"]),
-            unmet_success_criteria=[],
-            reason_codes=["aborted"],
-            plan_version=plan_version,
+    raw_spec = state.get("research_spec")
+    raw_coverage = state.get("coverage_state")
+    plan_version = int(state.get("plan_version") or 1)
+    if not isinstance(raw_spec, dict) or not isinstance(raw_coverage, dict):
+        return _assessment(
+            SemanticProgress.UNKNOWN,
+            0.0,
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            "unknown",
+            0.0,
+            0.0,
+            ["missing_spec_or_coverage"],
+            plan_version,
         )
 
-    if plan is None:
-        return ProgressAssessment(
-            status=SemanticProgress.UNKNOWN.value,
-            gap_ids=[],
-            coverage_gaps=[],
-            missing_dimensions=[],
-            resolved_gap_ids=[],
-            unresolved_conflicts=list(evidence["unresolved_conflicts"]),
-            low_confidence_claims=[],
-            stale_evidence=list(evidence["stale_sources"]),
-            unmet_success_criteria=[],
-            reason_codes=["no_active_plan"],
-            plan_version=plan_version,
+    spec = ResearchSpec.from_dict(raw_spec)
+    spec_issues = validate_research_spec(spec)
+    if spec_issues:
+        return _assessment(
+            SemanticProgress.BLOCKED,
+            0.0,
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            "unknown",
+            0.0,
+            0.0,
+            spec_issues,
+            plan_version,
         )
 
-    owners, labels, required = _active_gap_rows(plan, tasks)
-    complete_tasks = 0
-    partial_tasks = 0
-    failed_without_result = 0
-    pending_or_running = 0
-    incomplete_result = 0
-    for task_id in required:
-        task = tasks.get(task_id)
-        if task is None:
-            pending_or_running += 1
-            continue
-        if task["execution_status"] == TaskExecutionStatus.SUCCEEDED.value:
-            if task["result_status"] == ResultStatus.COMPLETE.value:
-                complete_tasks += 1
-            else:
-                incomplete_result += 1
-        elif task["execution_status"] == TaskExecutionStatus.FAILED.value:
-            if task["result_status"] == ResultStatus.PARTIAL.value:
-                partial_tasks += 1
-            else:
-                failed_without_result += 1
-        elif task["execution_status"] in {TaskExecutionStatus.PENDING.value, TaskExecutionStatus.RUNNING.value}:
-            pending_or_running += 1
-
-    unresolved_gap_ids: list[str] = []
-    resolved_gap_ids: list[str] = []
-    for gap_id, task_ids in owners.items():
-        owner_states = [tasks.get(task_id) for task_id in task_ids]
-        resolved = bool(owner_states) and all(
-            task_state is not None
-            and task_state["execution_status"] == TaskExecutionStatus.SUCCEEDED.value
-            and task_state["result_status"] == ResultStatus.COMPLETE.value
-            for task_state in owner_states
-        )
-        if resolved:
-            resolved_gap_ids.append(gap_id)
-        else:
-            unresolved_gap_ids.append(gap_id)
-
-    all_terminal = pending_or_running == 0
-    all_complete = all_terminal and complete_tasks == len(required)
-    partial_with_sufficient_evidence = (
-        all_terminal
-        and partial_tasks > 0
-        and evidence["status"] == EvidenceStatus.SUFFICIENT.value
-    )
-    reasons: list[str] = []
-    if not required:
-        status = SemanticProgress.UNKNOWN.value
-        reasons.append("no_required_research")
-    elif all_complete:
-        status = SemanticProgress.SUFFICIENT.value
-        reasons.append("required_research_complete")
-    elif partial_with_sufficient_evidence:
-        status = SemanticProgress.SUFFICIENT.value
-        reasons.extend(["required_research_partial", "evidence_sufficient"])
-        resolved_gap_ids = list(dict.fromkeys([*resolved_gap_ids, *unresolved_gap_ids]))
-        unresolved_gap_ids = []
+    coverage_ratio = float(raw_coverage.get("coverage_ratio") or 0.0)
+    covered = [str(item) for item in raw_coverage.get("covered_ids") or []]
+    partial = [str(item) for item in raw_coverage.get("partial_ids") or []]
+    missing = [str(item) for item in raw_coverage.get("missing_ids") or []]
+    conflicts = [str(item) for item in raw_coverage.get("conflicted_ids") or []]
+    stale = [str(item) for item in raw_coverage.get("stale_ids") or []]
+    gaps = {
+        str(gap_id): gap
+        for gap_id, gap in (state.get("semantic_gaps") or {}).items()
+        if isinstance(gap, dict)
+    }
+    candidate = state.get("candidate_set") if isinstance(state.get("candidate_set"), dict) else {}
+    if candidate and not candidate.get("available"):
+        candidate_state = str(candidate.get("status") or "pending")
+    elif candidate and not bool(candidate.get("expanded")):
+        candidate_state = "ready_not_expanded"
+    elif candidate:
+        candidate_state = "expanded"
     else:
-        status = SemanticProgress.GAP.value
-        reasons.extend(
-            [
-                "required_research_incomplete"
-                if complete_tasks or partial_tasks
-                else "required_research_not_completed"
-            ]
-        )
-    if pending_or_running:
-        reasons.append("required_research_pending")
-    if failed_without_result:
-        reasons.append("required_research_failed")
-    if partial_tasks:
-        reasons.append("required_research_partial")
-    if incomplete_result:
-        reasons.append("required_research_result_incomplete")
+        candidate_state = "not_required"
+    gain = float((state.get("marginal_gain") or {}).get("semantic_gain") or 0.0)
+    marginal = float((state.get("marginal_gain") or {}).get("marginal_gain") or gain)
 
-    coverage_gaps = [labels.get(gap_id, gap_id) for gap_id in unresolved_gap_ids]
+    if not gaps and coverage_ratio >= 1.0:
+        status = SemanticProgress.SUFFICIENT
+        reasons = ["coverage_sufficient"]
+    elif candidate_state == "ready_not_expanded":
+        status = SemanticProgress.GAP
+        reasons = ["candidate_ready_not_expanded"]
+    else:
+        status = SemanticProgress.GAP
+        reasons = ["semantic_gap"]
+    return _assessment(
+        status,
+        coverage_ratio,
+        covered,
+        partial,
+        missing,
+        list(gaps),
+        conflicts,
+        stale,
+        candidate_state,
+        gain,
+        marginal,
+        reasons,
+        plan_version,
+    )
+
+
+def _assessment(
+    status: SemanticProgress,
+    coverage_ratio: float,
+    covered: list[str],
+    partial: list[str],
+    missing: list[str],
+    gaps: list[str],
+    conflicts: list[str],
+    stale: list[str],
+    candidate_state: str,
+    semantic_gain: float,
+    marginal_gain: float,
+    reasons: list[str],
+    plan_version: int,
+) -> ProgressAssessment:
     return ProgressAssessment(
-        status=status,
-        gap_ids=unresolved_gap_ids,
-        coverage_gaps=coverage_gaps,
-        missing_dimensions=list(coverage_gaps),
-        resolved_gap_ids=list(dict.fromkeys(resolved_gap_ids)),
-        unresolved_conflicts=list(evidence["unresolved_conflicts"]),
-        low_confidence_claims=[],
-        stale_evidence=list(evidence["stale_sources"]),
-        unmet_success_criteria=[],
-        reason_codes=list(dict.fromkeys(reasons)),
+        status=status.value,
+        coverage_ratio=coverage_ratio,
+        covered_ids=covered,
+        partial_ids=partial,
+        missing_ids=missing,
+        semantic_gap_ids=gaps,
+        unresolved_conflicts=conflicts,
+        stale_units=stale,
+        candidate_state=candidate_state,
+        semantic_gain=semantic_gain,
+        marginal_gain=marginal_gain,
+        reason_codes=reasons,
         plan_version=plan_version,
     )
 

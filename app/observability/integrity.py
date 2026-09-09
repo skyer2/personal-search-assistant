@@ -81,7 +81,7 @@ def check_trace_integrity(
                 pass
         raw_attrs = event.get("attributes")
         attrs = raw_attrs if isinstance(raw_attrs, dict) else {}
-        if attrs.get("search_mode") == "agent" or event_type == "brief.compiled":
+        if attrs.get("search_mode") == "agent" or event_type in {"brief.compiled", "spec.compiled"}:
             is_agent_mode = True
         if (
             attrs.get("task_shape") == "simple_fact"
@@ -132,17 +132,8 @@ def check_trace_integrity(
                 attempted, maximum = 0, 0
             if maximum and attempted > maximum:
                 issues.append("replan_budget_exceeded")
-            try:
-                generation = int(attrs.get("recovery_generation") or 0)
-                generation_limit = int(attrs.get("max_recovery_generation") or 0)
-            except (TypeError, ValueError):
-                generation, generation_limit = 0, 0
-            if generation_limit and generation > generation_limit:
-                issues.append("recovery_generation_exceeded")
             if last_unresolved_gap_count is not None:
                 gap_baseline_after_replan = last_unresolved_gap_count
-        if "_recovery_recovery" in str(event.get("task_id") or ""):
-            issues.append("recovery_of_recovery_task_id")
         if event_type == "synthesis.completed":
             synthesis_evidence_ids.update(str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip())
         if event_type == "synthesis.failed":
@@ -186,7 +177,7 @@ def check_trace_integrity(
     if not failure_origin_stage and termination_stage:
         failure_origin_stage = termination_stage
 
-    brief_count = int(counts.get("brief.compiled", 0))
+    brief_count = int(counts.get("brief.compiled", 0)) + int(counts.get("spec.compiled", 0))
     plan_count = int(counts.get("plan.created", 0))
     worker_started = int(counts.get("worker.started", 0))
     worker_done = int(counts.get("worker.completed", 0)) + int(
@@ -239,7 +230,7 @@ def check_trace_integrity(
 
     if is_agent_mode and not is_simple_fact_fast_path:
         if brief_count == 0 and _stage_required("brief", failure_origin_stage):
-            issues.append("missing_brief_event")
+            issues.append("missing_spec_or_brief_event")
         if plan_count == 0 and _stage_required("plan", failure_origin_stage):
             issues.append("missing_plan_event")
 

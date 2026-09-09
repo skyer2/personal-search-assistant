@@ -164,6 +164,45 @@ def test_summarize_trace_workers_and_replan():
     print("[OK] summarize_trace")
 
 
+def test_summarize_trace_separates_same_task_across_plan_versions():
+    events = [
+        {
+            "type": "worker.started",
+            "task_id": "t_gap",
+            "plan_version": 3,
+            "attempt": 1,
+            "attributes": {"objective": "first wave"},
+        },
+        {
+            "type": "worker.completed",
+            "task_id": "t_gap",
+            "plan_version": 3,
+            "attempt": 1,
+            "duration_ms": 10,
+        },
+        {
+            "type": "worker.started",
+            "task_id": "t_gap",
+            "plan_version": 4,
+            "attempt": 1,
+            "attributes": {"objective": "second wave"},
+        },
+        {
+            "type": "worker.completed",
+            "task_id": "t_gap",
+            "plan_version": 4,
+            "attempt": 1,
+            "duration_ms": 20,
+        },
+    ]
+    summary = summarize_trace(events)
+    assert summary["worker_count"] == 2
+    assert [(row["plan_version"], row["duration_ms"]) for row in summary["workers"]] == [
+        (3, 10),
+        (4, 20),
+    ]
+
+
 def test_summarize_trace_progress_without_replan():
     events = [
         {

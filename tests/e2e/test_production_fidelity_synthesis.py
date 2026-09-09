@@ -281,8 +281,8 @@ def test_l3_rate_limit_falls_back_to_partial_delivery(tmp_path: Path, monkeypatc
     failures = [event for event in events if event["type"] == "synthesis.failed"]
     assert len(failures) == 2
     assert all(event["attributes"]["fail_reason"] == "provider_rate_limit" for event in failures)
-    assert result.metadata["fallback_used"] == "deterministic_partial_renderer"
-    assert "部分研究结果" in result.content
+    assert result.metadata["fallback_used"] == "semantic_digest"
+    assert result.content.strip()
 
 
 def test_l3_empty_content_falls_back_to_partial_delivery(tmp_path: Path, monkeypatch):
@@ -298,7 +298,7 @@ def test_l3_empty_content_falls_back_to_partial_delivery(tmp_path: Path, monkeyp
         for event in events
         if event["type"] == "synthesis.failed"
     )
-    assert result.metadata["fallback_used"] == "deterministic_partial_renderer"
+    assert result.metadata["fallback_used"] == "semantic_digest"
 
 
 def test_l3_context_error_compacts_and_retries(tmp_path: Path, monkeypatch):
@@ -324,7 +324,7 @@ def test_l3_context_error_falls_back_after_compact_failure(tmp_path: Path, monke
     events, summary = _trace("l3-synthesis-context-fallback", result)
     _assert_common_invariants(result, summary)
     assert provider.synthesis_calls == 2
-    assert result.metadata["fallback_used"] == "deterministic_partial_renderer"
+    assert result.metadata["fallback_used"] == "semantic_digest"
 
 
 def test_l3_provider_unavailable_falls_back_to_partial_delivery(tmp_path: Path, monkeypatch):
@@ -351,7 +351,7 @@ def test_l3_provider_auth_falls_back_after_one_attempt(tmp_path: Path, monkeypat
     _assert_common_invariants(result, summary)
     assert provider.synthesis_calls == 1
     assert result.metadata["synthesis_fail_reason"] == "provider_auth"
-    assert result.metadata["fallback_used"] == "deterministic_partial_renderer"
+    assert result.metadata["fallback_used"] == "semantic_digest"
 
 
 def test_l3_budget_exhausted_with_evidence_falls_back_to_partial_delivery(
@@ -365,7 +365,7 @@ def test_l3_budget_exhausted_with_evidence_falls_back_to_partial_delivery(
     _assert_common_invariants(result, summary)
     assert provider.synthesis_calls == 1
     assert result.metadata["synthesis_fail_reason"] == "budget_tokens"
-    assert result.metadata["fallback_used"] == "deterministic_partial_renderer"
+    assert result.metadata["fallback_used"] == "semantic_digest"
 
 
 def test_l3_no_evidence_and_synthesis_failure_is_explicit_failed(
@@ -405,8 +405,8 @@ def test_l3_release_blocker_research_cap_synthesis_timeout_yields_partial(
     assert result.content.strip()
     assert result.metadata["synthesis_attempts"] == 2
     assert result.metadata["synthesis_fail_reason"] == "synthesis_timeout"
-    assert result.metadata["fallback_used"] == "deterministic_partial_renderer"
-    assert "部分研究结果" in result.content
+    assert result.metadata["fallback_used"] == "semantic_digest"
+    assert result.content.strip()
     assert result.metadata["replan_count"] <= get_harness_config().max_replan_count
     assert not any("GraphRecursion" in str(event.get("error") or "") for event in events)
 
@@ -418,8 +418,8 @@ def test_l3_release_blocker_research_cap_synthesis_timeout_yields_partial(
     failures = [event for event in events if event["type"] == "synthesis.failed"]
     assert len(failures) == 2
     assert [event["attributes"]["fallback_action"] for event in failures] == [
-        "retry",
-        "deterministic_partial_renderer",
+        "compact_retry",
+        "semantic_digest",
     ]
     worker_failures = [event for event in events if event["type"] == "worker.failed"]
     assert worker_failures

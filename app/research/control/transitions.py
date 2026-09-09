@@ -12,28 +12,39 @@ class InvalidTransition(RuntimeError):
 
 
 _ALLOWED: dict[WorkflowPhase, frozenset[WorkflowPhase]] = {
-    WorkflowPhase.BOOTSTRAP: frozenset({WorkflowPhase.DIRECT, WorkflowPhase.UNDERSTAND}),
+    WorkflowPhase.BOOTSTRAP: frozenset({WorkflowPhase.DIRECT, WorkflowPhase.COMPILE_SPEC}),
     WorkflowPhase.DIRECT: frozenset({WorkflowPhase.FINALIZE}),
-    WorkflowPhase.UNDERSTAND: frozenset({WorkflowPhase.CLARIFY, WorkflowPhase.PLAN}),
-    WorkflowPhase.CLARIFY: frozenset({WorkflowPhase.PLAN}),
-    WorkflowPhase.PLAN: frozenset({WorkflowPhase.PLAN_VALIDATED, WorkflowPhase.REPLAN}),
-    WorkflowPhase.PLAN_VALIDATED: frozenset({WorkflowPhase.DISPATCH, WorkflowPhase.REPLAN}),
-    WorkflowPhase.DISPATCH: frozenset({WorkflowPhase.EXECUTE, WorkflowPhase.ASSESS}),
-    WorkflowPhase.EXECUTE: frozenset({WorkflowPhase.ASSESS}),
+    WorkflowPhase.COMPILE_SPEC: frozenset({WorkflowPhase.SPEC_GATE}),
+    WorkflowPhase.SPEC_GATE: frozenset({WorkflowPhase.CLARIFY, WorkflowPhase.PLAN}),
+    WorkflowPhase.CLARIFY: frozenset({WorkflowPhase.COMPILE_SPEC}),
+    WorkflowPhase.PLAN: frozenset({WorkflowPhase.PLAN_VALIDATED}),
+    WorkflowPhase.PLAN_VALIDATED: frozenset({WorkflowPhase.DISPATCH}),
+    WorkflowPhase.DISPATCH: frozenset({WorkflowPhase.EXECUTE, WorkflowPhase.INGEST_SEMANTICS}),
+    WorkflowPhase.EXECUTE: frozenset({WorkflowPhase.INGEST_SEMANTICS}),
+    WorkflowPhase.INGEST_SEMANTICS: frozenset({WorkflowPhase.ASSESS}),
     WorkflowPhase.ASSESS: frozenset(
         {
             WorkflowPhase.DISPATCH,
+            WorkflowPhase.GAP_FILL,
+            WorkflowPhase.EXPAND_PLAN,
             WorkflowPhase.REPLAN,
             WorkflowPhase.SYNTHESIS,
             WorkflowPhase.FINALIZE,
             WorkflowPhase.TERMINATED,
         }
     ),
+    WorkflowPhase.GAP_FILL: frozenset({WorkflowPhase.PLAN_VALIDATED}),
+    WorkflowPhase.EXPAND_PLAN: frozenset({WorkflowPhase.PLAN_VALIDATED}),
     WorkflowPhase.REPLAN: frozenset({WorkflowPhase.PLAN_VALIDATED}),
     WorkflowPhase.SYNTHESIS: frozenset({WorkflowPhase.QUALITY, WorkflowPhase.REPAIR_SYNTHESIS}),
     WorkflowPhase.REPAIR_SYNTHESIS: frozenset({WorkflowPhase.SYNTHESIS}),
     WorkflowPhase.QUALITY: frozenset(
-        {WorkflowPhase.FINALIZE, WorkflowPhase.REPAIR_SYNTHESIS, WorkflowPhase.REPLAN}
+        {
+            WorkflowPhase.FINALIZE,
+            WorkflowPhase.REPAIR_SYNTHESIS,
+            WorkflowPhase.REPLAN,
+            WorkflowPhase.GAP_FILL,
+        }
     ),
     WorkflowPhase.FINALIZE: frozenset({WorkflowPhase.TERMINATED}),
     WorkflowPhase.TERMINATED: frozenset(),

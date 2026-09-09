@@ -243,9 +243,11 @@ def _dedupe_claims(claims: list[ClaimRecord]) -> list[ClaimRecord]:
     best: dict[str, ClaimRecord] = {}
     order: list[str] = []
     for claim in claims:
+        qualitative = not claim.metric and claim.value is None
         key = "|".join(
             [
                 claim.task_id,
+                claim.claim_id if qualitative else "",
                 (claim.subject or "").lower(),
                 (claim.metric or "").lower(),
                 (claim.period or "").lower(),

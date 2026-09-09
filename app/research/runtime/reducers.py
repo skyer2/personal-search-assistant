@@ -15,6 +15,36 @@ def keep_last(left: Any, right: Any) -> Any:
     return right if right is not None else left
 
 
+def merge_records(left: list[Any] | None, right: list[Any] | None) -> list[Any]:
+    """Merge record lists by stable ID fields without duplicates."""
+    merged: list[Any] = []
+    indexes: dict[str, int] = {}
+    for row in [*(left or []), *(right or [])]:
+        if not isinstance(row, dict):
+            if row not in merged:
+                merged.append(row)
+            continue
+        record_id = str(
+            row.get("evidence_id")
+            or row.get("claim_id")
+            or row.get("edge_id")
+            or row.get("gap_id")
+            or row.get("candidate_id")
+            or ""
+        )
+        if record_id and record_id in indexes:
+            merged[indexes[record_id]] = row
+            continue
+        merged.append(row)
+        if record_id:
+            indexes[record_id] = len(merged) - 1
+    return merged
+
+
+def merge_strings(left: list[str] | None, right: list[str] | None) -> list[str]:
+    return list(dict.fromkeys([*(left or []), *(right or [])]))
+
+
 def merge_worker_payloads(results: list[dict[str, Any]]) -> dict[str, Any]:
     facts: list[str] = []
     sources: list[str] = []

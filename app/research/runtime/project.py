@@ -16,22 +16,32 @@ def sync_execution_projection(loop: LoopState, gstate: dict[str, Any]) -> LoopSt
     intent = gstate.get("intent")
     if isinstance(intent, dict) and intent:
         loop.intent = TaskIntent.from_dict(intent)
+    elif getattr(loop, "intent", None) is None and isinstance(gstate.get("research_spec"), dict):
+        spec = dict(gstate["research_spec"])
+        delivery = dict(spec.get("delivery_requirements") or {})
+        requested_format = str(delivery.get("format") or "markdown")
+        loop.intent = TaskIntent(
+            raw_query=str(spec.get("objective") or gstate.get("task_query") or ""),
+            summary=str(spec.get("objective") or gstate.get("task_query") or ""),
+            needs_network=True,
+            deliverable="pdf" if requested_format == "pdf" else "md" if requested_format == "markdown" else "text",
+        )
 
     plan = gstate.get("plan")
     if isinstance(plan, dict) and plan:
         loop.plan = ExecutionPlan.from_dict(plan)
 
     budget = gstate.get("budget")
-    replan_budget = gstate.get("replan_budget")
-    if isinstance(budget, dict) or isinstance(replan_budget, dict):
+    action_budget = gstate.get("action_budget")
+    if isinstance(budget, dict) or isinstance(action_budget, dict):
         metadata_budget = dict(loop.metadata.get("run_budget") or {})
         if isinstance(budget, dict):
             for key in ("max_parallel_workers", "max_replan_count"):
                 if budget.get(key) is not None:
                     metadata_budget[key] = max(0, int(budget[key]))
-        if isinstance(replan_budget, dict):
-            metadata_budget["replan_applied"] = max(0, int(replan_budget.get("applied") or 0))
-            loop.replan_count = max(0, int(replan_budget.get("applied") or 0))
+        if isinstance(action_budget, dict):
+            metadata_budget["replan_applied"] = max(0, int(action_budget.get("replan") or 0))
+            loop.replan_count = metadata_budget["replan_applied"]
         loop.metadata["run_budget"] = metadata_budget
 
     final = gstate.get("final_content")
@@ -41,14 +51,6 @@ def sync_execution_projection(loop: LoopState, gstate: dict[str, Any]) -> LoopSt
     abort = gstate.get("abort_reason")
     if abort:
         loop.abort_reason = str(abort)
-
-    brief = gstate.get("brief")
-    if isinstance(brief, dict) and brief:
-        loop.research_brief_obj = brief
-        if loop.intent is not None and (loop.intent.brief is None or loop.intent.brief.is_empty()):
-            from app.agent.harness.research_brief import ResearchBrief
-
-            loop.intent.brief = ResearchBrief.from_dict(brief)
 
     metadata: dict[str, Any] = {
         "workflow_authority": "research_state",
@@ -71,13 +73,6 @@ def sync_execution_projection(loop: LoopState, gstate: dict[str, Any]) -> LoopSt
             metadata[key] = dict(value)
     loop.metadata.update(metadata)
     return loop
-
-
-def brief_from_intent(intent: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(intent, dict):
-        return {}
-    brief = intent.get("brief")
-    return dict(brief) if isinstance(brief, dict) else {}
 
 
 def findings_from_worker_row(row: dict[str, Any]) -> list[dict[str, Any]]:

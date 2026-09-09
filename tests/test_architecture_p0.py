@@ -55,12 +55,13 @@ def test_graph_branch_for_mode():
     print("[OK] graph branches")
 
 
-def test_research_state_has_brief_and_findings():
+def test_research_state_has_spec_and_findings():
     state = empty_research_state(run_id="r", session_id="s", task_query="q")
-    assert state["brief"] == {}
+    assert state["research_spec"] == {}
+    assert state["coverage_contract"] == {}
     assert state["findings"] == []
     assert state["search_mode"] == "agent"
-    print("[OK] ResearchState brief/findings")
+    print("[OK] ResearchState spec/findings")
 
 
 def test_sync_execution_projection_is_one_way():
@@ -68,7 +69,7 @@ def test_sync_execution_projection_is_one_way():
     loop.replan_count = 9
     sync_execution_projection(
         loop,
-        {"replan_budget": {"attempted": 1, "applied": 1, "max_attempts": 2}, "final_content": "hi"},
+        {"action_budget": {"replan": 1}, "final_content": "hi"},
     )
     assert loop.replan_count == 1
     assert loop.final_content == "hi"
@@ -105,7 +106,7 @@ def test_compile_agent_and_direct_graphs():
     )
     assert result["search_mode"] == "agent"
     assert result.get("plan")
-    assert result.get("brief") is not None
+    assert result.get("research_spec")
 
     direct = compile_research_graph(checkpointer=InMemorySaver(), profile="direct")
     baseline = direct.invoke(

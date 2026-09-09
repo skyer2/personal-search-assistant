@@ -26,10 +26,12 @@ def harness_capabilities() -> dict[str, Any]:
             "planner": "semantic WHAT (objective DAG)",
             "worker": "local HOW (search/fetch in isolated context)",
             "harness": "WHETHER / HOW MUCH (hard ceiling + adaptive effort)",
-            "progress": "evidence-driven ENOUGH / GAP / PlanPatch",
+            "progress": "CoverageState → sufficient / partial / missing / stale / conflicted",
             "retry_vs_replan": {
                 "retry": "same goal, format/transient recovery; JSON-only forbids re-search",
-                "replan": "strategy change via constrained PlanPatch",
+                "gap_fill": "focused task bound to stable semantic gap_id",
+                "expand_plan": "consume materialized CandidateSet",
+                "replan": "strategy fingerprint must change",
             },
         },
         "experiment_modes": ["agent", "direct"],
@@ -39,7 +41,7 @@ def harness_capabilities() -> dict[str, Any]:
         "identity": {"tenant_id": "local", "user_id": "me"},
         "loop": [
             "simple_fact: direct provider search → deterministic answer",
-            "agent: brief → effort → plan → dispatch → progress / replan → synthesize",
+            "agent: spec → coverage contract → plan → dispatch → semantic ingest / control → synthesize",
             "direct (baseline only): single worker + search tool",
         ],
         "control_plane": {
@@ -67,11 +69,11 @@ def harness_capabilities() -> dict[str, Any]:
             "module": "app.research.planning.effort",
             "estimator": "deterministic ComplexityEstimator from Research Brief IR",
             "clamp": "min(effort_request, hard_ceiling)",
-            "gap_grant": "incremental PlanPatch + reserved retrieval; depletes remaining_*; never raises session ceiling",
+            "gap_grant": "bounded gap-fill reserve; depletes remaining_*; never raises session ceiling",
             "parallelism": "run_budget.max_parallel_workers clamps Worker semaphore",
         },
         "task_understanding": {
-            "ir": "ResearchBrief",
+            "ir": "ResearchSpec",
             "not_intent": True,
             "not_plan": True,
             "fields": [
@@ -80,6 +82,8 @@ def harness_capabilities() -> dict[str, Any]:
                 "dimensions",
                 "constraints",
                 "success_criteria",
+                "source_policy",
+                "language_hints",
                 "ambiguities",
                 "depth",
                 "freshness",

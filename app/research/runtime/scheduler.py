@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from app.agent.harness.state import ExecutionPlan, PlanStep
-from app.research.domain.gaps import active_research_steps, stamp_initial_gap_metadata
 from app.research.domain.task_state import (
     TaskExecutionStatus,
     TaskReadiness,
@@ -33,7 +32,6 @@ def annotate_plan_tasks(plan: ExecutionPlan, intent: Any | None = None) -> Execu
             step.depends_on = []
     if plan.plan_version < 1:
         plan.plan_version = 1
-    stamp_initial_gap_metadata(plan)
     return plan
 
 
@@ -42,7 +40,12 @@ def task_status_map(plan: ExecutionPlan) -> dict[str, str]:
 
 
 def required_research_ids(plan: ExecutionPlan) -> list[str]:
-    active = [(index, step) for index, step in active_research_steps(plan)]
+    active = [
+        (index, step)
+        for index, step in enumerate(plan.steps)
+        if step.step_type in RESEARCH_STEP_TYPES
+        and not (isinstance(step.metadata, dict) and step.metadata.get("superseded"))
+    ]
     required = [
         step.resolved_task_id(index)
         for index, step in active
@@ -51,6 +54,10 @@ def required_research_ids(plan: ExecutionPlan) -> list[str]:
     if required:
         return required
     return [step.resolved_task_id(index) for index, step in active]
+
+
+def ready_research_steps(plan: ExecutionPlan, tasks: Any) -> list[tuple[int, PlanStep]]:
+    return select_dispatch_wave(plan, tasks)
 
 
 def readiness_map(plan: ExecutionPlan, tasks: Any) -> dict[str, str]:
@@ -118,6 +125,7 @@ __all__ = [
     "annotate_plan_tasks",
     "dispatch_sends",
     "readiness_map",
+    "ready_research_steps",
     "research_only_plan",
     "required_research_ids",
     "running_task_ids",

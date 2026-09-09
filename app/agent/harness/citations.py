@@ -316,6 +316,22 @@ class CitationManager:
             if not text:
                 continue
             locator = locators[i] if i < len(locators) else locators[0]
+            canonical_locator = self._canonical_locator(locator)
+            existing = next(
+                (source for source in self.sources if source.locator == canonical_locator),
+                None,
+            )
+            if existing is not None:
+                self.fact_bindings.append(
+                    {
+                        "fact": text,
+                        "source_id": existing.source_id,
+                        "locator": existing.locator,
+                        "step_index": step_index,
+                    }
+                )
+                registered.append(existing)
+                continue
             kind = "url" if locator.lower().startswith(("http://", "https://")) else "file"
             src = EvidenceSource(
                 source_id=self._next_id(),

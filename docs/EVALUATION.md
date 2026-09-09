@@ -13,6 +13,7 @@ Eval 分六层。PR 只跑确定性层；Production-Fidelity、Live 和 BrowseCo
 ```text
 L0  Unit / Invariant          每 PR
 L1  Agent Component Eval      每 PR
+L1.5 Capability Regression   每 PR
 L2  Structural Harness Eval   dry-run 每 PR；live nightly
 L3  Production-Fidelity E2E   release / 手工
 L4  BrowseComp-Plus           release / 手工
@@ -35,6 +36,7 @@ L5  Ablation                  Vanilla / No-Replan / Full
 
 ```text
 Component  20 / 20
+Capability 20 / 20
 Scenario   20 / 20
 Planner     5 / 5
 Progress    6 / 6
@@ -52,9 +54,9 @@ Evidence component 里的低 grounding 分数是 **unsupported-claim 检测器�
 
 ### L0 Deterministic invariants
 
-现有单测覆盖 Planner DAG、Worker isolation、PlanPatch 预算、checkpoint、Evidence 回溯。不要 LLM Judge。
+现有单测覆盖 Planner DAG、Worker isolation、ActionBudget、checkpoint、Evidence 回溯。不要 LLM Judge。
 
-### L1 Component Eval（Harness 最该强化的一层）
+### L1 Component Eval
 
 | 数据集 | 验证什么 |
 | --- | --- |
@@ -64,6 +66,26 @@ Evidence component 里的低 grounding 分数是 **unsupported-claim 检测器�
 | `tests/eval/datasets/evidence_v1.jsonl` | claim 是否有 evidence，citation 是否支持 |
 
 入口：`python tests/eval/run_eval.py --component`
+
+### L1.5 Capability Regression
+
+`tests/eval/datasets/capability_v1.jsonl` contains 20 deterministic cases and covers all 15 required capability classes:
+
+```text
+单点事实 / 条件过滤聚合 / 对比 / 有迹多跳 / 无提示多跳
+长报告 / 时效 / 歧义 / 冲突 / 虚假前提
+垂直专业 / 长尾 / 多语言 / 严格引用 / 多轮修正
+```
+
+The runner validates semantic contract behavior, not only final text:
+
+- ResearchSpec routing and requirements
+- CoverageContract derivation, freshness, conflict, and candidate expansion
+- plan shape and task kinds
+- coverage status from claims and admitted evidence
+- premise, ambiguity, multilingual hints, citation, and follow-up spec versioning
+
+入口：`python tests/eval/runners/capability.py`
 
 ### L2 Structural Harness Scenario Eval
 
@@ -109,8 +131,8 @@ Retrieval-only → Vanilla → Harness-NoReplan → Full Harness
 
 ```text
 V0 Vanilla          Query → single agent → tools → Answer
-V1 Harness-NoReplan Brief → Plan → Workers → Progress → Answer
-V2 Full-Harness     同上，GAP 时 Replan
+V1 Harness-NoReplan Spec → Plan → Workers → Coverage → Answer
+V2 Full-Harness     同上，SemanticGap 触发 GapFill / Expand / Replan
 ```
 
 配置：`tests/eval/variants/{vanilla,no_replan,full}.yml`
@@ -184,7 +206,7 @@ python tests/eval/run_eval.py --live --variant full --fixture --limit 5
 ## CI 分档
 
 ```text
-PR CI     L0 unit + L1 component + L2 scenario dry-run  < 2 min
+PR CI     L0 unit + L1 component + L1.5 capability + L2 dry-run
 Nightly   20 条 live scenario × Full + NoReplan（可选 1～3 repeat）
 Release   L3 Production-Fidelity + Release Smoke
 Benchmark BrowseComp 50 × Vanilla / NoReplan / Full + 官方 judge
@@ -205,6 +227,6 @@ python tests/eval/run_eval.py --live --variant full --repeat 3 --fixture --limit
 python tests/eval/run_eval.py --calibrate-judge
 ```
 
-旧 `tasks.jsonl`（数据库 / RAGFlow / 电商 PDF）已删除；当前回归真源只保留 Component datasets 与 `harness_scenarios_v1.jsonl`。
+旧 `tasks.jsonl`（数据库 / RAGFlow / 电商 PDF）已删除；当前回归真源是 Component datasets、`capability_v1.jsonl` 与 `harness_scenarios_v1.jsonl`。
 
 基线：`tests/eval/results/baseline.json`（L1+L2 dry-run）。它证明的是 **Planner / Progress / Replan / Evidence invariants 不退化**，不证明线上答案质量。

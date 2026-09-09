@@ -250,6 +250,7 @@ def test_synthesis_failure_cannot_quality_pass():
                     "run_id": "terminal-quality",
                     "phase": "synthesis",
                     "final_content": "已有答案 [1]",
+                    "synthesis_failed": True,
                     "quality_attempts": 0,
                     "budget": {"max_replan_count": 0},
                 }
@@ -258,7 +259,7 @@ def test_synthesis_failure_cannot_quality_pass():
     finally:
         runner_module._SESSIONS.pop("terminal-quality", None)
     assert update["quality_assessment"]["verdict"] == "fail"
-    assert update["quality_assessment"]["issues"] == ["synthesis_failed"]
+    assert "synthesis_failed" in update["quality_assessment"]["issues"]
 
 
 def test_workflow_termination_is_not_task_success_when_partial():

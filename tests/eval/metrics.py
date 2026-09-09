@@ -283,6 +283,7 @@ class EvalReport:
     @property
     def regression_summary(self) -> dict[str, Any]:
         component = [r for r in self.results if r.mode == "component"]
+        capability = [r for r in self.results if r.mode == "capability"]
         scenario = [r for r in self.results if r.mode == "scenario-dry"]
 
         def _summary(rows: list[TaskEvalResult]) -> dict[str, int]:
@@ -293,10 +294,15 @@ class EvalReport:
 
         return {
             "component": _summary(component),
+            "capability": _summary(capability),
             "scenario": _summary(scenario),
             "by_component": {
                 variant: _summary([r for r in component if r.variant == variant])
                 for variant in ("planner", "progress", "replan", "evidence")
+            },
+            "by_capability": {
+                variant: _summary([r for r in capability if r.variant == variant])
+                for variant in sorted({r.variant for r in capability})
             },
         }
 

@@ -44,7 +44,8 @@ def test_landscape_timeout_salvage_reaches_partial_pdf_and_run_download(tmp_path
     assert "降级部分交付" in result.content
     assert any(path.lower().endswith(".pdf") for path in result.artifacts)
     assert result.metadata["termination"]["outcome"] == "partial"
-    assert result.metadata["termination"]["research_completed"] is True
+    assert result.metadata["termination"]["research_completed"] is False
+    assert result.metadata["termination"]["outcome"] == "partial"
     assert result.metadata["termination"]["synthesis_attempted"] is True
     assert result.metadata["termination"]["quality_attempted"] is True
 
@@ -67,7 +68,7 @@ def test_landscape_timeout_salvage_reaches_partial_pdf_and_run_download(tmp_path
     assert summary["brief"]["objective"]
     assert summary["brief"]["dimensions"]
     assert summary["plans"] and summary["plans"][-1]["task_ids"]
-    assert summary["worker_count"] == 2
+    assert summary["worker_count"] == 11
     assert all(row["execution_status"] == "failed" for row in summary["workers"])
     assert all(row["result_status"] == "partial" for row in summary["workers"])
     assert all(row["evidence_ids"] for row in summary["workers"])
@@ -76,7 +77,7 @@ def test_landscape_timeout_salvage_reaches_partial_pdf_and_run_download(tmp_path
 
     latest_progress = summary["progress"][-1]
     assert latest_progress["status"] == "gap"
-    assert latest_progress["coverage_gaps"]
+    assert latest_progress["gap_ids"]
     assert latest_progress["reason_codes"]
     control_events = [event for event in events if event["type"] == "control.decided"]
     assert any(event["attributes"]["action"] == "deliver_partial" for event in control_events)

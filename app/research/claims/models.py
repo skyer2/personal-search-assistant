@@ -19,6 +19,8 @@ class ClaimRecord:
     text: str
     task_id: str = ""
     subject: str = ""
+    subject_id: str = ""
+    dimension_id: str = ""
     metric: str = ""
     value: float | None = None
     unit: str = ""
@@ -29,6 +31,7 @@ class ClaimRecord:
     confidence: float = 1.0
     source_quality: str = "unknown"
     authority_score: float = 0.0
+    normalized_key: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -46,6 +49,8 @@ class ClaimRecord:
             text=str(row.get("text") or row.get("claim") or ""),
             task_id=str(row.get("task_id") or ""),
             subject=str(row.get("subject") or ""),
+            subject_id=str(row.get("subject_id") or ""),
+            dimension_id=str(row.get("dimension_id") or ""),
             metric=str(row.get("metric") or ""),
             value=parsed,
             unit=str(row.get("unit") or ""),
@@ -56,6 +61,7 @@ class ClaimRecord:
             confidence=float(row.get("confidence") or 1.0),
             source_quality=str(row.get("source_quality") or "unknown"),
             authority_score=float(row.get("authority_score") or 0.0),
+            normalized_key=str(row.get("normalized_key") or ""),
         )
 
 

@@ -1,5 +1,5 @@
-"""Evidence authority and sufficiency policies."""
+"""Evidence admission and policy."""
 
-from .policy import EvidencePolicy, SIMPLE_FACT_EVIDENCE_POLICY, registrable_domain
+from app.research.evidence.models import EvidenceRecord
 
-__all__ = ["EvidencePolicy", "SIMPLE_FACT_EVIDENCE_POLICY", "registrable_domain"]
+__all__ = ["EvidenceRecord"]

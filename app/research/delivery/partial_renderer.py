@@ -13,7 +13,7 @@ def render_partial_delivery(
     findings: list[dict[str, Any]],
     evidence_digests: list[EvidenceDigest],
     worker_summaries: list[dict[str, Any]],
-    business_gaps: list[str],
+    semantic_gaps: list[str],
     limitations: list[str],
     unresolved_conflicts: list[str],
     worker_failure_reasons: list[str],
@@ -66,7 +66,7 @@ def render_partial_delivery(
         lines.append("- 证据 ID 已恢复，但证据摘要不可用；请查看 evidence.json。")
 
     lines.extend(["", "## 尚未完成", ""])
-    unfinished = [str(item) for item in business_gaps if str(item).strip()]
+    unfinished = [str(item) for item in semantic_gaps if str(item).strip()]
     lines.extend(f"- {item}" for item in unfinished[:12] or ["- 部分研究维度尚未完成交叉验证。"])
     lines.append("- 完整模型综合未完成，因此本结果不构成完整终稿。")
 

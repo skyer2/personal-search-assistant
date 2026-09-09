@@ -1,11 +1,11 @@
 from app.config.loader import get_harness_config
-from app.research.domain.contracts import replan_budget_from_state
+from app.research.domain.contracts import action_budget_from_state
 from app.research.routing.mode_router import budget_for_mode
 from app.research.routing.task_shape import (
     TaskShape,
     execution_profile_for_shape,
 )
-from app.research.runtime.graph import intent_node
+from app.research.runtime.graph import compile_spec_node
 from app.research.runtime.state import empty_research_state
 
 
@@ -28,8 +28,8 @@ def test_breadth_heavy_replan_budget_has_single_effective_limit():
         task_query="对比 OpenAI、Anthropic 和 Google 的 deep research 架构",
         max_replan_count=hard_limit,
     )
-    update = intent_node(state)
+    update = compile_spec_node(state)
     effective_state = {**state, **update}
 
-    assert update["budget"]["max_replan_count"] == 2
-    assert replan_budget_from_state(effective_state)["max_attempts"] == 2
+    assert state["budget"]["max_replan_count"] == hard_limit
+    assert action_budget_from_state(effective_state)["max_replan"] == hard_limit

@@ -186,12 +186,15 @@ def _as_int(value: Any, default: int = 1) -> int:
         return default
 
 
-def _worker_attempt_key(event: dict[str, Any], attrs: dict[str, Any]) -> tuple[str, int]:
+def _worker_attempt_key(event: dict[str, Any], attrs: dict[str, Any]) -> tuple[str, int, int]:
     task_id = str(event.get("task_id") or attrs.get("task_id") or "")
     attempt = event.get("attempt")
     if attempt is None:
         attempt = attrs.get("attempt")
-    return (task_id, _as_int(attempt, 1))
+    plan_version = event.get("plan_version")
+    if plan_version is None:
+        plan_version = attrs.get("plan_version")
+    return (task_id, _as_int(plan_version, 1), _as_int(attempt, 1))
 
 
 def _coalesce_worker_row(
@@ -200,14 +203,14 @@ def _coalesce_worker_row(
     attrs: dict[str, Any],
     event_type: str,
 ) -> None:
-    """同一 task_id+attempt 的 started/completed 合成一行，objective 从 started 继承。"""
+    """同一 task_id+plan_version+attempt 的 started/completed 合成一行。"""
     key = _worker_attempt_key(event, attrs)
     incoming = {
         "type": event_type,
         "task_id": event.get("task_id") or attrs.get("task_id") or None,
         "status": event.get("status"),
         "duration_ms": event.get("duration_ms"),
-        "attempt": key[1],
+        "attempt": key[2],
         "plan_version": event.get("plan_version") if event.get("plan_version") is not None else attrs.get("plan_version"),
         "objective": attrs.get("objective"),
         "execution_status": attrs.get("execution_status"),
@@ -271,7 +274,7 @@ def summarize_trace(
     identity: dict[str, Any] = {}
     brief: dict[str, Any] | None = None
     plans: list[dict[str, Any]] = []
-    workers_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    workers_by_key: dict[tuple[str, int, int], dict[str, Any]] = {}
     progress: list[dict[str, Any]] = []
     replans: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
@@ -332,9 +335,10 @@ def summarize_trace(
                         "timestamp": event.get("timestamp"),
                     }
                 )
-        if event_type == "brief.compiled":
+        if event_type in {"brief.compiled", "spec.compiled"}:
+            spec_event = event_type == "spec.compiled"
             brief = {
-                "brief_id": attrs.get("brief_id"),
+                "brief_id": attrs.get("spec_id") if spec_event else attrs.get("brief_id"),
                 "brief_version": attrs.get("brief_version") or 1,
                 "objective": attrs.get("objective"),
                 "entities": attrs.get("entities") or [],
@@ -343,7 +347,7 @@ def summarize_trace(
                 "freshness": attrs.get("freshness"),
                 "deliverable": attrs.get("deliverable"),
                 "prefer_primary": attrs.get("prefer_primary"),
-                "planner_source": attrs.get("planner_source"),
+                "planner_source": attrs.get("planner_source") or ("spec_driven" if spec_event else None),
                 "intent_confidence": attrs.get("intent_confidence"),
                 "brief_ref": attrs.get("brief_ref"),
                 "brief_hash": attrs.get("brief_hash"),

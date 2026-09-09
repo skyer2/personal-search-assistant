@@ -66,7 +66,7 @@ memory limit / CPU quota / timeout / max retry
                   │              /        \
                   │            YES        NO
                   │             │          │
-                  │         PlanPatch   degraded / failed
+                  │  GAP_FILL / REPLAN  degraded / failed
                   │         (+ grant)
                   └─────────────┴──────────┘
                                 │
@@ -95,11 +95,11 @@ Harness  → controls resources / stop / replan ceiling
 | `max_tool_calls` | 整次 run 工具次数顶 |
 | `max_step_tool_calls` | 单步联网检索顶（search/fetch） |
 | `max_run_sec` | 墙钟顶 → `deadline_exceeded` |
-| `max_replan_count` | PlanPatch 次数顶 |
+| `max_replan_count` | 策略 Replan 次数顶 |
 | `max_plan_steps` | 计划步数顶 |
 | `max_parallel_workers` | 并发 Worker 顶 |
 | `planner.max_research_tasks` | 初始研究任务数顶 |
-| `planner.max_plan_patch_tasks` | 单次 patch 新增任务顶 |
+| `planner.max_plan_patch_tasks` | 单次 GapFill 新增任务顶 |
 
 **规则：Adaptive Effort 只能 `min(申请值, Hard Ceiling)`，永远不能抬高 Hard Ceiling。**
 
@@ -144,15 +144,17 @@ apply_effort_to_hard_ceiling(effort, hard) → EffectiveBudget
 
 Lead Planner **可以**在 task metadata 里带 `effort: low|medium|high` 提示；**不可以**输出「必须 search 13 次」这种假精确。
 
-### 3.3 Bounded Replacement Recovery（GAP 时）
+### 3.3 Bounded Semantic Control（GAP 时）
 
-`assess_progress() → GAP` 且 replan budget 未耗尽：
+`CoverageState` 产生 `SemanticGap` 且对应 `ActionBudget` 未耗尽：
 
-1. 定位稳定 Business Gap（`gap_id`），不是失败的 Task ID
-2. 旧 Task 标记 `SUPERSEDED`，replacement Task 原位替换 Plan Step，并继承 `gap_ids` / `origin_task_id`
-3. replacement 数量、recovery generation、同 Gap 恢复次数都受 hard ceiling / `ResearchState.replan_budget` clamp
-4. **不提高**会话 `max_tool_calls` / `max_run_sec` / `recursion_limit` 硬顶
-5. recovery exhausted / stalled → ControlPolicy 终止；有可用证据则 degraded delivery，否则 TerminalPolicy 判失败
+1. 瞬态执行失败走 `RETRY`，不扩大 Plan scope
+2. 明确语义缺口走 `GAP_FILL`，新任务必须绑定 `resolves_gap_ids`
+3. Discovery 后的候选扩展走 `EXPAND_PLAN`，消费 materialized `CandidateSet`
+4. 策略失效走 `REPLAN`，strategy fingerprint 必须改变
+5. 四类动作次数都受 `ResearchState.action_budget` clamp
+6. **不提高**会话 `max_tool_calls` / `max_run_sec` / `recursion_limit` 硬顶
+7. budget exhausted / semantic stall → ControlPolicy 终止；有可用证据则 partial delivery，否则判失败
 
 `run_budget.max_parallel_workers` 在 Plan 落盘后刷新 `RunSession.worker_sem`，由 StateGraph dispatch 消费。
 
@@ -167,7 +169,7 @@ Task 上的 `effort: low|medium|high` 只缩放该步 `max_retrieval_calls`（�
 | JSON / schema 错 | **format-only retry**；`retrieval_remaining=0`；禁止重搜 |
 | 空 Worker / unauthorized | JSON-only 或 fail-closed（现有 `JSON_ONLY_FAIL_REASONS`） |
 | 网络瞬态 | 有界 retry（工具层） |
-| Evidence 不足 | **Progress GAP → PlanPatch**，不是同 query 盲 retry |
+| Evidence 不足 | **SemanticGap → GAP_FILL**，不是同 query 盲 retry |
 | 任务过大 / 墙钟 | deadline / split via replan，不是无限 retry |
 | 重复搜索无新证据 | Progress stop |
 
@@ -197,7 +199,7 @@ Lead Planner 仍只输出 **objective DAG**，不调工具、不调度、不定�
 | 简单事实 | `direct` / 单 Worker |
 | 单主题深挖 | 少 Worker + 迭代检索 |
 | 多实体 / breadth-heavy | Lead + 并行 Worker |
-| 复杂 + 证据缺口 | + Progress + PlanPatch |
+| 复杂 + 证据缺口 | + Coverage + GAP_FILL |
 
 **不是「每个请求 3 个 Agent」。** 与 Anthropic Research / Gemini Deep Research / Perplexity 公开叙述一致：plan ↔ evidence 反馈，而不是一次 Plan 机械跑完。
 

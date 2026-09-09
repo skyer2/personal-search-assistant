@@ -65,6 +65,13 @@ class FakeBudget:
     def remaining_for_research_sec(self) -> float:
         return 60.0 if self._allowed else 0.0
 
+    def remaining_run_sec(self) -> float:
+        return 60.0 if self._allowed else 0.0
+
+    @property
+    def synthesis_reserve_sec(self) -> float:
+        return 10.0
+
 
 class FakeContext:
     task_query = "research query"

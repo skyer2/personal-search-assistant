@@ -14,8 +14,21 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "run.completed",
     "run.failed",
     "brief.compiled",
+    "spec.compiled",
+    "spec.validated",
+    "coverage.compiled",
+    "coverage.assessed",
+    "candidate_set.materialized",
+    "claim.extracted",
+    "claim.conflict_detected",
+    "claim.conflict_resolved",
+    "semantic_gap.opened",
+    "semantic_gap.closed",
+    "semantic_gain.assessed",
     "plan.created",
     "plan.validated",
+    "plan.expanded",
+    "plan.gap_fill_applied",
     "worker.started",
     "worker.completed",
     "worker.failed",
@@ -61,8 +74,21 @@ class EventType:
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
     BRIEF_COMPILED = "brief.compiled"
+    SPEC_COMPILED = "spec.compiled"
+    SPEC_VALIDATED = "spec.validated"
+    COVERAGE_COMPILED = "coverage.compiled"
+    COVERAGE_ASSESSED = "coverage.assessed"
+    CANDIDATE_SET_MATERIALIZED = "candidate_set.materialized"
+    CLAIM_EXTRACTED = "claim.extracted"
+    CLAIM_CONFLICT_DETECTED = "claim.conflict_detected"
+    CLAIM_CONFLICT_RESOLVED = "claim.conflict_resolved"
+    SEMANTIC_GAP_OPENED = "semantic_gap.opened"
+    SEMANTIC_GAP_CLOSED = "semantic_gap.closed"
+    SEMANTIC_GAIN_ASSESSED = "semantic_gain.assessed"
     PLAN_CREATED = "plan.created"
     PLAN_VALIDATED = "plan.validated"
+    PLAN_EXPANDED = "plan.expanded"
+    PLAN_GAP_FILL_APPLIED = "plan.gap_fill_applied"
     WORKER_STARTED = "worker.started"
     WORKER_COMPLETED = "worker.completed"
     WORKER_FAILED = "worker.failed"

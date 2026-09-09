@@ -1,40 +1,37 @@
-"""Research StateGraph. Routing authority is ControlPolicy; nodes are executors."""
+"""Contract-driven Research StateGraph. ControlPolicy is the route authority."""
 
 from __future__ import annotations
 
 from typing import Any, Literal, cast
 
-from app.agent.harness.planner import understand_task
 from app.agent.harness.state import ExecutionPlan
+from app.research.assessment.delivery import assess_delivery
+from app.research.assessment.evidence import assess_evidence
+from app.research.assessment.execution_health import assess_execution_health
 from app.research.assessment.progress import assess_progress
+from app.research.coverage.compiler import compile_coverage_contract
 from app.research.control.policy import decide_control
 from app.research.control.terminal_policy import terminal_update
 from app.research.control.transitions import transition_update
-from app.research.domain.contracts import (
-    ControlAction,
-    WorkflowPhase,
-    new_replan_budget,
-    recovery_limits_from_state,
-    replan_budget_from_state,
-)
-from app.research.domain.gaps import sync_business_gaps
-from app.research.domain.recovery import build_replacement_patch
+from app.research.domain.contracts import ControlAction, WorkflowPhase, action_budget_from_state
 from app.research.domain.task_state import (
     ResultStatus,
     TaskExecutionStatus,
     initialize_tasks,
+    retry_task,
     transition_task,
 )
-from app.research.routing.mode_router import canonicalize_mode
-from app.research.runtime.project import brief_from_intent
-from app.research.runtime.scheduler import (
-    annotate_plan_tasks,
-    dispatch_sends,
-    research_only_plan,
-    required_research_ids,
-    select_dispatch_wave,
-)
+from app.research.planning.expansion import expand_plan
+from app.research.planning.gap_fill import gap_fill
+from app.research.planning.planner import plan_for_spec
+from app.research.planning.replan import replan
+from app.research.planning.validator import validate_execution_plan
+from app.research.runtime.semantic_ingest import ingest_semantics
 from app.research.runtime.state import ResearchState, empty_research_state
+from app.research.routing.mode_router import canonicalize_mode
+from app.research.spec.compiler import compile_research_spec
+from app.research.spec.models import ResearchSpec
+from app.research.spec.validator import validate_research_spec
 
 
 class GraphInvariantViolation(RuntimeError):
@@ -47,64 +44,67 @@ def _plan_from_state(state: ResearchState) -> ExecutionPlan | None:
     return ExecutionPlan.from_dict(state["plan"])
 
 
-def intent_node(state: ResearchState) -> dict[str, Any]:
-    from app.research.routing.task_shape import classify_task_shape, execution_profile_for_shape
-
-    query = str(state.get("resolved_query") or state.get("task_query") or "")
-    intent = understand_task(query)
-    payload = intent.to_dict()
-    brief = brief_from_intent(payload)
-    shape = classify_task_shape(query, brief)
-    profile = execution_profile_for_shape(shape.shape)
-    budget = dict(state["budget"])
-    budget["max_parallel_workers"] = int(profile["parallel_workers"])
-    existing_replan = budget.get("max_replan_count")
-    profile_replan = int(profile["max_replan_count"])
-    effective_replan = (
-        profile_replan
-        if existing_replan is None
-        else min(int(cast(int, existing_replan)), profile_replan)
+def compile_spec_node(state: ResearchState) -> dict[str, Any]:
+    spec = compile_research_spec(
+        str(state.get("resolved_query") or state.get("task_query") or ""),
+        conversation_delta=str(state.get("conversation_summary") or ""),
+        existing_spec=state.get("research_spec") if isinstance(state.get("research_spec"), dict) and state.get("research_spec") else None,
     )
-    budget["max_replan_count"] = effective_replan
+    contract = compile_coverage_contract(spec)
     return transition_update(
         state,
-        WorkflowPhase.UNDERSTAND,
+        WorkflowPhase.COMPILE_SPEC,
         {
-            "intent": payload,
-            "brief": brief,
-            "needs_clarification": bool(intent.needs_clarification),
-            "route_signals": [f"task_shape:{shape.shape.value}"],
-            "budget": budget,
-            "replan_budget": new_replan_budget(effective_replan),
+            "research_spec": spec.to_dict(),
+            "coverage_contract": contract.to_dict(),
+            "route_signals": [f"task_shape:{spec.task_shape}"],
         },
     )
 
 
-def clarify_node(state: ResearchState) -> dict[str, Any]:
-    from app.agent.harness.planner import auto_resolve_clarification
-    from app.agent.harness.state import TaskIntent
+def spec_gate_node(state: ResearchState) -> dict[str, Any]:
+    issues = validate_research_spec(state.get("research_spec"))
+    blocking = any(issue in {"blocking_ambiguity", "contradicted_premise"} for issue in issues)
+    return transition_update(
+        state,
+        WorkflowPhase.SPEC_GATE,
+        {
+            "needs_clarification": blocking,
+            "route_signals": [*(state.get("route_signals") or []), *(f"spec_issue:{issue}" for issue in issues)],
+        },
+    )
 
-    intent = TaskIntent.from_dict(state.get("intent") or {})
-    resolved = auto_resolve_clarification(intent)
+
+def route_after_spec_gate(state: ResearchState) -> Literal["clarify", "plan"]:
+    return "clarify" if state.get("needs_clarification") else "plan"
+
+
+def clarify_node(state: ResearchState) -> dict[str, Any]:
+    spec = ResearchSpec.from_dict(state.get("research_spec"))
+    for ambiguity in spec.ambiguities:
+        if ambiguity.blocking and not ambiguity.resolution:
+            ambiguity.resolution = "auto_resolved: retain the original objective and disclose the assumption"
+            spec.assumptions.append(f"{ambiguity.text}: auto-resolved by retaining the original objective")
+    spec.interaction_requirements.requires_clarification = False
     return transition_update(
         state,
         WorkflowPhase.CLARIFY,
-        {"intent": resolved.to_dict(), "needs_clarification": False},
+        {
+            "research_spec": spec.to_dict(),
+            "needs_clarification": False,
+            "conversation_summary": str(state.get("conversation_summary") or ""),
+        },
     )
 
 
 def plan_node(state: ResearchState) -> dict[str, Any]:
-    from app.agent.harness.planner import finalize_plan
-    from app.agent.harness.state import TaskIntent
-    from app.research.planning.lead_planner import heuristic_dynamic_plan
-    from app.research.planning.policy import parse_source_policy
-
-    raw = state.get("intent") or {}
-    intent = TaskIntent.from_dict(raw) if raw else understand_task(state["task_query"])
-    plan = heuristic_dynamic_plan(intent, parse_source_policy(intent.raw_query))
-    plan = research_only_plan(annotate_plan_tasks(finalize_plan(plan)))
+    plan = plan_for_spec(
+        state.get("research_spec"),
+        state.get("coverage_contract"),
+        candidate_set=state.get("candidate_set"),
+        plan_version=int(state.get("plan_version") or 1),
+    )
     tasks = initialize_tasks(plan)
-    business_gaps = sync_business_gaps(plan, tasks, {})
     return transition_update(
         state,
         WorkflowPhase.PLAN,
@@ -112,7 +112,6 @@ def plan_node(state: ResearchState) -> dict[str, Any]:
             "plan": plan.to_dict(),
             "plan_version": plan.plan_version,
             "tasks": tasks,
-            "business_gaps": business_gaps,
             "needs_plan_review": False,
         },
     )
@@ -120,23 +119,16 @@ def plan_node(state: ResearchState) -> dict[str, Any]:
 
 def plan_validate_node(state: ResearchState) -> dict[str, Any]:
     plan = _plan_from_state(state)
-    if plan is None or not plan.steps or any(
-        step.step_type not in {"research", "network_search", "file_read"} for step in plan.steps
-    ):
-        return transition_update(state, WorkflowPhase.PLAN_VALIDATED, {"abort_reason": "empty_plan"})
-    return transition_update(state, WorkflowPhase.PLAN_VALIDATED, {})
-
-
-def dispatch_node(state: ResearchState) -> dict[str, Any]:
-    return transition_update(
-        state,
-        WorkflowPhase.DISPATCH,
-        {"dispatch_wave_id": int(state.get("dispatch_wave_id") or 0) + 1},
-    )
-
-
-def route_after_intent(state: ResearchState) -> Literal["clarify", "plan"]:
-    return "clarify" if state.get("needs_clarification") else "plan"
+    issues = validate_execution_plan(
+        plan,
+        spec=state.get("research_spec"),
+        coverage_contract=state.get("coverage_contract"),
+        candidate_set=state.get("candidate_set"),
+    ) if plan is not None else ["missing_plan"]
+    payload: dict[str, Any] = {}
+    if issues:
+        payload["abort_reason"] = f"plan_validation_failed:{','.join(issues)}"
+    return transition_update(state, WorkflowPhase.PLAN_VALIDATED, payload)
 
 
 def _decision(state: ResearchState) -> dict[str, Any]:
@@ -150,6 +142,14 @@ def _state_decision(state: ResearchState) -> dict[str, Any]:
     return _decision(state)
 
 
+def dispatch_node(state: ResearchState) -> dict[str, Any]:
+    decision = _decision(state)
+    payload: dict[str, Any] = {"control_decision": decision}
+    if decision["action"] == ControlAction.DISPATCH.value:
+        payload["dispatch_wave_id"] = int(state.get("dispatch_wave_id") or 0) + 1
+    return transition_update(state, WorkflowPhase.DISPATCH, payload)
+
+
 def route_dispatch(state: ResearchState) -> list[Any] | str:
     from langgraph.types import Send
 
@@ -160,44 +160,43 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
         if plan is None:
             return "finalize"
         sends: list[Any] = []
-        for index, step in select_dispatch_wave(
-            plan,
-            state.get("tasks"),
-            task_ids=decision["task_ids"],
-            max_parallel=max(1, int(state["budget"]["max_parallel_workers"])),
-        ):
+        selected = set(decision.get("task_ids") or [])
+        for index, step in enumerate(plan.steps):
+            task_id = step.resolved_task_id(index)
+            if selected and task_id not in selected:
+                continue
             sends.append(
                 Send(
                     "research_worker",
                     {
-                        "run_id": state["run_id"],
-                        "session_id": state["session_id"],
-                        "phase": state.get("phase") or WorkflowPhase.DISPATCH.value,
-                        "plan_version": int(state.get("plan_version") or 1),
-                        "dispatch_wave_id": int(state.get("dispatch_wave_id") or 0),
-                        "task_id": step.resolved_task_id(index),
+                        **state,
+                        "phase": WorkflowPhase.EXECUTE.value,
+                        "task_id": task_id,
                         "step_index": index,
                         "step_type": step.step_type,
                         "description": step.description,
                         "subagent": step.subagent or "",
                         "task_query": state["task_query"],
+                        "task_metadata": dict(step.metadata or {}),
                         "tasks": dict(state.get("tasks") or {}),
-                        "candidate_context": str((state.get("candidate_set") or {}).get("context") or ""),
-                        "candidate_set": dict(state.get("candidate_set") or {}),
                     },
                 )
             )
         if sends:
             return sends
-        return "progress"
-    if action in {ControlAction.WAIT.value, ControlAction.RETRY.value}:
-        return "retry" if action == ControlAction.RETRY.value else "progress"
+        return "ingest_semantics"
+    if action == ControlAction.RETRY.value:
+        return "retry"
+    if action == ControlAction.GAP_FILL.value:
+        return "gap_fill"
+    if action == ControlAction.EXPAND_PLAN.value:
+        return "expand_plan"
     if action == ControlAction.REPLAN.value:
         return "replan"
     if action in {ControlAction.SYNTHESIZE.value, ControlAction.DELIVER_PARTIAL.value}:
         return "synthesize"
-    if action == ControlAction.CANCEL.value:
-        return "finalize"
+    if action == ControlAction.WAIT.value:
+        return "dispatch"
     return "finalize"
 
 
@@ -205,111 +204,103 @@ def research_worker_node(state: ResearchState) -> dict[str, Any]:
     task_id = str(state.get("task_id") or "")
     current = dict(state.get("tasks") or {}).get(task_id)
     if current is not None and current.get("execution_status") != TaskExecutionStatus.PENDING.value:
-        return transition_update(
-            state,
-            WorkflowPhase.EXECUTE,
-            {
-                "worker_results": [
-                    {
-                        "task_id": task_id,
-                        "ok": False,
-                        "status": "duplicate_skipped",
-                        "summary": "duplicate task attempt suppressed",
-                    }
-                ]
-            },
-        )
-    running = transition_task(
-        state.get("tasks"),
-        task_id,
-        execution_status=TaskExecutionStatus.RUNNING,
-    )
+        return {
+            "worker_results": [
+                {
+                    "task_id": task_id,
+                    "ok": False,
+                    "status": "duplicate_skipped",
+                    "summary": "duplicate task attempt suppressed",
+                }
+            ]
+        }
+    running = transition_task(state.get("tasks"), task_id, execution_status=TaskExecutionStatus.RUNNING)
     tasks = transition_task(
         running,
         task_id,
         execution_status=TaskExecutionStatus.SUCCEEDED,
         result_status=ResultStatus.COMPLETE,
-        evidence_refs=[f"evidence:{task_id}"],
+        evidence_refs=[f"evidence:{task_id}:primary", f"evidence:{task_id}:secondary"],
     )
-    return transition_update(
-        state,
-        WorkflowPhase.EXECUTE,
-        {
-            "tasks": {task_id: tasks[task_id]},
-            "worker_results": [
+    evidence_ids = [f"evidence:{task_id}:primary", f"evidence:{task_id}:secondary"]
+    objective = str(state.get("description") or state.get("task_query") or "")
+    metadata = dict(state.get("task_metadata") or {})
+    candidates: list[dict[str, Any]] = []
+    if str(metadata.get("task_kind") or "") == "discovery":
+        target_items = max(1, int(metadata.get("target_items") or 4))
+        candidates = [
+            {"candidate_id": f"candidate_{index}", "name": f"Candidate {index}"}
+            for index in range(1, target_items + 1)
+        ]
+    return {
+        "tasks": {task_id: tasks[task_id]},
+        "worker_results": [
                 {
                     "task_id": task_id,
+                    "task_metadata": metadata,
                     "ok": True,
-                    "status": "succeeded",
-                    "summary": "deterministic evidence",
-                    "payload": {"evidence_ids": [f"evidence:{task_id}"]},
-                }
-            ],
-            "evidence_refs": [f"evidence:{task_id}"],
-        },
-    )
+                "status": "succeeded",
+                "summary": objective,
+                "payload": {
+                        "findings": [{"claim": objective, "evidence_ids": evidence_ids, "confidence": 0.9}],
+                        "facts": [objective],
+                        "candidates": candidates,
+                        "sources": [f"https://primary.example/{task_id}", f"https://secondary.example/{task_id}"],
+                    "evidence_ids": evidence_ids,
+                    "confidence": 0.9,
+                },
+            }
+        ],
+        "evidence_refs": evidence_ids,
+        "artifact_refs": [f"artifact:{task_id}"],
+    }
 
 
 def dispatch_barrier_node(_state: ResearchState) -> dict[str, Any]:
-    """Join all worker branches before a single assessment superstep."""
+    """Join all worker branches before one semantic ingest superstep."""
     return {}
 
 
-def progress_node(state: ResearchState) -> dict[str, Any]:
-    plan = _plan_from_state(state)
-    if plan is None:
-        return transition_update(state, WorkflowPhase.ASSESS, {"abort_reason": "missing_plan"})
-    assessment = assess_progress(dict(state))
-    business_gaps = sync_business_gaps(
-        plan,
-        state.get("tasks"),
-        state.get("business_gaps"),
-        resolved_gap_ids=assessment["resolved_gap_ids"],
-    )
-    evidence_count = len(state.get("evidence_refs") or [])
-    snapshot = {
-        "gap_ids": assessment["gap_ids"],
-        "resolved_gap_ids": assessment["resolved_gap_ids"],
-        "evidence_refs": sorted(set(state.get("evidence_refs") or [])),
-        "delivery_mode": "none",
-        "delivery_status": "unknown",
+def ingest_semantics_node(state: ResearchState) -> dict[str, Any]:
+    return transition_update(state, WorkflowPhase.INGEST_SEMANTICS, ingest_semantics(dict(state)))
+
+
+def assess_node(state: ResearchState) -> dict[str, Any]:
+    progress = assess_progress(dict(state))
+    evidence = assess_evidence(dict(state))
+    health = assess_execution_health(dict(state))
+    delivery = assess_delivery(dict(state))
+    enriched = {
+        **state,
+        "progress_assessment": progress,
+        "evidence_assessment": evidence,
+        "execution_health": health,
+        "delivery_readiness": delivery,
     }
-    stalled = int(state.get("stalled_cycles") or 0) + 1 if snapshot == dict(state.get("recovery_snapshot") or {}) else 0
-    decision = decide_control(
-        {
-            **state,
-            "progress_assessment": assessment,
-            "business_gaps": business_gaps,
-            "stalled_cycles": stalled,
-        }
-    )
+    decision = decide_control(enriched)
     return transition_update(
         state,
         WorkflowPhase.ASSESS,
         {
-            "progress_assessment": assessment,
-            "evidence_assessment": {
-                "status": "sufficient" if evidence_count else "insufficient",
-                "evidence_count": evidence_count,
-                "trusted_evidence_count": evidence_count,
-                "primary_source_count": min(1, evidence_count),
-                "independent_source_count": evidence_count,
-            },
-            "execution_health": {"status": "degraded" if assessment["status"] == "gap" else "healthy", "stalled_cycles": stalled},
-            "delivery_readiness": {},
-            "business_gaps": business_gaps,
-            "recovery_snapshot": snapshot,
-            "stalled_cycles": stalled,
+            "progress_assessment": progress,
+            "evidence_assessment": evidence,
+            "execution_health": health,
+            "delivery_readiness": delivery,
             "control_decision": decision,
         },
     )
 
 
-def route_progress(state: ResearchState) -> str:
-    decision = _state_decision(state)
-    action = decision["action"]
-    if action in {ControlAction.DISPATCH.value, ControlAction.WAIT.value, ControlAction.RETRY.value}:
-        return "retry" if action == ControlAction.RETRY.value else "dispatch"
+def route_assess(state: ResearchState) -> str:
+    action = _state_decision(state)["action"]
+    if action in {ControlAction.DISPATCH.value, ControlAction.WAIT.value}:
+        return "dispatch"
+    if action == ControlAction.RETRY.value:
+        return "retry"
+    if action == ControlAction.GAP_FILL.value:
+        return "gap_fill"
+    if action == ControlAction.EXPAND_PLAN.value:
+        return "expand_plan"
     if action == ControlAction.REPLAN.value:
         return "replan"
     if action in {ControlAction.SYNTHESIZE.value, ControlAction.DELIVER_PARTIAL.value}:
@@ -317,112 +308,213 @@ def route_progress(state: ResearchState) -> str:
     return "finalize"
 
 
-def replan_node(state: ResearchState) -> dict[str, Any]:
-    plan = _plan_from_state(state)
-    if plan is None:
-        return transition_update(state, WorkflowPhase.REPLAN, {})
-    assessment = dict(state.get("progress_assessment") or {})
-    patch = build_replacement_patch(
-        plan,
-        state.get("tasks"),
-        gap_ids=[str(item) for item in assessment.get("gap_ids") or []],
-        limits=recovery_limits_from_state(dict(state)),
-        rejected_hashes=[str(item) for item in state.get("rejected_patch_hashes") or []],
-        previous_gaps=state.get("business_gaps"),
+def _increment_action(state: ResearchState, action: str) -> dict[str, int]:
+    budget = action_budget_from_state(dict(state))
+    budget[action] = int(budget.get(action) or 0) + 1
+    return budget
+
+
+def gap_fill_node(state: ResearchState) -> dict[str, Any]:
+    budget = action_budget_from_state(dict(state))
+    result = gap_fill(
+        state.get("research_spec"),
+        state.get("semantic_gaps"),
+        plan_version=int(state.get("plan_version") or 1),
+        max_tasks=max(0, int(budget["max_gap_fill"] - budget["gap_fill"])),
     )
-    budget = dict(replan_budget_from_state(dict(state)))
-    attempted = int(budget.get("attempted") or 0) + 1
-    applied = int(budget.get("applied") or 0) + (1 if patch["applied"] else 0)
-    budget.update(attempted=attempted, applied=applied)
-    rejected = [str(item) for item in state.get("rejected_patch_hashes") or []]
-    if not patch["applied"]:
-        rejected = list(dict.fromkeys([*rejected, patch["fingerprint"]]))
+    if not result.applied:
+        return transition_update(state, WorkflowPhase.GAP_FILL, {"abort_reason": result.reason})
+    tasks = {**state.get("tasks", {}), **initialize_tasks(result.plan)}
     return transition_update(
         state,
-        WorkflowPhase.REPLAN,
+        WorkflowPhase.GAP_FILL,
         {
-            "plan": patch["plan"].to_dict(),
-            "plan_version": patch["plan"].plan_version if patch["applied"] else int(state.get("plan_version") or 1),
-            "tasks": patch["tasks"],
-            "business_gaps": patch["business_gaps"],
-            "replan_budget": budget,
-            "rejected_patch_hashes": rejected,
+            "plan": result.plan.to_dict(),
+            "plan_version": result.plan.plan_version,
+            "tasks": tasks,
+            "semantic_gaps": result.semantic_gaps,
+            "action_budget": _increment_action(state, "gap_fill"),
         },
     )
 
 
+def expand_plan_node(state: ResearchState) -> dict[str, Any]:
+    result = expand_plan(
+        state.get("research_spec"),
+        state.get("candidate_set"),
+        plan_version=int(state.get("plan_version") or 1),
+    )
+    if not result.applied:
+        return transition_update(state, WorkflowPhase.EXPAND_PLAN, {"abort_reason": result.reason})
+    tasks = {**state.get("tasks", {}), **initialize_tasks(result.plan)}
+    return transition_update(
+        state,
+        WorkflowPhase.EXPAND_PLAN,
+        {
+            "candidate_set": result.candidate_set,
+            "coverage_contract": result.coverage_contract.to_dict(),
+            "plan": result.plan.to_dict(),
+            "plan_version": result.plan.plan_version,
+            "tasks": tasks,
+            "action_budget": _increment_action(state, "expand_plan"),
+        },
+    )
+
+
+def replan_node(state: ResearchState) -> dict[str, Any]:
+    result = replan(
+        state.get("research_spec"),
+        state.get("plan"),
+        state.get("semantic_gaps"),
+        state.get("tasks"),
+        reason="semantic_gain_low",
+        plan_version=int(state.get("plan_version") or 1),
+    )
+    if not result.applied:
+        return transition_update(state, WorkflowPhase.REPLAN, {"abort_reason": result.reason})
+    tasks = {**result.tasks, **initialize_tasks(result.plan)}
+    return transition_update(
+        state,
+        WorkflowPhase.REPLAN,
+        {
+            "plan": result.plan.to_dict(),
+            "plan_version": result.plan.plan_version,
+            "tasks": tasks,
+            "semantic_gaps": result.semantic_gaps,
+            "action_budget": _increment_action(state, "replan"),
+        },
+    )
+
+
+def retry_node(state: ResearchState) -> dict[str, Any]:
+    decision = _state_decision(state)
+    tasks = dict(state.get("tasks") or {})
+    for task_id in decision.get("task_ids") or []:
+        tasks = retry_task(tasks, str(task_id))
+    return {
+        "tasks": tasks,
+        "action_budget": _increment_action(state, "retry"),
+        "control_decision": {},
+    }
+
+
+def _semantic_digest(state: ResearchState, *, compact: bool) -> str:
+    spec = ResearchSpec.from_dict(state.get("research_spec"))
+    claims = [row for row in state.get("claims") or [] if isinstance(row, dict)]
+    coverage = state.get("coverage_state") if isinstance(state.get("coverage_state"), dict) else {}
+    lines = [f"# {spec.objective}", ""]
+    selected = claims[:12] if compact else claims[:40]
+    for claim in selected:
+        evidence_ids = ", ".join(str(item) for item in claim.get("evidence_ids") or [])
+        lines.append(f"- {claim.get('text') or claim.get('claim')} [{evidence_ids}]")
+    limitations = [str(item) for item in coverage.get("missing_ids") or []]
+    if limitations:
+        lines.extend(["", "## Known limitations", *[f"- Uncovered coverage unit: {item}" for item in limitations[:8 if compact else 20]]])
+    conflicts = [str(item) for item in coverage.get("conflicted_ids") or []]
+    if conflicts:
+        lines.extend(["", "## Conflict disclosures", *[f"- Unresolved coverage unit: {item}" for item in conflicts[:8 if compact else 20]]])
+    return "\n".join(lines)
+
+
 def synthesize_node(state: ResearchState) -> dict[str, Any]:
-    content = str(state.get("final_content") or "").strip()
-    if not content:
-        findings = list(state.get("findings") or [])
-        content = "\n".join(
-            str(item.get("claim") or item.get("summary") or "")
-            for item in findings
-            if isinstance(item, dict)
-        ).strip()
+    compact = int(state.get("synthesis_attempts") or 0) >= 1
+    content = _semantic_digest(state, compact=compact)
     return transition_update(
         state,
         WorkflowPhase.SYNTHESIS,
         {
             "final_content": content,
-            "delivery_readiness": dict(state.get("delivery_readiness") or {}),
+            "synthesis_attempts": int(state.get("synthesis_attempts") or 0) + 1,
+            "synthesis_failed": False,
+            "delivery_readiness": assess_delivery(dict(state)),
         },
+    )
+
+
+def _quality_assessment(state: ResearchState) -> dict[str, Any]:
+    content = str(state.get("final_content") or "").strip()
+    progress = assess_progress(dict(state))
+    evidence = assess_evidence(dict(state))
+    issues: list[str] = []
+    if not content:
+        issues.append("no_content")
+    if bool(state.get("synthesis_failed")):
+        issues.append("synthesis_failed")
+    if progress["status"] != "sufficient":
+        issues.append("coverage_gate_failed")
+    if progress["unresolved_conflicts"]:
+        issues.append("blocking_conflict_unresolved")
+    evidence_ids = {str(row.get("evidence_id") or "") for row in state.get("evidence_records") or [] if isinstance(row, dict)}
+    claims = [row for row in state.get("claims") or [] if isinstance(row, dict)]
+    unsupported = [
+        claim
+        for claim in claims
+        if not [item for item in claim.get("evidence_ids") or [] if str(item) in evidence_ids]
+    ]
+    if unsupported:
+        issues.append("claim_evidence_grounding_failed")
+    if claims and not all(any(str(item) in content for item in claim.get("evidence_ids") or []) for claim in claims):
+        issues.append("citation_missing")
+    blocking = {"no_content", "coverage_gate_failed", "blocking_conflict_unresolved", "claim_evidence_grounding_failed"}
+    repairable = bool(content) and bool(set(issues) & {"citation_missing"}) and not (set(issues) & blocking - {"coverage_gate_failed"})
+    suggested_action = "repair" if repairable else "gap_fill" if "coverage_gate_failed" in issues else ""
+    return {
+        "verdict": "pass" if not issues else "fail",
+        "issues": issues,
+        "repairable": repairable,
+        "suggested_action": suggested_action,
+        "grounding": not unsupported,
+        "citation_metrics": {
+            "claim_count": len(claims),
+            "supported_claim_count": len(claims) - len(unsupported),
+            "evidence_count": len(evidence_ids),
+            "coverage_ratio": progress["coverage_ratio"],
+            "evidence_status": evidence["status"],
+        },
+    }
+
+
+def quality_gate_node(state: ResearchState) -> dict[str, Any]:
+    assessment = _quality_assessment(state)
+    decision = decide_control({**state, "quality_assessment": assessment})
+    return transition_update(
+        state,
+        WorkflowPhase.QUALITY,
+        {"quality_assessment": assessment, "control_decision": decision},
     )
 
 
 def route_after_quality(state: ResearchState) -> str:
-    decision = _state_decision(state)
-    if decision["action"] == ControlAction.REPAIR_SYNTHESIS.value:
+    action = _state_decision(state)["action"]
+    if action == ControlAction.REPAIR_SYNTHESIS.value:
         return "repair_synthesis"
-    if decision["action"] == ControlAction.REPLAN.value:
+    if action == ControlAction.GAP_FILL.value:
+        return "gap_fill"
+    if action == ControlAction.REPLAN.value:
         return "replan"
     return "finalize"
 
 
-def quality_gate_node(state: ResearchState) -> dict[str, Any]:
-    content = bool(str(state.get("final_content") or "").strip())
-    verdict = "unknown" if content else "fail"
+def repair_synthesis_node(state: ResearchState) -> dict[str, Any]:
+    compact = _semantic_digest(state, compact=True)
     return transition_update(
         state,
-        WorkflowPhase.QUALITY,
+        WorkflowPhase.REPAIR_SYNTHESIS,
         {
-            "quality_assessment": {
-                "verdict": verdict,
-                "issues": [] if content else ["no_content"],
-                "repairable": False,
-                "suggested_action": "",
-                "grounding": False,
-                "citation_metrics": {},
-            },
-            "control_decision": _decision({**state, "quality_assessment": {"verdict": verdict}}),
+            "final_content": compact,
+            "synthesis_attempts": int(state.get("synthesis_attempts") or 0) + 1,
+            "synthesis_failed": False,
         },
     )
 
 
-def repair_synthesis_node(state: ResearchState) -> dict[str, Any]:
-    return transition_update(
-        state,
-        WorkflowPhase.REPAIR_SYNTHESIS,
-        {"final_content": str(state.get("final_content") or "")},
-    )
-
-
-def retry_node(state: ResearchState) -> dict[str, Any]:
-    from app.research.domain.task_state import retry_task
-
-    decision = _state_decision(state)
-    tasks = dict(state.get("tasks") or {})
-    for task_id in decision.get("task_ids") or []:
-        tasks = retry_task(tasks, str(task_id))
-    return {"tasks": tasks}
-
-
 def finalize_node(state: ResearchState) -> dict[str, Any]:
+    progress = assess_progress(dict(state))
     terminal = terminal_update(
         state,
         reason=str((state.get("termination") or {}).get("outcome") or "incomplete"),
         stage="finalize",
-        research_completed=bool(state.get("evidence_refs")),
+        research_completed=progress["status"] == "sufficient",
         synthesis_attempted=bool(state.get("final_content")),
         quality_attempted=bool(state.get("quality_assessment")),
     )
@@ -464,84 +556,113 @@ def compile_research_graph(
         return research_worker_node(cast(ResearchState, payload))
 
     if runtime is not None:
-        vanilla = runtime.node_vanilla_agent
-        intent = runtime.node_intent
+        compile_spec = runtime.node_compile_spec
+        spec_gate = runtime.node_spec_gate
         clarify = runtime.node_clarify
         plan = runtime.node_plan
         plan_validate = runtime.node_plan_validate
         dispatch = runtime.node_dispatch
         worker = runtime.node_research_worker
-        progress = runtime.node_progress
-        retry = runtime.node_retry
+        ingest = runtime.node_ingest_semantics
+        assess = runtime.node_assess
+        gap_fill = runtime.node_gap_fill
+        expand = runtime.node_expand_plan
         replan = runtime.node_replan
+        retry = runtime.node_retry
         synthesize = runtime.node_synthesize
         quality_gate = runtime.node_quality_gate
         repair_synthesis = runtime.node_repair_synthesis
         finalize = runtime.node_finalize
     else:
-        vanilla = vanilla_agent_node
-        intent = intent_node
+        compile_spec = compile_spec_node
+        spec_gate = spec_gate_node
         clarify = clarify_node
         plan = plan_node
         plan_validate = plan_validate_node
         dispatch = dispatch_node
         worker = _worker
-        progress = progress_node
-        retry = retry_node
+        ingest = ingest_semantics_node
+        assess = assess_node
+        gap_fill = gap_fill_node
+        expand = expand_plan_node
         replan = replan_node
+        retry = retry_node
         synthesize = synthesize_node
         quality_gate = quality_gate_node
         repair_synthesis = repair_synthesis_node
         finalize = finalize_node
 
     builder = StateGraph(ResearchState)
-    builder.add_node("finalize", finalize)
     if mode == "direct":
-        builder.add_node("vanilla", vanilla)
+        builder.add_node("vanilla", vanilla_agent_node)
+        builder.add_node("finalize", finalize)
         builder.add_edge(START, "vanilla")
         builder.add_edge("vanilla", "finalize")
         builder.add_edge("finalize", END)
         kwargs: dict[str, Any] = {"checkpointer": checkpointer} if checkpointer is not None else {}
         return builder.compile(**kwargs)
 
-    builder.add_node("intent", intent)
-    builder.add_node("clarify", clarify)
-    builder.add_node("plan", plan)
-    builder.add_node("plan_validate", plan_validate)
-    builder.add_node("dispatch", dispatch)
-    builder.add_node("research_worker", worker)
-    builder.add_node("dispatch_barrier", dispatch_barrier_node)
-    builder.add_node("progress", progress)
-    builder.add_node("retry", retry)
-    builder.add_node("replan", replan)
-    builder.add_node("synthesize", synthesize)
-    builder.add_node("quality_gate", quality_gate)
-    builder.add_node("repair_synthesis", repair_synthesis)
-    builder.add_edge(START, "intent")
-    builder.add_conditional_edges("intent", route_after_intent, {"clarify": "clarify", "plan": "plan"})
-    builder.add_edge("clarify", "plan")
+    for name, node in {
+        "compile_spec": compile_spec,
+        "spec_gate": spec_gate,
+        "clarify": clarify,
+        "plan": plan,
+        "plan_validate": plan_validate,
+        "dispatch": dispatch,
+        "research_worker": worker,
+        "dispatch_barrier": dispatch_barrier_node,
+        "ingest_semantics": ingest,
+        "assess": assess,
+        "gap_fill": gap_fill,
+        "expand_plan": expand,
+        "replan": replan,
+        "retry": retry,
+        "synthesize": synthesize,
+        "quality_gate": quality_gate,
+        "repair_synthesis": repair_synthesis,
+        "finalize": finalize,
+    }.items():
+        builder.add_node(name, node)
+
+    builder.add_edge(START, "compile_spec")
+    builder.add_edge("compile_spec", "spec_gate")
+    builder.add_conditional_edges("spec_gate", route_after_spec_gate, {"clarify": "clarify", "plan": "plan"})
+    builder.add_edge("clarify", "compile_spec")
     builder.add_edge("plan", "plan_validate")
     builder.add_edge("plan_validate", "dispatch")
     builder.add_conditional_edges(
         "dispatch",
         route_dispatch,
-        ["research_worker", "progress", "retry", "replan", "synthesize", "finalize"],
+        [
+            "research_worker",
+            "ingest_semantics",
+            "retry",
+            "gap_fill",
+            "expand_plan",
+            "replan",
+            "synthesize",
+            "finalize",
+            "dispatch",
+        ],
     )
     builder.add_edge("research_worker", "dispatch_barrier")
-    builder.add_edge("dispatch_barrier", "progress")
+    builder.add_edge("dispatch_barrier", "ingest_semantics")
+    builder.add_edge("ingest_semantics", "assess")
     builder.add_conditional_edges(
-        "progress",
-        route_progress,
-        ["dispatch", "retry", "replan", "synthesize", "finalize"],
+        "assess",
+        route_assess,
+        ["dispatch", "retry", "gap_fill", "expand_plan", "replan", "synthesize", "finalize"],
     )
     builder.add_edge("retry", "dispatch")
-    builder.add_edge("synthesize", "quality_gate")
+    builder.add_edge("gap_fill", "plan_validate")
+    builder.add_edge("expand_plan", "plan_validate")
     builder.add_edge("replan", "plan_validate")
+    builder.add_edge("synthesize", "quality_gate")
     builder.add_edge("repair_synthesis", "synthesize")
     builder.add_conditional_edges(
         "quality_gate",
         route_after_quality,
-        ["finalize", "repair_synthesis", "replan"],
+        ["finalize", "repair_synthesis", "gap_fill", "replan"],
     )
     builder.add_edge("finalize", END)
     kwargs = {"checkpointer": checkpointer} if checkpointer is not None else {}
@@ -555,8 +676,8 @@ def initial_graph_state(**kwargs: Any) -> ResearchState:
 __all__ = [
     "GraphInvariantViolation",
     "compile_research_graph",
-    "dispatch_sends",
     "initial_graph_state",
+    "route_after_quality",
+    "route_assess",
     "route_dispatch",
-    "route_progress",
 ]

@@ -4,10 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.harness.planner import understand_task
 from app.research.runtime import runner as runner_module
 from app.research.runtime.runner import ResearchGraphRunner
 from app.research.runtime.state import empty_research_state
+from app.research.spec.compiler import compile_research_spec
 
 
 class FakeState:
@@ -28,22 +28,26 @@ class FakeSession:
 
 
 def _gstate(query: str) -> dict:
-    intent = understand_task(query)
+    spec = compile_research_spec(query)
     state = empty_research_state(
         run_id="run-planner",
         session_id="session-planner",
         task_query=query,
     )
-    state["intent"] = intent.to_dict()
-    state["task_query"] = query
-    state["phase"] = "understand"
+    state.update(
+        {
+            "research_spec": spec.to_dict(),
+            "task_query": query,
+            "phase": "spec_gate",
+        }
+    )
     return state
 
 
-async def _plan(query: str, *, llm_enabled: bool) -> tuple[dict, object]:
+async def _plan(query: str) -> tuple[dict, object]:
     harness = SimpleNamespace(
         harness_config=SimpleNamespace(
-            planner_llm_enabled=llm_enabled,
+            planner_llm_enabled=True,
             planner_dynamic_lead_enabled=True,
             planner_max_research_tasks=6,
         )
@@ -59,33 +63,26 @@ async def _plan(query: str, *, llm_enabled: bool) -> tuple[dict, object]:
 
 
 @pytest.mark.asyncio
-async def test_breadth_heavy_query_uses_lead_planner(monkeypatch):
-    query = "你觉的当下国内AI初创有潜力值得加入的公司有哪些？为什么？"
-    calls: list[str] = []
-
-    async def fake_lead_plan(intent, policy, **kwargs):
-        calls.append(intent.raw_query)
-        from app.research.planning.lead_planner import heuristic_dynamic_plan
-
-        return heuristic_dynamic_plan(intent, policy)
+async def test_dynamic_discovery_query_creates_discovery_task(monkeypatch):
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("spec-driven planner must not invoke the legacy lead planner")
 
     monkeypatch.setattr(
         "app.research.planning.lead_planner.lead_plan_with_llm",
-        fake_lead_plan,
+        fail_if_called,
     )
-    update, session = await _plan(query, llm_enabled=True)
-    assert calls == [query]
-    assert session.state.metadata["planner_source"] == "lead_llm"
+    query = "你觉的当下国内AI初创有潜力值得加入的公司有哪些？为什么？"
+    update, session = await _plan(query)
     task_ids = [step["task_id"] for step in update["plan"]["steps"]]
-    assert "t_landscape" in task_ids
-    assert task_ids != ["t0:network_search"]
+    assert task_ids == ["t_discovery"]
+    assert session.state.metadata["planner_source"] == "spec_driven"
 
 
 @pytest.mark.asyncio
 async def test_landscape_query_does_not_collapse_to_generic_search():
     query = "当下国内 AI 初创公司有哪些值得加入？为什么？"
-    update, _session = await _plan(query, llm_enabled=False)
+    update, _session = await _plan(query)
     steps = update["plan"]["steps"]
-    task_ids = [step["task_id"] for step in steps]
-    assert "t_landscape" in task_ids
-    assert task_ids != ["t0:network_search"]
+    assert steps
+    assert all(step["step_type"] == "research" for step in steps)
+    assert all(step["task_id"] != "t0:network_search" for step in steps)

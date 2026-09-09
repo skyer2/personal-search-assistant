@@ -23,7 +23,7 @@ class SynthesisContext:
     evidence_digests: tuple[EvidenceDigest, ...] = ()
     findings: tuple[dict[str, Any], ...] = ()
     worker_summaries: tuple[dict[str, Any], ...] = ()
-    business_gaps: tuple[str, ...] = ()
+    semantic_gaps: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     unresolved_conflicts: tuple[str, ...] = ()
     token_budget: int = 40_000
@@ -43,7 +43,7 @@ class SynthesisContext:
             summary = str(row.get("summary") or "").strip()
             if summary:
                 lines.append(f"- [{row.get('task_id') or 'worker'}] {summary}")
-        lines.extend(f"- 尚未覆盖：{gap}" for gap in self.business_gaps if str(gap).strip())
+        lines.extend(f"- 尚未覆盖：{gap}" for gap in self.semantic_gaps if str(gap).strip())
         return "\n".join(lines)
 
 
@@ -70,7 +70,7 @@ class SynthesisContextBuilder:
             evidence_digests=tuple(self._digests(refs, findings, compact)),
             findings=tuple(findings),
             worker_summaries=tuple(self._worker_summaries(gstate, compact)),
-            business_gaps=tuple(self._business_gaps(gstate)),
+            semantic_gaps=tuple(self._semantic_gaps(gstate)),
             limitations=tuple(self._strings(limitations)),
             unresolved_conflicts=tuple(self._strings(unresolved_conflicts)),
             token_budget=max(1_000, base_budget // 2 if compact else base_budget),
@@ -96,7 +96,7 @@ class SynthesisContextBuilder:
             evidence_digests=digests,
             findings=context.findings[:40],
             worker_summaries=context.worker_summaries[:24],
-            business_gaps=context.business_gaps[:12],
+            semantic_gaps=context.semantic_gaps[:12],
             limitations=context.limitations[:12],
             unresolved_conflicts=context.unresolved_conflicts[:12],
             token_budget=max(1_000, context.token_budget // 2),
@@ -168,12 +168,13 @@ class SynthesisContextBuilder:
         return output
 
     @staticmethod
-    def _business_gaps(gstate: dict[str, Any]) -> list[str]:
+    def _semantic_gaps(gstate: dict[str, Any]) -> list[str]:
         output: list[str] = []
-        for raw in gstate.get("business_gaps") or []:
+        for gap_id, raw in (gstate.get("semantic_gaps") or {}).items():
             if not isinstance(raw, dict):
-                continue
-            value = str(raw.get("gap_id") or raw.get("description") or "").strip()
+                value = str(gap_id)
+            else:
+                value = str(raw.get("gap_id") or gap_id).strip()
             if value and value not in output:
                 output.append(value)
         return output[:24]

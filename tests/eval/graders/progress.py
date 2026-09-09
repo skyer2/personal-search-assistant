@@ -6,6 +6,7 @@ from typing import Any
 
 from app.agent.harness.state import ExecutionPlan, PlanStep
 from app.research.assessment.progress import assess_progress
+from app.research.spec.compiler import compile_research_spec
 
 
 def plan_from_case(case: dict[str, Any]) -> ExecutionPlan:
@@ -107,12 +108,24 @@ def assess_offline_progress(
 
 
 def grade_progress_case(case: dict[str, Any]) -> dict[str, Any]:
-    assessment = assess_offline_progress(
-        plan_from_case(case),
-        task_status=dict(case.get("task_status") or {}),
-        worker_results=list(case.get("worker_results") or []),
-        aborted=bool(case.get("aborted")),
-    )
+    coverage = dict(case.get("coverage_state") or {})
+    if coverage:
+        assessment = dict(
+            assess_progress(
+                {
+                    "research_spec": compile_research_spec(str(case.get("query") or "")).to_dict(),
+                    "coverage_state": coverage,
+                    "semantic_gaps": dict(case.get("semantic_gaps") or {}),
+                }
+            )
+        )
+    else:
+        assessment = assess_offline_progress(
+            plan_from_case(case),
+            task_status=dict(case.get("task_status") or {}),
+            worker_results=list(case.get("worker_results") or []),
+            aborted=bool(case.get("aborted")),
+        )
     expect = dict(case.get("expected") or {})
     issues: list[str] = []
     if expect.get("status") and assessment["status"] != expect["status"]:

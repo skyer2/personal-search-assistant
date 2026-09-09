@@ -5,8 +5,10 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, NotRequired, TypedDict
 
-from app.research.domain.contracts import LifecycleStatus, WorkflowPhase, new_replan_budget
+from app.research.domain.contracts import LifecycleStatus, WorkflowPhase, new_action_budget
 from app.research.runtime.reducers import merge_dicts
+from app.research.runtime.reducers import merge_records
+from app.research.runtime.reducers import merge_strings
 from app.research.runtime.reducers import keep_last
 
 
@@ -21,9 +23,10 @@ class BudgetState(TypedDict):
     synthesis_reserve_sec: float
     max_parallel_workers: int
     max_replan_count: int
-    max_recovery_generation: int
-    max_same_gap_recovery: int
-    max_stalled_cycles: int
+    max_task_attempts: int
+    max_gap_fill_attempts: int
+    max_expand_plan_attempts: int
+    max_semantic_stall_cycles: int
     max_active_tasks: int
     exhausted: bool
     low: bool
@@ -45,22 +48,28 @@ class ResearchState(TypedDict):
     resolved_query: str
     search_cards: list[dict[str, Any]]
 
-    brief: dict[str, Any]
+    research_spec: dict[str, Any]
+    coverage_contract: dict[str, Any]
+    coverage_state: dict[str, Any]
+    claims: Annotated[list[dict[str, Any]], merge_records]
+    claim_conflicts: Annotated[list[dict[str, Any]], merge_records]
+    claim_resolutions: Annotated[list[dict[str, Any]], merge_records]
+    evidence_records: Annotated[list[dict[str, Any]], merge_records]
+    semantic_gaps: Annotated[dict[str, dict[str, Any]], keep_last]
+    artifact_refs: Annotated[list[str], merge_strings]
+
     intent: dict[str, Any] | None
     plan: dict[str, Any] | None
     plan_version: int
     tasks: Annotated[dict[str, dict[str, Any]], merge_dicts]
     worker_results: Annotated[list[dict[str, Any]], operator.add]
     findings: Annotated[list[dict[str, Any]], operator.add]
-    evidence_refs: Annotated[list[str], operator.add]
+    evidence_refs: Annotated[list[str], merge_strings]
     artifacts: list[str]
 
     budget: BudgetState
     budget_status: str
-    replan_budget: dict[str, int]
-    business_gaps: Annotated[dict[str, dict[str, Any]], merge_dicts]
-    rejected_patch_hashes: Annotated[list[str], operator.add]
-    recovery_snapshot: dict[str, Any]
+    action_budget: dict[str, int]
     dispatch_wave_id: int
 
     draft_ref: str | None
@@ -80,9 +89,12 @@ class ResearchState(TypedDict):
     delivery_readiness: dict[str, Any]
     quality_assessment: dict[str, Any]
     control_decision: dict[str, Any]
+    synthesis_attempts: int
+    synthesis_failed: bool
     candidate_set: Annotated[dict[str, Any], merge_dicts]
     marginal_gain: dict[str, Any]
-    stalled_cycles: int
+    semantic_wave_gains: list[dict[str, Any]]
+    semantic_stall: int
 
 
 class WorkerTaskState(TypedDict):
@@ -128,7 +140,15 @@ def empty_research_state(
         "conversation_summary": "",
         "resolved_query": task_query,
         "search_cards": [],
-        "brief": {},
+        "research_spec": {},
+        "coverage_contract": {},
+        "coverage_state": {},
+        "claims": [],
+        "claim_conflicts": [],
+        "claim_resolutions": [],
+        "evidence_records": [],
+        "semantic_gaps": {},
+        "artifact_refs": [],
         "intent": None,
         "plan": None,
         "plan_version": 1,
@@ -148,18 +168,21 @@ def empty_research_state(
             "synthesis_reserve_sec": 180.0,
             "max_parallel_workers": 3,
             "max_replan_count": max_replan_count,
-            "max_recovery_generation": 2,
-            "max_same_gap_recovery": 2,
-            "max_stalled_cycles": 2,
+            "max_task_attempts": 2,
+            "max_gap_fill_attempts": 4,
+            "max_expand_plan_attempts": 2,
+            "max_semantic_stall_cycles": 2,
             "max_active_tasks": 3,
             "exhausted": False,
             "low": False,
         },
         "budget_status": "available",
-        "replan_budget": new_replan_budget(max_replan_count),
-        "business_gaps": {},
-        "rejected_patch_hashes": [],
-        "recovery_snapshot": {},
+        "action_budget": new_action_budget(
+            max_retry=2,
+            max_gap_fill=4,
+            max_expand_plan=2,
+            max_replan=max_replan_count,
+        ),
         "dispatch_wave_id": 0,
         "draft_ref": None,
         "final_ref": None,
@@ -177,9 +200,12 @@ def empty_research_state(
         "delivery_readiness": {},
         "quality_assessment": {},
         "control_decision": {},
+        "synthesis_attempts": 0,
+        "synthesis_failed": False,
         "candidate_set": {},
         "marginal_gain": {},
-        "stalled_cycles": 0,
+        "semantic_wave_gains": [],
+        "semantic_stall": 0,
     }
 
 

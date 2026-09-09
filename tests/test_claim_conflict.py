@@ -69,6 +69,29 @@ def test_extract_and_detect_cross_worker_conflict():
     print("[OK] cross-worker claims detected", result.to_dict())
 
 
+def test_qualitative_findings_from_one_task_stay_distinct():
+    rows = [
+        {
+            "task_id": "t_deep_dive",
+            "ok": True,
+            "summary": "two company findings",
+            "payload": {
+                "sources": ["https://deepseek.com", "https://moonshot.ai"],
+                "findings": [
+                    {"claim": "DeepSeek focuses on open models.", "evidence_ids": ["e1"]},
+                    {"claim": "Moonshot AI provides Kimi.", "evidence_ids": ["e2"]},
+                ],
+            },
+        }
+    ]
+    claims = extract_claims_from_worker_results(rows)
+    assert [claim.text for claim in claims] == [
+        "DeepSeek focuses on open models.",
+        "Moonshot AI provides Kimi.",
+    ]
+    assert [claim.evidence_ids for claim in claims] == [["e1"], ["e2"]]
+
+
 def test_scope_mismatch_is_expected_disagreement():
     rows = [
         {

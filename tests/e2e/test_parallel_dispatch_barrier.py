@@ -3,7 +3,6 @@ import time
 from app.agent.harness.state import ExecutionPlan, PlanStep
 from app.research.control.transitions import transition_update
 from app.research.domain.contracts import WorkflowPhase
-from app.research.domain.gaps import sync_business_gaps
 from app.research.domain.task_state import (
     ResultStatus,
     TaskExecutionStatus,
@@ -33,7 +32,9 @@ def _plan():
 def _invoke_barrier_graph(order, delays):
     completion_order = []
     progress_waves = []
-    original_progress = graph_module.progress_node
+    original_ingest = graph_module.ingest_semantics_node
+    original_assess = graph_module.assess_node
+    original_plan_validate = graph_module.plan_validate_node
 
     def plan_node(state):
         plan = _plan()
@@ -45,7 +46,6 @@ def _invoke_barrier_graph(order, delays):
                 "plan": plan.to_dict(),
                 "plan_version": 1,
                 "tasks": tasks,
-                "business_gaps": sync_business_gaps(plan, tasks, {}),
             },
         )
 
@@ -61,18 +61,53 @@ def _invoke_barrier_graph(order, delays):
             evidence_refs=[f"evidence:{task_id}"],
         )
         completion_order.append(task_id)
-        return transition_update(
-            payload,
-            WorkflowPhase.EXECUTE,
-            {"tasks": {task_id: tasks[task_id]}, "evidence_refs": [f"evidence:{task_id}"]},
-        )
+        return {
+            "tasks": {task_id: tasks[task_id]},
+            "worker_results": [
+                {
+                    "task_id": task_id,
+                    "task_metadata": dict(payload.get("task_metadata") or {}),
+                    "ok": True,
+                    "status": "succeeded",
+                    "summary": task_id,
+                    "payload": {
+                        "subject_id": task_id,
+                        "dimension": "general",
+                        "findings": [{"claim": task_id, "evidence_ids": [f"evidence:{task_id}"]}],
+                        "sources": [f"https://{task_id}.example.com"],
+                        "evidence_ids": [f"evidence:{task_id}"],
+                    },
+                }
+            ],
+            "evidence_refs": [f"evidence:{task_id}"],
+        }
 
-    def progress_node(state):
+    def ingest_node(state):
         progress_waves.append(int(state.get("dispatch_wave_id") or 0))
-        return original_progress(state)
+        return original_ingest(state)
 
     graph_module.plan_node = plan_node
-    graph_module.progress_node = progress_node
+    graph_module.plan_validate_node = lambda state: transition_update(
+        state, WorkflowPhase.PLAN_VALIDATED, {}
+    )
+    graph_module.ingest_semantics_node = ingest_node
+    graph_module.assess_node = lambda state: transition_update(
+        state,
+        WorkflowPhase.ASSESS,
+        {
+            "progress_assessment": {"status": "sufficient"},
+            "evidence_assessment": {"status": "sufficient"},
+            "execution_health": {"status": "healthy"},
+            "delivery_readiness": {"status": "ready", "mode": "normal"},
+            "control_decision": {
+                "action": "finalize_success",
+                "mode": "normal",
+                "reason_codes": ["barrier_test_complete"],
+                "task_ids": [],
+                "gap_ids": [],
+            },
+        },
+    )
     try:
         graph = compile_research_graph(invoke_worker=worker, profile="agent")
         result = graph.invoke(
@@ -82,11 +117,13 @@ def _invoke_barrier_graph(order, delays):
                 task_query="比较 A B C 全景",
                 max_replan_count=0,
             ),
-            config={"configurable": {"thread_id": f"s-{order}"}, "recursion_limit": 30},
+            config={"configurable": {"thread_id": f"s-{order}"}, "recursion_limit": 64},
         )
     finally:
         graph_module.plan_node = globals()["_original_plan_node"]
-        graph_module.progress_node = original_progress
+        graph_module.plan_validate_node = original_plan_validate
+        graph_module.ingest_semantics_node = original_ingest
+        graph_module.assess_node = original_assess
     return result, completion_order, progress_waves
 
 

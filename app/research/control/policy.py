@@ -16,12 +16,9 @@ from app.research.domain.contracts import (
     BudgetStatus,
     ControlAction,
     ControlDecision,
-    recovery_limits_from_state,
-    replan_budget_exhausted,
-    replan_budget_from_state,
+    action_budget_from_state,
+    budget_status,
 )
-from app.research.domain.gaps import active_research_steps, step_gap_ids
-from app.research.domain.recovery import eligible_recovery_targets
 from app.research.domain.task_state import (
     TaskExecutionStatus,
     TaskReadiness,
@@ -29,7 +26,7 @@ from app.research.domain.task_state import (
     task_readiness,
 )
 
-POLICY_VERSION = "control-policy.v2"
+POLICY_VERSION = "control-policy.v3"
 MAX_TASK_ATTEMPTS = 2
 
 
@@ -43,16 +40,22 @@ def plan_from_state(state: dict[str, Any]) -> ExecutionPlan | None:
 def _required_steps(plan: ExecutionPlan) -> list[tuple[int, Any]]:
     return [
         (index, step)
-        for index, step in active_research_steps(plan)
-        if not (isinstance(step.metadata, dict) and step.metadata.get("optional"))
+        for index, step in enumerate(plan.steps)
+        if step.step_type in {"research", "network_search", "file_read"}
+        and not (isinstance(step.metadata, dict) and step.metadata.get("optional"))
     ]
 
 
-def _readiness(state: dict[str, Any], plan: ExecutionPlan) -> list[tuple[str, TaskReadiness, int]]:
+def _readiness(state: dict[str, Any], plan: ExecutionPlan) -> list[tuple[str, TaskReadiness]]:
     return [
-        (step.resolved_task_id(index), task_readiness(step, state.get("tasks")), index)
+        (step.resolved_task_id(index), task_readiness(step, state.get("tasks")))
         for index, step in _required_steps(plan)
     ]
+
+
+def _strategy_fingerprint(plan: ExecutionPlan | None) -> str:
+    payload = plan.to_dict() if plan is not None else {}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:20]
 
 
 def _decision(
@@ -62,15 +65,22 @@ def _decision(
     mode: str = "",
     reasons: list[str] | None = None,
     task_ids: list[str] | None = None,
+    gap_ids: list[str] | None = None,
 ) -> ControlDecision:
-    reasons = reasons or []
-    task_ids = task_ids or []
+    plan = plan_from_state(state)
+    reasons = list(dict.fromkeys(reasons or []))
+    task_ids = list(dict.fromkeys(task_ids or []))
+    gap_ids = list(dict.fromkeys(gap_ids or []))
+    candidate = state.get("candidate_set") if isinstance(state.get("candidate_set"), dict) else {}
     fingerprint = {
         "action": action.value,
         "mode": mode,
         "reasons": reasons,
         "task_ids": task_ids,
+        "gap_ids": gap_ids,
+        "candidate_set_id": str(candidate.get("candidate_set_id") or ""),
         "plan_version": int(state.get("plan_version") or 1),
+        "coverage_ratio": float((state.get("coverage_state") or {}).get("coverage_ratio") or 0.0),
         "tasks": {
             task_id: {
                 "execution_status": task["execution_status"],
@@ -89,11 +99,20 @@ def _decision(
         mode=mode,
         reason_codes=reasons,
         task_ids=task_ids,
+        gap_ids=gap_ids,
+        candidate_set_id=str(candidate.get("candidate_set_id") or ""),
+        strategy_fingerprint=_strategy_fingerprint(plan),
         state_version=int(state.get("state_version") or 1),
         plan_version=int(state.get("plan_version") or 1),
         assessment_refs=[
             name
-            for name in ("progress_assessment", "evidence_assessment", "execution_health", "delivery_readiness", "quality_assessment")
+            for name in (
+                "progress_assessment",
+                "evidence_assessment",
+                "execution_health",
+                "delivery_readiness",
+                "quality_assessment",
+            )
             if isinstance(state.get(name), dict)
         ],
         policy_version=POLICY_VERSION,
@@ -111,11 +130,25 @@ def decide_control(state: dict[str, Any]) -> ControlDecision:
         if quality["verdict"] == QualityVerdict.PASS.value:
             return _decision(state, ControlAction.FINALIZE_SUCCESS, mode=DeliveryMode.NORMAL.value, reasons=["quality_pass"])
         if quality["repairable"] and quality["suggested_action"] == "repair":
-            return _decision(state, ControlAction.REPAIR_SYNTHESIS, reasons=["quality_repairable"])
-        if quality["suggested_action"] == "replan":
-            budget = replan_budget_from_state(state)
-            if not replan_budget_exhausted(budget):
-                return _decision(state, ControlAction.REPLAN, reasons=["quality_replan"])
+            if int(state.get("synthesis_attempts") or 0) < 2:
+                return _decision(state, ControlAction.REPAIR_SYNTHESIS, reasons=["quality_repairable"])
+            return _decision(state, ControlAction.FINALIZE_FAILURE, mode=DeliveryMode.DEGRADED.value, reasons=["quality_repair_exhausted"])
+        if quality["suggested_action"] == "gap_fill":
+            actions = action_budget_from_state(state)
+            fillable = [
+                gap_id
+                for gap_id, gap in (state.get("semantic_gaps") or {}).items()
+                if isinstance(gap, dict)
+                and bool(gap.get("actionable", True))
+                and int(gap.get("attempt_count") or 0) < 2
+            ]
+            if fillable and actions["gap_fill"] < actions["max_gap_fill"]:
+                return _decision(
+                    state,
+                    ControlAction.GAP_FILL,
+                    reasons=["quality_gate_failed", "explicit_semantic_gap"],
+                    gap_ids=fillable,
+                )
         if bool(state.get("final_content")):
             return _decision(state, ControlAction.FINALIZE_FAILURE, mode=DeliveryMode.DEGRADED.value, reasons=["quality_fail_partial"])
         return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=["quality_fail"])
@@ -124,130 +157,92 @@ def decide_control(state: dict[str, Any]) -> ControlDecision:
     if plan is None:
         return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=["missing_plan"])
 
-    readiness = _readiness(state, plan)
-    running = [task_id for task_id, ready, _ in readiness if ready == TaskReadiness.WAITING_RESOURCE and _task_is_running(state, task_id)]
-    if running:
-        return _decision(state, ControlAction.WAIT, task_ids=running, reasons=["required_task_running"])
-    runnable = [task_id for task_id, ready, _ in readiness if ready == TaskReadiness.RUNNABLE]
-    if runnable:
-        return _decision(state, ControlAction.DISPATCH, task_ids=runnable, reasons=["required_task_runnable"])
-
-    health = assess_execution_health(state)
     progress = assess_progress(state)
-    budget = replan_budget_from_state(state)
-    limits = recovery_limits_from_state(state)
     evidence = assess_evidence(state)
-    delivery = assess_delivery(state)
-    usable_evidence = evidence["status"] in {
-        EvidenceStatus.PARTIAL.value,
-        EvidenceStatus.SUFFICIENT.value,
-    }
-    budget_allows_recovery = (
-        str(state.get("budget_status") or BudgetStatus.UNKNOWN.value)
-        != BudgetStatus.EXHAUSTED.value
+    health = assess_execution_health(state)
+    if budget_status(state) == BudgetStatus.EXHAUSTED:
+        if progress["status"] == SemanticProgress.SUFFICIENT.value and evidence["status"] != EvidenceStatus.INSUFFICIENT.value:
+            return _decision(state, ControlAction.SYNTHESIZE, reasons=["budget_stop", "coverage_sufficient"])
+        if evidence["evidence_count"]:
+            return _decision(state, ControlAction.DELIVER_PARTIAL, mode=DeliveryMode.PARTIAL_ONLY.value, reasons=["budget_stop", "usable_partial_evidence"])
+        return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=["budget_stop", "no_usable_evidence"])
+
+    actions = action_budget_from_state(state)
+    candidate = state.get("candidate_set") if isinstance(state.get("candidate_set"), dict) else {}
+    candidate_ready = (
+        bool(candidate.get("available"))
+        and not bool(candidate.get("expanded"))
+        and bool(candidate.get("items") or candidate.get("candidates"))
     )
-    semantic_gap_ids = [str(item) for item in progress.get("gap_ids") or []]
-    if not semantic_gap_ids:
-        semantic_gap_ids = [
-            gap_id
-            for _index, step in _required_steps(plan)
-            for gap_id in step_gap_ids(step)
-        ]
-    recovery_targets = eligible_recovery_targets(
-        plan,
-        state.get("tasks"),
-        semantic_gap_ids,
-        limits,
-        [str(item) for item in state.get("rejected_patch_hashes") or []],
-    )
-    stalled = int(state.get("stalled_cycles") or 0) >= int(limits["max_stalled_cycles"])
+    if candidate_ready and actions["expand_plan"] < actions["max_expand_plan"]:
+        return _decision(
+            state,
+            ControlAction.EXPAND_PLAN,
+            reasons=["candidate_set_ready", "discovery_required"],
+            gap_ids=[str(item) for item in candidate.get("source_task_ids") or []],
+        )
+
+    readiness = _readiness(state, plan)
+    running = [
+        task_id
+        for task_id, ready in readiness
+        if ready == TaskReadiness.WAITING_RESOURCE
+        and normalize_tasks(state.get("tasks")).get(task_id, {}).get("execution_status") == TaskExecutionStatus.RUNNING.value
+    ]
+    if running:
+        return _decision(state, ControlAction.WAIT, task_ids=running, reasons=["workers_running"])
+    runnable = [task_id for task_id, ready in readiness if ready == TaskReadiness.RUNNABLE]
+    if runnable:
+        return _decision(state, ControlAction.DISPATCH, task_ids=runnable, reasons=["runnable_tasks"])
+
+    tasks = normalize_tasks(state.get("tasks"))
     retryable = [
         task_id
-        for task_id in health["retryable_tasks"]
-        if int(normalize_tasks(state.get("tasks")).get(task_id, {}).get("attempt") or 0) < MAX_TASK_ATTEMPTS
+        for task_id, task in tasks.items()
+        if task["execution_status"] == TaskExecutionStatus.FAILED.value
+        and bool(task.get("failure", {}).get("retryable"))
+        and int(task.get("attempt") or 0) < min(actions["max_retry"], MAX_TASK_ATTEMPTS)
     ]
+    if retryable and actions["retry"] < actions["max_retry"]:
+        return _decision(state, ControlAction.RETRY, task_ids=retryable, reasons=["transient_failure"])
 
-    if delivery["mode"] != DeliveryMode.NONE.value:
+    if progress["status"] == SemanticProgress.SUFFICIENT.value and evidence["status"] == EvidenceStatus.SUFFICIENT.value:
+        return _decision(state, ControlAction.SYNTHESIZE, reasons=["coverage_sufficient", "evidence_sufficient"])
+
+    semantic_stall = int(state.get("semantic_stall") or 0)
+    if semantic_stall >= 2 and actions["replan"] < actions["max_replan"]:
+        return _decision(state, ControlAction.REPLAN, reasons=["semantic_gain_low", "alternative_strategy_available"])
+
+    gaps = {
+        gap_id: gap
+        for gap_id, gap in (state.get("semantic_gaps") or {}).items()
+        if isinstance(gap, dict) and bool(gap.get("actionable", True))
+    }
+    fillable = {
+        gap_id: gap
+        for gap_id, gap in gaps.items()
+        if int(gap.get("attempt_count") or 0) < 2
+    }
+    if fillable and actions["gap_fill"] < actions["max_gap_fill"]:
         return _decision(
             state,
-            ControlAction.SYNTHESIZE,
-            mode=delivery["mode"],
-            reasons=["delivery_ready", *delivery["limitations"]],
+            ControlAction.GAP_FILL,
+            reasons=["explicit_semantic_gap"],
+            gap_ids=list(fillable),
         )
 
-    should_retry = bool(
-        retryable
-        and health["status"] in {ExecutionHealthStatus.DEGRADED.value, ExecutionHealthStatus.FAILED.value}
-        and budget_allows_recovery
-        and delivery["mode"] == DeliveryMode.NONE.value
-        and (
-            progress["status"] != SemanticProgress.GAP.value
-            or (replan_budget_exhausted(budget) and budget["max_attempts"] == 0)
-        )
-    )
-    if should_retry:
-        return _decision(
-            state,
-            ControlAction.RETRY,
-            task_ids=retryable,
-            reasons=["retryable_failure", "budget_allows_recovery", "delivery_not_ready"],
-        )
+    marginal = state.get("marginal_gain") if isinstance(state.get("marginal_gain"), dict) else {}
+    if bool(marginal.get("stalled")) and evidence["status"] in {EvidenceStatus.PARTIAL.value, EvidenceStatus.SUFFICIENT.value}:
+        return _decision(state, ControlAction.DELIVER_PARTIAL, mode=DeliveryMode.PARTIAL_ONLY.value, reasons=["semantic_gain_low", "usable_evidence"])
 
-    if (
-        progress["status"] == SemanticProgress.GAP.value
-        and _progress_gap_is_actionable(progress)
-        and not stalled
-        and budget_allows_recovery
-        and not replan_budget_exhausted(budget)
-        and recovery_targets
-    ):
+    if actions["replan"] < actions["max_replan"] and gaps:
         return _decision(state, ControlAction.REPLAN, reasons=["semantic_gap", "replan_available"])
 
-    if progress["status"] == SemanticProgress.GAP.value and _progress_gap_is_actionable(progress):
-        stop_reason = "recovery_stalled" if stalled else "recovery_exhausted"
-        if usable_evidence:
-            return _decision(
-                state,
-                ControlAction.DELIVER_PARTIAL,
-                mode=DeliveryMode.DEGRADED.value,
-                reasons=[stop_reason, "usable_evidence"],
-            )
-        return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=[stop_reason, "no_usable_evidence"])
-
-    if usable_evidence and replan_budget_exhausted(budget):
-        return _decision(
-            state,
-            ControlAction.DELIVER_PARTIAL,
-            mode=DeliveryMode.DEGRADED.value,
-            reasons=["replan_exhausted", "usable_evidence"],
-        )
-    if usable_evidence and str(state.get("budget_status") or BudgetStatus.UNKNOWN.value) == BudgetStatus.EXHAUSTED.value:
-        return _decision(
-            state,
-            ControlAction.DELIVER_PARTIAL,
-            mode=DeliveryMode.DEGRADED.value,
-            reasons=["budget_exhausted", "usable_evidence"],
-        )
-    return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=[*delivery["blockers"], "delivery_not_ready"])
+    if evidence["status"] in {EvidenceStatus.PARTIAL.value, EvidenceStatus.SUFFICIENT.value}:
+        return _decision(state, ControlAction.DELIVER_PARTIAL, mode=DeliveryMode.PARTIAL_ONLY.value, reasons=["usable_partial_evidence"])
+    if health["status"] == ExecutionHealthStatus.FAILED.value:
+        return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=["execution_failed_no_evidence"])
+    return _decision(state, ControlAction.FINALIZE_FAILURE, reasons=["recovery_exhausted", "no_usable_evidence"])
 
 
-def _task_is_running(state: dict[str, Any], task_id: str) -> bool:
-    task = normalize_tasks(state.get("tasks")).get(task_id)
-    return task is not None and task["execution_status"] == TaskExecutionStatus.RUNNING.value
-
-
-def _progress_gap_is_actionable(progress: dict[str, Any]) -> bool:
-    return any(
-        progress.get(key)
-        for key in (
-            "coverage_gaps",
-            "missing_dimensions",
-            "unresolved_conflicts",
-            "low_confidence_claims",
-            "stale_evidence",
-            "unmet_success_criteria",
-        )
-    )
-
-
-__all__ = ["POLICY_VERSION", "decide_control", "plan_from_state"]
+__all__ = ["MAX_TASK_ATTEMPTS", "POLICY_VERSION", "decide_control", "plan_from_state"]

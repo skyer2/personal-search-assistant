@@ -42,6 +42,7 @@ from tests.eval.metrics import (
     compare_with_baseline,
 )
 from tests.eval.reliability import reliability_report
+from tests.eval.runners.capability import run_capability_dry_eval
 from tests.eval.runners.component import load_jsonl, run_component_eval
 from tests.eval.runners.experiment import (
     apply_variant,
@@ -64,7 +65,7 @@ def run_dry_eval(
     """默认跑 L1 component + L2 scenario dry-run。传入 tasks 时只评这些 scenario。"""
     _ = min_trajectory_similarity
     if not tasks:
-        return run_component_eval() + run_scenario_dry_eval()
+        return run_component_eval() + run_capability_dry_eval() + run_scenario_dry_eval()
     if tasks and "case_id" in tasks[0]:
         return run_scenario_dry_eval(cases=tasks)
     # 兼容旧调用：只做 planner invariants，不再用 expected_agents / SequenceMatcher 判成败
@@ -465,7 +466,7 @@ def main() -> None:
             dataset = Path(args.tasks).name
         else:
             results = run_dry_eval()
-            dataset = "component+harness_scenarios_v1"
+            dataset = "component+capability_v1+harness_scenarios_v1"
         mode = "dry-run"
 
     report = build_report(results)

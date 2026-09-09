@@ -1,75 +1,72 @@
-"""Replan grader：是否针对缺口补 task，而不是重复旧任务或越权。"""
+"""Semantic gap-fill grader: focused tasks, bounded scope, source policy."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.agent.harness.planner import understand_task
-from app.research.planning.compose import compose_execution_plan_sync
-from app.research.planning.plan_patch import apply_plan_patch, build_progress_patch
-from app.research.planning.policy import parse_source_policy
-from app.research.planning.validator import RESEARCH_TYPES
+from app.research.coverage.gaps import stable_gap_id
+from app.research.planning.gap_fill import gap_fill
+from app.research.spec.compiler import compile_research_spec
+
+
+def _semantic_gaps(assessment: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    signals = [
+        *(assessment.get("coverage_gaps") or []),
+        *(assessment.get("missing_dimensions") or []),
+        *(assessment.get("stale_evidence") or []),
+    ]
+    gaps: dict[str, dict[str, Any]] = {}
+    for signal in dict.fromkeys(str(item) for item in signals if str(item).strip()):
+        gap_id = stable_gap_id("subject_1", signal, "coverage")
+        gaps[gap_id] = {
+            "gap_id": gap_id,
+            "gap_type": "coverage",
+            "subject_id": "subject_1",
+            "dimension_id": signal,
+            "severity": "high",
+            "blocking": True,
+            "actionable": True,
+            "attempt_count": 0,
+        }
+    return gaps
 
 
 def grade_replan_case(case: dict[str, Any]) -> dict[str, Any]:
-    intent = understand_task(case["query"], bool(case.get("requires_upload")))
-    plan, compose_issues = compose_execution_plan_sync(intent)
-    for step in plan.steps:
-        if step.step_type in RESEARCH_TYPES:
-            step.metadata["status"] = "done"
+    spec = compile_research_spec(str(case["query"]))
+    assessment = dict(case.get("assessment") or {})
     expect = dict(case.get("expected") or {})
     max_new = int(case.get("max_new_tasks") or expect.get("max_new_tasks") or 2)
-    assessment = dict(case.get("assessment") or {})
-    patch = build_progress_patch(
-        plan,
-        intent,
-        assessment=assessment,
-        max_new_tasks=max_new,
+    result = gap_fill(
+        spec,
+        _semantic_gaps(assessment),
+        plan_version=1,
+        max_tasks=max_new,
     )
-    added = [item for item in (patch.get("add_tasks") or []) if isinstance(item, dict)]
+    added = result.plan.steps if result.applied else []
     issues: list[str] = []
     if expect.get("must_add_tasks") and not added:
-        issues.append("no_tasks_added")
-    if expect.get("empty_or_reject_ok") and assessment.get("status") == "sufficient":
-        added = []
-    elif expect.get("must_add_tasks") is False and added:
+        issues.append(result.reason)
+    if expect.get("must_add_tasks") is False and added:
         issues.append("unexpected_tasks")
     if len(added) > max_new:
         issues.append("exceeds_max_new_tasks")
-
-    policy = parse_source_policy(intent.raw_query)
-    updated, apply_issues = apply_plan_patch(
-        plan,
-        patch if added else {"add_tasks": []},
-        intent,
-        policy=policy,
-        max_new_tasks=max_new,
-    )
-    if added and apply_issues:
-        issues.extend(apply_issues)
-    if expect.get("plan_version_bump") and added:
-        if int(updated.plan_version or 1) != int(plan.plan_version or 1) + int(expect["plan_version_bump"]):
-            issues.append("plan_version_not_bumped")
-    ids = [s.task_id for s in updated.steps if s.task_id]
-    if expect.get("no_duplicate_task_ids") and len(ids) != len(set(ids)):
+    if expect.get("plan_version_bump") and added and result.plan.plan_version != 1 + int(expect["plan_version_bump"]):
+        issues.append("plan_version_not_bumped")
+    task_ids = [step.task_id for step in added if step.task_id]
+    if expect.get("no_duplicate_task_ids") and len(task_ids) != len(set(task_ids)):
         issues.append("duplicate_task_id")
     for tool in expect.get("forbidden_tools") or []:
-        for step in updated.steps:
-            if tool in (step.allowed_tools or []):
-                issues.append(f"forbidden_tool:{tool}")
-                break
-    reason = str(patch.get("reason") or "")
-    needle = expect.get("reason_contains")
-    if needle and needle not in reason and not added:
-        issues.append("reason_mismatch")
-
-    useful = bool(added) and assessment.get("status") == "gap" and not apply_issues
+        if any(tool in (step.allowed_tools or []) for step in added):
+            issues.append(f"forbidden_tool:{tool}")
+    if added and not all((step.metadata or {}).get("resolves_gap_ids") for step in added):
+        issues.append("task_missing_gap_binding")
+    useful = bool(added) and assessment.get("status") == "gap"
     return {
-        "ok": not issues and not compose_issues,
-        "issues": issues + compose_issues,
-        "added_tasks": [item.get("task_id") for item in added],
-        "from_plan_version": int(plan.plan_version or 1),
-        "to_plan_version": int(updated.plan_version or 1),
-        "reason": reason,
+        "ok": not issues,
+        "issues": issues,
+        "added_tasks": task_ids,
+        "from_plan_version": 1,
+        "to_plan_version": result.plan.plan_version,
+        "reason": result.reason,
         "useful": useful,
     }

@@ -17,6 +17,8 @@ from app.observability.payload_store import SemanticPayloadStore, reset_payload_
 from app.observability.privacy import sanitize_attributes
 from app.observability.recorder import AgentTelemetry
 from app.observability.replay import load_events, merge_events
+from app.observability.events import EVENT_VOCABULARY
+from app.observability.semantic_events import control_decision_event_attributes, progress_event_attributes
 from app.observability.semantic import (
     compute_replan_gap_closure,
     earliest_failure_origin,
@@ -60,6 +62,81 @@ def test_brief_event_and_payload_ref():
         assert loaded is not None
         assert loaded["payload"]["dimensions"] == ["memory", "eval"]
         print("[OK] brief event + payload ref")
+
+
+def test_spec_event_summarizes_as_research_brief():
+    events = [
+        {
+            "type": "spec.compiled",
+            "span_id": "spec",
+            "attributes": {
+                "spec_id": "spec_01",
+                "objective": "find promising AI startups",
+                "entities": ["DeepSeek", "Moonshot AI"],
+                "dimensions": ["commercialization", "technology"],
+                "deliverable": "pdf",
+                "prefer_primary": True,
+            },
+        }
+    ]
+    summary = summarize_trace(events)
+    assert summary["brief"]["brief_id"] == "spec_01"
+    assert summary["brief"]["objective"] == "find promising AI startups"
+    assert summary["brief"]["entities"] == ["DeepSeek", "Moonshot AI"]
+    assert summary["brief"]["dimensions"] == ["commercialization", "technology"]
+    assert summary["brief"]["deliverable"] == "pdf"
+    print("[OK] spec event summarized as brief")
+
+
+def test_progress_event_projects_semantic_gap_ids():
+    attributes = progress_event_attributes(
+        {
+            "status": "gap",
+            "semantic_gap_ids": ["gap_01"],
+            "missing_ids": ["coverage_01"],
+        }
+    )
+    assert attributes["gap_ids"] == ["gap_01"]
+    assert attributes["unresolved_gap_count"] == 1
+    assert attributes["missing_dimensions"] == ["coverage_01"]
+
+
+def test_semantic_event_vocabulary_and_control_lineage():
+    required = {
+        "spec.compiled",
+        "spec.validated",
+        "coverage.compiled",
+        "coverage.assessed",
+        "candidate_set.materialized",
+        "claim.extracted",
+        "claim.conflict_detected",
+        "claim.conflict_resolved",
+        "semantic_gap.opened",
+        "semantic_gap.closed",
+        "semantic_gain.assessed",
+        "plan.expanded",
+        "plan.gap_fill_applied",
+        "control.decided",
+    }
+    assert required <= set(EVENT_VOCABULARY)
+    attributes = control_decision_event_attributes(
+        {
+            "decision_id": "decision_01",
+            "action": "gap_fill",
+            "reason_codes": ["semantic_gap"],
+            "task_ids": ["task_01"],
+            "gap_ids": ["gap_01"],
+            "candidate_set_id": "candidate_set_01",
+            "strategy_fingerprint": "strategy_01",
+            "state_version": 2,
+            "assessment_refs": ["coverage_01"],
+        }
+    )
+    assert attributes["gap_ids"] == ["gap_01"]
+    assert attributes["candidate_set_id"] == "candidate_set_01"
+    assert attributes["strategy_fingerprint"] == "strategy_01"
+    assert attributes["state_version"] == 2
+    assert attributes["assessment_refs"] == ["coverage_01"]
 
 
 def test_plan_links_to_brief_and_worker_lineage():

@@ -7,9 +7,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from app.agent.harness.planner import auto_resolve_clarification, understand_task
 from app.agent.harness.citations import SourceTier
-from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep, TaskIntent
+from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep
 from app.research.assessment.delivery import assess_delivery
 from app.research.assessment.evidence import assess_evidence
 from app.research.assessment.execution_health import assess_execution_health
@@ -19,14 +18,10 @@ from app.research.control.terminal_policy import terminal_update
 from app.research.control.transitions import transition_update
 from app.research.domain.contracts import (
     BudgetStatus,
+    StopReason,
     WorkflowPhase,
-    new_replan_budget,
-    recovery_limits_from_state,
-    replan_budget_from_state,
 )
 from app.research.domain.failure import classify_failure
-from app.research.domain.gaps import active_research_steps, step_gap_ids, sync_business_gaps
-from app.research.domain.recovery import build_replacement_patch
 from app.research.domain.task_state import (
     ResultStatus,
     TaskExecutionStatus,
@@ -35,8 +30,7 @@ from app.research.domain.task_state import (
     retry_task,
     transition_task,
 )
-from app.research.runtime.project import brief_from_intent, sync_execution_projection
-from app.research.runtime.scheduler import annotate_plan_tasks, research_only_plan, required_research_ids
+from app.research.runtime.project import sync_execution_projection
 from app.research.runtime.state import empty_research_state
 from app.observability.semantic_events import (
     brief_event_attributes,
@@ -136,34 +130,8 @@ def _budget_snapshot(session: RunSession) -> dict[str, Any]:
     return budget
 
 
-def _evidence_snapshot(session: RunSession, state: dict[str, Any]) -> dict[str, Any]:
-    manager = session.ctx.citation_manager
-    sources = list(getattr(manager, "sources", None) or []) if manager is not None else []
-    tiers = [str(getattr(source, "source_tier", "") or "") for source in sources]
-    primary = sum(tier == "PRIMARY" for tier in tiers)
-    high_quality = sum(tier == "HIGH_QUALITY_SECONDARY" for tier in tiers)
-    locators = [str(getattr(source, "locator", "") or "") for source in sources]
-    domains: set[str] = set()
-    for locator in locators:
-        if locator.startswith(("http://", "https://")):
-            domains.add(locator.split("/")[2].lower())
-    evidence_refs = [str(item) for item in state.get("evidence_refs") or [] if str(item).strip()]
-    return {
-        "status": "sufficient" if primary >= 1 or high_quality >= 2 else ("partial" if sources or evidence_refs else "insufficient"),
-        "evidence_count": len(sources) or len(evidence_refs),
-        "trusted_evidence_count": primary + high_quality,
-        "primary_source_count": primary,
-        "independent_source_count": len(domains),
-        "supported_claims": len(state.get("findings") or []),
-        "unsupported_claims": 0,
-        "unresolved_conflicts": [],
-        "stale_sources": [],
-        "reason_codes": ["citation_subsystem"] if sources else (["artifact_evidence_refs"] if evidence_refs else []),
-    }
-
-
 def _sync_assessments(session: RunSession, state: dict[str, Any]) -> dict[str, Any]:
-    state["evidence_assessment"] = _evidence_snapshot(session, state)
+    state["evidence_assessment"] = assess_evidence(state)
     state["progress_assessment"] = assess_progress(state)
     state["execution_health"] = assess_execution_health(state)
     state["delivery_readiness"] = assess_delivery(state)
@@ -296,7 +264,7 @@ def _interrupt_payloads(result: dict[str, Any]) -> list[dict[str, Any]]:
 class ResearchGraphRunner:
     """Compile and execute the graph; semantic routing stays in ControlPolicy."""
 
-    RECURSION_LIMIT = 30
+    RECURSION_LIMIT = 64
 
     def __init__(self, harness: Any):
         self.harness = harness
@@ -404,12 +372,21 @@ class ResearchGraphRunner:
 
     async def _execute_simple_fact_fast_path(self, session: RunSession, route_decision: Any) -> Any:
         from app.research.execution.worker_executor import WorkerExecutorV2
+        from app.research.coverage.compiler import compile_coverage_contract
+        from app.research.domain.task_state import TaskExecutionStatus, initialize_tasks, transition_task
+        from app.research.runtime.semantic_ingest import ingest_semantics
         from app.research.runtime.simple_fact import render_simple_fact_answer
+        from app.research.spec.compiler import compile_research_spec
         from app.research.runtime.worker import ResearchContext, ResearchTask, WorkerResult
 
         state = session.state
+        spec = compile_research_spec(
+            session.ctx.task_query,
+            conversation_delta=str(getattr(session.ctx, "conversation_summary", "") or ""),
+        )
+        contract = compile_coverage_contract(spec)
         state.plan = ExecutionPlan(
-            steps=[PlanStep(step_type="network_search", description="检索并确认单一事实", task_id="simple_fact:search", allowed_tools=["internet_search"], metadata={"simple_fact_fast_path": True})],
+            steps=[PlanStep(step_type="network_search", description="检索并确认单一事实", task_id="simple_fact:search", allowed_tools=["internet_search"], metadata={"simple_fact_fast_path": True, "task_kind": "lookup", "subject_id": spec.subjects[0].subject_id if spec.subjects else "general", "coverage_keys": [unit.dimension_id for unit in contract.units], "coverage_ids": [unit.coverage_id for unit in contract.units]})],
             summary="Simple fact fast path",
             planning_mode="simple_fact_fast_path",
         )
@@ -429,10 +406,56 @@ class ResearchGraphRunner:
         worker_result = await WorkerExecutorV2(self.harness, session).execute(task, context)
         if worker_result.raw is not None:
             state.step_results.append(worker_result.raw)
+        semantic_state = empty_research_state(
+            run_id=session.run_id,
+            session_id=session.session_id,
+            task_query=session.ctx.task_query,
+            user_id=session.ctx.user_id,
+            tenant_id=session.ctx.tenant_id,
+            project_id=session.ctx.project_id,
+        )
+        semantic_state.update(
+            {
+                "research_spec": spec.to_dict(),
+                "coverage_contract": contract.to_dict(),
+                "plan": state.plan.to_dict(),
+                "tasks": transition_task(
+                    transition_task(initialize_tasks(state.plan), "simple_fact:search", execution_status=TaskExecutionStatus.RUNNING),
+                    "simple_fact:search",
+                    execution_status=TaskExecutionStatus.SUCCEEDED,
+                    evidence_refs=worker_result.evidence_refs,
+                ),
+            }
+        )
+        semantic_state.update(
+            ingest_semantics(
+                {
+                    **semantic_state,
+                    "worker_results": [
+                        {
+                            "task_id": "simple_fact:search",
+                            "task_metadata": dict(state.plan.steps[0].metadata or {}),
+                            "ok": worker_result.ok,
+                            "status": worker_result.status,
+                            "summary": worker_result.summary,
+                            "payload": {
+                                "facts": worker_result.facts,
+                                "sources": worker_result.sources,
+                                "findings": worker_result.findings,
+                                "evidence_ids": worker_result.evidence_refs,
+                                "confidence": 0.9 if worker_result.ok else 0.0,
+                            },
+                        }
+                    ],
+                }
+            )
+        )
         manager = session.ctx.citation_manager
         answer = render_simple_fact_answer(query=session.ctx.task_query, worker_result=worker_result, citation_manager=manager) if manager is not None else None
         source_counts = manager.source_counts_by_tier() if manager is not None else {}
-        passed = bool(worker_result.ok and answer is not None and answer.sufficient)
+        progress_assessment = assess_progress(semantic_state)
+        evidence_assessment = assess_evidence(semantic_state)
+        passed = bool(worker_result.ok and answer is not None and answer.sufficient and progress_assessment["status"] == "sufficient")
         if passed and manager is not None and answer is not None:
             state.final_content = manager.build_cited_report(answer.content)
         else:
@@ -447,16 +470,20 @@ class ResearchGraphRunner:
                 "planner_calls": 0,
                 "synthesis_calls": 0,
                 "workers": 1,
+                "research_spec": semantic_state["research_spec"],
+                "coverage_contract": semantic_state["coverage_contract"],
+                "coverage_state": semantic_state["coverage_state"],
+                "progress_assessment": progress_assessment,
             }
         )
         if manager is not None:
             manager.save_evidence_json(session.ctx.run_dir, run_id=session.run_id)
-        evidence_assessment = _evidence_snapshot(session, {})
         terminal = terminal_update(
             {
                 "cancel_reason": "",
                 "abort_reason": state.abort_reason,
                 "quality_assessment": {"verdict": "pass" if passed else "fail"},
+                "progress_assessment": progress_assessment,
                 "evidence_assessment": evidence_assessment,
                 "final_content": state.final_content,
             },
@@ -492,6 +519,9 @@ class ResearchGraphRunner:
                     "budget_reservation_errors": 0 if worker_result.ok else 1,
                     "partial_renderer_called": False,
                     "quality": "pass" if passed else "fail",
+                    "coverage_ratio": float(semantic_state["coverage_state"].get("coverage_ratio") or 0.0),
+                    "progress_assessment": progress_assessment,
+                    "evidence_assessment": evidence_assessment,
                     "outcome": outcome,
                     "termination": terminal["termination"],
                 }
@@ -519,91 +549,82 @@ class ResearchGraphRunner:
             {"final_content": session.state.final_content, "worker_results": [row], "evidence_refs": result.evidence_refs, "quality_assessment": {"verdict": "pass" if result.ok else "fail", "grounding": False}},
         )
 
-    async def node_intent(self, gstate: dict[str, Any]) -> dict[str, Any]:
+    async def node_compile_spec(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.graph import compile_spec_node
+
         session = _require_session(gstate)
-        sync_execution_projection(session.state, gstate)
-        if gstate.get("intent"):
-            intent = TaskIntent.from_dict(gstate["intent"])
-            needs = bool(gstate.get("needs_clarification"))
-        else:
-            session.state = await self.harness._phase_understand(session.state, session.ctx.task_query, bool(session.ctx.uploaded_prompt))
-            intent = session.state.intent or understand_task(session.ctx.task_query)
-            needs = bool(intent.needs_clarification and not intent.clarification_resolved)
-        payload = intent.to_dict()
+        update = compile_spec_node(gstate)
+        spec = dict(update.get("research_spec") or {})
         _emit(
             session,
-            "brief.compiled",
-            phase=WorkflowPhase.UNDERSTAND.value,
+            "spec.compiled",
+            phase=WorkflowPhase.COMPILE_SPEC.value,
             status="ok",
-            attributes=brief_event_attributes(
-                brief_from_intent(payload),
-                run_id=session.run_id,
-                planner_source="intent",
-            ),
+            attributes={
+                "spec_id": spec.get("spec_id"),
+                "task_shape": spec.get("task_shape"),
+                "objective": spec.get("objective"),
+                "entities": [
+                    str(row.get("name") or row.get("subject_id") or "")
+                    for row in spec.get("subjects") or []
+                    if isinstance(row, dict)
+                ],
+                "dimensions": [
+                    str(row.get("dimension_id") or "")
+                    for row in spec.get("dimensions") or []
+                    if isinstance(row, dict)
+                ],
+                "deliverable": (spec.get("delivery_requirements") or {}).get("format"),
+                "prefer_primary": (spec.get("evidence_requirements") or {}).get("prefer_primary"),
+                "coverage_unit_count": len((update.get("coverage_contract") or {}).get("units") or []),
+            },
         )
-        return transition_update(
-            gstate,
-            WorkflowPhase.UNDERSTAND,
-            {"intent": payload, "brief": brief_from_intent(payload), "needs_clarification": needs},
+        contract = dict(update.get("coverage_contract") or {})
+        _emit(
+            session,
+            "coverage.compiled",
+            phase=WorkflowPhase.COMPILE_SPEC.value,
+            status="ok",
+            attributes={
+                "contract_id": contract.get("contract_id"),
+                "spec_id": spec.get("spec_id"),
+                "version": contract.get("version"),
+                "unit_count": len(contract.get("units") or []),
+                "unit_ids": [str(row.get("coverage_id")) for row in contract.get("units") or []],
+            },
         )
+        return update
+
+    async def node_spec_gate(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.graph import spec_gate_node
+
+        session = _require_session(gstate)
+        update = spec_gate_node(gstate)
+        spec = dict(gstate.get("research_spec") or {})
+        _emit(
+            session,
+            "spec.validated",
+            phase=WorkflowPhase.SPEC_GATE.value,
+            status="needs_clarification" if update.get("needs_clarification") else "ok",
+            attributes={"spec_id": spec.get("spec_id"), "needs_clarification": update.get("needs_clarification")},
+        )
+        return update
 
     async def node_clarify(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        session = _require_session(gstate)
-        intent = TaskIntent.from_dict(gstate.get("intent") or {})
-        resolved = auto_resolve_clarification(intent)
-        session.state.intent = resolved
-        return transition_update(gstate, WorkflowPhase.CLARIFY, {"intent": resolved.to_dict(), "needs_clarification": False})
+        from app.research.runtime.graph import clarify_node
+
+        return clarify_node(gstate)
 
     async def node_plan(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.agent.llm import compression_model
-        from app.agent.harness.planner import finalize_plan
-        from app.research.planning.compose import PlanningLimits
-        from app.research.planning.effort import resolve_effective_budget
-        from app.research.planning.lead_planner import heuristic_dynamic_plan, lead_plan_with_llm
-        from app.research.planning.policy import parse_source_policy
+        from app.research.planning.planner import plan_for_spec
+        from app.research.runtime.graph import plan_node
+
         session = _require_session(gstate)
-        intent = TaskIntent.from_dict(gstate.get("intent") or {}) if gstate.get("intent") else understand_task(gstate["task_query"])
-        config = self.harness.harness_config
-        limits = PlanningLimits.from_config(config)
-        policy = parse_source_policy(intent.raw_query)
-        effective = resolve_effective_budget(intent, config)
-        plan = None
-        planner_source = "heuristic"
-        if bool(getattr(config, "planner_llm_enabled", False)) and bool(
-            getattr(config, "planner_dynamic_lead_enabled", True)
-        ):
-            try:
-                plan = await asyncio.wait_for(
-                    lead_plan_with_llm(
-                        intent,
-                        policy,
-                        model=compression_model,
-                        session_id=session.session_id,
-                        max_tasks=limits.max_research_tasks,
-                        effort=effective,
-                    ),
-                    timeout=max(5.0, float(getattr(config, "planner_wall_budget_sec", 45) or 45)),
-                )
-            except Exception:
-                plan = None
-        if plan is None:
-            plan = heuristic_dynamic_plan(intent, policy)
-        else:
-            planner_source = "lead_llm"
-        plan = research_only_plan(annotate_plan_tasks(finalize_plan(plan), intent))
-        tasks = initialize_tasks(plan)
-        business_gaps = sync_business_gaps(plan, tasks, {})
-        session.state.intent = intent
-        session.state.plan = plan
-        session.state.replan_count = 0
+        update = plan_node(gstate)
+        plan = ExecutionPlan.from_dict(update["plan"])
+        sync_execution_projection(session.state, update)
         if isinstance(session.state.metadata, dict):
-            session.state.metadata.update(
-                {
-                    "effort_plan": effective.to_dict(),
-                    "run_budget": effective.as_run_budget(),
-                    "planner_source": planner_source,
-                }
-            )
+            session.state.metadata["planner_source"] = "spec_driven"
         _emit(
             session,
             "plan.created",
@@ -612,83 +633,42 @@ class ResearchGraphRunner:
             plan_version=plan.plan_version,
             attributes=plan_event_attributes(
                 plan,
-                brief_from_intent(intent.to_dict()),
+                {"objective": (gstate.get("research_spec") or {}).get("objective") or gstate["task_query"]},
                 run_id=session.run_id,
-                planner_source=planner_source,
+                planner_source="spec_driven",
             ),
         )
-        return transition_update(
-            gstate,
-            WorkflowPhase.PLAN,
-            {
-                "plan": plan.to_dict(),
-                "plan_version": plan.plan_version,
-                "tasks": tasks,
-                "business_gaps": business_gaps,
-                "needs_plan_review": False,
-                "replan_budget": new_replan_budget(
-                    int((gstate.get("budget") or {}).get("max_replan_count") or 0)
-                ),
-            },
-        )
+        return update
 
     async def node_plan_validate(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        plan_raw = gstate.get("plan")
-        plan = ExecutionPlan.from_dict(plan_raw) if isinstance(plan_raw, dict) and plan_raw else None
-        if plan is None or not plan.steps or any(step.step_type not in {"research", "network_search", "file_read"} for step in plan.steps):
-            return transition_update(gstate, WorkflowPhase.PLAN_VALIDATED, {"abort_reason": "empty_plan"})
-        return transition_update(gstate, WorkflowPhase.PLAN_VALIDATED, {})
+        from app.research.runtime.graph import plan_validate_node
+
+        return plan_validate_node(gstate)
 
     async def node_dispatch(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.graph import dispatch_node
+
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
         state = _sync_assessments(session, dict(gstate))
-        decision = decide_control(state)
-        state["control_decision"] = decision
-        dispatch_wave_id = int(gstate.get("dispatch_wave_id") or 0) + 1
-        state["dispatch_wave_id"] = dispatch_wave_id
-        _emit_assessments(
+        update = dispatch_node(state)
+        decision = dict(update.get("control_decision") or {})
+        _emit(
             session,
-            state,
-            decision,
-            WorkflowPhase.DISPATCH.value,
-            include_progress=False,
+            "control.decided",
+            phase=WorkflowPhase.DISPATCH.value,
+            status=str(decision.get("action") or "unknown"),
+            plan_version=int(state.get("plan_version") or 1),
+            attributes=control_decision_event_attributes(decision),
         )
         if isinstance(session.state.metadata, dict):
-            session.state.metadata.update(
-                {
-                    "progress_assessment": state["progress_assessment"],
-                    "evidence_assessment": state["evidence_assessment"],
-                    "execution_health": state["execution_health"],
-                    "delivery_readiness": state["delivery_readiness"],
-                    "control_decision": decision,
-                }
-            )
-        return transition_update(
-            gstate,
-            WorkflowPhase.DISPATCH,
-            {
-                key: state[key]
-                for key in (
-                    "progress_assessment",
-                    "evidence_assessment",
-                    "execution_health",
-                    "delivery_readiness",
-                    "control_decision",
-                    "budget",
-                    "budget_status",
-                    "dispatch_wave_id",
-                )
-            },
-        )
+            session.state.metadata.update({"control_decision": decision})
+        return {**update, "budget": state["budget"], "budget_status": state["budget_status"]}
 
     async def node_retry(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        decision = dict(gstate.get("control_decision") or {})
-        task_ids = [str(item) for item in decision.get("task_ids") or []]
-        tasks = dict(gstate.get("tasks") or {})
-        for task_id in task_ids:
-            tasks = retry_task(tasks, task_id)
-        return {"tasks": tasks}
+        from app.research.runtime.graph import retry_node
+
+        return retry_node(gstate)
 
     async def node_research_worker(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from langgraph.types import interrupt
@@ -699,18 +679,21 @@ class ResearchGraphRunner:
         from app.research.runtime.worker import ResearchContext, ResearchTask, WorkerResult
 
         session = _require_session(gstate)
+        sync_execution_projection(session.state, gstate)
         step_index = int(gstate.get("step_index") or 0)
         task_id = str(gstate.get("task_id") or f"s{step_index}")
         plan = session.state.plan
         if plan is None or step_index >= len(plan.steps):
             failure = classify_failure("missing_step")
-            return transition_update(gstate, WorkflowPhase.EXECUTE, {"tasks": transition_task(gstate.get("tasks"), task_id, execution_status=TaskExecutionStatus.FAILED, result_status=ResultStatus.NONE, failure=failure, timestamp=_now()), "worker_results": [{"task_id": task_id, "ok": False, "status": "failed", "summary": "missing_step"}]})
+            return {
+                "tasks": transition_task(gstate.get("tasks"), task_id, execution_status=TaskExecutionStatus.FAILED, result_status=ResultStatus.NONE, failure=failure, timestamp=_now()),
+                "worker_results": [{"task_id": task_id, "ok": False, "status": "failed", "summary": "missing_step"}],
+            }
         step = plan.steps[step_index]
         if self.harness.harness_config.hitl_enabled and step.step_type in set(self.harness.harness_config.hitl_step_gate_types):
             resume = interrupt({"kind": "step_gate", "step_index": step_index, "description": step.description})
             if isinstance(resume, dict) and resume.get("_timeout"):
                 return transition_update(gstate, WorkflowPhase.EXECUTE, {"cancel_reason": "user_cancelled"})
-        sync_execution_projection(session.state, gstate)
         current_task = normalize_tasks(gstate.get("tasks")).get(task_id)
         attempt = int((current_task or {}).get("attempt") or 0) + 1
         if current_task is not None and current_task["execution_status"] != TaskExecutionStatus.PENDING.value:
@@ -728,21 +711,18 @@ class ResearchGraphRunner:
                     "dispatch_wave_id": int(gstate.get("dispatch_wave_id") or 0),
                 },
             )
-            return transition_update(
-                gstate,
-                WorkflowPhase.EXECUTE,
-                {
-                    "worker_results": [
-                        {
-                            "task_id": task_id,
-                            "ok": False,
-                            "status": "duplicate_skipped",
-                            "summary": "duplicate task attempt suppressed",
-                            "payload": {"duplicate": True},
-                        }
-                    ]
-                },
-            )
+            return {
+                "worker_results": [
+                    {
+                        "task_id": task_id,
+                        "task_metadata": dict(step.metadata or {}),
+                        "ok": False,
+                        "status": "duplicate_skipped",
+                        "summary": "duplicate task attempt suppressed",
+                        "payload": {"duplicate": True},
+                    }
+                ]
+            }
         dispatch_wave_id = int(gstate.get("dispatch_wave_id") or 0)
         task = ResearchTask(task_id=task_id, objective=str(step.objective or step.description), step_type=step.step_type, step_index=step_index, description=step.description, subagent=step.subagent or "", allowed_tools=list(step.allowed_tools or []), plan_version=int(gstate.get("plan_version") or 1), attempt=attempt, dispatch_wave_id=dispatch_wave_id)
         context = ResearchContext(run_id=session.run_id, query=session.ctx.task_query, user_id=session.ctx.user_id, tenant_id=session.ctx.tenant_id, project_id=session.ctx.project_id, session_id=session.session_id)
@@ -760,6 +740,10 @@ class ResearchGraphRunner:
             execution_status = TaskExecutionStatus.SUCCEEDED
             result_status = ResultStatus.COMPLETE
             failure = None
+        elif result.status == "blocked":
+            execution_status = TaskExecutionStatus.STOPPED
+            result_status = ResultStatus.PARTIAL
+            failure = classify_failure(result.fail_reason or result.status)
         elif result.status == "skipped":
             execution_status = TaskExecutionStatus.SKIPPED
             result_status = ResultStatus.NONE
@@ -775,6 +759,7 @@ class ResearchGraphRunner:
             result_status=result_status,
             attempt=attempt,
             failure=failure,
+            stop_reason=StopReason.BUDGET.value if execution_status == TaskExecutionStatus.STOPPED else "",
             evidence_refs=result.evidence_refs,
             timestamp=_now(),
         )
@@ -808,155 +793,178 @@ class ResearchGraphRunner:
                     "source_quality": "untrusted_external",
                 },
             )
-        return transition_update(
-            gstate,
-            WorkflowPhase.EXECUTE,
-            {
-                "tasks": {task_id: tasks[task_id]},
-                "worker_results": [row],
-                "evidence_refs": result.evidence_refs,
-                "findings": normalized_findings,
+        row["task_metadata"] = dict(step.metadata or {})
+        return {
+            "tasks": {task_id: tasks[task_id]},
+            "worker_results": [row],
+            "evidence_refs": result.evidence_refs,
+            "findings": normalized_findings,
+        }
+
+    async def node_ingest_semantics(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.semantic_ingest import ingest_semantics
+
+        session = _require_session(gstate)
+        update = ingest_semantics(gstate)
+        sync_execution_projection(session.state, {**gstate, **update})
+        coverage = dict(update.get("coverage_state") or {})
+        contract = dict(update.get("coverage_contract") or {})
+        _emit(
+            session,
+            "coverage.assessed",
+            phase=WorkflowPhase.INGEST_SEMANTICS.value,
+            status=str(coverage.get("status") or "unknown"),
+            plan_version=int(gstate.get("plan_version") or 1),
+            attributes={
+                "contract_id": coverage.get("contract_id") or contract.get("contract_id"),
+                "coverage_ratio": coverage.get("coverage_ratio"),
+                "covered_count": len(coverage.get("covered_ids") or []),
+                "covered_ids": coverage.get("covered_ids") or [],
+                "partial_ids": coverage.get("partial_ids") or [],
+                "missing_ids": coverage.get("missing_ids") or [],
+                "conflicted_ids": coverage.get("conflicted_ids") or [],
+                "stale_ids": coverage.get("stale_ids") or [],
             },
         )
+        for claim in update.get("claims") or []:
+            _emit(
+                session,
+                "claim.extracted",
+                phase=WorkflowPhase.INGEST_SEMANTICS.value,
+                status="ok",
+                attributes={"claim_id": claim.get("claim_id"), "normalized_key": claim.get("normalized_key")},
+            )
+        for edge in update.get("claim_conflicts") or []:
+            _emit(
+                session,
+                "claim.conflict_detected",
+                phase=WorkflowPhase.INGEST_SEMANTICS.value,
+                status="ok",
+                attributes={
+                    "edge_id": edge.get("edge_id"),
+                    "left_claim_id": edge.get("left_id"),
+                    "right_claim_id": edge.get("right_id"),
+                    "kind": edge.get("kind"),
+                },
+            )
+        for resolution in update.get("claim_resolutions") or []:
+            _emit(
+                session,
+                "claim.conflict_resolved",
+                phase=WorkflowPhase.INGEST_SEMANTICS.value,
+                status=str(resolution.get("status") or "ok"),
+                attributes={
+                    "edge_id": resolution.get("edge_id"),
+                    "status": resolution.get("status"),
+                    "winner_claim_id": resolution.get("winner_id"),
+                    "evidence_ids": resolution.get("evidence_ids") or [],
+                },
+            )
+        candidate_set = update.get("candidate_set")
+        if isinstance(candidate_set, dict):
+            _emit(
+                session,
+                "candidate_set.materialized",
+                phase=WorkflowPhase.INGEST_SEMANTICS.value,
+                status=str(candidate_set.get("status") or "unknown"),
+                plan_version=int(gstate.get("plan_version") or 1),
+                attributes={
+                    "candidate_set_id": candidate_set.get("candidate_set_id"),
+                    "available": candidate_set.get("available"),
+                    "item_count": len(candidate_set.get("items") or []),
+                    "items": candidate_set.get("items") or [],
+                },
+            )
+        for gap_id in update.get("semantic_gaps") or {}:
+            _emit(
+                session,
+                "semantic_gap.opened",
+                phase=WorkflowPhase.INGEST_SEMANTICS.value,
+                status="ok",
+                attributes={"gap_id": gap_id},
+            )
+        for gap_id in set(gstate.get("semantic_gaps") or {}) - set(update.get("semantic_gaps") or {}):
+            _emit(
+                session,
+                "semantic_gap.closed",
+                phase=WorkflowPhase.INGEST_SEMANTICS.value,
+                status="ok",
+                attributes={"gap_id": gap_id},
+            )
+        _emit(
+            session,
+            "semantic_gain.assessed",
+            phase=WorkflowPhase.INGEST_SEMANTICS.value,
+            status="ok",
+            attributes=update.get("marginal_gain") or {},
+        )
+        return transition_update(gstate, WorkflowPhase.INGEST_SEMANTICS, update)
 
-    async def node_progress(self, gstate: dict[str, Any]) -> dict[str, Any]:
+    async def node_assess(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.graph import assess_node
+
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
         state = _sync_assessments(session, dict(gstate))
-        plan = session.state.plan
-        if plan is None:
-            return transition_update(gstate, WorkflowPhase.ASSESS, {"abort_reason": "missing_plan"})
-        business_gaps = sync_business_gaps(
-            plan,
-            state.get("tasks"),
-            gstate.get("business_gaps"),
-            resolved_gap_ids=[str(item) for item in state["progress_assessment"].get("resolved_gap_ids") or []],
-        )
-        state["business_gaps"] = business_gaps
-        snapshot = {
-            "gap_ids": [str(item) for item in state["progress_assessment"].get("gap_ids") or []],
-            "resolved_gap_ids": [
-                str(item) for item in state["progress_assessment"].get("resolved_gap_ids") or []
-            ],
-            "evidence_refs": sorted(
-                {str(item) for item in gstate.get("evidence_refs") or [] if str(item).strip()}
-            ),
-            "delivery_mode": str(state["delivery_readiness"].get("mode") or "none"),
-            "delivery_status": str(state["delivery_readiness"].get("status") or "unknown"),
-        }
-        previous_snapshot = dict(gstate.get("recovery_snapshot") or {})
-        stalled = int(gstate.get("stalled_cycles") or 0) + 1 if snapshot == previous_snapshot else 0
-        state["stalled_cycles"] = stalled
-        state["recovery_snapshot"] = snapshot
-        state = _sync_assessments(session, state)
-        state["business_gaps"] = business_gaps
-        state["recovery_snapshot"] = snapshot
-        decision = decide_control(state)
-        state["execution_health"] = {**state["execution_health"], "stalled_cycles": stalled}
-        state["control_decision"] = decision
-        _emit_assessments(session, state, decision, WorkflowPhase.ASSESS.value)
+        update = assess_node(state)
+        decision = dict(update.get("control_decision") or {})
+        _emit_assessments(session, {**state, **update}, decision, WorkflowPhase.ASSESS.value)
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
                 {
-                    "progress_assessment": state["progress_assessment"],
-                    "evidence_assessment": state["evidence_assessment"],
-                    "execution_health": state["execution_health"],
-                    "delivery_readiness": state["delivery_readiness"],
+                    "progress_assessment": update.get("progress_assessment") or {},
+                    "evidence_assessment": update.get("evidence_assessment") or {},
+                    "execution_health": update.get("execution_health") or {},
+                    "delivery_readiness": update.get("delivery_readiness") or {},
                     "control_decision": decision,
                 }
             )
-        return transition_update(
-            gstate,
-            WorkflowPhase.ASSESS,
-            {
-                key: state[key]
-                for key in (
-                    "progress_assessment",
-                    "evidence_assessment",
-                    "execution_health",
-                    "delivery_readiness",
-                    "control_decision",
-                    "business_gaps",
-                    "recovery_snapshot",
-                    "budget",
-                )
-            }
-            | {
-                "stalled_cycles": stalled,
-                "budget_status": state["budget_status"],
-                "dispatch_wave_id": int(gstate.get("dispatch_wave_id") or 0),
-            },
-        )
+        return {**update, "budget": state["budget"], "budget_status": state["budget_status"]}
 
-    async def node_replan(self, gstate: dict[str, Any]) -> dict[str, Any]:
+    async def node_gap_fill(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.graph import gap_fill_node
+
         session = _require_session(gstate)
-        sync_execution_projection(session.state, gstate)
-        plan = session.state.plan
-        if plan is None or session.state.intent is None:
-            return transition_update(gstate, WorkflowPhase.REPLAN, {})
-        budget = dict(replan_budget_from_state(gstate))
-        assessment = dict(gstate.get("progress_assessment") or {})
-        gap_ids = [str(item) for item in assessment.get("gap_ids") or [] if str(item).strip()]
-        if not gap_ids:
-            gap_ids = [
-                gap_id
-                for _index, step in active_research_steps(plan)
-                if not (isinstance(step.metadata, dict) and step.metadata.get("optional"))
-                for gap_id in step_gap_ids(step)
-            ]
-        patch = build_replacement_patch(
-            plan,
-            gstate.get("tasks"),
-            gap_ids=gap_ids,
-            limits=recovery_limits_from_state(gstate),
-            rejected_hashes=[str(item) for item in gstate.get("rejected_patch_hashes") or []],
-            previous_gaps=gstate.get("business_gaps"),
-        )
-        attempted = int(budget.get("attempted") or 0) + 1
-        applied = int(budget.get("applied") or 0) + (1 if patch["applied"] else 0)
-        budget.update(attempted=attempted, applied=applied)
-        rejected_hashes = [str(item) for item in gstate.get("rejected_patch_hashes") or []]
-        if not patch["applied"]:
-            rejected_hashes = list(dict.fromkeys([*rejected_hashes, patch["fingerprint"]]))
-        session.state.plan = patch["plan"]
-        session.state.replan_count = applied
-        from_plan_version = int(gstate.get("plan_version") or patch["plan"].plan_version)
-        to_plan_version = patch["plan"].plan_version if patch["applied"] else from_plan_version
-        event_type = "replan.applied" if patch["applied"] else "replan.rejected"
-        common_attributes = {
-            "patch_id": f"patch:{session.run_id}:{attempted}",
-            "triggered_by": "progress_gap",
-            "target_gap_ids": patch["target_gap_ids"],
-            "from_plan_version": from_plan_version,
-            "to_plan_version": to_plan_version,
-            "superseded_task_ids": patch["superseded_task_ids"],
-            "added_task_ids": patch["added_task_ids"],
-            "recovery_generation": patch["recovery_generation"],
-            "max_recovery_generation": int(recovery_limits_from_state(gstate)["max_recovery_generation"]),
-            "attempted": attempted,
-            "max_attempts": int(budget.get("max_attempts") or 0),
-            "fingerprint": patch["fingerprint"],
-        }
+        update = gap_fill_node(gstate)
         _emit(
             session,
-            event_type,
+            "plan.gap_fill_applied" if update.get("plan") else "plan.gap_fill_rejected",
+            phase=WorkflowPhase.GAP_FILL.value,
+            status="ok" if update.get("plan") else "no_op",
+            plan_version=int(update.get("plan_version") or gstate.get("plan_version") or 1),
+            attributes={"reason": update.get("abort_reason", "")},
+        )
+        return update
+
+    async def node_expand_plan(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.graph import expand_plan_node
+
+        session = _require_session(gstate)
+        update = expand_plan_node(gstate)
+        _emit(
+            session,
+            "plan.expanded" if update.get("plan") else "plan.expansion_rejected",
+            phase=WorkflowPhase.EXPAND_PLAN.value,
+            status="ok" if update.get("plan") else "no_op",
+            plan_version=int(update.get("plan_version") or gstate.get("plan_version") or 1),
+            attributes={"reason": update.get("abort_reason", "")},
+        )
+        return update
+
+    async def node_replan(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.graph import replan_node
+
+        session = _require_session(gstate)
+        update = replan_node(gstate)
+        _emit(
+            session,
+            "replan.applied" if update.get("plan") else "replan.rejected",
             phase=WorkflowPhase.REPLAN.value,
-            status="ok" if patch["applied"] else "no_op",
-            plan_version=to_plan_version,
-            attributes=common_attributes,
+            status="ok" if update.get("plan") else "no_op",
+            plan_version=int(update.get("plan_version") or gstate.get("plan_version") or 1),
+            attributes={"reason": update.get("abort_reason", "")},
         )
-        return transition_update(
-            gstate,
-            WorkflowPhase.REPLAN,
-            {
-                "plan": patch["plan"].to_dict(),
-                "plan_version": to_plan_version,
-                "tasks": patch["tasks"],
-                "business_gaps": patch["business_gaps"],
-                "replan_budget": budget,
-                "rejected_patch_hashes": rejected_hashes,
-            },
-        )
+        return update
 
     def _synthesis_budget_attributes(self, session: RunSession, executor: Any) -> dict[str, Any]:
         manager = getattr(session, "budget_manager", None)
@@ -1035,301 +1043,179 @@ class ResearchGraphRunner:
                 attributes={"operation": "synthesis_end_span", "error_type": type(exc).__name__},
             )
 
-    async def _synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
+    def _semantic_synthesis_digest(self, gstate: dict[str, Any], *, compact: bool) -> str:
+        spec = dict(gstate.get("research_spec") or {})
+        claims = [dict(row) for row in gstate.get("claims") or [] if isinstance(row, dict)]
+        coverage = dict(gstate.get("coverage_state") or {})
+        lines = [f"# {spec.get('objective') or gstate.get('task_query')}", ""]
+        for claim in claims[:12 if compact else 40]:
+            evidence_ids = ", ".join(str(item) for item in claim.get("evidence_ids") or [])
+            text = str(claim.get("text") or claim.get("claim") or "").strip()
+            lines.append(f"- {text} [{evidence_ids}]")
+        missing = [str(item) for item in coverage.get("missing_ids") or []]
+        if missing:
+            lines.extend(["", "## Known limitations"])
+            lines.extend(f"- Uncovered coverage unit: {item}" for item in missing[:8 if compact else 20])
+        conflicts = [str(item) for item in coverage.get("conflicted_ids") or []]
+        if conflicts:
+            lines.extend(["", "## Conflict disclosures"])
+            lines.extend(f"- Unresolved coverage unit: {item}" for item in conflicts[:8 if compact else 20])
+        return "\n".join(lines)
+
+    async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
         import app.research.execution.synthesis_executor as synthesis_executor_module
-        from app.agent.harness.token_counter import estimate_tokens
-        from app.research.delivery.partial_renderer import render_partial_delivery
-        from app.research.delivery.synthesis_context import SynthesisContextBuilder
+        from dataclasses import replace
+        from app.research.delivery.synthesis_context import EvidenceDigest
         from app.research.runtime.worker import ResearchContext
 
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
+        attempts_before = int(gstate.get("synthesis_attempts") or 0)
+        compact = attempts_before >= 1
         decision = dict(gstate.get("control_decision") or {})
-        delivery = dict(gstate.get("delivery_readiness") or {})
-        mode = str(decision.get("mode") or delivery.get("mode") or "degraded")
-        if mode not in {"normal", "degraded"}:
-            mode = "degraded"
-        progress = dict(gstate.get("progress_assessment") or {})
-        evidence = dict(gstate.get("evidence_assessment") or {})
-        conflicts = [
-            *[str(item) for item in progress.get("unresolved_conflicts") or []],
-            *[str(item) for item in evidence.get("unresolved_conflicts") or []],
+        mode = "degraded" if compact or decision.get("action") == "deliver_partial" else "normal"
+        evidence_records = [dict(row) for row in gstate.get("evidence_records") or [] if isinstance(row, dict)]
+        claims = [dict(row) for row in gstate.get("claims") or [] if isinstance(row, dict)]
+        evidence_refs = [str(row.get("evidence_id")) for row in evidence_records]
+        digests = [
+            EvidenceDigest(
+                evidence_id=str(row.get("evidence_id") or ""),
+                title=str(row.get("source_id") or row.get("locator") or row.get("evidence_id") or ""),
+                locator=str(row.get("locator") or ""),
+                excerpt=str(row.get("excerpt_ref") or ""),
+                supported_claims=tuple(
+                    str(claim.get("text") or claim.get("claim") or "")
+                    for claim in claims
+                    if str(row.get("evidence_id") or "") in [str(item) for item in claim.get("evidence_ids") or []]
+                ),
+            )
+            for row in evidence_records[:20 if compact else 40]
         ]
-        builder = SynthesisContextBuilder(self.harness, session)
-        context = builder.build(
-            gstate,
-            limitations=[str(item) for item in delivery.get("limitations") or []],
-            unresolved_conflicts=conflicts,
+        coverage = dict(gstate.get("coverage_state") or {})
+        request = synthesis_executor_module.SynthesisRequest(
+            mode=mode,
+            evidence_refs=evidence_refs,
+            limitations=[f"Uncovered coverage unit: {item}" for item in coverage.get("missing_ids") or []],
+            unresolved_conflicts=[f"Unresolved coverage unit: {item}" for item in coverage.get("conflicted_ids") or []],
+            research_summary=self._semantic_synthesis_digest(gstate, compact=compact),
+            evidence_digests=digests,
+            findings=claims[:12 if compact else 40],
+            worker_summaries=[],
+            token_budget=20_000 if compact else 40_000,
         )
         executor = synthesis_executor_module.SynthesisExecutor(self.harness, session)
-        research_context = ResearchContext(
+        context = ResearchContext(
             run_id=session.run_id,
-            query=session.ctx.task_query,
+            query=str((gstate.get("research_spec") or {}).get("objective") or gstate["task_query"]),
             user_id=session.ctx.user_id,
             tenant_id=session.ctx.tenant_id,
             project_id=session.ctx.project_id,
             session_id=session.session_id,
         )
-        evidence_refs = list(context.evidence_refs)
-        input_refs = [{"type": "evidence", "id": item} for item in evidence_refs]
-        answer_refs = [{"type": "answer", "id": "synthesis:latest"}]
-        attempts = 0
-        last_result = None
-        fallback_action = ""
-
-        while attempts < 2:
-            attempts += 1
-            request = synthesis_executor_module.SynthesisRequest(
-                mode=mode,
-                evidence_refs=evidence_refs,
-                limitations=list(context.limitations),
-                unresolved_conflicts=list(context.unresolved_conflicts),
-                research_summary=context.research_summary(),
-                evidence_digests=list(context.evidence_digests),
-                findings=list(context.findings),
-                worker_summaries=list(context.worker_summaries),
-                token_budget=context.token_budget,
-            )
-            estimate_input_tokens = getattr(executor, "estimate_input_tokens", None)
-            estimated_tokens = (
-                int(estimate_input_tokens(request, research_context))
-                if callable(estimate_input_tokens)
-                else estimate_tokens(request.research_summary)
-            )
-            budget_attrs = self._synthesis_budget_attributes(session, executor)
-            span_key = self._start_synthesis_span(
-                session,
-                attempt=attempts,
-                mode=mode,
-                attributes={"mode": mode, "attempt": attempts},
-            )
-            _emit(
-                session,
-                "synthesis.started",
-                phase=WorkflowPhase.SYNTHESIS.value,
-                status="start",
-                attempt=attempts,
-                attributes={
-                    "mode": mode,
-                    "attempt": attempts,
-                    "evidence_count": len(evidence_refs),
-                    "evidence_ids": evidence_refs,
-                    "input_tokens_estimated": estimated_tokens,
-                    **budget_attrs,
-                },
-                input_refs=input_refs,
-            )
-            result = await executor.execute(request, research_context)
-            last_result = result
-            if result.ok:
-                manager = session.ctx.citation_manager
-                final_content = (
-                    manager.build_cited_report(result.summary)
-                    if manager is not None
-                    else result.summary
-                )
-                session.state.final_content = final_content
-                if isinstance(session.state.metadata, dict):
-                    session.state.metadata.update(
-                        {
-                            "synthesis_attempted": True,
-                            "synthesis_attempts": attempts,
-                            "synthesis_mode": mode,
-                            "synthesis_status": result.status,
-                        }
-                    )
-                _emit(
-                    session,
-                    "synthesis.completed",
-                    phase=WorkflowPhase.SYNTHESIS.value,
-                    status="ok",
-                    duration_ms=result.duration_ms,
-                    attempt=attempts,
-                    attributes={
-                        "mode": mode,
-                        "attempt": attempts,
-                        "duration_ms": result.duration_ms,
-                        "input_tokens_estimated": estimated_tokens,
-                        "evidence_count": len(result.evidence_refs),
-                        "evidence_ids": result.evidence_refs,
-                        "content_chars": len(final_content),
-                    },
-                    input_refs=input_refs,
-                    output_refs=answer_refs,
-                )
-                self._end_synthesis_span(session, span_key, status="ok", duration_ms=result.duration_ms)
-                return transition_update(
-                    gstate,
-                    WorkflowPhase.SYNTHESIS,
-                    {"final_content": final_content, "draft_ref": "synthesis:latest", "quality_assessment": {}},
-                )
-
-            retryable = result.fail_reason in synthesis_executor_module.RETRYABLE_SYNTHESIS_FAILURES
-            can_retry = attempts < 2 and retryable
-            if result.fail_reason == "context_length_exceeded" and attempts < 2 and not context.compacted:
-                context = builder.compact(context)
-                fallback_action = "compact_retry"
-            elif can_retry:
-                fallback_action = "retry"
-            elif context.findings or context.evidence_digests:
-                fallback_action = "deterministic_partial_renderer"
-            else:
-                fallback_action = "explicit_failed_no_evidence"
+        result = await executor.execute(request, context)
+        retried = False
+        if not result.ok and (
+            result.fail_reason in synthesis_executor_module.RETRYABLE_SYNTHESIS_FAILURES
+            or result.fail_reason == "context_length_exceeded"
+        ):
+            retried = True
             _emit(
                 session,
                 "synthesis.failed",
                 phase=WorkflowPhase.SYNTHESIS.value,
                 status="failed",
+                attempt=attempts_before + 1,
                 duration_ms=result.duration_ms,
-                attempt=attempts,
                 attributes={
                     "mode": mode,
-                    "attempt": attempts,
+                    "compact": False,
+                    "evidence_count": len(evidence_refs),
+                    "claim_count": len(claims),
                     "fail_reason": result.fail_reason,
-                    "duration_ms": result.duration_ms,
-                    "input_tokens_estimated": estimated_tokens,
-                    "evidence_count": len(result.evidence_refs),
-                    "evidence_ids": result.evidence_refs,
-                    "fallback_action": fallback_action,
+                    "fallback_action": "compact_retry",
                 },
-                input_refs=input_refs,
-                output_refs=answer_refs if fallback_action != "explicit_failed_no_evidence" else None,
             )
-            self._end_synthesis_span(session, span_key, status="failed", duration_ms=result.duration_ms)
-            if fallback_action in {"retry", "compact_retry"}:
-                continue
-            break
-
-        fail_reason = str(getattr(last_result, "fail_reason", "") or "synthesis_failed")
-        if not (context.findings or context.evidence_digests):
-            if isinstance(session.state.metadata, dict):
-                session.state.metadata.update(
-                    {
-                        "synthesis_attempted": True,
-                        "synthesis_attempts": attempts,
-                        "synthesis_mode": mode,
-                        "synthesis_status": "failed",
-                        "synthesis_failed": True,
-                        "synthesis_fail_reason": fail_reason,
-                        "fallback_used": "",
-                    }
+            mode = "degraded"
+            request = replace(
+                request,
+                mode=mode,
+                research_summary=self._semantic_synthesis_digest(gstate, compact=True),
+                evidence_digests=digests[:20],
+                findings=claims[:12],
+                token_budget=20_000,
+            )
+            result = await executor.execute(request, context)
+        fallback = not result.ok
+        content = self._semantic_synthesis_digest(gstate, compact=True) if fallback else result.summary
+        if not fallback:
+            missing_evidence_ids = [
+                evidence_id
+                for evidence_id in evidence_refs
+                if evidence_id and evidence_id not in content
+            ]
+            if missing_evidence_ids:
+                content = (
+                    content.rstrip()
+                    + "\n\n## Evidence references\n"
+                    + "\n".join(f"- [{evidence_id}]" for evidence_id in missing_evidence_ids)
                 )
-            return transition_update(gstate, WorkflowPhase.SYNTHESIS, {"quality_assessment": {}})
-
-        worker_failures = [
-            str(row.get("fail_reason") or row.get("status") or "")
-            for row in gstate.get("worker_results") or []
-            if isinstance(row, dict) and not bool(row.get("ok", True))
-        ]
-        fallback_content = render_partial_delivery(
-            objective=session.ctx.task_query,
-            findings=list(context.findings),
-            evidence_digests=list(context.evidence_digests),
-            worker_summaries=list(context.worker_summaries),
-            business_gaps=list(context.business_gaps),
-            limitations=list(context.limitations),
-            unresolved_conflicts=list(context.unresolved_conflicts),
-            worker_failure_reasons=worker_failures,
-            synthesis_failure_reason=fail_reason,
-        )
         manager = session.ctx.citation_manager
-        final_content = (
-            manager.build_cited_report(fallback_content)
-            if manager is not None and fallback_content
-            else fallback_content
-        )
-        session.state.final_content = final_content
+        if manager is not None and content:
+            content = manager.build_cited_report(content)
+        session.state.final_content = content
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
                 {
                     "synthesis_attempted": True,
-                    "synthesis_attempts": attempts,
+                    "synthesis_attempts": attempts_before + (2 if retried else 1),
                     "synthesis_mode": mode,
-                    "synthesis_status": "failed",
-                    "synthesis_failed": True,
-                    "synthesis_fail_reason": fail_reason,
-                    "fallback_used": "deterministic_partial_renderer",
+                    "synthesis_status": result.status,
+                    "synthesis_failed": fallback,
+                    "synthesis_fail_reason": result.fail_reason,
+                    "fallback_used": "semantic_digest" if fallback else "",
                 }
             )
+        _emit(
+            session,
+            "synthesis.completed" if not fallback else "synthesis.failed",
+            phase=WorkflowPhase.SYNTHESIS.value,
+            status="ok" if not fallback else "failed",
+            attempt=attempts_before + (2 if retried else 1),
+            duration_ms=result.duration_ms,
+            attributes={
+                "mode": mode,
+                "compact": compact or retried,
+                "evidence_count": len(evidence_refs),
+                "claim_count": len(claims),
+                "fail_reason": result.fail_reason,
+                "fallback_action": "semantic_digest" if fallback else "",
+            },
+        )
         return transition_update(
             gstate,
             WorkflowPhase.SYNTHESIS,
-            {"final_content": final_content, "draft_ref": "synthesis:fallback", "quality_assessment": {}},
+            {
+                "final_content": content,
+                "synthesis_attempts": attempts_before + (2 if retried else 1),
+                "synthesis_failed": fallback,
+                "quality_assessment": {},
+            },
         )
 
-    async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        return await self._synthesize(gstate)
-
     async def node_quality_gate(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.assessment.evidence import EvidenceStatus, assess_evidence
-        from app.research.assessment.quality import QualityVerdict
+        from app.research.runtime.graph import quality_gate_node
 
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
-        final_content = str(gstate.get("final_content") or "").strip()
-        manager = session.ctx.citation_manager
-        evidence = assess_evidence(gstate)
-        if not final_content:
-            assessment = {
-                "verdict": QualityVerdict.FAIL.value,
-                "issues": ["no_content"],
-                "repairable": False,
-                "suggested_action": "",
-                "grounding": False,
-                "citation_metrics": {},
-            }
-        elif bool((session.state.metadata or {}).get("synthesis_failed")):
-            assessment = {
-                "verdict": QualityVerdict.FAIL.value,
-                "issues": ["synthesis_failed"],
-                "repairable": False,
-                "suggested_action": "",
-                "grounding": False,
-                "citation_metrics": {},
-            }
-        elif manager is None:
-            assessment = {
-                "verdict": QualityVerdict.UNKNOWN.value,
-                "issues": ["citation_manager_missing"],
-                "repairable": False,
-                "suggested_action": "",
-                "grounding": False,
-                "citation_metrics": {},
-            }
-        else:
-            metrics: dict[str, Any] = dict(manager.compute_metrics(final_content))
-            citations_ok, citation_issue = manager.validate_citations(final_content)
-            grounding = bool(
-                citations_ok
-                and evidence["status"] == EvidenceStatus.SUFFICIENT.value
-                and int(metrics.get("registered_sources") or 0) > 0
-            )
-            issues = [] if citations_ok else [citation_issue]
-            if evidence["status"] != EvidenceStatus.SUFFICIENT.value:
-                issues.append(f"evidence_{evidence['status']}")
-            assessment = {
-                "verdict": QualityVerdict.PASS.value if grounding else QualityVerdict.FAIL.value,
-                "issues": issues,
-                "repairable": bool(citation_issue == "citation_coverage_low" and manager.sources),
-                "suggested_action": (
-                    "repair"
-                    if citation_issue == "citation_coverage_low"
-                    else "replan"
-                    if evidence["status"] == EvidenceStatus.INSUFFICIENT.value
-                    else ""
-                ),
-                "grounding": grounding,
-                "citation_metrics": metrics,
-            }
-        state = dict(gstate)
-        state["quality_assessment"] = assessment
-        decision = decide_control(state)
+        update = quality_gate_node(gstate)
+        assessment = dict(update.get("quality_assessment") or {})
+        decision = dict(update.get("control_decision") or {})
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
                 {
                     "quality": assessment,
                     "quality_attempted": True,
-                    "answer_grounded": bool(assessment["grounding"]),
+                    "answer_grounded": bool(assessment.get("grounding")),
                     "control_decision": decision,
                 }
             )
@@ -1337,51 +1223,36 @@ class ResearchGraphRunner:
             session,
             "quality.assessed",
             phase=WorkflowPhase.QUALITY.value,
-            status=str(assessment["verdict"]),
+            status=str(assessment.get("verdict") or "unknown"),
             attributes=quality_event_attributes(assessment),
         )
         _emit(
             session,
             "control.decided",
             phase=WorkflowPhase.QUALITY.value,
-            status=str(decision["action"]),
+            status=str(decision.get("action") or "unknown"),
             attributes=control_decision_event_attributes(decision),
         )
-        return transition_update(
-            gstate,
-            WorkflowPhase.QUALITY,
-            {"quality_assessment": assessment, "control_decision": decision},
-        )
+        return update
 
     async def node_repair_synthesis(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        return transition_update(gstate, WorkflowPhase.REPAIR_SYNTHESIS, {})
+        from app.research.runtime.graph import repair_synthesis_node
+
+        return repair_synthesis_node(gstate)
 
     async def node_finalize(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.graph import finalize_node
+
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
         session.state.final_content = str(gstate.get("final_content") or "")
-        plan = session.state.plan
-        required = required_research_ids(plan) if plan is not None else []
-        tasks = normalize_tasks(gstate.get("tasks"))
-        terminal_required = [
-            task_id
-            for task_id in required
-            if tasks.get(task_id, {}).get("execution_status")
-            not in {TaskExecutionStatus.PENDING.value, TaskExecutionStatus.RUNNING.value}
-        ]
-        termination = terminal_update(
-            gstate,
-            reason="",
-            stage=WorkflowPhase.FINALIZE.value,
-            research_completed=bool(required) and len(terminal_required) == len(required) and bool(gstate.get("evidence_refs")),
-            synthesis_attempted=bool(gstate.get("final_content")),
-            quality_attempted=bool(gstate.get("quality_assessment")),
-        )
+        termination = finalize_node(gstate)
+        termination_payload = dict(termination.get("termination") or {})
         outcome = str(termination["termination"]["outcome"])
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
                 {
-                    "termination": termination["termination"],
+                    "termination": termination_payload,
                     "quality": dict(gstate.get("quality_assessment") or {}),
                     "quality_attempted": bool(gstate.get("quality_assessment")),
                 }
@@ -1392,7 +1263,7 @@ class ResearchGraphRunner:
             phase=WorkflowPhase.FINALIZE.value,
             status=outcome,
             attributes={
-                **termination_event_attributes(termination["termination"]),
+                **termination_event_attributes(termination_payload),
                 "final_content_chars": len(session.state.final_content),
             },
         )
@@ -1404,30 +1275,4 @@ class ResearchGraphRunner:
             deliverable_dir=session.ctx.deliverable_dir,
         )
         session.result = result
-        return transition_update(
-            gstate,
-            WorkflowPhase.FINALIZE,
-            {**termination, "final_content": session.state.final_content},
-        )
-
-    def _research_summary(self, gstate: dict[str, Any]) -> str:
-        lines: list[str] = []
-        for finding in list(gstate.get("findings") or [])[:120]:
-            if not isinstance(finding, dict):
-                continue
-            claim = str(finding.get("claim") or finding.get("summary") or "").strip()
-            if not claim:
-                continue
-            evidence_ids = ", ".join(str(item) for item in finding.get("evidence_ids") or [])
-            lines.append(
-                f"[{finding.get('finding_id', '')}] {claim}"
-                + (f"（证据：{evidence_ids}）" if evidence_ids else "")
-            )
-        for row in list(gstate.get("worker_results") or [])[:80]:
-            if not isinstance(row, dict):
-                continue
-            summary = str(row.get("summary") or "").strip()
-            if not summary:
-                continue
-            lines.append(f"[worker:{row.get('task_id', '')}] {summary}")
-        return "\n".join(lines)
+        return termination
