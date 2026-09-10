@@ -25,15 +25,14 @@ class FakeHarness:
     harness_config = FakeConfig()
 
 
-class FailingAgent:
+class FailingModel:
     def __init__(self, error: Exception | None = None):
         self.error = error
 
-    async def astream(self, *args: Any, **kwargs: Any):
+    async def ainvoke(self, *args: Any, **kwargs: Any):
         if self.error is not None:
             raise self.error
-        yield {"synthesis": {"messages": []}}
-        yield {}
+        return ""
 
 
 class FakeSession:
@@ -110,7 +109,7 @@ def test_synthesis_failure_taxonomy():
 
 def _run_failure(message: str):
     harness = FakeHarness()
-    harness.agent = FailingAgent(RuntimeError(message))
+    harness.synthesis_model = FailingModel(RuntimeError(message))
     return asyncio.run(
         SynthesisExecutor(harness, FakeSession()).execute(
             SynthesisRequest(mode="degraded", evidence_refs=["ev"]), _context()
@@ -120,7 +119,7 @@ def _run_failure(message: str):
 
 def test_empty_synthesis_is_retryable_taxonomy():
     harness = FakeHarness()
-    harness.agent = FailingAgent(None)
+    harness.synthesis_model = FailingModel(None)
     result = asyncio.run(
         SynthesisExecutor(harness, FakeSession()).execute(
             SynthesisRequest(mode="degraded", evidence_refs=["ev"]), _context()

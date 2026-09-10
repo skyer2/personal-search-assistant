@@ -114,9 +114,11 @@ def test_uploads_and_artifacts(tmp_path):
     assert listed[0]["path"] == "report.md"
     (output / "working_notes.md").write_text("# notes", encoding="utf-8")
     (output / "report.pdf").write_bytes(b"%PDF-1.4\n")
+    (output / "analysis.xlsx").write_bytes(b"xlsx")
+    for internal in ("run_summary.json", "evidence.json", "art-web-1.txt", "trace.jsonl"):
+        (output / internal).write_text("internal", encoding="utf-8")
     ordered = [item["name"] for item in list_output_files(tmp_path / "output", "s1")]
-    assert ordered[0] == "report.pdf"
-    assert ordered.index("report.md") < ordered.index("working_notes.md")
+    assert ordered == ["report.pdf", "report.md", "analysis.xlsx"]
     target = resolve_output_file(tmp_path / "output", "s1", "report.md")
     assert target.exists()
     try:

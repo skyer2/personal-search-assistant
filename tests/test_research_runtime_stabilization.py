@@ -32,9 +32,8 @@ class FakeHarness:
 
 
 class RaisingAgent:
-    async def astream(self, *args: Any, **kwargs: Any):
+    async def ainvoke(self, *args: Any, **kwargs: Any):
         raise RuntimeError("provider unavailable")
-        yield {}
 
 
 def _budget_manager() -> RunBudgetManager:
@@ -217,7 +216,7 @@ async def test_low_synthesis_budget_skips_llm_and_renders_partial(monkeypatch):
     manager = _budget_manager()
     manager.commit_tokens(95_001)
     harness = FakeHarness()
-    harness.agent = RaisingAgent()
+    harness.synthesis_model = RaisingAgent()
     session = _run_session(manager, harness)
     monkeypatch.setattr(runner_module, "get_session", lambda _run_id: session)
 
@@ -234,7 +233,7 @@ async def test_low_synthesis_budget_skips_llm_and_renders_partial(monkeypatch):
 async def test_synthesis_failure_with_evidence_returns_user_readable_partial(monkeypatch):
     manager = _budget_manager()
     harness = FakeHarness()
-    harness.agent = RaisingAgent()
+    harness.synthesis_model = RaisingAgent()
     session = _run_session(manager, harness)
     monkeypatch.setattr(runner_module, "get_session", lambda _run_id: session)
 

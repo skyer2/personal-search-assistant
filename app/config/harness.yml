@@ -200,7 +200,8 @@ harness:
     require_structured_worker_output: true
     synthesis_use_evidence_digest: true
     direct_worker_invoke: true
-    synthesis_step_timeout_sec: 240
+    synthesis_step_timeout_sec: 60
+    synthesis_retry_timeout_sec: 30
     progress_eval_enabled: true
     graph_checkpoint_backend: sqlite
     graph_checkpoint_path: output/.harness/graph_checkpoints.sqlite

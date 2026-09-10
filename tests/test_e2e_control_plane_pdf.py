@@ -25,6 +25,7 @@ class DeterministicWorkerExecutor:
             "DeepSeek 和 Moonshot AI 是当下国内 AI 初创中最相关的候选，依据是一手官网来源。",
             "用户决策需要的关键事实包括模型技术、开发者采用率和产品差异化。",
             "主要风险和限制是估值、商业化进展和管理团队信息仍需独立来源验证。",
+            "明确区分已确认事实、未确认内容和风险。",
         ]
         locators = ["https://www.deepseek.com/", "https://www.moonshot.ai/"]
         manager = self.session.ctx.citation_manager
@@ -42,7 +43,7 @@ class DeterministicWorkerExecutor:
                     "task_id": task.task_id,
                     "summary": fact,
                     "claim": fact,
-                    "evidence_ids": [evidence_refs[min(index, len(evidence_refs) - 1)]],
+                    "evidence_ids": evidence_refs,
                 }
                 for index, fact in enumerate(facts)
             ],

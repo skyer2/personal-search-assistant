@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import re
+import asyncio
 from typing import Any
 
-from app.api.tracing import build_run_config
 from app.research.brief.models import StructuredResearchBrief
 from app.research.coverage.judge import CoverageJudgement
-from app.research.execution.llm_gateway import LLMGateway
+from app.research.execution.structured_llm_gateway import StructuredLLMGateway
+from app.research.runtime.task_budget import task_budget_profile
 from app.research.runtime.task_identity import semantic_fingerprint
 from app.research.supervisor.models import ResearchTaskRequest, SupervisorAction
 from app.research.supervisor.prompt import SUPERVISOR_PROMPT
@@ -28,6 +28,7 @@ class SupervisorAgent:
         target_criteria: tuple[str, ...] = (),
         target_gaps: tuple[str, ...] = (),
     ) -> ResearchTaskRequest:
+        profile = task_budget_profile("small" if index > 2 else "medium")
         return ResearchTaskRequest(
             objective=objective,
             target_criteria=target_criteria,
@@ -36,8 +37,8 @@ class SupervisorAgent:
             expected_evidence=("一手来源", "高质量独立来源"),
             novelty_reason="针对当前 Coverage 缺口收敛研究范围",
             estimated_effort="small" if index > 2 else "medium",
-            max_search_calls=4,
-            max_llm_calls=4,
+            max_search_calls=profile.max_search_calls,
+            max_llm_calls=profile.max_llm_calls,
         )
 
     def fallback_action(
@@ -55,7 +56,7 @@ class SupervisorAgent:
         criteria = tuple(brief.success_criteria or brief.key_questions)
         known = set(previous_fingerprints or set())
         tasks: list[ResearchTaskRequest] = []
-        for index, objective in enumerate(candidates[:4], start=1):
+        for index, objective in enumerate(candidates[:2], start=1):
             gap = judgement.missing[index - 1] if judgement and index <= len(judgement.missing) else objective
             task = self._task(
                 index,
@@ -94,6 +95,33 @@ class SupervisorAgent:
             previous_fingerprints=previous_fingerprints,
         )
         return SupervisorAction(action.action, action.reason, resolved.research_tasks, action.source)
+
+    @staticmethod
+    def _sanitize_action(action: SupervisorAction) -> SupervisorAction:
+        tasks: list[ResearchTaskRequest] = []
+        for item in action.research_tasks:
+            profile = task_budget_profile(item.estimated_effort)
+            tasks.append(
+                ResearchTaskRequest(
+                    objective=item.objective,
+                    target_criteria=item.target_criteria,
+                    target_gaps=item.target_gaps,
+                    priority=item.priority,
+                    expected_evidence=item.expected_evidence,
+                    source_hints=item.source_hints,
+                    novelty_reason=item.novelty_reason,
+                    estimated_effort=item.estimated_effort,
+                    max_search_calls=profile.max_search_calls,
+                    max_llm_calls=profile.max_llm_calls,
+                    task_id="",
+                )
+            )
+        return SupervisorAction(
+            action=action.action,
+            reason=action.reason,
+            research_tasks=tuple(tasks),
+            source="structured_llm",
+        )
 
     @staticmethod
     def _actionable_questions(
@@ -144,34 +172,23 @@ class SupervisorAgent:
             previous_fingerprints=sorted(previous_fingerprints or [])[-32:],
             duplicate_search_ratio=f"{max(0.0, min(1.0, float(duplicate_search_ratio))):.2%}",
         )
-        texts: list[str] = []
         try:
-            gateway = LLMGateway(self.budget_manager)
-            config = build_run_config("supervisor", metadata={"phase": "supervisor"})
-            with gateway.execution_scope(phase="supervisor"):
-                async for chunk in gateway.astream(self.agent, {"messages": [{"role": "user", "content": prompt}]}, config):
-                    if isinstance(chunk, dict):
-                        states = list(chunk.values()) if len(chunk) == 1 else [chunk]
-                        for state in states:
-                            if not isinstance(state, dict):
-                                continue
-                            for message in state.get("messages") or []:
-                                content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
-                                texts.append(str(content or ""))
+            gateway = StructuredLLMGateway(self.budget_manager)
+            with gateway.gateway.execution_scope(phase="supervisor"):
+                action = await asyncio.wait_for(
+                    gateway.ainvoke(
+                        model=self.agent,
+                        schema=SupervisorAction,
+                        prompt=prompt,
+                        phase="supervisor",
+                        timeout_sec=30,
+                    ),
+                    timeout=30,
+                )
         except Exception:
             return fallback
-        raw = "\n".join(texts).strip()
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if not match:
-            return fallback
-        try:
-            patch = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return fallback
-        if not isinstance(patch, dict):
-            return fallback
-        action = SupervisorAction.from_dict({**patch, "source": "structured_llm"})
-        return self.resolve_action(action, judgement, brief)
+        action = self._sanitize_action(action)
+        return self.resolve_action(action, judgement, brief, previous_fingerprints)
 
 
 __all__ = ["SupervisorAgent"]

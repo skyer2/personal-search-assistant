@@ -55,6 +55,7 @@ class ResearchState(TypedDict):
     supervisor: dict[str, Any]
     supervisor_action: dict[str, Any]
     coverage_judgement: dict[str, Any]
+    fast_path_answer: dict[str, Any]
 
     claims: Annotated[list[dict[str, Any]], merge_records]
     claim_conflicts: Annotated[list[dict[str, Any]], merge_records]
@@ -157,6 +158,7 @@ def empty_research_state(
         "supervisor": {"iteration": 0, "last_action": "", "reasoning_summary": ""},
         "supervisor_action": {},
         "coverage_judgement": {},
+        "fast_path_answer": {},
         "claims": [],
         "claim_conflicts": [],
         "claim_resolutions": [],

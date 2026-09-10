@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from app.observability.integrity import check_trace_integrity
+from app.observability.journal import build_span_tree
+from app.observability.recorder import AgentTelemetry
 
 
 def _events(run_status: str) -> list[dict]:
@@ -137,6 +139,44 @@ def test_integrity_rejects_zero_root_span():
     events = [{"type": "llm_usage", "attributes": {"search_mode": "agent"}}]
     result = check_trace_integrity(events, run_status="partial")
     assert "missing_root_span" in result["issues"]
+
+
+def test_worker_span_restore_keeps_run_root_taskless():
+    telemetry = AgentTelemetry()
+    telemetry._ws_enabled = False
+    ctx = telemetry.start_run(session_id="trace-root", run_id="run-root", query_preview="q")
+    worker_key = telemetry.start_span(
+        "worker.execute",
+        phase="worker",
+        plan_version=1,
+        task_id="task_001",
+        attempt=1,
+    )
+    telemetry.emit("worker.started", phase="worker", task_id="task_001", plan_version=1, attempt=1)
+    telemetry.end_span(worker_key)
+    root_event = telemetry.emit(
+        "run.terminated",
+        phase="run",
+        status="partial",
+        span_id=ctx.root_span_id,
+    )
+
+    assert root_event.parent_span_id is None
+    assert root_event.task_id is None
+    assert root_event.plan_version is None
+    assert root_event.attempt is None
+
+    events = [
+        event.to_dict()
+        for event in telemetry.journal.events_for_run("trace-root", "run-root")
+    ]
+    summary = check_trace_integrity(events, run_status="partial")
+    roots = build_span_tree(events)["roots"]
+    assert summary["span_tree"]["root_count"] == 1
+    assert roots[0]["name"] == "research.run"
+    assert roots[0]["parent_span_id"] is None
+    assert roots[0]["task_id"] is None
+    assert summary["span_tree"]["cycle_count"] == 0
 
 
 def test_integrity_rejects_missing_lineage_and_synthesis_span():

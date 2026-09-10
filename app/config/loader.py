@@ -161,7 +161,8 @@ class HarnessConfig:
     require_structured_worker_output: bool = True
     synthesis_use_evidence_digest: bool = True
     direct_worker_invoke: bool = True
-    synthesis_step_timeout_sec: int = 240
+    synthesis_step_timeout_sec: int = 60
+    synthesis_retry_timeout_sec: int = 30
     progress_eval_enabled: bool = True
     graph_checkpoint_backend: str = "sqlite"
     graph_checkpoint_path: str = "output/.harness/graph_checkpoints.sqlite"
@@ -629,7 +630,13 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         synthesis_step_timeout_sec=int(
             os.getenv(
                 "HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC",
-                orch.get("synthesis_step_timeout_sec", 240),
+                orch.get("synthesis_step_timeout_sec", 60),
+            )
+        ),
+        synthesis_retry_timeout_sec=int(
+            os.getenv(
+                "HARNESS_SYNTHESIS_RETRY_TIMEOUT_SEC",
+                orch.get("synthesis_retry_timeout_sec", 30),
             )
         ),
         progress_eval_enabled=_env_bool(

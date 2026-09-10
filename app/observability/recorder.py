@@ -301,6 +301,10 @@ class AgentTelemetry:
                 span_id=handle.parent_span_id,
                 parent_span_id=grandparent,
             )
+            if ctx.root_span_id and handle.parent_span_id == ctx.root_span_id:
+                restored.task_id = None
+                restored.plan_version = None
+                restored.attempt = None
             set_context(restored)
 
     def emit(
@@ -344,6 +348,8 @@ class AgentTelemetry:
         attrs = dict(attributes or {})
         refs_in = list(input_refs or attrs.pop("input_refs", None) or [])
         refs_out = list(output_refs or attrs.pop("output_refs", None) or [])
+        resolved_span_id = span_id or (ctx.span_id if ctx else new_id())
+        root_event = ctx is not None and resolved_span_id == ctx.root_span_id
         if (
             event_type.endswith(".failed")
             or status in {"failed", "error", "fail"}
@@ -359,16 +365,20 @@ class AgentTelemetry:
         event = AgentEvent(
             event_id=new_id(20),
             trace_id=trace_id,
-            span_id=span_id or (ctx.span_id if ctx else new_id()),
-            parent_span_id=parent_span_id if parent_span_id is not None else (ctx.parent_span_id if ctx else None),
+            span_id=resolved_span_id,
+            parent_span_id=(
+                None
+                if root_event
+                else parent_span_id if parent_span_id is not None else (ctx.parent_span_id if ctx else None)
+            ),
             run_id=run_id,
             session_id=session_id,
             seq=seq,
             timestamp=utc_now(),
             type=event_type,
-            plan_version=plan_version if plan_version is not None else (ctx.plan_version if ctx else None),
-            task_id=task_id if task_id is not None else (ctx.task_id if ctx else None),
-            attempt=attempt if attempt is not None else (ctx.attempt if ctx else None),
+            plan_version=None if root_event else plan_version if plan_version is not None else (ctx.plan_version if ctx else None),
+            task_id=None if root_event else task_id if task_id is not None else (ctx.task_id if ctx else None),
+            attempt=None if root_event else attempt if attempt is not None else (ctx.attempt if ctx else None),
             phase=phase,
             status=status,
             duration_ms=duration_ms,

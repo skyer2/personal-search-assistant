@@ -8,12 +8,11 @@ available; it never routes from TaskShape.
 from __future__ import annotations
 
 import hashlib
-import json
+import asyncio
 import re
 from dataclasses import replace
 from typing import Any
 
-from app.api.tracing import build_run_config
 from app.research.brief.models import (
     DeliverableRequirements,
     FreshnessRequirements,
@@ -21,7 +20,7 @@ from app.research.brief.models import (
     StructuredResearchBrief,
 )
 from app.research.brief.validator import validate_structured_brief
-from app.research.execution.llm_gateway import LLMGateway
+from app.research.execution.structured_llm_gateway import StructuredLLMGateway
 
 BRIEF_AGENT_PROMPT = """你是研究任务的结构化 Brief 编译器。理解用户真正目标，不要按表面关键词分类。
 
@@ -163,41 +162,6 @@ def compile_structured_brief(
     return brief
 
 
-def _message_text(chunks: list[Any]) -> str:
-    texts: list[str] = []
-    for chunk in chunks:
-        if not isinstance(chunk, dict):
-            continue
-        states = list(chunk.values()) if len(chunk) == 1 else [chunk]
-        for state in states:
-            if not isinstance(state, dict):
-                continue
-            for message in state.get("messages") or []:
-                if isinstance(message, dict):
-                    texts.append(str(message.get("content") or ""))
-                else:
-                    texts.append(str(getattr(message, "content", "") or ""))
-    return "\n".join(texts)
-
-
-def _json_object(text: str) -> dict[str, Any] | None:
-    text = text.strip()
-    if not text:
-        return None
-    try:
-        value = json.loads(text)
-        return value if isinstance(value, dict) else None
-    except json.JSONDecodeError:
-        match = re.search(r"\{[\s\S]*\}", text)
-        if not match:
-            return None
-        try:
-            value = json.loads(match.group(0))
-            return value if isinstance(value, dict) else None
-        except json.JSONDecodeError:
-            return None
-
-
 def _merge_llm_brief(fallback: StructuredResearchBrief, patch: dict[str, Any]) -> StructuredResearchBrief:
     source = patch.get("source_requirements") if isinstance(patch.get("source_requirements"), dict) else {}
     freshness = patch.get("freshness_requirements") if isinstance(patch.get("freshness_requirements"), dict) else {}
@@ -240,17 +204,22 @@ async def compile_structured_brief_with_llm(
     if agent is None:
         return fallback
     prompt = BRIEF_AGENT_PROMPT.format(query=query, conversation_delta=conversation_delta or "无")
-    chunks: list[Any] = []
-    gateway = LLMGateway(budget_manager)
-    config = build_run_config(f"{session_id}:brief", metadata={"phase": "brief"})
     try:
-        with gateway.execution_scope(phase="brief"):
-            async for chunk in gateway.astream(agent, {"messages": [{"role": "user", "content": prompt}]}, config):
-                chunks.append(chunk)
+        gateway = StructuredLLMGateway(budget_manager)
+        with gateway.gateway.execution_scope(phase="brief"):
+            structured = await asyncio.wait_for(
+                gateway.ainvoke(
+                    model=agent,
+                    schema=StructuredResearchBrief,
+                    prompt=prompt,
+                    phase="brief",
+                    timeout_sec=20,
+                ),
+                timeout=20,
+            )
     except Exception:
         return fallback
-    patch = _json_object(_message_text(chunks))
-    return fallback if patch is None else _merge_llm_brief(fallback, patch)
+    return _merge_llm_brief(fallback, structured.to_dict())
 
 
 __all__ = ["BRIEF_AGENT_PROMPT", "compile_structured_brief", "compile_structured_brief_with_llm"]

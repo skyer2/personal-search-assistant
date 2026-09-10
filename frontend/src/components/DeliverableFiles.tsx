@@ -26,10 +26,11 @@ function FileIcon({ name }: { name: string }) {
 
 function isPrimaryDeliverable(file: OutputFile): boolean {
   const name = file.name.toLowerCase();
-  if (name === "working_notes.md" || name === "working_notes.pdf") {
+  const stem = name.replace(/\.(md|pdf|xlsx|docx)$/i, "");
+  if (["working_notes", "evidence", "checkpoint", "run_summary"].includes(stem)) {
     return false;
   }
-  return name.endsWith(".pdf") || name.endsWith(".md");
+  return name.endsWith(".pdf") || name.endsWith(".md") || name.endsWith(".xlsx") || name.endsWith(".docx");
 }
 
 export function sortDeliverableFiles(files: OutputFile[]): OutputFile[] {
@@ -181,7 +182,7 @@ export function DeliverableFiles({
   variant = "shelf"
 }: DeliverableFilesProps) {
   const artifactScope = { scope, runId };
-  const ordered = sortDeliverableFiles(files);
+  const ordered = sortDeliverableFiles(files.filter(isPrimaryDeliverable));
   const visibleCount = variant === "banner" ? 5 : 20;
   const visible = ordered.slice(0, visibleCount);
   const rest = ordered.slice(visibleCount);

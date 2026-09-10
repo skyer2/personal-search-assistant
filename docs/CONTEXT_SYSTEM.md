@@ -74,7 +74,7 @@ POST /api/task
 | 每步 **user message** | 当前工人这一步 | 每步重建 |
 | `compressed_content` | 下一步 prior / 最终拼接 | 本任务内 |
 | evidence digest | 合成步 | 本任务内，从工人 JSON 汇总 |
-| `CitationManager.sources` | finalize 参考文献 | 本任务内，另存 `evidence.json` |
+| `CitationManager.sources` | finalize 参考文献 | 本 Run 内，另存 `runs/{run_id}/evidence/evidence.json` |
 | 长期 Memory | 跨任务，按身份和项目隔离 | `app/agent/memory/`，由 Memory 面板显式管理 |
 | LangGraph messages | Leaf Worker 图内 replay | 进程内 |
 
@@ -162,7 +162,7 @@ LLM 失败或未配置                    → 截到 max_output_chars，method=t
 `max_output_chars` 来自 `compression.max_tokens * 4`（默认 500 token ≈ 2000 字）。  
 压缩模型默认 `qwen-turbo`，和主模型分开，省钱。
 
-LLM 提示词硬性要求：**保留事实、数据、URL/表名/文件名、`[source:src-N]`**。输入还会先截到 12000 字符，避免压缩模型自己爆窗。
+LLM 提示词硬性要求：**保留事实、数据、URL/表名/文件名、`[source:src-N]`**。输入还会先截到 16000 字符，避免压缩模型自己爆窗。
 
 截断降级会在末尾标明「原始 N 字符 → M 字符」，方便排查。
 
@@ -227,7 +227,7 @@ Finalize：
 - 指标：CCR 优先看**含数字的句子**是否带 `[n]`（`numeric_citation_coverage`）；句号后的 `[n]` 会并回上一句
 - 覆盖率低于 `citations.min_coverage_rate`（默认 0.2）可触发 recover：`citation_coverage_low`
 
-证据在每步成功时写入 `output/session_*/evidence.json`（不必等 finalize）。写报告步另注入【可回读证据】目录。
+证据在每步成功时写入 `output/session_*/runs/{run_id}/evidence/evidence.json`（不必等 finalize）。写报告步另注入【可回读证据】目录。
 
 ---
 
@@ -238,7 +238,7 @@ Finalize：
 文件：`context_budget.py`
 
 - 估算：**字符数 / 4**（与 compressor 同一口径，不是 tiktoken）
-- 默认 `max_step_message_tokens=12000`
+- 默认 `max_step_message_tokens=16000`
 - `measure_layers` 按层记账：task_query / intent / notes / memory / evidence / prior_results / step / tools …
 - 超预算：`fit_layers_to_token_budget` **按层淘汰**（先 trim/drop tools → resources → path → prior → memory → evidence → task_query；`step` / `notes` / `binding` 尽量 pin）。只要还剩当前步骤层，**禁止整段保头截尾**。
 - 观测：`obs_step_message_tokens_peak`、`obs_context_budget_trims`、`evictions`
@@ -250,7 +250,7 @@ Finalize：
 `harness.yml` `budget`：
 
 - `max_total_tokens`（对 step 原文 + final 的粗估）
-- `max_tool_calls`（会话上限；默认 40，给并行研究 + 写报告留余量）
+- `max_tool_calls`（Run 上限；默认 240，给并行研究 + 写报告留余量）
 - `max_step_tool_calls`（**步内** `internet_search` / `fetch_url` 硬上限，默认 8；超限工具返回「停止检索，立刻输出 JSON」，不是等下一步才 abort）
 - `max_run_sec`
 - `max_plan_steps` / `max_replan_count`
@@ -289,7 +289,7 @@ compression:
   retention_min_number: 0.5
 
 context:
-  max_step_message_tokens: 12000
+  max_step_message_tokens: 16000
   prior_results_max_steps: 5
   prior_snippet_max_chars: 400
   wrap_untrusted_external: true
@@ -311,7 +311,7 @@ orchestration:
   parallel_retrieval_enabled: true
 
 budget:
-  max_tool_calls: 40
+  max_tool_calls: 240
   max_step_tool_calls: 8
 ```
 
@@ -327,7 +327,7 @@ app/agent/harness/retention.py         URL/数字保留率
 app/agent/harness/window_hygiene.py    每步 thread + tool_result 清除
 app/agent/harness/working_notes.py     抗压缩工作笔记
 app/agent/harness/citations.py         fact-source 绑定、可回读目录、数字句 CCR
-app/agent/harness/loop.py              BUILD_CONTEXT → EXECUTE → COMPRESS
+app/research/runtime/runner.py          生产 Research StateGraph 节点
 app/config/harness.yml                 上述开关
 tests/test_harness_phase11_context.py  预算 / untrusted / 压缩阈值
 tests/test_harness_phase19_context.py  窗口卫生 / 保留 / 笔记 / 绑定
@@ -337,7 +337,7 @@ tests/test_harness_phase19_context.py  窗口卫生 / 保留 / 笔记 / 绑定
 
 ## 十、仍然没做的（面试主动说）
 
-- Token 仍是 `len/4` 启发式，不是模型真实 tokenizer / API usage。
+- Token 估算按 `HARNESS_TOKEN_MODEL` 选择 GLM/Qwen/tiktoken 后端；无匹配后端时才退回近似估算，不使用 API 返回 usage。
 - 没有 Anthropic 那种服务端整段 `compaction` block；我们是每步新 thread + 步级摘要。
 - 超大 tool 结果没有默认写文件只留指针；跨步靠新 thread 丢弃，步内 HITL resume 前会把过长 tool_result 换成占位符（keep_last=1）。
 - digest 仍依赖工人 JSON；散文回传时写报告会退回截断摘要，但可回读证据层会尽量补。

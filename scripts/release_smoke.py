@@ -160,6 +160,38 @@ class SmokeLLMProvider:
         await asyncio.sleep(0.01)
         raise BudgetReservationError("research_token_cap")
 
+    def with_structured_output(self, schema: dict[str, Any]) -> Any:
+        provider = self
+
+        class StructuredSmokeModel:
+            async def ainvoke(
+                self,
+                prompt: str,
+                config: dict[str, Any] | None = None,
+            ) -> dict[str, Any]:
+                provider.calls += 1
+                provider.estimated_tokens += estimate_tokens(prompt)
+                if "Evidence Pack:" not in prompt:
+                    raise RuntimeError("structured smoke model only supports atomic facts")
+                evidence_pack = json.loads(prompt.split("Evidence Pack:", 1)[1])
+                supporting = [
+                    row
+                    for row in evidence_pack
+                    if "2017" in str(row.get("evidence") or "")
+                ]
+                if not supporting:
+                    raise RuntimeError("structured smoke model found no supporting evidence")
+                return {
+                    "answer": "Transformer 是 2017 年提出的。",
+                    "answer_type": "date",
+                    "supporting_source_ids": [supporting[0]["source_id"]],
+                    "confidence": 0.99,
+                    "sufficient": True,
+                    "reason": "release smoke fixture",
+                }
+
+        return StructuredSmokeModel()
+
 
 def assert_production_config() -> None:
     config = get_harness_config()
@@ -168,7 +200,7 @@ def assert_production_config() -> None:
         "max_replan_count": 3,
         "direct_worker_invoke": True,
         "max_total_tokens": 300000,
-        "synthesis_step_timeout_sec": 240,
+        "synthesis_step_timeout_sec": 60,
     }
     for key, value in expected.items():
         actual = getattr(config, key)

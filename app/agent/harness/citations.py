@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 URL_PATTERN = re.compile(r"https?://[^\s\]\)\"'<>]+", re.IGNORECASE)
@@ -454,12 +454,18 @@ class CitationManager:
         """source_id → 引用编号 [1][2]…"""
         return {src.source_id: idx + 1 for idx, src in enumerate(self.sources)}
 
-    def build_references_block(self) -> str:
-        if not self.sources:
+    def build_references_block(self, *, source_ids: Iterable[str] | None = None) -> str:
+        selected = (
+            {str(item) for item in source_ids}
+            if source_ids is not None
+            else {source.source_id for source in self.sources}
+        )
+        sources = [source for source in self.sources if source.source_id in selected]
+        if not sources:
             return ""
         lines = ["", "## 参考文献", ""]
         id_to_num = self.source_number_map()
-        for src in self.sources:
+        for src in sources:
             num = id_to_num[src.source_id]
             kind_label = {
                 "url": "网络",
@@ -544,7 +550,22 @@ class CitationManager:
     def build_cited_report(self, raw_content: str) -> str:
         """生成带引用提示与参考文献块的最终报告。"""
         body = self.inject_inline_citation_hints(raw_content)
-        refs = self.build_references_block()
+        cited_numbers = {
+            int(number)
+            for number in CITATION_MARKER_PATTERN.findall(body)
+        }
+        id_to_num = self.source_number_map()
+        number_to_id = {
+            number: source.source_id
+            for source in self.sources
+            if (number := id_to_num.get(source.source_id)) is not None
+        }
+        used_source_ids = {
+            number_to_id[number]
+            for number in cited_numbers
+            if number in number_to_id
+        }
+        refs = self.build_references_block(source_ids=used_source_ids)
         if refs and refs.strip() not in body:
             return body.rstrip() + "\n" + refs + "\n"
         return body

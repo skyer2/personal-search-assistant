@@ -39,6 +39,7 @@ from app.research.runtime.latency import (
     note_stage_duration,
     note_worker_durations,
 )
+from app.research.runtime.task_budget import task_budget_profile
 from app.research.runtime.state import ResearchState, empty_research_state
 from app.observability.semantic_events import (
     brief_event_attributes,
@@ -54,7 +55,6 @@ from app.observability.semantic_events import (
 
 logger = logging.getLogger(__name__)
 _SESSIONS: dict[str, RunSession] = {}
-_TASK_EFFORT_TOKENS = {"small": 4_000, "medium": 10_000, "large": 20_000}
 
 
 class RunSession:
@@ -531,20 +531,20 @@ class ResearchGraphRunner:
                             "source_hints": list(item.source_hints),
                             "novelty_reason": item.novelty_reason,
                             "estimated_effort": item.estimated_effort,
-                            "token_ceiling": _TASK_EFFORT_TOKENS.get(
-                                item.estimated_effort, _TASK_EFFORT_TOKENS["medium"]
-                            ),
+                            "token_ceiling": (profile := task_budget_profile(item.estimated_effort)).token_ceiling,
                             "max_search_calls": min(
-                                int(item.max_search_calls or 4),
+                                int(item.max_search_calls or profile.max_search_calls),
                                 int(budget.get("max_search_calls_per_worker") or 4),
                             ),
                             "max_llm_calls": min(
-                                int(item.max_llm_calls or 4),
+                                int(item.max_llm_calls or profile.max_llm_calls),
                                 int(getattr(self.harness.harness_config, "max_llm_calls_per_worker", 4) or 4),
                             ),
-                            "max_fetched_sources": int(
-                                budget.get("max_fetched_sources_per_worker") or 6
+                            "max_fetched_sources": min(
+                                profile.max_fetch_sources,
+                                int(budget.get("max_fetched_sources_per_worker") or 8),
                             ),
+                            "max_output_tokens_per_call": profile.max_output_tokens_per_call,
                             "semantic_fingerprint": next(
                                 approved.fingerprint
                                 for approved in admission.approved
@@ -676,6 +676,7 @@ class ResearchGraphRunner:
 
     async def node_ingest_findings(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.ingestion import ingest_new_worker_results
+        from app.research.runtime.atomic_fact import extract_atomic_fact_answer
 
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
@@ -706,12 +707,24 @@ class ResearchGraphRunner:
                     "processed_worker_result_ids": list(update.get("processed_worker_result_ids") or []),
                 }
             )
+        if bool(gstate.get("fast_path")):
+            manager = getattr(session.ctx, "citation_manager", None)
+            atomic_answer = await extract_atomic_fact_answer(
+                query=str(gstate.get("task_query") or ""),
+                sources=list(getattr(manager, "sources", []) or []) if manager is not None else [],
+                model=getattr(self.harness, "control_agent", None),
+                budget_manager=session.budget_manager,
+                timeout_sec=10,
+            )
+            update["fast_path_answer"] = atomic_answer.to_dict()
         return transition_update(gstate, WorkflowPhase.INGEST_FINDINGS, update)
 
     async def node_coverage_judge(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.brief.models import StructuredResearchBrief
         from app.research.coverage.judge import CoverageJudgement
         from app.research.coverage.judge import CoverageJudge
+        from dataclasses import replace
+        from app.research.runtime.atomic_fact import AtomicFactAnswer
 
         session = _require_session(gstate)
         coverage_started = time.perf_counter()
@@ -728,7 +741,7 @@ class ResearchGraphRunner:
             if isinstance(previous_raw, dict) and previous_raw
             else None
         )
-        judgement = await CoverageJudge(getattr(self.harness, "control_agent", None), session.budget_manager).evaluate(
+        judgement = await CoverageJudge(None, session.budget_manager).evaluate(
             brief,
             findings,
             claim_conflicts=conflicts,
@@ -736,6 +749,15 @@ class ResearchGraphRunner:
             evidence=evidence_records,
             previous=previous,
         )
+        if bool(gstate.get("fast_path")):
+            atomic_answer = AtomicFactAnswer.from_dict(state.get("fast_path_answer"))
+            judgement = replace(
+                judgement,
+                sufficient=atomic_answer.sufficient,
+                status="sufficient" if atomic_answer.sufficient else "gap",
+                source="simple_fact_evidence_policy",
+                reason=atomic_answer.reason or "fast path evidence policy",
+            )
         supported_count = sum(
             1 for row in judgement.criteria if row.status == "supported"
         )
@@ -1041,6 +1063,7 @@ class ResearchGraphRunner:
                     "support_type": "partial",
                     "source_quality": str(evidence.get("source_tier") or "SECONDARY"),
                 },
+                input_refs=[{"type": "task", "id": task_id}] if task_id else None,
             )
         worker_update = {
             "phase": WorkflowPhase.EXECUTE.value,
@@ -1160,7 +1183,11 @@ class ResearchGraphRunner:
         from app.research.delivery.partial_renderer import render_partial_delivery, scrub_internal_ids
         from app.research.delivery.synthesis_context import SynthesisContextBuilder
         from app.research.delivery.synthesis_context import EvidenceDigest
-        from app.research.runtime.simple_fact import render_simple_fact_answer
+        from app.research.runtime.atomic_fact import (
+            AtomicFactAnswer,
+            extract_atomic_fact_answer,
+            render_atomic_fact_answer,
+        )
         from app.research.runtime.worker import ResearchContext
 
         session = _require_session(gstate)
@@ -1178,32 +1205,28 @@ class ResearchGraphRunner:
             )
             raw_payload = worker_row.get("payload")
             payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
-            worker_result = SimpleNamespace(
-                facts=list(payload.get("facts") or []),
-                summary=str(worker_row.get("summary") or ""),
-            )
-            if manager is None:
-                answer: Any = SimpleNamespace(
-                    content=str(worker_result.summary or "未能从可信来源确认该事实。"),
-                    source_id="",
-                    source_tier="UNKNOWN",
-                    sufficient=bool(payload.get("evidence_ids")),
-                )
-                content = str(answer.content)
-            else:
-                answer = render_simple_fact_answer(
+            raw_answer = gstate.get("fast_path_answer")
+            answer = (
+                AtomicFactAnswer.from_dict(raw_answer)
+                if isinstance(raw_answer, dict)
+                else await extract_atomic_fact_answer(
                     query=str(gstate.get("task_query") or ""),
-                    worker_result=worker_result,
-                    citation_manager=manager,
+                    sources=list(getattr(manager, "sources", []) or []) if manager is not None else [],
+                    model=getattr(self.harness, "control_agent", None),
+                    budget_manager=session.budget_manager,
+                    timeout_sec=10,
                 )
-                content = manager.build_cited_report(answer.content)
+            )
+            content = render_atomic_fact_answer(answer, manager) if manager is not None else (
+                "## 当前无法可靠确认\n\n当前运行缺少证据管理器，无法验证来源。"
+            )
             session.state.final_content = content
             if isinstance(session.state.metadata, dict):
                 session.state.metadata.update(
                     {
                         "synthesis_attempted": True,
                         "synthesis_attempts": 1,
-                        "synthesis_mode": "brief_fast_path_deterministic",
+                        "synthesis_mode": "atomic_fact_structured",
                         "synthesis_status": "ok" if answer.sufficient else "failed",
                         "synthesis_failed": not answer.sufficient,
                         "synthesis_fail_reason": "" if answer.sufficient else "insufficient_trusted_evidence",
@@ -1221,6 +1244,8 @@ class ResearchGraphRunner:
                     "compact": False,
                     "evidence_count": len(payload.get("evidence_ids") or []),
                     "claim_count": len(payload.get("facts") or []),
+                    "answer_type": answer.answer_type,
+                    "supporting_source_ids": list(answer.supporting_source_ids),
                     "fail_reason": "" if answer.sufficient else "insufficient_trusted_evidence",
                     "fallback_action": "",
                 },
@@ -1331,10 +1356,16 @@ class ResearchGraphRunner:
         else:
             result = await executor.execute(request, context)
         retried = False
-        if not result.ok and (
-            result.fail_reason in synthesis_executor_module.RETRYABLE_SYNTHESIS_FAILURES
-            or result.fail_reason == "context_length_exceeded"
-        ):
+        retry_allowed = bool(
+            not result.ok
+            and result.fail_reason in synthesis_executor_module.RETRYABLE_SYNTHESIS_FAILURES
+            and remaining_synthesis_tokens >= 1_000
+        )
+        remaining_run_method = getattr(session.budget_manager, "remaining_run_sec", None)
+        retry_allowed = retry_allowed and (
+            not callable(remaining_run_method) or float(remaining_run_method()) > 0
+        )
+        if retry_allowed:
             retried = True
             _emit(
                 session,
@@ -1350,6 +1381,11 @@ class ResearchGraphRunner:
                     "claim_count": len(claims),
                     "fail_reason": result.fail_reason,
                     "fallback_action": "compact_retry",
+                    "retry_timeout_sec": getattr(
+                        self.harness.harness_config,
+                        "synthesis_retry_timeout_sec",
+                        30,
+                    ),
                 },
             )
             mode = "degraded"
@@ -1357,11 +1393,21 @@ class ResearchGraphRunner:
                 request,
                 mode=mode,
                 research_summary=self._semantic_synthesis_digest(gstate, compact=True),
-                evidence_digests=digests[:20],
-                findings=claims[:12],
-                token_budget=20_000,
+                evidence_digests=digests[:12],
+                findings=claims[:8],
+                token_budget=min(12_000, remaining_synthesis_tokens),
             )
-            result = await executor.execute(request, context)
+            result = await executor.execute(
+                request,
+                context,
+                timeout_sec=float(
+                    getattr(
+                        self.harness.harness_config,
+                        "synthesis_retry_timeout_sec",
+                        30,
+                    )
+                ),
+            )
         fallback = not result.ok or not str(result.summary or "").strip()
         if fallback:
             worker_failure_reasons = [
@@ -1460,7 +1506,12 @@ class ResearchGraphRunner:
         degradation_issues = [
             item for item in ("coverage_gap", "synthesis_failed") if item in issues
         ]
-        repairable = bool(content) and not citation_valid and int(gstate.get("synthesis_attempts") or 0) < 2
+        repairable = (
+            not bool(gstate.get("fast_path"))
+            and bool(content)
+            and not citation_valid
+            and int(gstate.get("synthesis_attempts") or 0) < 2
+        )
         verdict = (
             "pass"
             if not issues

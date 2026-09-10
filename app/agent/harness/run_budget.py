@@ -85,6 +85,7 @@ class _WorkerLease:
     task_id: str
     token_ceiling: int
     max_llm_calls: int
+    max_output_tokens_per_call: int = 4_096
     used_tokens: int = 0
     in_flight_tokens: int = 0
     llm_calls: int = 0
@@ -226,6 +227,7 @@ class RunBudgetManager:
         max_llm_calls: int | None = None,
         token_ceiling: int | None = None,
         parallel_workers: int | None = None,
+        max_output_tokens_per_call: int | None = None,
     ) -> tuple[str, str]:
         """Atomically reserve worker research capacity."""
         research_cap = self.phase_plan.research_cap_tokens(self.token_limit)
@@ -260,6 +262,10 @@ class RunBudgetManager:
                 task_id=str(task_id or ""),
                 token_ceiling=max(0, requested),
                 max_llm_calls=max(1, int(max_llm_calls or self.max_llm_calls_per_worker)),
+                max_output_tokens_per_call=max(
+                    1,
+                    int(max_output_tokens_per_call or 4_096),
+                ),
             )
             return lease_id, ""
 
@@ -274,6 +280,18 @@ class RunBudgetManager:
                 if reservation.worker_task_id == lease.task_id:
                     self._release_llm_reservation_locked(reservation.reservation_id)
             self._maybe_force_synthesis_locked()
+
+    def worker_output_limit(self, task_id: str) -> int:
+        with self._lock:
+            lease = next(
+                (
+                    item
+                    for item in self._worker_leases.values()
+                    if item.task_id == str(task_id or "")
+                ),
+                None,
+            )
+            return lease.max_output_tokens_per_call if lease else 4_096
 
     def reserve_llm_call(
         self,
@@ -336,6 +354,7 @@ class RunBudgetManager:
                     task_id=lease.task_id,
                     token_ceiling=lease.token_ceiling,
                     max_llm_calls=lease.max_llm_calls,
+                    max_output_tokens_per_call=lease.max_output_tokens_per_call,
                     used_tokens=lease.used_tokens,
                     in_flight_tokens=lease.in_flight_tokens + total,
                     llm_calls=lease.llm_calls + 1,
@@ -363,6 +382,7 @@ class RunBudgetManager:
                         task_id=lease.task_id,
                         token_ceiling=lease.token_ceiling,
                         max_llm_calls=lease.max_llm_calls,
+                        max_output_tokens_per_call=lease.max_output_tokens_per_call,
                         used_tokens=lease.used_tokens + actual,
                         in_flight_tokens=max(0, lease.in_flight_tokens - reservation.estimated_tokens),
                         llm_calls=lease.llm_calls,
@@ -395,6 +415,7 @@ class RunBudgetManager:
                     task_id=lease.task_id,
                     token_ceiling=lease.token_ceiling,
                     max_llm_calls=lease.max_llm_calls,
+                    max_output_tokens_per_call=lease.max_output_tokens_per_call,
                     used_tokens=lease.used_tokens,
                     in_flight_tokens=max(0, lease.in_flight_tokens - reservation.estimated_tokens),
                     llm_calls=lease.llm_calls,

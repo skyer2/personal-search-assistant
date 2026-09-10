@@ -67,40 +67,7 @@ class ProductionFaultProvider:
             else str(getattr(last_message, "content", "") or "")
         )
         if prompt.startswith("任务：") and "合成模式" in prompt:
-            self.synthesis_calls += 1
-            failure = self.synthesis_failure
-            if failure == "rate_limit":
-                raise RuntimeError("429 rate limit")
-            if failure == "timeout":
-                global CLOCK_JUMPS_REQUESTED
-                CLOCK_JUMPS_REQUESTED += 1
-                await asyncio.Event().wait()
-            if failure == "empty":
-                yield {"synthesis": {"messages": [AIMessage(content="")]}}
-                return
-            if failure == "context":
-                if self.synthesis_calls == 1:
-                    raise RuntimeError("context_length_exceeded")
-                if not self.context_retry_success:
-                    raise RuntimeError("context_length_exceeded")
-            if failure == "unavailable":
-                raise RuntimeError("provider unavailable")
-            if failure == "auth":
-                raise RuntimeError("invalid auth")
-            if failure == "budget":
-                raise RuntimeError("budget_tokens")
-            yield {
-                "synthesis": {
-                    "messages": [
-                        AIMessage(
-                            content=(
-                                "# 国内 AI 初创公司部分评估\n\n"
-                                "- 已恢复的证据显示若干候选公司具有近期融资与商业化信号。[1]\n"
-                            )
-                        )
-                    ]
-                }
-            }
+            yield {"synthesis": {"messages": [await self._synthesis_message()]}}
             return
 
         gateway = CapturingToolGateway.current
@@ -170,6 +137,47 @@ class ProductionFaultProvider:
             payload["error_code"] = self.worker_failure
         yield {"worker": {"messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))]}}
 
+    async def ainvoke(self, payload: dict[str, Any], config: dict[str, Any] | None = None):
+        messages = list(payload.get("messages") or [])
+        last_message = messages[-1]
+        prompt = (
+            str(last_message.get("content") or "")
+            if isinstance(last_message, dict)
+            else str(getattr(last_message, "content", "") or "")
+        )
+        if prompt.startswith("任务：") and "合成模式" in prompt:
+            return await self._synthesis_message()
+        raise RuntimeError("raw synthesis model must only receive synthesis prompts")
+
+    async def _synthesis_message(self):
+        self.synthesis_calls += 1
+        failure = self.synthesis_failure
+        if failure == "rate_limit":
+            raise RuntimeError("429 rate limit")
+        if failure == "timeout":
+            global CLOCK_JUMPS_REQUESTED
+            CLOCK_JUMPS_REQUESTED += 1
+            await asyncio.Event().wait()
+        if failure == "empty":
+            return AIMessage(content="")
+        if failure == "context":
+            if self.synthesis_calls == 1:
+                raise RuntimeError("context_length_exceeded")
+            if not self.context_retry_success:
+                raise RuntimeError("context_length_exceeded")
+        if failure == "unavailable":
+            raise RuntimeError("provider unavailable")
+        if failure == "auth":
+            raise RuntimeError("invalid auth")
+        if failure == "budget":
+            raise RuntimeError("budget_tokens")
+        return AIMessage(
+            content=(
+                "# 国内 AI 初创公司部分评估\n\n"
+                "- 已恢复的证据显示若干候选公司具有近期融资与商业化信号。[1]\n"
+            )
+        )
+
 
 class VirtualTimeoutLoop(asyncio.SelectorEventLoop):
     """Replace only the clock; timeout duration and graph config stay production."""
@@ -195,7 +203,8 @@ def _assert_production_config() -> None:
     assert config.max_replan_count == 3
     assert config.direct_worker_invoke is True
     assert config.max_total_tokens == 300000
-    assert config.synthesis_step_timeout_sec == 240
+    assert config.synthesis_step_timeout_sec == 60
+    assert config.synthesis_retry_timeout_sec == 30
 
 
 def _run(
@@ -208,6 +217,7 @@ def _run(
         agent=provider,
         project_root=tmp_path,
         harness_config=config,
+        synthesis_model=provider,
         workers={"research": provider, "network_search": provider, "web": provider},
     )
     return asyncio.run(harness.run(QUERY, session_id, mode="agent"))
@@ -225,6 +235,7 @@ def _run_with_virtual_timeout_clock(
         agent=provider,
         project_root=tmp_path,
         harness_config=config,
+        synthesis_model=provider,
         workers={"research": provider, "network_search": provider, "web": provider},
     )
     loop = VirtualTimeoutLoop()
@@ -292,7 +303,7 @@ def test_l3_empty_content_falls_back_to_partial_delivery(tmp_path: Path, monkeyp
     result = _run(tmp_path, "l3-synthesis-empty", provider)
     events, summary = _trace("l3-synthesis-empty", result)
     _assert_common_invariants(result, summary)
-    assert provider.synthesis_calls == 2
+    assert provider.synthesis_calls == 1
     assert all(
         event["attributes"]["fail_reason"] == "empty_content"
         for event in events
@@ -403,7 +414,7 @@ def test_l3_release_blocker_research_cap_synthesis_timeout_yields_partial(
 
     assert result.metadata["termination"]["outcome"] == "partial"
     assert result.content.strip()
-    assert result.metadata["synthesis_attempts"] == 2
+    assert result.metadata["synthesis_attempts"] == 1
     assert result.metadata["synthesis_fail_reason"] == "synthesis_timeout"
     assert result.metadata["fallback_used"] == "deterministic_partial"
     assert result.content.strip()
@@ -416,9 +427,8 @@ def test_l3_release_blocker_research_cap_synthesis_timeout_yields_partial(
     assert integrity["span_tree"]["root_count"] >= 1
     assert integrity["lineage_edges"] > 0
     failures = [event for event in events if event["type"] == "synthesis.failed"]
-    assert len(failures) == 2
+    assert len(failures) == 1
     assert [event["attributes"]["fallback_action"] for event in failures] == [
-        "compact_retry",
         "deterministic_partial",
     ]
     worker_failures = [event for event in events if event["type"] == "worker.failed"]

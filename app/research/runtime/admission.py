@@ -9,6 +9,7 @@ from app.research.runtime.task_identity import (
     execution_task_id,
     semantic_fingerprint,
 )
+from app.research.runtime.task_budget import task_budget_profile
 from app.research.supervisor.models import ResearchTaskRequest
 
 
@@ -42,7 +43,6 @@ class DispatchAdmission:
         }
 
 
-_EFFORT_TOKENS = {"small": 4_000, "medium": 10_000, "large": 20_000}
 _PRIORITY_ORDER = {"high": 0, "normal": 1, "low": 2}
 
 
@@ -119,15 +119,20 @@ def admit_dispatch(
         if remaining_sec <= 0:
             denied[f"request_{index}"] = "synthesis_time_reserve"
             continue
-        estimated = _EFFORT_TOKENS.get(request.estimated_effort, _EFFORT_TOKENS["medium"])
-        requested_llm_calls = max(1, int(request.max_llm_calls or 1))
+        profile = task_budget_profile(request.estimated_effort)
+        estimated = profile.token_ceiling
+        requested_llm_calls = profile.max_llm_calls
         if len(approved) >= max_slots:
             deferred.append(f"request_{index}")
             continue
         if remaining_tokens < estimated:
             denied[f"request_{index}"] = "research_token_cap"
             continue
-        if max_llm_calls and llm_calls + reserved_llm_calls + requested_llm_calls > max_llm_calls:
+        if (
+            max_llm_calls
+            and llm_calls + reserved_llm_calls + requested_llm_calls
+            > max_llm_calls
+        ):
             denied[f"request_{index}"] = "budget_llm_calls"
             continue
         task_id = execution_task_id(wave_id, fingerprint)

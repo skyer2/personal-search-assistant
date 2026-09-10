@@ -65,3 +65,19 @@ if _compression_enabled:
     except Exception as exc:
         print(f"[LLM] compression_model init failed, will use truncate: {exc}")
 
+_synthesis_model_name = os.getenv("LLM_SYNTHESIS_MODEL") or os.getenv("LLM_QWEN_MAX")
+synthesis_model = model
+if _synthesis_model_name and _synthesis_model_name != os.getenv("LLM_QWEN_MAX"):
+    try:
+        synthesis_model = wrap_model_with_budget(init_chat_model(
+            model=_synthesis_model_name,
+            model_provider="openai",
+            timeout=min(_llm_timeout, float(os.getenv("LLM_SYNTHESIS_TIMEOUT_SEC", "60"))),
+            temperature=_supervisor_temperature,
+            base_url=_openai_base_url,
+            api_key=_openai_api_key,
+        ))
+    except Exception as exc:
+        print(f"[LLM] synthesis_model init failed, fallback to main model: {exc}")
+        synthesis_model = model
+

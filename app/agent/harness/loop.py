@@ -151,10 +151,12 @@ class AgentHarness:
         max_retries: Optional[int] = None,
         workers: Optional[dict[str, Any]] = None,
         control_agent: Any = None,
+        synthesis_model: Any = None,
     ):
         self.harness_config = harness_config or get_harness_config()
         self.agent = agent
         self.control_agent = control_agent if control_agent is not None else agent
+        self.synthesis_model = synthesis_model if synthesis_model is not None else self.control_agent
         self.workers = workers or {}
         self.project_root = project_root
         self._run_citation_manager: Optional[CitationManager] = None

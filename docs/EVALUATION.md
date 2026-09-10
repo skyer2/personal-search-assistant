@@ -45,7 +45,7 @@ L5  Ablation                  Vanilla / Single-iteration / Full
 入口：
 
 ```bash
-python tests/eval/run_eval.py --component
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --component
 ```
 
 组件评测不调用真实 LLM、搜索工具，也不产生真实延迟。它证明结构语义，不证明线上答案质量。
@@ -77,8 +77,8 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 入口：
 
 ```bash
-python tests/e2e/test_production_fidelity_synthesis.py
-python scripts/release_smoke.py --q1-runs 3
+.\.venv\Scripts\python.exe tests\e2e\test_production_fidelity_synthesis.py
+.\.venv\Scripts\python.exe scripts\release_smoke.py --q1-runs 3
 ```
 
 这一层保留生产配置，只替换 provider implementation 与 clock，注入 rate limit、empty、context overflow、provider unavailable、auth、budget exhausted、timeout 等故障，并断言：
@@ -89,6 +89,8 @@ python scripts/release_smoke.py --q1-runs 3
 - synthesis attempt / fail reason / fallback；
 - Trace Integrity；
 - repeated run 非空 `partial` 或 `success`。
+
+`release_smoke.py` 还固定执行 3 次主研究查询、两个开放研究查询和 1 个原子事实查询。主查询必须 3 次均为非空 `partial` 或 `success`；原子事实必须命中快路径并回答受证据支持的年份，同时 Trace Integrity 通过。
 
 ### L4 BrowseComp-Plus
 
@@ -105,9 +107,9 @@ V2 Full              Coverage gap 可触发下一轮 Supervisor 研究
 配置：
 
 ```bash
-python tests/eval/run_eval.py --live --variant vanilla --fixture
-python tests/eval/run_eval.py --live --variant single_iteration --fixture
-python tests/eval/run_eval.py --live --variant full --fixture
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --live --variant vanilla --fixture
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --live --variant single_iteration --fixture
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --live --variant full --fixture
 ```
 
 报告 ΔAccuracy / ΔCitation / ΔTokens / ΔP95 / ΔToolCalls / Supervisor Iteration / Supervisor Recovery。每个 case 绑定 `case_id` + `variant` + `run_id` + `trace_id`，失败可 drill-down 到 Flight Recorder。
@@ -131,13 +133,13 @@ python tests/eval/run_eval.py --live --variant full --fixture
 | Human meta-eval | `judge_calibration_v1.jsonl`，目标 30～50 条专家标签 |
 
 ```bash
-python tests/eval/run_eval.py --calibrate-judge
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --calibrate-judge
 ```
 
 ## Reliability
 
 ```bash
-python tests/eval/run_eval.py --live --variant full --repeat 3 --fixture --limit 5
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --live --variant full --repeat 3 --fixture --limit 5
 ```
 
 | 指标 | 含义 |
@@ -173,15 +175,17 @@ Benchmark BrowseComp-Plus + 官方 judge
 
 ```bash
 # PR
-python tests/eval/run_eval.py --dry-run --fail-on-regression
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --dry-run --fail-on-regression
 
 # 只跑 component
-python tests/eval/run_eval.py --component
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --component
 
 # Live / fixture
-python tests/eval/run_eval.py --live --variant full --limit 5 --fixture
-python tests/eval/run_eval.py --live --variant full --repeat 3 --fixture --limit 5
-python tests/eval/run_eval.py --calibrate-judge
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --live --variant full --limit 5 --fixture
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --live --variant full --repeat 3 --fixture --limit 5
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --calibrate-judge
+# Release
+.\.venv\Scripts\python.exe scripts\release_smoke.py --q1-runs 3
 ```
 
 当前回归真源：`brief_v1`、`coverage_v1`、`supervisor_v1`、`evidence_v1`、`capability_v1`、`harness_scenarios_v1`。基线只证明结构不变量不退化，不证明线上答案质量。

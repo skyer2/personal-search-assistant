@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-_INTERNAL_STEMS = {"working_notes", "evidence", "checkpoint"}
+_INTERNAL_STEMS = {"working_notes", "evidence", "checkpoint", "run_summary"}
+_DELIVERABLE_SUFFIXES = {".md", ".pdf", ".xlsx", ".docx"}
 _LIST_CACHE_TTL_SECONDS = 5.0
 _list_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _list_cache_lock = threading.Lock()
@@ -53,6 +54,13 @@ def _artifact_sort_key(item: dict[str, Any]) -> tuple:
     return (internal, pdf, markdown, -float(item.get("mtime") or 0))
 
 
+def _is_user_deliverable(path: Path) -> bool:
+    return (
+        path.suffix.lower() in _DELIVERABLE_SUFFIXES
+        and path.stem.lower() not in _INTERNAL_STEMS
+    )
+
+
 def session_output_dir(output_root: Path, session_id: str) -> Path:
     return Path(output_root) / f"session_{session_id}"
 
@@ -76,6 +84,8 @@ def _scan_output_files(root: Path) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
     for path in root.rglob("*"):
         if not path.is_file():
+            continue
+        if not _is_user_deliverable(path):
             continue
         rel = path.relative_to(root).as_posix()
         stat = path.stat()

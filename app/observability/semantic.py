@@ -270,11 +270,11 @@ def build_lineage_edges(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         inputs = list(event.get("input_refs") or attrs.get("input_refs") or [])
         outputs = list(event.get("output_refs") or attrs.get("output_refs") or [])
 
-        if not inputs and not outputs:
-            if event_type not in _LINEAGE_EVENT_TYPES:
-                continue
-            in_ids = []
-            out_ids = []
+        if event_type not in _LINEAGE_EVENT_TYPES and not inputs and not outputs:
+            continue
+        in_ids = list(inputs)
+        out_ids = list(outputs)
+        if not in_ids:
             if event_type == "evidence.registered":
                 task_id = str(event.get("task_id") or attrs.get("task_id") or "")
                 if task_id:
@@ -288,6 +288,7 @@ def build_lineage_edges(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for key in ("brief_id", "plan_id", "progress_id"):
                 if attrs.get(key):
                     in_ids.append({"type": key.replace("_id", ""), "id": attrs.get(key)})
+        if not out_ids:
             for key in ("answer_id", "patch_id", "evidence_id", "finding_id"):
                 if attrs.get(key):
                     out_ids.append({"type": key.replace("_id", ""), "id": attrs.get(key)})
@@ -296,8 +297,8 @@ def build_lineage_edges(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     out_ids.append({"type": "evidence", "id": str(evidence_id)})
             if event_type in {"synthesis.completed", "synthesis.failed"} and in_ids:
                 out_ids.append({"type": "synthesis", "id": str(event.get("span_id") or event.get("event_id") or "")})
-            inputs = in_ids
-            outputs = out_ids
+        inputs = in_ids
+        outputs = out_ids
 
         if not outputs:
             continue

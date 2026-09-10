@@ -26,7 +26,7 @@ def test_citation_manager_registers_and_builds_report():
     mgr = CitationManager()
     content = "参考 https://example.com/ai 与行业数据，2026年趋势向好。"
     mgr.register_from_step(0, "network_search", content)
-    cited = mgr.build_cited_report("## 摘要\nAI 电商持续增长。")
+    cited = mgr.build_cited_report("## 摘要\nAI 电商持续增长。[1]")
     assert "## 参考文献" in cited
     assert "[1]" in cited
     metrics = mgr.compute_metrics(cited)

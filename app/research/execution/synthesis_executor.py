@@ -10,13 +10,12 @@ from typing import Any
 from app.api.tracing import build_run_config
 from app.agent.harness.token_counter import estimate_tokens
 from app.research.execution.llm_gateway import LLMGateway
-from app.research.execution.tool_gateway import ToolGateway
 from app.research.delivery.synthesis_context import EvidenceDigest
 from app.research.runtime.worker import ResearchContext, WorkerResult
 
 
 RETRYABLE_SYNTHESIS_FAILURES = frozenset(
-    {"synthesis_timeout", "provider_rate_limit", "stream_error", "provider_unavailable", "empty_content"}
+    {"provider_rate_limit", "provider_unavailable", "context_length_exceeded"}
 )
 NON_RETRYABLE_SYNTHESIS_FAILURES = frozenset(
     {"provider_auth", "provider_bad_request", "budget_tokens", "budget_llm_calls"}
@@ -70,7 +69,13 @@ class SynthesisExecutor:
         self.harness = harness
         self.session = session
 
-    async def execute(self, request: SynthesisRequest, context: ResearchContext) -> WorkerResult:
+    async def execute(
+        self,
+        request: SynthesisRequest,
+        context: ResearchContext,
+        *,
+        timeout_sec: float | None = None,
+    ) -> WorkerResult:
         started = time.perf_counter()
         if request.mode not in {"normal", "degraded"}:
             return self._result(
@@ -80,8 +85,8 @@ class SynthesisExecutor:
                 fail_reason="invalid_synthesis_mode",
                 evidence_refs=request.evidence_refs,
             )
-        agent = getattr(self.harness, "agent", None)
-        if agent is None:
+        model = getattr(self.harness, "synthesis_model", None)
+        if model is None:
             return self._result(
                 started,
                 ok=False,
@@ -92,8 +97,8 @@ class SynthesisExecutor:
 
         try:
             content = await asyncio.wait_for(
-                self._invoke(agent=agent, request=request, context=context),
-                timeout=self._timeout_sec(),
+                self._invoke(model=model, request=request, context=context),
+                timeout=self._timeout_sec(timeout_sec),
             )
         except asyncio.TimeoutError:
             return self._result(
@@ -131,7 +136,7 @@ class SynthesisExecutor:
     async def _invoke(
         self,
         *,
-        agent: Any,
+        model: Any,
         request: SynthesisRequest,
         context: ResearchContext,
     ) -> str:
@@ -144,23 +149,13 @@ class SynthesisExecutor:
             },
         )
         gateway = LLMGateway(self.session.budget_manager)
-        messages: list[Any] = []
-        with ToolGateway(0).execution_scope():
-            with gateway.execution_scope(phase="synthesis"):
-                async for chunk in gateway.astream(
-                    agent,
-                    {"messages": [{"role": "user", "content": self._prompt(request, context)}]},
-                    config,
-                ):
-                    for node_state in chunk.values():
-                        if not isinstance(node_state, dict):
-                            continue
-                        messages.extend(node_state.get("messages") or [])
-        for message in reversed(messages):
-            content = str(getattr(message, "content", "") or "")
-            if content.strip():
-                return content
-        return ""
+        with gateway.execution_scope(phase="synthesis"):
+            response = await gateway.ainvoke(
+                model,
+                {"messages": [{"role": "user", "content": self._prompt(request, context)}]},
+                config,
+            )
+        return self._response_content(response)
 
     def _prompt(self, request: SynthesisRequest, context: ResearchContext) -> str:
         mode_instruction = (
@@ -203,20 +198,31 @@ class SynthesisExecutor:
     def estimate_input_tokens(self, request: SynthesisRequest, context: ResearchContext) -> int:
         return estimate_tokens(self._prompt(request, context))
 
-    def _timeout_sec(self) -> float:
+    def _response_content(self, response: Any) -> str:
+        if isinstance(response, str):
+            return response
+        if isinstance(response, dict):
+            content = response.get("content")
+            return str(content or "") if content is not None else ""
+        if isinstance(response, list):
+            return self._response_content(response[-1]) if response else ""
+        return str(getattr(response, "content", "") or "")
+
+    def _timeout_sec(self, requested_timeout_sec: float | None = None) -> float:
         config = self.harness.harness_config
         timeout_sec = max(
-            10,
+            1,
             int(
-                getattr(config, "synthesis_step_timeout_sec", 0)
-                or config.step_timeout_sec
+                requested_timeout_sec
+                if requested_timeout_sec is not None
+                else getattr(config, "synthesis_step_timeout_sec", 0)
+                or 60
             ),
         )
         remaining_method = getattr(self.session.budget_manager, "remaining_run_sec", None)
         if callable(remaining_method):
             remaining_sec = max(0.0, float(remaining_method()))
-            if remaining_sec > 0:
-                return max(10.0, min(float(timeout_sec), remaining_sec))
+            return min(float(timeout_sec), remaining_sec)
         return float(timeout_sec)
 
     def _result(

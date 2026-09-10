@@ -149,6 +149,9 @@ class WorkerExecutorV2:
             max_llm_calls=int(step.metadata.get("max_llm_calls") or 0) or None,
             token_ceiling=int(step.metadata.get("token_ceiling") or 0) or None,
             parallel_workers=parallel_workers,
+            max_output_tokens_per_call=(
+                int(step.metadata.get("max_output_tokens_per_call") or 0) or None
+            ),
         )
         queue_ms = int((time.perf_counter() - queue_started) * 1000)
         if not lease_id:

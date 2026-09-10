@@ -26,7 +26,10 @@ from app.research.brief.compiler import compile_structured_brief
 from app.research.brief.models import FastPathEligibility
 from app.research.runtime import runner as runner_module
 from app.research.evidence.policy import registrable_domain
-from app.research.runtime.simple_fact import render_simple_fact_answer
+from app.research.runtime.atomic_fact import (
+    AtomicFactAnswer,
+    render_atomic_fact_answer,
+)
 
 
 _CASES = [
@@ -84,16 +87,63 @@ class FakeSearchTool:
         }
 
 
+class FakeStructuredModel:
+    def __init__(self, answer: str, answer_type: str, query: str = ""):
+        self.answer = answer
+        self.answer_type = answer_type
+        self.query = query
+
+    def with_structured_output(self, _schema: Any) -> Any:
+        model = self
+        properties = dict(_schema.get("properties") or {})
+
+        class Runnable:
+            async def ainvoke(
+                self,
+                _prompt: str,
+                config: dict[str, Any] | None = None,
+            ) -> dict[str, Any]:
+                if "objective" in properties:
+                    return {
+                        "objective": model.query,
+                        "user_intent": "atomic_fact",
+                        "explicit_subjects": [model.query],
+                        "key_questions": [model.query],
+                        "source_requirements": {
+                            "min_independent_sources": 1,
+                            "primary_required": False,
+                            "preferred": ["official", "primary"],
+                        },
+                        "freshness_requirements": {"required": False, "time_horizon": "any"},
+                        "deliverable": {"format": "text", "depth": "brief"},
+                        "success_criteria": ["直接回答用户的原子事实问题。"],
+                        "clarification_needed": False,
+                        "confidence": 0.95,
+                    }
+                return {
+                    "answer": model.answer,
+                    "answer_type": model.answer_type,
+                    "supporting_source_ids": ["src-1"],
+                    "confidence": 0.95,
+                    "sufficient": True,
+                    "reason": "test fixture",
+                }
+
+        return Runnable()
+
+
 @pytest.mark.parametrize(("query", "url", "content", "expected"), _CASES)
 def test_simple_fact_release_gate(query, url, content, expected, monkeypatch, tmp_path):
     monkeypatch.setattr(
         "app.tools.tavily_tool.internet_search", FakeSearchTool(url, content)
     )
     config = get_harness_config()
+    answer_type = "date" if "发布时间" in query or "哪年" in query else "definition"
     harness = AgentHarness(
         agent=None,
-        project_root=ROOT,
+        project_root=tmp_path,
         harness_config=config,
+        control_agent=FakeStructuredModel(expected, answer_type, query),
     )
     session_id = f"simple-fact-{tmp_path.name}"
     reset_run_store()
@@ -119,6 +169,9 @@ def test_simple_fact_release_gate(query, url, content, expected, monkeypatch, tm
     assert result.metadata["partial_renderer_called"] is False
     assert result.metadata["termination"]["outcome"] == "success"
     assert result.metadata["quality"]["verdict"] == "pass"
+    run_root = tmp_path / "output" / f"session_{session_id}"
+    artifact_files = list(run_root.rglob("*.md")) + list(run_root.rglob("*.pdf"))
+    assert artifact_files == []
 
 
 @pytest.mark.parametrize("query", [case[0] for case in _CASES])
@@ -183,7 +236,7 @@ def test_registrable_domain_handles_multi_label_public_suffixes():
     assert registrable_domain("https://www.economist.co.uk/story") == "economist.co.uk"
 
 
-def test_renderer_cites_the_source_that_contains_the_extracted_fact():
+def test_atomic_fact_renderer_uses_only_supporting_sources():
     manager = CitationManager()
     manager.bind_worker_facts(
         0,
@@ -197,20 +250,21 @@ def test_renderer_cites_the_source_that_contains_the_extracted_fact():
             "https://www.reuters.com/technology/deepseek-v3",
         ],
     )
-    worker_result = SimpleNamespace(
-        facts=[source.bound_fact for source in manager.sources], summary="DeepSeek-V3"
+    answer = AtomicFactAnswer(
+        answer="DeepSeek V3 发布于 2024年12月26日。",
+        answer_type="date",
+        supporting_source_ids=(manager.sources[0].source_id,),
+        confidence=0.95,
+        sufficient=True,
+        reason="test",
     )
+    rendered = render_atomic_fact_answer(answer, manager)
 
-    answer = render_simple_fact_answer(
-        query="DeepSeek V3 发布时间？",
-        worker_result=worker_result,
-        citation_manager=manager,
-    )
-
-    assert "2024年12月26日" in answer.content
-    assert answer.source_id == manager.sources[1].source_id
-    assert answer.supporting_fact == manager.sources[1].bound_fact
-    assert "[2]" in answer.content
+    assert "## 答案" in rendered
+    assert "2024年12月26日" in rendered
+    assert "[1]" in rendered
+    assert manager.sources[0].locator in rendered
+    assert manager.sources[1].locator not in rendered
 
 
 def test_synthesis_failure_cannot_quality_pass():
@@ -252,6 +306,53 @@ def test_synthesis_failure_cannot_quality_pass():
         runner_module._SESSIONS.pop("terminal-quality", None)
     assert update["quality_assessment"]["verdict"] == "fail"
     assert "synthesis_failed" in update["quality_assessment"]["issues"]
+
+
+def test_fast_path_insufficient_evidence_is_not_repairable():
+    class Harness:
+        harness_config = get_harness_config()
+        validator = ResultValidator()
+
+        async def _phase_validate(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    state = LoopState(session_id="terminal-quality-fast-path")
+    state.final_content = "## 当前无法可靠确认"
+    state.metadata["synthesis_failed"] = True
+    session = SimpleNamespace(
+        state=state,
+        ctx=SimpleNamespace(
+            session_dir=ROOT,
+            citation_manager=None,
+            deliverable_dir=None,
+            run_dir=None,
+        ),
+    )
+    graph_runner = runner_module.ResearchGraphRunner(Harness())
+    runner_module._SESSIONS["terminal-quality-fast-path"] = session
+    try:
+        update = asyncio.run(
+            graph_runner.node_quality_gate(
+                {
+                    "run_id": "terminal-quality-fast-path",
+                    "phase": "synthesis",
+                    "fast_path": True,
+                    "final_content": "## 当前无法可靠确认",
+                    "synthesis_failed": True,
+                    "coverage_judgement": {"sufficient": False},
+                    "evidence_records": [{"evidence_id": "evidence-1"}],
+                    "synthesis_attempts": 1,
+                    "quality_attempts": 0,
+                    "budget": {"max_replan_count": 0},
+                }
+            )
+        )
+    finally:
+        runner_module._SESSIONS.pop("terminal-quality-fast-path", None)
+    assert update["quality_assessment"]["repairable"] is False
+    from app.research.runtime.graph import route_after_quality
+
+    assert route_after_quality(update) == "finalize"
 
 
 def test_workflow_termination_is_not_task_success_when_partial():

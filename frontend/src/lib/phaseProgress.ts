@@ -1,10 +1,18 @@
 import type { MonitorMessage } from "../types";
+import {
+  canonicalEventName,
+  isFastPathRun,
+  projectPhaseStates,
+  type PhaseLifecycleState
+} from "./phaseProjection";
+
+export { canonicalEventName };
 
 export const PHASE_LABELS: Record<string, string> = {
   understand: "理解任务",
   strategy: "制定研究方向",
   research: "执行研究",
-  coverage: "证据整理与覆盖判断",
+  coverage: "证据覆盖",
   synthesis: "结果合成",
   quality: "质量检查",
   delivery: "完成交付",
@@ -26,11 +34,20 @@ export const FAST_PATH_ORDER = [
   "understand",
   "fast_research",
   "fast_coverage",
+  "quality",
   "delivery"
 ] as const;
 
 export type PipelinePhase = string;
-export type PhaseTone = "idle" | "running" | "paused" | "done" | "failed";
+export type PhaseTone =
+  | "idle"
+  | "running"
+  | "paused"
+  | "done"
+  | "partial"
+  | "insufficient"
+  | "failed"
+  | "skipped";
 
 export interface PhaseTimelineItem {
   phase: string;
@@ -64,103 +81,48 @@ function asDuration(value: unknown): number | undefined {
   return Number.isFinite(raw) ? raw : undefined;
 }
 
-export function canonicalEventName(message: MonitorMessage): string {
-  const canonical = text(message.data?.canonical_event);
-  if (canonical) {
-    return canonical;
-  }
-  switch (message.event) {
-    case "brief":
-      return "brief.compiled";
-    case "topology":
-      return "topology.decided";
-    case "plan":
-      return "plan.created";
-    case "coverage":
-      return "coverage.assessed";
-    case "finding":
-      return "finding.compressed";
-    case "evidence":
-      return "evidence.registered";
-    case "termination":
-      return "run.terminated";
-    case "task_result":
-      return "run.completed";
-    case "quality":
-      return "quality.assessed";
-    case "tool_start":
-      return "tool.started";
-    case "tool_end":
-      return "tool.completed";
-    case "tool_error":
-      return "tool.failed";
-    case "supervisor":
-      return text(message.data?.status) === "start" || /\[supervisor\] start/.test(message.message)
-        ? "supervisor.started"
-        : "supervisor.decided";
-    case "worker": {
-      const status = text(message.data?.status) || text(message.data?.worker_status);
-      if (status === "start") return "worker.started";
-      if (["failed", "error"].includes(status)) return "worker.failed";
-      return "worker.completed";
-    }
-    case "synthesis":
-      return text(message.data?.status) === "start" || /\[synthesis\] start/.test(message.message)
-        ? "synthesis.started"
-        : text(message.data?.status) === "failed" || /\[synthesis\] failed/.test(message.message)
-          ? "synthesis.failed"
-          : "synthesis.completed";
-    default:
-      return message.event;
-  }
-}
-
-function terminalStatus(events: MonitorMessage[]): PhaseProgress["terminalStatus"] {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    const kind = canonicalEventName(event);
-    if (!["run.terminated", "run.completed", "run.failed"].includes(kind)) {
-      continue;
-    }
-    const termination = event.data?.termination;
-    const terminationRecord =
-      typeof termination === "object" && termination !== null ? (termination as Record<string, unknown>) : {};
-    const raw =
-      text(event.data?.outcome) ||
-      text(event.data?.status) ||
-      text(terminationRecord.outcome) ||
-      text(terminationRecord.runtime_status);
-    if (["completed", "success", "finished"].includes(raw)) return "completed";
-    if (["partial", "degraded"].includes(raw)) return "partial";
-    if (["failed", "error", "crashed"].includes(raw)) return "failed";
-    if (["cancelled", "canceled", "interrupted"].includes(raw)) return "cancelled";
-  }
-  return "";
-}
-
-function isFastPath(events: MonitorMessage[]): boolean {
-  return events.some((event) => {
-    if (canonicalEventName(event) !== "topology.decided") {
-      return false;
-    }
-    return event.data?.eligible === true || text(event.data?.execution_path) === "fast_path";
-  });
-}
-
-function stepHintFromData(data: Record<string, unknown>): string {
-  const workerStatus = text(data.execution_status) || text(data.worker_status) || text(data.status);
-  const taskId = text(data.task_id);
-  if (workerStatus && taskId) {
-    return `${taskId} · ${workerStatus}`;
-  }
-  return text(data.status);
-}
-
-function toneForStatus(status: string, paused: boolean): PhaseTone {
-  if (["failed", "error", "fail"].includes(status)) return "failed";
-  if (["done", "ok", "sufficient", "success", "completed"].includes(status)) return "done";
-  if (["start", "running", "gap", "partial"].includes(status)) return paused ? "paused" : "running";
+function toneForState(state: PhaseLifecycleState, paused: boolean): PhaseTone {
+  if (state === "running") return paused ? "paused" : "running";
+  if (state === "completed") return "done";
+  if (state === "partial") return "partial";
+  if (state === "insufficient") return "insufficient";
+  if (state === "failed") return "failed";
+  if (state === "skipped") return "skipped";
   return "idle";
+}
+
+function lastOfKind(events: MonitorMessage[], names: string[]): MonitorMessage | undefined {
+  return [...events].reverse().find((event) => names.includes(canonicalEventName(event)));
+}
+
+function sourceEventForPhase(events: MonitorMessage[], phase: string): MonitorMessage | undefined {
+  const researchKinds = ["worker.started", "worker.completed", "worker.failed"];
+  const map: Record<string, string[]> = {
+    understand: ["brief.compiled"],
+    strategy: ["supervisor.started", "supervisor.decided", "plan.created", "worker.started"],
+    research: researchKinds,
+    fast_research: researchKinds,
+    coverage: ["coverage.assessed"],
+    fast_coverage: ["coverage.assessed"],
+    synthesis: ["synthesis.started", "synthesis.completed", "synthesis.failed"],
+    quality: ["quality.assessed"],
+    delivery: ["run.terminated", "run.completed", "run.failed"]
+  };
+  return lastOfKind(events, map[phase] ?? []);
+}
+
+function stepHintForPhase(
+  phase: string,
+  state: PhaseLifecycleState,
+  detail: string | undefined,
+  source: MonitorMessage | undefined
+): string {
+  if (detail && ["research", "fast_research", "coverage", "fast_coverage", "quality"].includes(phase)) {
+    return detail;
+  }
+  if (!source) return "";
+  const data = source.data ?? {};
+  return text(data.status) || text(data.execution_status) || text(data.result_status) || state;
 }
 
 export function buildPhaseTimeline(
@@ -168,69 +130,65 @@ export function buildPhaseTimeline(
   options: { paused?: boolean } = {}
 ): PhaseTimelineItem[] {
   const paused = Boolean(options.paused);
-  const fastPath = isFastPath(events);
+  const fastPath = isFastPathRun(events);
   const stageOrder: string[] = fastPath ? [...FAST_PATH_ORDER] : [...PHASE_ORDER];
-  const stageByEvent = new Map<string, string>([
-    ["brief.compiled", "understand"],
-    ["supervisor.started", "strategy"],
-    ["supervisor.decided", "strategy"],
-    ["plan.created", "strategy"],
-    ["worker.started", fastPath ? "fast_research" : "research"],
-    ["worker.completed", fastPath ? "fast_research" : "research"],
-    ["worker.failed", fastPath ? "fast_research" : "research"],
-    ["evidence.registered", fastPath ? "fast_coverage" : "coverage"],
-    ["finding.compressed", fastPath ? "fast_coverage" : "coverage"],
-    ["progress.assessed", fastPath ? "fast_coverage" : "coverage"],
-    ["coverage.assessed", fastPath ? "fast_coverage" : "coverage"],
-    ["synthesis.started", "synthesis"],
-    ["synthesis.completed", "synthesis"],
-    ["synthesis.failed", "synthesis"],
-    ["quality.assessed", "quality"],
-    ["run.terminated", "delivery"],
-    ["run.completed", "delivery"],
-    ["run.failed", "delivery"]
-  ]);
+  const states = projectPhaseStates(events);
 
-  const latestByStage = new Map<string, PhaseTimelineItem>();
-  for (const event of events) {
-    const kind = canonicalEventName(event);
-    const stage = stageByEvent.get(kind);
-    if (!stage || !stageOrder.includes(stage)) {
-      continue;
-    }
-    const status =
-      text(event.data?.status) ||
-      text(event.data?.execution_status) ||
-      text(event.data?.worker_status) ||
-      (kind.endsWith(".started") ? "start" : "done");
-    const effectiveStatus =
-      kind === "supervisor.decided" && !["failed", "error", "cancelled"].includes(status)
-        ? "done"
-        : status;
-    latestByStage.set(stage, {
-      phase: stage,
-      status: effectiveStatus,
-      tone: toneForStatus(effectiveStatus, paused),
-      durationMs: asDuration(event.data?.duration_ms),
-      timestamp: event.timestamp,
-      data: event.data,
-      stepHint: stepHintFromData(event.data)
-    });
-  }
+  return states
+    .filter((state) => state.state !== "pending")
+    .map((state) => {
+      const source = sourceEventForPhase(events, state.phase);
+      return {
+        phase: state.phase,
+        status: state.state,
+        tone: toneForState(state.state, paused),
+        durationMs: source ? asDuration(source.data?.duration_ms) : undefined,
+        timestamp: source?.timestamp ?? "",
+        data: source?.data ?? {},
+        stepHint: stepHintForPhase(state.phase, state.state, state.detail, source)
+      };
+    })
+    .filter((item) => stageOrder.includes(item.phase));
+}
 
-  return stageOrder
-    .map((stage) => latestByStage.get(stage))
-    .filter((item): item is PhaseTimelineItem => Boolean(item));
+function terminalStatus(events: MonitorMessage[]): PhaseProgress["terminalStatus"] {
+  const event = lastOfKind(events, ["run.terminated", "run.completed", "run.failed"]);
+  if (!event) return "";
+  const termination = event.data?.termination;
+  const terminationRecord =
+    typeof termination === "object" && termination !== null ? (termination as Record<string, unknown>) : {};
+  const raw =
+    text(event.data?.outcome) ||
+    text(event.data?.status) ||
+    text(terminationRecord.outcome) ||
+    text(terminationRecord.runtime_status);
+  if (["completed", "success", "finished"].includes(raw)) return "completed";
+  if (["partial", "degraded"].includes(raw)) return "partial";
+  if (["failed", "error", "crashed"].includes(raw)) return "failed";
+  if (["cancelled", "canceled", "interrupted"].includes(raw)) return "cancelled";
+  return "";
+}
+
+export function formatPhaseStatus(phase: string, status: string): string {
+  if (status === "pending") return "待开始";
+  if (status === "running") return "进行中";
+  if (status === "completed") return phase.includes("coverage") ? "充分" : "已完成";
+  if (status === "partial") return phase === "delivery" ? "部分可确认" : "部分完成";
+  if (status === "insufficient") return "不足";
+  if (status === "failed") return phase === "quality" ? "未通过" : "失败";
+  if (status === "skipped") return "未执行";
+  return status;
 }
 
 export function computePhaseProgress(
   events: MonitorMessage[],
   options: { paused?: boolean } = {}
 ): PhaseProgress {
-  const fastPath = isFastPath(events);
+  const fastPath = isFastPathRun(events);
   const stageOrder: string[] = fastPath ? [...FAST_PATH_ORDER] : [...PHASE_ORDER];
   const items = buildPhaseTimeline(events, { paused: options.paused });
   const terminal = terminalStatus(events);
+  const states = projectPhaseStates(events);
   const workerStarted = events.filter((event) => canonicalEventName(event) === "worker.started").length;
   const workerTerminal = events.filter((event) =>
     ["worker.completed", "worker.failed"].includes(canonicalEventName(event))
@@ -241,7 +199,8 @@ export function computePhaseProgress(
       ? [
           ["understand", 20],
           ["fast_research", 60],
-          ["fast_coverage", 85],
+          ["fast_coverage", 80],
+          ["quality", 95],
           ["delivery", 100]
         ]
       : [
@@ -258,7 +217,7 @@ export function computePhaseProgress(
   let percent = 0;
   for (const item of items) {
     const threshold = thresholds.get(item.phase) ?? 0;
-    if (item.tone === "done" || item.tone === "failed") {
+    if (["done", "failed", "partial", "insufficient"].includes(item.tone)) {
       percent = Math.max(percent, threshold);
     } else if (item.tone === "running" || item.tone === "paused") {
       percent = Math.max(percent, Math.round(threshold * 0.9));
@@ -272,6 +231,7 @@ export function computePhaseProgress(
   const current = [...items].reverse().find((item) => item.tone === "running" || item.tone === "paused");
   const failed =
     terminal === "failed" ||
+    states.some((state) => state.state === "failed") ||
     events.some((event) => {
       const kind = canonicalEventName(event);
       return ["worker.failed", "tool.failed", "synthesis.failed", "run.failed"].includes(kind) || event.event === "error";
@@ -282,9 +242,11 @@ export function computePhaseProgress(
     currentPhase: current?.phase ?? (items.length > 0 ? items[items.length - 1].phase : ""),
     currentLabel: current
       ? PHASE_LABELS[current.phase] ?? current.phase
-      : events.length > 0
-        ? "研究执行中"
-        : "等待开始",
+      : terminal
+        ? "流程已结束"
+        : events.length > 0
+          ? "研究执行中"
+          : "等待开始",
     stepHint: current?.stepHint || "",
     completedCount: items.filter((item) => item.tone === "done").length,
     totalCount: stageOrder.length,

@@ -41,6 +41,7 @@ Named graph nodes:
 ## Authority Boundaries
 
 - `brief` compiles the query, conversation delta, entities, key questions, source constraints, freshness, and deliverable into a `StructuredResearchBrief`.
+- Brief and Supervisor use raw ChatModels through `StructuredLLMGateway`; structured output coercion is outside worker prompt logic.
 - Fast-path eligibility is derived from the Brief. A simple fact does not bypass the main graph; it branches after `brief`.
 - `supervisor` turns the Brief and the latest Coverage Judgement into `CONDUCT_RESEARCH` or `COMPLETE` actions. It owns task granularity and research strategy.
 - `researcher` executes one isolated task attempt, immediately ingests its own typed result, and returns the idempotent ingestion update. It cannot declare coverage complete.
@@ -72,7 +73,7 @@ Workers own execution, not research completion. Each result is scoped to:
 
 Workers can return findings, facts, candidates, sources, evidence IDs, and confidence. They cannot mutate coverage, mark research complete, or choose the next strategy.
 
-Worker leases split the remaining research capacity by the actual approved wave size and enforce the task-level LLM-call ceiling. Early fan-in does not cancel required workers; it can only skip optional workers after partial-wave Coverage is sufficient.
+Worker leases split remaining research capacity by the actual approved wave size and enforce the shared `TaskBudgetProfile`: token ceiling, LLM/search/fetch ceilings, and `max_output_tokens_per_call`. Early fan-in does not cancel required workers; it can only skip optional workers after partial-wave Coverage is sufficient.
 
 ## Stop Semantics
 

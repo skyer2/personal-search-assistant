@@ -398,6 +398,9 @@ class LangChainWorkerRuntime:
                             parallel_workers=max(1, int(getattr(session, "active_wave_size", 1) or 1)),
                             max_llm_calls=max(1, task_max_llm_calls),
                             token_ceiling=task_token_ceiling or None,
+                            max_output_tokens_per_call=(
+                                int(step.metadata.get("max_output_tokens_per_call") or 0) or None
+                            ),
                         )
                     # Research 不得侵占 synthesis 时间储备
                     remaining = mgr.remaining_for_research_sec()

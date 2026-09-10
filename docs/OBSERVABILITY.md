@@ -80,6 +80,8 @@ Trace Viewer 的 `Understanding` 面板展示 Brief 与拓扑；`Supervisor / Co
 
 - Live 和 Replay 都从 canonical event 计算 Worker 成功 / partial / failed、工具调用、工具失败、运行异常与 Provider 异常；不能靠 legacy callback 双计数。
 - 新 Run 提交时原子清空事件、文件、结果、状态与统计；旧 Run 的迟到事件按 `run_id` 丢弃。
+- 进度条由 `phaseProjection` 从全量事件聚合，不再依赖单个 callback 或最后一条 phase 消息。
+- 终态语义区分执行完成、部分可确认、执行失败、无法找到可靠来源和已取消；质量拒绝不得显示成“任务失败”。
 - `SOURCES` 面板展示当前 Run 实际发生的 search query、已采纳 evidence、上传文件、数据库 / KB 来源和来源质量分层，不展示静态能力清单。
 - Trace Viewer 中 `Evidence` 是证据源登记表，`Lineage` 是结论溯源，`Span Tree` 是执行因果与耗时；三者不能合并成一个“证据链”概念。
 - 打开 `Span Tree` 时同时加载事件索引，选中 span 后可直接查看 `Related Events`，不需要先进入 JSONL 页签。
@@ -126,9 +128,10 @@ Run latency 汇总包含 brief、supervisor、worker、coverage、synthesis、qu
 
 - Worker run 必须同时有 `worker.started` 与 `worker.completed` / `worker.failed`，不允许只有完成态的“幽灵完成”。
 - 每次执行必须有至少一个 root span；Worker 必须挂在 Research root / synthesis 相应 span 下。
+- Root span 恢复上下文时不继承 Worker 的 `task_id`、`plan_version` 或 `attempt`。
 - Research synthesis 阶段必须有 synthesis span / event；失败时必须给出 `fail_reason`。
-- Evidence 引用必须形成 lineage；`synthesis.failed` 与 `evidence_ids` 也计入 lineage。
-- Simple Fact fast path 只校验 worker 生命周期与 root span，不要求开放研究图的 coverage / synthesis 事件。
+- Evidence 引用必须形成 lineage；`synthesis.failed` 与 `evidence_ids` 也计入 lineage。显式 input/output 引用存在时，ID 匹配只补缺失侧，不允许重复边。
+- Atomic fact fast path 必须保留 worker 生命周期、root span、coverage / synthesis 事件与证据血缘；它只豁免开放研究图的 Supervisor 循环，不豁免可观测性。
 - 存在可用 evidence 且 final content 为空时，Trace Integrity 必须失败，即使外层 run 没有抛异常。
 
 观测系统自身失败不能吞掉业务事件：Worker span 创建失败会 emit `observability.internal_error`，随后 `worker.started` / `worker.completed` 仍按业务事实记录。

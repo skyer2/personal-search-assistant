@@ -65,12 +65,14 @@ def test_run_artifacts_listing_is_run_scoped(tmp_path):
         run_deliverables = session_root / "runs" / run_id / "deliverables"
         run_deliverables.mkdir(parents=True)
         (run_deliverables / name).write_bytes(name.encode())
+    (session_root / "runs" / "run_002" / "run_summary.json").write_text("{}", encoding="utf-8")
+    (session_root / "runs" / "run_002" / "working_notes.md").write_text("# notes", encoding="utf-8")
+    (session_root / "runs" / "run_002" / "art-web-1.txt").write_text("artifact", encoding="utf-8")
 
     run2_files = list_run_output_files(tmp_path, "s1", "run_002")
     names = [f["name"] for f in run2_files]
     assert names == ["B.pdf"]
-    assert "A.pdf" not in names
-    assert "stale.pdf" not in names
+    assert all(name not in names for name in ("A.pdf", "run_summary.json", "working_notes.md", "art-web-1.txt"))
 
     # Session 级列表仍是完整历史（历史视图），但 Run 级严格隔离
     session_files = list_output_files(tmp_path, "s1")

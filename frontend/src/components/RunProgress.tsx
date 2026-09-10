@@ -1,6 +1,6 @@
 import { PauseCircleOutlined } from "@ant-design/icons";
 import type { ReactNode } from "react";
-import { PHASE_LABELS, type PhaseProgress } from "../lib/phaseProgress";
+import { PHASE_LABELS, formatPhaseStatus, type PhaseProgress } from "../lib/phaseProgress";
 import { describeRunOutcome, type RunStatus } from "../lib/runStatus";
 
 interface RunProgressProps {
@@ -24,10 +24,9 @@ export function RunProgress({
   const executePhase = progress.items.find((item) => item.phase === "research");
   const researchSkipped =
     !progress.stageOrder.includes("fast_research") &&
-    (!executePhase || executePhase.tone === "idle" || ["skipped", "not_started"].includes(executePhase.status));
+    (!executePhase || executePhase.tone === "skipped");
   const qualityFailed =
-    progress.items.some((item) => item.phase === "quality" && item.tone === "failed") ||
-    progress.hasFailed;
+    progress.items.some((item) => item.phase === "quality" && item.tone === "failed");
   const qualityRepairable = quality?.repairable === true;
   const outcome = describeRunOutcome({ runStatus, quality, termination });
 
@@ -36,9 +35,9 @@ export function RunProgress({
     : cancelling
       ? "正在取消当前任务"
       : runStatus === "completed"
-        ? "运行完成"
+        ? "流程已结束"
         : runStatus === "partial"
-          ? outcome?.title ?? "部分可确认"
+          ? "流程已结束"
         : runStatus === "failed"
           ? "执行失败"
           : runStatus === "interrupted"
@@ -48,11 +47,12 @@ export function RunProgress({
             : "正在运行";
 
   const detail = paused
-    ? "计时与进度已冻结，审批通过后才会继续"
+      ? "计时与进度已冻结，审批通过后才会继续"
       : runStatus === "completed"
-      ? "终端状态为完成；语义阶段按真实事件投影。"
+      ? "结果：已完成 · 语义阶段按真实事件投影。"
       : runStatus === "partial"
         ? [
+            "结果：部分可确认",
             outcome?.detail ?? "已保留可确认结论，但未达到完整交付标准。",
             qualityFailed && qualityRepairable ? "可修复" : "",
             researchSkipped ? "Research Skipped / 未执行" : "",
@@ -105,7 +105,7 @@ export function RunProgress({
               <span className="phase-pipeline-dot" />
               <span>
                 {PHASE_LABELS[phase]}
-                {item?.status ? <small> · {item.status}</small> : null}
+                {item ? <small> · {formatPhaseStatus(phase, item.status)}</small> : null}
               </span>
             </li>
           );

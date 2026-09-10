@@ -534,6 +534,23 @@ textarea {
   background: rgba(255, 200, 87, 0.12);
 }
 
+.phase-step--partial,
+.phase-step--insufficient {
+  border-color: rgba(255, 200, 87, 0.28);
+  background: rgba(255, 200, 87, 0.06);
+}
+
+.phase-step--partial .phase-step-icon,
+.phase-step--insufficient .phase-step-icon {
+  color: var(--amber);
+  border-color: rgba(255, 200, 87, 0.42);
+  background: rgba(255, 200, 87, 0.12);
+}
+
+.phase-step--skipped .phase-step-icon {
+  color: var(--muted);
+}
+
 .phase-step-title {
   display: flex;
   align-items: center;
@@ -2612,6 +2629,24 @@ textarea {
 
 .phase-pipeline-item--failed .phase-pipeline-dot {
   background: var(--red);
+}
+
+.phase-pipeline-item--partial,
+.phase-pipeline-item--insufficient {
+  color: var(--amber);
+}
+
+.phase-pipeline-item--partial .phase-pipeline-dot,
+.phase-pipeline-item--insufficient .phase-pipeline-dot {
+  background: var(--amber);
+}
+
+.phase-pipeline-item--skipped {
+  color: var(--muted);
+}
+
+.phase-pipeline-item--skipped .phase-pipeline-dot {
+  background: var(--muted);
 }
 
 .event-log-details {

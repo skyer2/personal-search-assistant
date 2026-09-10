@@ -78,6 +78,9 @@ function toneTag(tone: PhaseTone): { color: string; label: string } {
   if (tone === "done") return { color: "success", label: "完成" };
   if (tone === "paused") return { color: "warning", label: "已暂停" };
   if (tone === "running") return { color: "blue", label: "进行中" };
+  if (tone === "partial") return { color: "warning", label: "部分完成" };
+  if (tone === "insufficient") return { color: "warning", label: "不足" };
+  if (tone === "skipped") return { color: "default", label: "未执行" };
   return { color: "default", label: "待开始" };
 }
 

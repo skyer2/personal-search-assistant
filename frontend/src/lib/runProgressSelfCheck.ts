@@ -1,5 +1,6 @@
 import { elapsedClockSelfCheck } from "./elapsedClock";
-import { computePhaseProgress } from "./phaseProgress";
+import { computePhaseProgress, formatPhaseStatus } from "./phaseProgress";
+import { projectPhaseStates } from "./phaseProjection";
 import { deriveRunStatus } from "./runStatus";
 import { deriveRunSources, deriveRunStats } from "./runStats";
 import { eventBelongsToRun } from "./sessionProjection";
@@ -107,6 +108,85 @@ function checkMultiWaveMonotonic(): string[] {
   return after < before ? ["multi-wave progress must be monotonic"] : [];
 }
 
+function checkSddPhaseProjection(): string[] {
+  const errors: string[] = [];
+  const caseOne = [
+    event("brief", { status: "ok", canonical_event: "brief.compiled" }),
+    event("topology", { eligible: false, canonical_event: "topology.decided" }),
+    event("supervisor", { status: "start", canonical_event: "supervisor.started" }),
+    event("worker", { status: "start", task_id: "w1", canonical_event: "worker.started" })
+  ];
+  const caseOneStates = new Map(projectPhaseStates(caseOne).map((state) => [state.phase, state]));
+  if (caseOneStates.get("understand")?.state !== "completed") {
+    errors.push("brief.compiled must complete understand");
+  }
+  if (caseOneStates.get("strategy")?.state !== "completed") {
+    errors.push("worker.started must complete strategy");
+  }
+  if (caseOneStates.get("research")?.state !== "running") {
+    errors.push("started worker must keep research running");
+  }
+
+  const partialWorkers = [
+    event("brief", { status: "ok", canonical_event: "brief.compiled" }),
+    event("topology", { eligible: false, canonical_event: "topology.decided" }),
+    event("supervisor", { status: "start", canonical_event: "supervisor.started" }),
+    ...Array.from({ length: 7 }, (_, index) =>
+      event("worker", { status: "start", task_id: `w${index}`, canonical_event: "worker.started" })
+    ),
+    ...Array.from({ length: 5 }, (_, index) =>
+      event("worker", {
+        status: "partial",
+        execution_status: "partial",
+        task_id: `w${index}`,
+        canonical_event: "worker.completed"
+      })
+    ),
+    ...Array.from({ length: 2 }, (_, index) =>
+      event("worker", {
+        status: "failed",
+        execution_status: "failed",
+        task_id: `w${index + 5}`,
+        canonical_event: "worker.failed"
+      })
+    )
+  ];
+  const research = projectPhaseStates(partialWorkers).find((state) => state.phase === "research");
+  if (research?.state !== "partial" || research.detail !== "7 tasks · 5 partial · 2 failed") {
+    errors.push("research must aggregate all worker outcomes");
+  }
+
+  const gap = projectPhaseStates([
+    event("brief", { status: "ok", canonical_event: "brief.compiled" }),
+    event("coverage", { status: "gap", canonical_event: "coverage.assessed" })
+  ]).find((state) => state.phase === "coverage");
+  if (gap?.state !== "insufficient" || formatPhaseStatus("coverage", gap.state) !== "不足") {
+    errors.push("coverage gap must render as insufficient");
+  }
+
+  const quality = projectPhaseStates([
+    event("quality", { status: "QUALITY_REJECTED", canonical_event: "quality.assessed" })
+  ]).find((state) => state.phase === "quality");
+  if (quality?.state !== "failed" || formatPhaseStatus("quality", quality.state) !== "未通过") {
+    errors.push("quality rejection must render as failed");
+  }
+
+  const terminalPartial = computePhaseProgress([
+    ...partialWorkers,
+    event("coverage", { status: "gap", canonical_event: "coverage.assessed" }),
+    event("synthesis", { status: "failed", canonical_event: "synthesis.failed" }),
+    event("quality", { status: "fail", canonical_event: "quality.assessed" }),
+    event("termination", { status: "partial", outcome: "partial", canonical_event: "run.terminated" })
+  ]);
+  if (terminalPartial.percent !== 100 || terminalPartial.terminalStatus !== "partial") {
+    errors.push("terminal partial must be lifecycle-complete without claiming success");
+  }
+  if (terminalPartial.currentLabel !== "流程已结束") {
+    errors.push("terminal partial label must mean lifecycle end");
+  }
+  return errors;
+}
+
 function checkStatsAndRunIsolation(): string[] {
   const events = [
     event("tool_start", { tool_name: "internet_search" }, "run-current"),
@@ -177,6 +257,7 @@ export function runProgressSelfCheck(): string[] {
     ...checkFastPathTerminal(),
     ...checkPartialTerminal(),
     ...checkMultiWaveMonotonic(),
+    ...checkSddPhaseProjection(),
     ...checkStatsAndRunIsolation(),
     ...checkRunSourceProjection()
   ];

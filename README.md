@@ -24,11 +24,13 @@ This project is not a search engine. Search is only an environment tool. The har
 - Coverage is judged from evidence-backed findings against the Brief, not from task completion.
 - Synthesis consumes semantic digests and cannot change coverage.
 - The final answer must pass coverage, conflict, citation, and grounding gates.
+- Semantic LLM calls go through one structured invocation boundary; workers cannot reinterpret user intent.
+- Chat is the primary answer surface. `FILES` lists only explicit user deliverables, never internal run artifacts.
 
 ## Execution Path
 
 ```text
-Simple fact → Brief fast path → researcher → answer
+Atomic fact → Brief eligibility → one bounded researcher → policy-gated structured answer
 
 Other Research
   → brief
@@ -52,7 +54,7 @@ The deterministic regression gate now has 60 cases:
 - 20 structural scenarios
 
 ```bash
-python tests/eval/run_eval.py --dry-run --fail-on-regression
+.\.venv\Scripts\python.exe tests\eval\run_eval.py --dry-run --fail-on-regression
 ```
 
 Production fidelity, live scenarios, and BrowseComp-Plus are documented in [docs/EVALUATION.md](docs/EVALUATION.md) and [docs/BROWSECOMP_PLUS_EVAL.md](docs/BROWSECOMP_PLUS_EVAL.md).
@@ -63,6 +65,7 @@ Production fidelity, live scenarios, and BrowseComp-Plus are documented in [docs
 - [StateGraph runtime](docs/HARNESS_ARCHITECTURE.md)
 - [Observability contract](docs/OBSERVABILITY.md)
 - [Evaluation system](docs/EVALUATION.md)
+- [Runtime delivery stabilization result](docs/architecture/runtime-delivery-stabilization-result.md)
 - [BrowseComp-Plus](docs/BROWSECOMP_PLUS_EVAL.md)
 - [Context and memory boundaries](docs/CONTEXT_SYSTEM.md)
 - [Deployment](docs/OPENEULER_BARE_METAL.md)

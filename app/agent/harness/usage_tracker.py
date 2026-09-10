@@ -140,7 +140,7 @@ def reset_current_llm_reservation(token: Any) -> None:
     _current_llm_reservation.reset(token)
 
 
-def estimate_llm_tokens(prompt: Any, *, output_reserve: int = 4096) -> int:
+def estimate_llm_tokens(prompt: Any, *, max_output_tokens: int = 4096) -> int:
     """Conservative CJK-aware estimate used before provider usage exists."""
     if prompt is None:
         text = ""
@@ -154,7 +154,7 @@ def estimate_llm_tokens(prompt: Any, *, output_reserve: int = 4096) -> int:
         text = repr(prompt)
     cjk = sum(1 for char in text if ord(char) >= 0x2E80)
     other = len(text) - cjk
-    return max(1, cjk + (other + 3) // 4 + int(output_reserve or 0))
+    return max(1, cjk + (other + 3) // 4 + int(max_output_tokens or 0))
 
 
 _PHASE_PROMPT_TEMPLATES: dict[str, tuple[str, str]] = {
@@ -401,9 +401,19 @@ class UsageTrackingCallback(BaseCallbackHandler):
         elif manager is not None:
             from app.agent.harness.run_budget import BudgetReservationError
 
+            worker_task_id = get_current_worker_task_id()
+            output_limit_method = getattr(manager, "worker_output_limit", None)
+            output_limit = (
+                int(output_limit_method(worker_task_id))
+                if callable(output_limit_method) and worker_task_id
+                else 4_096
+            )
             reservation_id, reason = manager.reserve_llm_call(
-                estimated_tokens=estimate_llm_tokens(prompt_blob),
-                worker_task_id=get_current_worker_task_id(),
+                estimated_tokens=estimate_llm_tokens(
+                    prompt_blob,
+                    max_output_tokens=output_limit,
+                ),
+                worker_task_id=worker_task_id,
                 phase=self.phase or get_llm_phase(),
             )
             if not reservation_id:
@@ -610,10 +620,20 @@ def _begin_llm_reservation(prompt: Any) -> tuple[Any, str, int, Any] | None:
     manager = get_current_budget_manager()
     if manager is None:
         return None
-    estimated_tokens = estimate_llm_tokens(prompt)
+    worker_task_id = get_current_worker_task_id()
+    output_limit_method = getattr(manager, "worker_output_limit", None)
+    output_limit = (
+        int(output_limit_method(worker_task_id))
+        if callable(output_limit_method) and worker_task_id
+        else 4_096
+    )
+    estimated_tokens = estimate_llm_tokens(
+        prompt,
+        max_output_tokens=output_limit,
+    )
     reservation_id, reason = manager.reserve_llm_call(
         estimated_tokens=estimated_tokens,
-        worker_task_id=get_current_worker_task_id(),
+        worker_task_id=worker_task_id,
         phase=get_llm_phase(),
     )
     if not reservation_id:

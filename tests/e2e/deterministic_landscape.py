@@ -56,6 +56,24 @@ def deterministic_search(**kwargs: Any) -> dict[str, Any]:
 
 
 class DeterministicAgent:
+    async def ainvoke(self, payload: dict[str, Any], config: dict[str, Any] | None = None):
+        messages = list(payload.get("messages") or [])
+        last_message = messages[-1]
+        prompt = (
+            str(last_message.get("content") or "")
+            if isinstance(last_message, dict)
+            else str(getattr(last_message, "content", "") or "")
+        )
+        if not (prompt.startswith("任务：") and "合成模式" in prompt):
+            raise RuntimeError("raw synthesis model must only receive synthesis prompts")
+        return AIMessage(
+            content=(
+                "# 国内 AI 初创公司部分评估\n\n"
+                "- 已恢复的检索证据显示若干候选公司具有近期融资与商业化信号。\n"
+                "- Worker 持续超时，Replan 已达到有界恢复上限，本次为降级部分交付。\n"
+            )
+        )
+
     async def astream(self, payload: dict[str, Any], config: dict[str, Any] | None = None):
         messages = list(payload.get("messages") or [])
         last_message = messages[-1]

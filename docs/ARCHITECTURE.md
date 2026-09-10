@@ -45,6 +45,12 @@ finalize
 
 The atomic-fact fast path is not a second workflow. The `brief` node derives strict eligibility and sends eligible facts directly to `researcher`; every other query enters the Supervisor loop.
 
+## Atomic Fact Fast Path
+
+An atomic fact is eligible only when the Brief identifies one subject, one question, no clarification, a brief text deliverable, and point-in-time freshness. The fast path performs one bounded search, admits evidence with `SIMPLE_FACT_EVIDENCE_POLICY`, extracts a structured answer bound to supporting source IDs, and either delivers a cited answer or explicitly reports that the fact cannot be reliably confirmed.
+
+Insufficient atomic-fact evidence is terminal. It never enters an open-research Supervisor loop and never retries synthesis with the same evidence.
+
 ## Authority Model
 
 | Concern | Authority | Non-authority |
@@ -53,6 +59,7 @@ The atomic-fact fast path is not a second workflow. The `brief` node derives str
 | What to research next | Supervisor | Worker, ControlPolicy, planner |
 | Machine task identity | Runtime identity module | Supervisor LLM |
 | Whether a request can execute | Budget admission and RuntimePolicy | Supervisor LLM |
+| Structured LLM call envelope | `StructuredLLMGateway` | ad-hoc JSON parsing in agents |
 | Evidence admission | Evidence admission policy | Worker payload |
 | Whether coverage improved | Coverage Judge + Brief + evidence delta | worker count or finding count |
 | Final delivery | Citation and grounding gates | synthesis confidence |
@@ -88,7 +95,15 @@ Budget admission runs before dispatch. It approves, defers, or denies each Super
 
 Research cannot consume the synthesis or quality reserves. When research tokens are exhausted, the runtime forces synthesis instead of launching more workers.
 
-Worker leases use the actual approved wave size, not the configured maximum. A task's declared LLM-call ceiling and effort token ceiling are bound to its runtime lease before execution.
+Worker leases use the actual approved wave size, not the configured maximum. Admission and execution share the same `TaskBudgetProfile`. The default profiles are:
+
+| Effort | Token ceiling | LLM calls | Searches | Fetches | Output tokens / call |
+|---|---:|---:|---:|---:|---:|
+| small | 12,000 | 3 | 3 | 6 | 1,500 |
+| medium | 24,000 | 4 | 4 | 8 | 2,000 |
+| large | 40,000 | 6 | 6 | 12 | 2,500 |
+
+Each call receives `max_output_tokens_per_call`; a small task cannot consume the full research token ceiling on its first LLM call.
 
 ## Workers and Ingest
 
@@ -111,6 +126,8 @@ Coverage is monotonic:
 
 Synthesis reads a Brief-native context built from evidence digests, findings, claims, worker limitations, and coverage gaps. It does not read legacy coverage state.
 
+The synthesis model is invoked directly through the LLM gateway with `ainvoke`. A normal synthesis attempt is capped at 60 seconds. Only provider rate limiting, provider unavailability, and context-length failures may retry once in degraded mode with a 30-second cap. Timeout, auth, bad request, content filter, and budget failures do not retry.
+
 If synthesis tokens are low or the provider fails while usable evidence exists, the runtime renders a deterministic user-readable partial result. Partial content:
 
 - contains recovered facts and evidence links;
@@ -128,11 +145,17 @@ Termination separates:
 
 Quality failure is never reported as completed research. Budget exhaustion with evidence is a partial result, not an empty failure.
 
+## Delivery
+
+Chat is the primary delivery surface. A report request may additionally produce `.md`, `.pdf`, `.xlsx`, or `.docx`. The `FILES` panel is run-scoped and excludes `run_summary.json`, `evidence.json`, working notes, raw web artifacts, checkpoints, and other internal execution files. Atomic-fact answers do not create a file deliverable.
+
 ## State and Observability
 
 `ResearchState` is the workflow truth and is checkpointed through LangGraph. It contains the Brief, Supervisor decisions, task state, evidence, claims, findings, coverage judgement, budgets, and terminal projection. Legacy semantic state and semantic wave history are not part of the runtime.
 
 The trace has exactly one `research.run` root. Worker, evidence, coverage, synthesis, quality, and terminal events preserve lineage. Trace Integrity fails when required stages, progress, root spans, lineage, or terminal semantics are missing.
+
+Root spans never inherit Worker task, plan, or attempt context. Lineage edges are derived from explicit input/output references; matching IDs only fills in the missing side of an edge and never creates duplicate edges.
 
 The frontend is a run-scoped projection only. Events, files, progress, worker statistics, tool statistics, and source statistics are filtered by the current `run_id`; late events from an old run cannot update the new turn.
 
