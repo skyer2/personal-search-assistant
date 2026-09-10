@@ -81,7 +81,7 @@ export function describeRunOutcome(input: {
 export function deriveRunStatus(input: {
   isRunning: boolean;
   isCancelling?: boolean;
-  hitlPending: HitlInterruptPayload | null;
+  hitlPending?: HitlInterruptPayload | null;
   events: MonitorMessage[];
   result?: string;
   taskFailed?: boolean;
@@ -107,15 +107,33 @@ export function deriveRunStatus(input: {
   if (input.serverStatus === "partial") {
     return "partial";
   }
-  const taskResult = [...input.events].reverse().find((event) => event.event === "task_result");
-  const taskResultStatus = typeof taskResult?.data?.status === "string" ? taskResult.data.status : "";
-  if (taskResultStatus === "completed" || input.serverStatus === "completed") {
+  const terminalEvent = [...input.events]
+    .reverse()
+    .find((event) => event.event === "task_result" || event.event === "termination");
+  const terminalData = terminalEvent?.data;
+  const termination =
+    terminalData?.termination && typeof terminalData.termination === "object"
+      ? (terminalData.termination as Record<string, unknown>)
+      : terminalData;
+  const terminalStatus = String(
+    terminalData?.status || terminalData?.outcome || termination?.outcome || termination?.runtime_status || ""
+  );
+  if (["partial", "degraded"].includes(terminalStatus)) {
+    return "partial";
+  }
+  if (["cancelled", "canceled", "interrupted"].includes(terminalStatus)) {
+    return "interrupted";
+  }
+  if (["failed", "error", "crashed"].includes(terminalStatus)) {
+    return "failed";
+  }
+  if (["completed", "success", "finished"].includes(terminalStatus) || input.serverStatus === "completed") {
     return "completed";
   }
   if (input.events.some((event) => event.event === "task_cancelled") || input.serverStatus === "interrupted") {
     return "interrupted";
   }
-  if (taskResult || input.result) {
+  if (terminalEvent || input.result) {
     return "unknown";
   }
   return "idle";

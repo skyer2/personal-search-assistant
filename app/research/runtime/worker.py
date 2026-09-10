@@ -216,6 +216,7 @@ class WorkerResult:
     candidates: list[dict[str, Any]] = field(default_factory=list)
     raw: Any = None
     fail_reason: str = ""
+    metrics: dict[str, Any] = field(default_factory=dict)
     queue_ms: int = 0
     execution_ms: int = 0
     duration_ms: int = 0
@@ -286,6 +287,8 @@ class LangChainWorkerRuntime:
             "findings": [],
             "evidence_refs": [],
             "sources": [],
+            "facts": [],
+            "candidates": [],
         }
         parent_ctx = None
         span_key = ""
@@ -326,6 +329,40 @@ class LangChainWorkerRuntime:
                 trace_id=str(getattr(session.state, "trace_id", "") or ""),
             )
 
+        if bool(step.metadata.get("optional")) and bool(getattr(session, "wave_early_stop", False)):
+            duration_ms = int((time.perf_counter() - worker_started) * 1000)
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.WORKER_COMPLETED,
+                    phase="execute",
+                    status="skipped",
+                    duration_ms=duration_ms,
+                    task_id=task.task_id,
+                    attempt=attempt,
+                    plan_version=int(task.plan_version or 1),
+                    attributes={
+                        "objective": task.objective,
+                        "step_type": task.step_type,
+                        "worker_status": "skipped",
+                        "fail_reason": "optional_wave_coverage_complete",
+                    },
+                    run_id=session.run_id,
+                    session_id=session.session_id,
+                    trace_id=str(getattr(session.state, "trace_id", "") or ""),
+                )
+                if span_key:
+                    recorder.end_span(span_key, status="skipped", duration_ms=duration_ms)
+            return WorkerResult(
+                ok=True,
+                task_id=task.task_id,
+                status="skipped",
+                summary="skipped_optional_wave_coverage_complete",
+                fail_reason="optional_wave_coverage_complete",
+                queue_ms=0,
+                execution_ms=0,
+                duration_ms=duration_ms,
+            )
+
         try:
             queue_started = time.perf_counter()
             async with session.worker_sem:
@@ -350,10 +387,17 @@ class LangChainWorkerRuntime:
                     lease_id, why = "", "budget_manager_unavailable"
                     reserve_worker_lease = getattr(mgr, "reserve_worker_lease", None)
                     if callable(reserve_worker_lease):
-                        resolve_parallel = getattr(session, "_resolve_max_workers", None)
+                        task_max_llm_calls = int(
+                            step.metadata.get("max_llm_calls")
+                            or getattr(self.harness.harness_config, "max_llm_calls_per_worker", 4)
+                            or 4
+                        )
+                        task_token_ceiling = int(step.metadata.get("token_ceiling") or 0)
                         lease_id, why = reserve_worker_lease(
                             task.task_id,
-                            parallel_workers=int(resolve_parallel() if callable(resolve_parallel) else 3),
+                            parallel_workers=max(1, int(getattr(session, "active_wave_size", 1) or 1)),
+                            max_llm_calls=max(1, task_max_llm_calls),
+                            token_ceiling=task_token_ceiling or None,
                         )
                     # Research 不得侵占 synthesis 时间储备
                     remaining = mgr.remaining_for_research_sec()
@@ -585,6 +629,8 @@ class LangChainWorkerRuntime:
                         findings=list(salvaged["findings"]),
                         evidence_refs=list(salvaged["evidence_refs"]),
                         sources=list(salvaged["sources"]),
+                        facts=list(salvaged["facts"]),
+                        candidates=list(salvaged["candidates"]),
                         raw=outcome,
                         fail_reason=fail_reason,
                         queue_ms=queue_ms,
@@ -795,6 +841,7 @@ class LangChainWorkerRuntime:
                     evidence_refs=list(salvaged["evidence_refs"]),
                     sources=list(salvaged["sources"]),
                     facts=list(salvaged["facts"]),
+                    candidates=list(salvaged["candidates"]),
                     fail_reason=reason,
                     queue_ms=queue_ms,
                     execution_ms=exec_ms,
@@ -863,6 +910,8 @@ class LangChainWorkerRuntime:
                     findings=list(salvaged["findings"]),
                     evidence_refs=list(salvaged["evidence_refs"]),
                     sources=list(salvaged["sources"]),
+                    facts=list(salvaged["facts"]),
+                    candidates=list(salvaged["candidates"]),
                     raw=outcome,
                     fail_reason=provider_failure.kind.value,
                     queue_ms=queue_ms,

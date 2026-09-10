@@ -51,6 +51,19 @@ def merge_strings(left: list[str] | None, right: list[str] | None) -> list[str]:
     return list(dict.fromkeys([*(left or []), *(right or [])]))
 
 
+def merge_value_signals(left: dict[str, Any] | None, right: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge partial worker value signals without losing concurrent evidence gains."""
+    merged = dict(left or {})
+    for key, value in dict(right or {}).items():
+        if key in {"new_high_quality_evidence_count", "new_supported_claim_count", "closed_criteria_count"}:
+            merged[key] = max(0, int(merged.get(key) or 0)) + max(0, int(value or 0))
+        elif key == "duplicate_search_ratio":
+            merged[key] = max(float(merged.get(key) or 0.0), float(value or 0.0))
+        else:
+            merged[key] = value
+    return merged
+
+
 def merge_worker_payloads(results: list[dict[str, Any]]) -> dict[str, Any]:
     facts: list[str] = []
     sources: list[str] = []

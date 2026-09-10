@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -32,6 +33,12 @@ from app.research.domain.task_state import (
     worker_result_lifecycle,
 )
 from app.research.runtime.project import sync_execution_projection
+from app.research.runtime.latency import (
+    critical_path_summary,
+    note_final_answer,
+    note_stage_duration,
+    note_worker_durations,
+)
 from app.research.runtime.state import ResearchState, empty_research_state
 from app.observability.semantic_events import (
     brief_event_attributes,
@@ -71,6 +78,7 @@ class RunSession:
         self.result: Any = None
         self.worker_sem = asyncio.Semaphore(self._resolve_max_workers())
         self.active_wave_size = 1
+        self.wave_early_stop = False
 
     def _resolve_max_workers(self) -> int:
         hard = max(1, int(getattr(self.harness.harness_config, "max_parallel_workers", 3) or 3))
@@ -358,7 +366,7 @@ class ResearchGraphRunner:
 
         return await compile_structured_brief_with_llm(
             session.ctx.task_query,
-            agent=getattr(self.harness, "agent", None),
+            agent=getattr(self.harness, "control_agent", None),
             budget_manager=session.budget_manager,
             conversation_delta=str(getattr(session.ctx, "conversation_summary", "") or ""),
             session_id=session.session_id,
@@ -370,6 +378,7 @@ class ResearchGraphRunner:
         from app.research.runtime.graph import brief_node
 
         session = _require_session(gstate)
+        brief_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
         state = dict(gstate)
         if not isinstance(state.get("brief"), dict) or not state.get("brief"):
@@ -421,6 +430,11 @@ class ResearchGraphRunner:
             },
             input_refs=[{"type": "brief", "id": brief.brief_id}],
         )
+        note_stage_duration(
+            session.state,
+            "brief",
+            int((time.perf_counter() - brief_started) * 1000),
+        )
         return update
 
     async def node_supervisor(self, gstate: dict[str, Any]) -> dict[str, Any]:
@@ -431,6 +445,7 @@ class ResearchGraphRunner:
         from app.research.supervisor.models import ResearchTaskRequest
 
         session = _require_session(gstate)
+        supervisor_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
         state = _sync_assessments(session, dict(gstate))
         brief = StructuredResearchBrief.from_dict(state.get("brief"))
@@ -450,12 +465,13 @@ class ResearchGraphRunner:
             phase=WorkflowPhase.SUPERVISOR.value,
             status="start",
             attributes={
-                "iteration": int((state.get("supervisor") or {}).get("iteration") or 0) + 1,
+                "iteration": int((state.get("supervisor") or {}).get("iteration") or 0)
+                + (1 if state.get("plan") else 0),
                 "finding_count": len(findings),
                 "coverage_status": judgement.status if judgement else "unknown",
             },
         )
-        supervisor = SupervisorAgent(getattr(self.harness, "agent", None), session.budget_manager)
+        supervisor = SupervisorAgent(getattr(self.harness, "control_agent", None), session.budget_manager)
         action = await supervisor.decide(
             brief,
             findings,
@@ -473,12 +489,19 @@ class ResearchGraphRunner:
         payload: dict[str, Any] = {
             "supervisor_action": action.to_dict(),
             "supervisor": {
-                "iteration": int((state.get("supervisor") or {}).get("iteration") or 0) + 1,
+                "iteration": int((state.get("supervisor") or {}).get("iteration") or 0)
+                + (1 if state.get("plan") else 0),
                 "last_action": action.action,
                 "reasoning_summary": action.reason,
             },
         }
-        if action.action == "CONDUCT_RESEARCH" and action.research_tasks:
+        raw_iteration_limit = state.get("budget", {}).get("max_replan_count")
+        iteration_limit = 3 if raw_iteration_limit is None else max(0, int(raw_iteration_limit))
+        supervisor_iteration_exceeded = (
+            int(payload["supervisor"]["iteration"]) >= max(1, iteration_limit)
+        )
+        if action.action == "CONDUCT_RESEARCH" and action.research_tasks and not supervisor_iteration_exceeded:
+            session.wave_early_stop = False
             task_requests = [ResearchTaskRequest.from_dict(item.to_dict()) for item in action.research_tasks]
             wave_id = int(state.get("dispatch_wave_id") or 0) + 1
             admission = admit_dispatch(
@@ -641,6 +664,11 @@ class ResearchGraphRunner:
             },
             output_refs=[{"type": "supervisor_action", "id": payload["supervisor"]["last_action"]}],
         )
+        note_stage_duration(
+            session.state,
+            "supervisor",
+            int((time.perf_counter() - supervisor_started) * 1000),
+        )
         return transition_update(gstate, WorkflowPhase.SUPERVISOR, payload)
 
     async def node_researcher(self, gstate: dict[str, Any]) -> dict[str, Any]:
@@ -686,23 +714,26 @@ class ResearchGraphRunner:
         from app.research.coverage.judge import CoverageJudge
 
         session = _require_session(gstate)
+        coverage_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
         state = _sync_assessments(session, dict(gstate))
         brief = StructuredResearchBrief.from_dict(state.get("brief"))
         findings = [row for row in state.get("findings") or [] if isinstance(row, dict)]
         claims = [row for row in state.get("claims") or [] if isinstance(row, dict)]
         conflicts = [row for row in state.get("claim_conflicts") or [] if isinstance(row, dict)]
+        evidence_records = [row for row in state.get("evidence_records") or [] if isinstance(row, dict)]
         previous_raw = state.get("coverage_judgement")
         previous = (
             CoverageJudgement.from_dict(previous_raw)
             if isinstance(previous_raw, dict) and previous_raw
             else None
         )
-        judgement = await CoverageJudge(getattr(self.harness, "agent", None), session.budget_manager).evaluate(
+        judgement = await CoverageJudge(getattr(self.harness, "control_agent", None), session.budget_manager).evaluate(
             brief,
             findings,
             claim_conflicts=conflicts,
             claims=claims,
+            evidence=evidence_records,
             previous=previous,
         )
         supported_count = sum(
@@ -798,6 +829,11 @@ class ResearchGraphRunner:
                 dispatch_wave_id=int(gstate.get("dispatch_wave_id") or 0),
             ),
         )
+        note_stage_duration(
+            session.state,
+            "coverage",
+            int((time.perf_counter() - coverage_started) * 1000),
+        )
         return transition_update(gstate, WorkflowPhase.COVERAGE_JUDGE, update)
 
     async def _bridge_interrupts(self, result: dict[str, Any], session: RunSession) -> Any:
@@ -850,7 +886,10 @@ class ResearchGraphRunner:
     async def node_research_worker(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from langgraph.types import interrupt
 
+        from app.research.brief.models import StructuredResearchBrief
+        from app.research.coverage.judge import CoverageJudgement, judge_coverage
         from app.research.execution.worker_executor import WorkerExecutorV2
+        from app.research.runtime.ingestion import ingest_new_worker_results
         from app.research.runtime.findings import normalize_findings
         from app.research.runtime.isolation import worker_row
         from app.research.runtime.worker import ResearchContext, ResearchTask, WorkerResult
@@ -910,10 +949,11 @@ class ResearchGraphRunner:
         result = await WorkerExecutorV2(self.harness, session).execute(task, context)
         if not isinstance(result, WorkerResult):
             raise TypeError("WorkerRuntime.execute must return WorkerResult")
+        note_worker_durations(session.state, [result])
         if result.raw is not None:
             session.state.step_results.append(result.raw)
         row = worker_row(task_id, step, result.ok, result.raw) if result.raw is not None else {"task_id": task_id, "ok": result.ok, "summary": result.summary, "step_type": step.step_type, "payload": {"facts": result.facts, "sources": result.sources, "findings": result.findings, "evidence_ids": result.evidence_refs, "candidates": result.candidates}}
-        row.update(status=result.status, fail_reason=result.fail_reason, queue_ms=result.queue_ms, execution_ms=result.execution_ms)
+        row.update(status=result.status, fail_reason=result.fail_reason, queue_ms=result.queue_ms, execution_ms=result.execution_ms, metrics=result.metrics)
         row.update(
             dispatch_wave_id=dispatch_wave_id,
             attempt=attempt,
@@ -926,6 +966,26 @@ class ResearchGraphRunner:
             "evidence_ids": result.evidence_refs,
             "search_queries": list((row.get("payload") or {}).get("search_queries") or []),
         }
+        row["task_metadata"] = dict(step.metadata or {})
+        ingest_update = ingest_new_worker_results({**gstate, "worker_results": [row]})
+        if ingest_update:
+            brief = StructuredResearchBrief.from_dict(gstate.get("brief"))
+            previous_raw = gstate.get("coverage_judgement")
+            previous = (
+                CoverageJudgement.from_dict(previous_raw)
+                if isinstance(previous_raw, dict) and previous_raw
+                else None
+            )
+            partial_state = {**gstate, **ingest_update}
+            judgement = judge_coverage(
+                brief,
+                [row for row in partial_state.get("findings") or [] if isinstance(row, dict)],
+                claims=[row for row in partial_state.get("claims") or [] if isinstance(row, dict)],
+                evidence=[row for row in partial_state.get("evidence_records") or [] if isinstance(row, dict)],
+                previous=previous,
+            )
+            if judgement.sufficient:
+                session.wave_early_stop = True
         execution_status, result_status, stop_reason, failure = worker_result_lifecycle(result)
         tasks = transition_task(
             running,
@@ -952,7 +1012,18 @@ class ResearchGraphRunner:
                 "dispatch_wave_id": dispatch_wave_id,
             },
         )
-        for evidence_id in result.evidence_refs:
+        evidence_events = list(ingest_update.get("evidence_records") or [])
+        if not evidence_events:
+            evidence_events = [
+                {
+                    "evidence_id": evidence_id,
+                    "artifact_id": evidence_id,
+                    "source_kind": "artifact",
+                    "source_tier": "SECONDARY",
+                }
+                for evidence_id in result.evidence_refs
+            ]
+        for evidence in evidence_events:
             _emit(
                 session,
                 "evidence.registered",
@@ -961,21 +1032,27 @@ class ResearchGraphRunner:
                 task_id=task_id,
                 attempt=attempt,
                 attributes={
-                    "evidence_id": evidence_id,
-                    "artifact_id": evidence_id,
-                    "source_kind": "artifact",
+                    "evidence_id": str(evidence.get("evidence_id") or ""),
+                    "source_id": str(evidence.get("source_id") or ""),
+                    "artifact_id": str(evidence.get("artifact_ref") or evidence.get("artifact_id") or ""),
+                    "source_kind": str(evidence.get("source_kind") or "artifact"),
+                    "locator": str(evidence.get("locator") or ""),
+                    "source_tier": str(evidence.get("source_tier") or "SECONDARY"),
                     "support_type": "partial",
-                    "source_quality": "untrusted_external",
+                    "source_quality": str(evidence.get("source_tier") or "SECONDARY"),
                 },
             )
-        row["task_metadata"] = dict(step.metadata or {})
-        return {
+        worker_update = {
             "phase": WorkflowPhase.EXECUTE.value,
             "tasks": {task_id: tasks[task_id]},
             "worker_results": [row],
             "evidence_refs": result.evidence_refs,
             "findings": normalized_findings,
         }
+        if ingest_update:
+            worker_update.update(ingest_update)
+            worker_update["findings"] = list(ingest_update.get("findings") or normalized_findings)
+        return worker_update
 
     def _synthesis_budget_attributes(self, session: RunSession, executor: Any) -> dict[str, Any]:
         manager = getattr(session, "budget_manager", None)
@@ -1087,6 +1164,7 @@ class ResearchGraphRunner:
         from app.research.runtime.worker import ResearchContext
 
         session = _require_session(gstate)
+        synthesis_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
         if bool(gstate.get("fast_path")):
             manager = getattr(session.ctx, "citation_manager", None)
@@ -1146,6 +1224,11 @@ class ResearchGraphRunner:
                     "fail_reason": "" if answer.sufficient else "insufficient_trusted_evidence",
                     "fallback_action": "",
                 },
+            )
+            note_stage_duration(
+                session.state,
+                "synthesis",
+                int((time.perf_counter() - synthesis_started) * 1000),
             )
             return transition_update(
                 gstate,
@@ -1334,6 +1417,11 @@ class ResearchGraphRunner:
                 "fallback_action": "deterministic_partial" if fallback else "",
             },
         )
+        note_stage_duration(
+            session.state,
+            "synthesis",
+            int((time.perf_counter() - synthesis_started) * 1000),
+        )
         return transition_update(
             gstate,
             WorkflowPhase.SYNTHESIS,
@@ -1347,6 +1435,7 @@ class ResearchGraphRunner:
 
     async def node_quality_gate(self, gstate: dict[str, Any]) -> dict[str, Any]:
         session = _require_session(gstate)
+        quality_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
         content = str(gstate.get("final_content") or "").strip()
         judgement = dict(gstate.get("coverage_judgement") or {})
@@ -1429,12 +1518,18 @@ class ResearchGraphRunner:
             status=str(decision.get("action") or "unknown"),
             attributes=control_decision_event_attributes(decision),
         )
+        note_stage_duration(
+            session.state,
+            "quality",
+            int((time.perf_counter() - quality_started) * 1000),
+        )
         return update
 
     async def node_finalize(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.runtime.graph import finalize_node
 
         session = _require_session(gstate)
+        finalize_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
         session.state.final_content = str(gstate.get("final_content") or "")
         termination = finalize_node(cast(ResearchState, gstate))
@@ -1481,7 +1576,16 @@ class ResearchGraphRunner:
                     "workers": len(gstate.get("tasks") or {}),
                     "primary_sources": int(source_counts.get(SourceTier.PRIMARY.value, 0) or 0),
                     "partial_renderer_called": str((gstate.get("control_decision") or {}).get("action") or "") == "deliver_partial",
+                    "latency": critical_path_summary(session.state.metadata),
                 }
             )
+        note_stage_duration(
+            session.state,
+            "finalize",
+            int((time.perf_counter() - finalize_started) * 1000),
+        )
+        note_final_answer(session.state)
+        if isinstance(result.metadata, dict):
+            result.metadata["latency"] = critical_path_summary(session.state.metadata)
         session.result = result
         return termination

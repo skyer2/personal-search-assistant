@@ -71,10 +71,22 @@ observability.internal_error · eval.scored
 | `findings` / `finding_count` | `finding.compressed` |
 | `coverage_judgements` / `coverage_judgement_count` | `coverage.assessed` |
 | `progress` / `progress_count` | `progress.assessed` |
-| `workers` / `worker_count` | `worker.started` / `worker.done` |
+| `workers` / `worker_count` | `worker.started` / `worker.completed` / `worker.failed` |
 | `evidence`, `synthesis`, `lineage`, `quality` | 对应执行与交付事件 |
 
 Trace Viewer 的 `Understanding` 面板展示 Brief 与拓扑；`Supervisor / Coverage` 面板展示策略决策、压缩发现、Coverage 判断和行动缺口。
+
+## UI Projection Contract
+
+- Live 和 Replay 都从 canonical event 计算 Worker 成功 / partial / failed、工具调用、工具失败、运行异常与 Provider 异常；不能靠 legacy callback 双计数。
+- 新 Run 提交时原子清空事件、文件、结果、状态与统计；旧 Run 的迟到事件按 `run_id` 丢弃。
+- `SOURCES` 面板展示当前 Run 实际发生的 search query、已采纳 evidence、上传文件、数据库 / KB 来源和来源质量分层，不展示静态能力清单。
+- Trace Viewer 中 `Evidence` 是证据源登记表，`Lineage` 是结论溯源，`Span Tree` 是执行因果与耗时；三者不能合并成一个“证据链”概念。
+- 打开 `Span Tree` 时同时加载事件索引，选中 span 后可直接查看 `Related Events`，不需要先进入 JSONL 页签。
+
+## Latency Breakdown
+
+Run latency 汇总包含 brief、supervisor、worker、coverage、synthesis、quality 与 finalize 阶段。Worker 结果还包含 queue、execution、tool、LLM、token、cache、artifact 与失败原因指标。任何分钟级等待都应能定位到具体阶段或 Worker，而不是只看到全局 elapsed。
 
 ## 看哪里
 
@@ -82,7 +94,7 @@ Trace Viewer 的 `Understanding` 面板展示 Brief 与拓扑；`Supervisor / Co
 |---|---|
 | 实时 UI | 提问后的过程框 / 执行过程（WebSocket `monitor_event`）。刷新后走 `GET /api/sessions/{id}/bootstrap`，WS `subscribe.after_seq` replay，按 `(run_id, seq)` 去重 |
 | Run 投影 | `RunStore` SQLite：query / status / result / HITL / timestamps / 文件 metadata。不要从 Trace 重建业务状态 |
-| 因果树 | `GET /api/traces/tree/{session_id}` |
+| Span Tree（执行因果与耗时） | `GET /api/traces/tree/{session_id}` |
 | Brief / Topology | Trace Viewer `Understanding` 页签 |
 | Supervisor / Findings / Coverage | Trace Viewer `Supervisor / Coverage` 页签 |
 | Worker / Evidence / Synthesis / Quality | Trace Viewer 对应页签 |
@@ -98,7 +110,7 @@ Trace Viewer 的 `Understanding` 面板展示 Brief 与拓扑；`Supervisor / Co
 
 | 字段 | 含义 |
 |---|---|
-| `action` | `THINK` / `CONDUCT_RESEARCH` / `COMPLETE` |
+| `action` | `CONDUCT_RESEARCH` / `COMPLETE` |
 | `runtime_action` | `RuntimePolicy` 的 `dispatch` / `retry` / `synthesize` / `deliver_partial` / `wait` / `stop` |
 | `reason` | Supervisor 的研究理由 |
 | `runtime_reasons` | 预算、安全、终态等确定性理由 |
@@ -112,14 +124,14 @@ Trace Viewer 的 `Understanding` 面板展示 Brief 与拓扑；`Supervisor / Co
 
 `trace_integrity` 是生产门禁，不只是 UI 展示：
 
-- Worker run 必须同时有 `worker.started` 与 `worker.done`，不允许只有 done 的“幽灵完成”。
+- Worker run 必须同时有 `worker.started` 与 `worker.completed` / `worker.failed`，不允许只有完成态的“幽灵完成”。
 - 每次执行必须有至少一个 root span；Worker 必须挂在 Research root / synthesis 相应 span 下。
 - Research synthesis 阶段必须有 synthesis span / event；失败时必须给出 `fail_reason`。
 - Evidence 引用必须形成 lineage；`synthesis.failed` 与 `evidence_ids` 也计入 lineage。
 - Simple Fact fast path 只校验 worker 生命周期与 root span，不要求开放研究图的 coverage / synthesis 事件。
 - 存在可用 evidence 且 final content 为空时，Trace Integrity 必须失败，即使外层 run 没有抛异常。
 
-观测系统自身失败不能吞掉业务事件：Worker span 创建失败会 emit `observability.internal_error`，随后 `worker.started` / `worker.done` 仍按业务事实记录。
+观测系统自身失败不能吞掉业务事件：Worker span 创建失败会 emit `observability.internal_error`，随后 `worker.started` / `worker.completed` 仍按业务事实记录。
 
 ## Synthesis 观测
 

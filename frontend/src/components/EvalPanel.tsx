@@ -85,7 +85,7 @@ export function EvalPanel() {
       <div className="panel-heading-row">
         <div>
           <span className="panel-kicker">DETERMINISTIC REGRESSION</span>
-          <Typography.Title level={4}>Regression Gate</Typography.Title>
+          <Typography.Title level={4}>Regression Eval</Typography.Title>
         </div>
         <Space>
           <Button icon={<ReloadOutlined aria-hidden />} loading={loading} onClick={() => void load()}>
@@ -110,6 +110,13 @@ export function EvalPanel() {
           type="warning"
         />
       ) : null}
+
+      <Alert
+        message="Regression Eval 与 Run Quality Eval 是两类结论"
+        description="本面板只回答“这次代码改动是否破坏确定性合同”。单个真实回答的 grounding、citation、coverage、latency 与成本，请在该 Run 的 Trace → Run Quality Eval 中查看。"
+        showIcon
+        type="info"
+      />
 
       <div className="eval-stats-grid">
         <Card loading={loading} size="small">

@@ -1,7 +1,11 @@
 from app.research.coverage.assessor import assess_coverage
 from app.research.coverage.compiler import compile_coverage_contract
+from app.research.coverage.judge import judge_coverage
+from app.research.brief.models import SourceRequirements, StructuredResearchBrief
+from app.research.findings.models import ResearchFinding
 from app.research.planning.candidate import stable_candidate_id
 from app.research.spec.compiler import compile_research_spec
+from dataclasses import replace
 
 
 def test_landscape_contract_expands_after_candidate_discovery():
@@ -39,3 +43,69 @@ def test_coverage_is_recomputed_from_claims_and_evidence():
     assert state_one.to_dict() == state_two.to_dict()
     assert state_one.coverage_ratio == 1.0
     assert state_one.covered_ids == [unit.coverage_id for unit in contract.units]
+
+
+def test_success_criteria_and_source_identity_drive_coverage():
+    brief = StructuredResearchBrief(
+        brief_id="brief-coverage",
+        version=1,
+        objective="Evaluate Company A",
+        user_intent="research",
+        key_questions=("How should Company A be studied?",),
+        success_criteria=("Confirm Company A funding",),
+        source_requirements=SourceRequirements(min_independent_sources=2),
+    )
+    finding = ResearchFinding(
+        finding_id="finding-1",
+        task_id="task-1",
+        summary="Unrelated wording for text-overlap fallback",
+        claims=("Unrelated claim",),
+        evidence_ids=("evidence-1", "evidence-2"),
+        supported_criteria=("Confirm Company A funding",),
+    )
+    same_source = [
+        {"evidence_id": "evidence-1", "source_id": "company-a.com"},
+        {"evidence_id": "evidence-2", "source_id": "company-a.com"},
+    ]
+    partial = judge_coverage(brief, [finding], evidence=same_source)
+    assert partial.sufficient is False
+    assert partial.criteria[0].status == "partial"
+    assert partial.criteria[0].evidence_ids == ("evidence-1", "evidence-2")
+    assert partial.criteria[0].source_ids == ("company-a.com",)
+
+    independent_finding = replace(finding, evidence_ids=("evidence-1", "evidence-3"))
+    independent = judge_coverage(
+        brief,
+        [independent_finding],
+        evidence=[
+            *same_source,
+            {"evidence_id": "evidence-3", "source_id": "reuters.com"},
+        ],
+    )
+    assert independent.sufficient is True
+    assert independent.criteria[0].status == "supported"
+
+
+def test_no_evidence_delta_cannot_close_gap():
+    brief = StructuredResearchBrief(
+        brief_id="brief-no-delta",
+        version=1,
+        objective="Evaluate Company A",
+        user_intent="research",
+        success_criteria=("Confirm Company A funding",),
+        source_requirements=SourceRequirements(min_independent_sources=2),
+    )
+    finding = ResearchFinding(
+        finding_id="finding-1",
+        task_id="task-1",
+        summary="Company A funding",
+        claims=("Company A funding",),
+        evidence_ids=("evidence-1",),
+        supported_criteria=("Confirm Company A funding",),
+    )
+    evidence = [{"evidence_id": "evidence-1", "source_id": "company-a.com"}]
+    previous = judge_coverage(brief, [finding], evidence=evidence)
+    repeated = judge_coverage(brief, [finding], evidence=evidence, previous=previous)
+    assert previous.sufficient is False
+    assert repeated.sufficient is False
+    assert repeated.status == "gap"

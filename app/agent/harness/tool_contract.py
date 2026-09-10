@@ -279,21 +279,68 @@ def wrap_tool_with_contract(tool: Any, *, tool_name: str = "", step_type: str = 
     args_schema = getattr(tool, "args_schema", None)
 
     def _run(**kwargs: Any) -> Any:
+        import json
+        import time
+
         from app.research.runtime.activity import (
             get_current_worker_activity,
             tracked_worker_operation,
         )
 
-        with tracked_worker_operation(f"tool.{name}"):
-            if hasattr(tool, "invoke"):
-                raw = tool.invoke(kwargs)
-            else:
-                func = getattr(tool, "func", None)
-                raw = func(**kwargs) if callable(func) else tool(**kwargs)
-        tracker = get_current_worker_activity()
-        if tracker is not None:
-            tracker.artifact_written()
-        return apply_tool_output_contract(raw, tool_name=name, step_type=step_type)
+        from app.observability import get_recorder
+
+        recorder = get_recorder()
+        call_id = ""
+        started = time.perf_counter()
+        if recorder.is_active:
+            call_id = recorder.begin_tool(name, args=kwargs)
+        try:
+            with tracked_worker_operation(f"tool.{name}"):
+                if hasattr(tool, "invoke"):
+                    raw = tool.invoke(kwargs)
+                else:
+                    func = getattr(tool, "func", None)
+                    raw = func(**kwargs) if callable(func) else tool(**kwargs)
+            output = apply_tool_output_contract(raw, tool_name=name, step_type=step_type)
+            tracker = get_current_worker_activity()
+            if tracker is not None:
+                tracker.artifact_written()
+            if recorder.is_active:
+                payload = json.loads(output) if isinstance(output, str) else {}
+                artifact_ids: list[str] = []
+                if isinstance(payload, dict):
+                    artifact_id = str(payload.get("artifact_id") or "")
+                    if artifact_id:
+                        artifact_ids.append(artifact_id)
+                    artifact_ids.extend(
+                        str(item)
+                        for item in payload.get("artifact_ids") or []
+                        if str(item).strip()
+                    )
+                    payload["instrumentation"] = "tool_contract"
+                    output = json.dumps(payload, ensure_ascii=False)
+                recorder.finish_tool(
+                    name,
+                    tool_call_id=call_id,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    status="ok",
+                    result_ref=artifact_ids[0] if artifact_ids else "",
+                    result_count=1 if output else 0,
+                    result_bytes=len(output.encode("utf-8")) if isinstance(output, str) else 0,
+                    artifact_ids=artifact_ids,
+                )
+            return output
+        except Exception as exc:
+            if recorder.is_active:
+                recorder.finish_tool(
+                    name,
+                    tool_call_id=call_id,
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    status="error",
+                    error=f"{type(exc).__name__}: {exc}",
+                    extra={"error_class": type(exc).__name__, "retryable": False},
+                )
+            raise
 
     wrapped = StructuredTool.from_function(
         func=_run,

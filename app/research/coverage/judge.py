@@ -11,6 +11,7 @@ from typing import Any
 from app.api.tracing import build_run_config
 from app.research.brief.models import StructuredResearchBrief
 from app.research.execution.llm_gateway import LLMGateway
+from app.research.evidence.policy import registrable_domain
 from app.research.findings.models import ResearchFinding
 
 
@@ -20,6 +21,7 @@ class CriterionSupport:
     status: str
     supporting_claim_ids: tuple[str, ...] = ()
     evidence_ids: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
     missing: str = ""
     conflicts: tuple[str, ...] = ()
     confidence: float = 0.0
@@ -35,6 +37,7 @@ class CriterionSupport:
             status=str(row.get("status") or "indeterminate"),
             supporting_claim_ids=tuple(str(item) for item in row.get("supporting_claim_ids") or []),
             evidence_ids=tuple(str(item) for item in row.get("evidence_ids") or []),
+            source_ids=tuple(str(item) for item in row.get("source_ids") or []),
             missing=str(row.get("missing") or ""),
             conflicts=tuple(str(item) for item in row.get("conflicts") or []),
             confidence=max(0.0, min(1.0, float(row.get("confidence") or 0.0))),
@@ -107,7 +110,7 @@ def _criterion_id(text: str) -> str:
 
 
 def _criteria(brief: StructuredResearchBrief) -> tuple[tuple[str, str], ...]:
-    rows = tuple(brief.key_questions or brief.success_criteria or (brief.objective,))
+    rows = tuple(brief.success_criteria or brief.key_questions or (brief.objective,))
     return tuple((_criterion_id(item), item) for item in rows if str(item).strip())
 
 
@@ -131,13 +134,31 @@ def _matches(criterion: str, text: str) -> bool:
     return overlap / len(left) >= 0.34 or (word_match and overlap / len(left) >= 0.2)
 
 
+def _source_identity(row: dict[str, Any]) -> str:
+    source_id = str(row.get("source_id") or "").strip()
+    if source_id:
+        return source_id
+    locator = str(row.get("locator") or row.get("url") or "").strip()
+    if locator:
+        return registrable_domain(locator) or locator
+    return str(row.get("evidence_id") or "").strip()
+
+
+def _explicitly_bound(criterion_id: str, criterion: str, finding: ResearchFinding) -> bool:
+    target = _normalize(criterion)
+    targets = {_normalize(item) for item in finding.supported_criteria}
+    return criterion_id in finding.supported_criteria or target in targets
+
+
 def _supported_rows(
+    criterion_id: str,
     criterion: str,
     findings: list[ResearchFinding],
     claims: list[dict[str, Any]],
+    evidence_by_id: dict[str, dict[str, Any]],
     *,
     atomic_fact: bool = False,
-) -> tuple[list[str], list[str], float]:
+) -> tuple[list[str], list[str], float, list[str]]:
     claim_ids: list[str] = []
     evidence_ids: list[str] = []
     for row in claims:
@@ -152,16 +173,28 @@ def _supported_rows(
         if not finding.evidence_ids:
             continue
         text = " ".join([finding.summary, *finding.claims])
-        if _matches(criterion, text):
+        if _explicitly_bound(criterion_id, criterion, finding) or _matches(criterion, text):
             evidence_ids.extend(finding.evidence_ids)
+    source_ids = [
+        _source_identity(evidence_by_id[evidence_id])
+        for evidence_id in dict.fromkeys(evidence_ids)
+        if evidence_id in evidence_by_id
+    ]
+    for finding in findings:
+        if _explicitly_bound(criterion_id, criterion, finding):
+            source_ids.extend(
+                registrable_domain(source) or source
+                for source in finding.source_ids
+                if str(source).strip()
+            )
     if atomic_fact and (claim_ids or evidence_ids):
-        selected_claim_ids = claim_ids[:1]
-        selected_evidence_ids = evidence_ids[:1]
-        return selected_claim_ids, selected_evidence_ids, 0.55
+        return claim_ids[:1], list(dict.fromkeys(evidence_ids)), 0.55, list(dict.fromkeys(source_ids))
+    unique_sources = list(dict.fromkeys(source_ids))
     return (
         list(dict.fromkeys(claim_ids)),
         list(dict.fromkeys(evidence_ids)),
-        min(1.0, 0.35 + 0.2 * len(dict.fromkeys(evidence_ids))),
+        min(1.0, 0.35 + 0.2 * len(unique_sources)),
+        unique_sources,
     )
 
 
@@ -179,6 +212,7 @@ def judge_coverage(
     *,
     claim_conflicts: list[dict[str, Any]] | None = None,
     claims: list[dict[str, Any]] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
     previous: CoverageJudgement | None = None,
 ) -> CoverageJudgement:
     normalized_findings = [
@@ -187,24 +221,31 @@ def judge_coverage(
         if isinstance(item, (ResearchFinding, dict))
     ]
     normalized_claims = [dict(row) for row in claims or [] if isinstance(row, dict)]
+    evidence_by_id = {
+        str(row.get("evidence_id")): dict(row)
+        for row in evidence or []
+        if isinstance(row, dict) and str(row.get("evidence_id") or "").strip()
+    }
     conflicts = [dict(row) for row in claim_conflicts or [] if isinstance(row, dict)]
     conflict_ids = _current_conflict_ids(conflicts)
     required_sources = max(1, int(brief.source_requirements.min_independent_sources or 1))
 
     supports: list[CriterionSupport] = []
     for criterion_id, criterion in _criteria(brief):
-        claim_ids, evidence_ids, confidence = _supported_rows(
+        claim_ids, evidence_ids, confidence, source_ids = _supported_rows(
+            criterion_id,
             criterion,
             normalized_findings,
             normalized_claims,
+            evidence_by_id,
             atomic_fact=brief.user_intent == "atomic_fact",
         )
-        if evidence_ids and len(evidence_ids) >= required_sources:
+        if source_ids and len(source_ids) >= required_sources:
             status = "supported"
             missing = ""
-        elif evidence_ids:
+        elif source_ids or evidence_ids:
             status = "partial"
-            missing = f"{criterion}（仍缺少 {required_sources - len(evidence_ids)} 个独立来源）"
+            missing = f"{criterion}（仍缺少 {required_sources - len(source_ids)} 个独立来源）"
         else:
             status = "unsupported"
             missing = criterion
@@ -214,6 +255,7 @@ def judge_coverage(
                 status=status,
                 supporting_claim_ids=tuple(claim_ids),
                 evidence_ids=tuple(evidence_ids),
+                source_ids=tuple(source_ids),
                 missing=missing,
                 conflicts=(),
                 confidence=confidence if status != "unsupported" else 0.0,
@@ -296,10 +338,10 @@ def judge_coverage(
         status="gap",
         criteria=tuple(supports),
         delta=delta,
-        missing=missing or tuple(brief.key_questions),
+        missing=missing or tuple(row[1] for row in _criteria(brief)),
         conflicts=tuple(sorted(conflict_ids)),
         weak_claims=weak,
-        recommended_next_questions=missing[:4] or tuple(brief.key_questions[:4]),
+        recommended_next_questions=missing[:4],
         reason=(
             "coverage cannot improve without an evidence, claim, gap-closure, or conflict delta"
             if previous is not None and not previous.sufficient and not progress
@@ -320,6 +362,7 @@ class CoverageJudge:
         *,
         claim_conflicts: list[dict[str, Any]] | None = None,
         claims: list[dict[str, Any]] | None = None,
+        evidence: list[dict[str, Any]] | None = None,
         previous: CoverageJudgement | None = None,
     ) -> CoverageJudgement:
         fallback = judge_coverage(
@@ -327,6 +370,7 @@ class CoverageJudge:
             findings,
             claim_conflicts=claim_conflicts,
             claims=claims,
+            evidence=evidence,
             previous=previous,
         )
         if self.agent is None:
@@ -343,6 +387,7 @@ class CoverageJudge:
             f"Brief: {json.dumps(brief.to_dict(), ensure_ascii=False)}\n"
             f"Findings: {json.dumps(serialized, ensure_ascii=False)}\n"
             f"Claims: {json.dumps(claims or [], ensure_ascii=False)}\n"
+            f"Evidence: {json.dumps(evidence or [], ensure_ascii=False)}\n"
         )
         texts: list[str] = []
         try:

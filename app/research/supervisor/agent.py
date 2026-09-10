@@ -60,7 +60,7 @@ class SupervisorAgent:
             task = self._task(
                 index,
                 objective,
-                target_criteria=criteria[:2],
+                target_criteria=(criteria[index - 1],) if criteria else (),
                 target_gaps=(gap,),
             )
             fingerprint = semantic_fingerprint(

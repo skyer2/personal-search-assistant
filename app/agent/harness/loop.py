@@ -150,9 +150,11 @@ class AgentHarness:
         harness_config: Optional[HarnessConfig] = None,
         max_retries: Optional[int] = None,
         workers: Optional[dict[str, Any]] = None,
+        control_agent: Any = None,
     ):
         self.harness_config = harness_config or get_harness_config()
         self.agent = agent
+        self.control_agent = control_agent if control_agent is not None else agent
         self.workers = workers or {}
         self.project_root = project_root
         self._run_citation_manager: Optional[CitationManager] = None
@@ -1636,21 +1638,26 @@ class AgentHarness:
                                     domains.append(host)
                             except Exception:
                                 pass
-                        monitor.report_tool_end(
-                            tool_name,
-                            tool_call_id=tool_call_id,
-                            duration_ms=duration_ms,
-                            status="error" if failed else "ok",
-                            error=content_text[:240] if failed else "",
-                            result_count=result_count,
-                            result_bytes=result_bytes,
-                            artifact_ids=artifact_ids,
-                            extra={
-                                "document_ids": document_ids[:20],
-                                "domains": domains[:12],
-                                "top_k": result_count or None,
-                            },
+                        instrumented_by_contract = (
+                            isinstance(parsed, dict)
+                            and parsed.get("instrumentation") == "tool_contract"
                         )
+                        if not instrumented_by_contract:
+                            monitor.report_tool_end(
+                                tool_name,
+                                tool_call_id=tool_call_id,
+                                duration_ms=duration_ms,
+                                status="error" if failed else "ok",
+                                error=content_text[:240] if failed else "",
+                                result_count=result_count,
+                                result_bytes=result_bytes,
+                                artifact_ids=artifact_ids,
+                                extra={
+                                    "document_ids": document_ids[:20],
+                                    "domains": domains[:12],
+                                    "top_k": result_count or None,
+                                },
+                            )
                     elif is_assistant_message(last_msg):
                         text = message_text(last_msg)
                         if text.strip():

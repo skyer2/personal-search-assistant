@@ -88,11 +88,13 @@ Budget admission runs before dispatch. It approves, defers, or denies each Super
 
 Research cannot consume the synthesis or quality reserves. When research tokens are exhausted, the runtime forces synthesis instead of launching more workers.
 
+Worker leases use the actual approved wave size, not the configured maximum. A task's declared LLM-call ceiling and effort token ceiling are bound to its runtime lease before execution.
+
 ## Workers and Ingest
 
 Workers are bounded leaf researchers. They do not run a second deep-research loop. On timeout or budget stop, artifact-backed evidence is salvaged and the worker becomes a partial result while preserving its exact failure reason.
 
-`ingest_findings` processes only unprocessed WorkerResults for the current wave. Evidence, claims, conflicts, resolutions, findings, and search-query fingerprints are deterministic and idempotent. Replaying a WorkerResult does not duplicate records or findings.
+Each `researcher` result is ingested immediately with the same deterministic ingestion contract. The graph still waits for required workers at the fan-in boundary, but evidence, claims, and findings become available as each worker returns. `ingest_findings` then processes only WorkerResults that were not already ingested; replay never duplicates records. If partial-wave coverage already satisfies the Brief, only optional or speculative workers may be skipped. Required workers are never cancelled for latency.
 
 ## Coverage
 
@@ -132,6 +134,8 @@ Quality failure is never reported as completed research. Budget exhaustion with 
 
 The trace has exactly one `research.run` root. Worker, evidence, coverage, synthesis, quality, and terminal events preserve lineage. Trace Integrity fails when required stages, progress, root spans, lineage, or terminal semantics are missing.
 
+The frontend is a run-scoped projection only. Events, files, progress, worker statistics, tool statistics, and source statistics are filtered by the current `run_id`; late events from an old run cannot update the new turn.
+
 ## Evaluation
 
-Regression covers Brief, Coverage, Supervisor, Evidence, capability scenarios, structural scenarios, production fault injection, and release smoke. See [EVALUATION.md](./EVALUATION.md) and [architecture/research-runtime-stabilization-result.md](./architecture/research-runtime-stabilization-result.md).
+Regression covers Brief, Coverage, Supervisor, Evidence, capability scenarios, structural scenarios, production fault injection, and release smoke. See [EVALUATION.md](./EVALUATION.md).

@@ -1,6 +1,6 @@
 import { PauseCircleOutlined } from "@ant-design/icons";
 import type { ReactNode } from "react";
-import { PHASE_LABELS, PHASE_ORDER, type PhaseProgress } from "../lib/phaseProgress";
+import { PHASE_LABELS, type PhaseProgress } from "../lib/phaseProgress";
 import { describeRunOutcome, type RunStatus } from "../lib/runStatus";
 
 interface RunProgressProps {
@@ -21,13 +21,12 @@ export function RunProgress({
   const paused = runStatus === "awaiting_approval";
   const cancelling = runStatus === "cancelling";
   const live = runStatus === "running";
-  const executePhase = progress.items.find((item) => item.phase === "execute");
+  const executePhase = progress.items.find((item) => item.phase === "research");
   const researchSkipped =
-    !executePhase ||
-    executePhase.tone === "idle" ||
-    ["skipped", "not_started"].includes(executePhase.status);
+    !progress.stageOrder.includes("fast_research") &&
+    (!executePhase || executePhase.tone === "idle" || ["skipped", "not_started"].includes(executePhase.status));
   const qualityFailed =
-    progress.items.some((item) => item.phase === "validate" && item.tone === "failed") ||
+    progress.items.some((item) => item.phase === "quality" && item.tone === "failed") ||
     progress.hasFailed;
   const qualityRepairable = quality?.repairable === true;
   const outcome = describeRunOutcome({ runStatus, quality, termination });
@@ -37,9 +36,7 @@ export function RunProgress({
     : cancelling
       ? "正在取消当前任务"
       : runStatus === "completed"
-        ? progress.completedCount === progress.totalCount
-          ? "运行完成 · 全部阶段已完成"
-          : "运行完成 · 阶段事件不完整"
+        ? "运行完成"
         : runStatus === "partial"
           ? outcome?.title ?? "部分可确认"
         : runStatus === "failed"
@@ -52,10 +49,8 @@ export function RunProgress({
 
   const detail = paused
     ? "计时与进度已冻结，审批通过后才会继续"
-    : runStatus === "completed"
-      ? progress.completedCount === progress.totalCount
-        ? "全部阶段已完成"
-        : "终端状态为完成，但未观察到全部阶段事件；进度不伪造为 100%。"
+      : runStatus === "completed"
+      ? "终端状态为完成；语义阶段按真实事件投影。"
       : runStatus === "partial"
         ? [
             outcome?.detail ?? "已保留可确认结论，但未达到完整交付标准。",
@@ -101,14 +96,17 @@ export function RunProgress({
         <span className="progress-bar-fill" style={{ width: `${Math.max(progress.percent, 4)}%` }} />
       </div>
 
-      <ol className="phase-pipeline" aria-label="Harness 阶段">
-        {PHASE_ORDER.map((phase) => {
+      <ol className="phase-pipeline" aria-label="研究语义阶段">
+        {progress.stageOrder.map((phase) => {
           const item = progress.items.find((entry) => entry.phase === phase);
           const tone = item?.tone ?? "idle";
           return (
             <li className={`phase-pipeline-item phase-pipeline-item--${tone}`} key={phase}>
               <span className="phase-pipeline-dot" />
-              <span>{PHASE_LABELS[phase]}</span>
+              <span>
+                {PHASE_LABELS[phase]}
+                {item?.status ? <small> · {item.status}</small> : null}
+              </span>
             </li>
           );
         })}

@@ -63,6 +63,7 @@ harness = AgentHarness(
     harness_config=harness_config,
     context_builder=ContextBuilder.from_harness_config(),
     workers=worker_graphs,
+    control_agent=model,
 )
 
 

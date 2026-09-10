@@ -4,6 +4,15 @@
 
 本文是评测实现说明。[ARCHITECTURE.md](./ARCHITECTURE.md) 仍是仓库范围权威。
 
+## 两类 Eval
+
+| 类型 | 问题 | 数据源 |
+|---|---|---|
+| Regression Eval | 这次代码改动是否破坏确定性合同？ | 组件 / capability / structural dry-run、baseline diff |
+| Run Quality Eval | 这个真实 Run 的回答质量如何？ | 该 Run 的 `quality.assessed` / `eval.scored`、grounding、citation、coverage、latency、cost |
+
+前者是开发回归门禁，后者是单次运行质量解释。二者不共用同一个“分数”语义，也不能互相冒充。
+
 ## 评测对象
 
 ```text
@@ -30,7 +39,7 @@ L5  Ablation                  Vanilla / Single-iteration / Full
 |---|---|
 | `brief_v1.jsonl` | 用户意图、时效、来源、交付物、fast-path 准入 |
 | `coverage_v1.jsonl` | Brief 对齐的 Coverage Judgement、缺口、冲突、弱证据 |
-| `supervisor_v1.jsonl` | THINK / CONDUCT_RESEARCH / COMPLETE、任务边界、预算终止 |
+| `supervisor_v1.jsonl` | CONDUCT_RESEARCH / COMPLETE、任务边界、预算终止 |
 | `evidence_v1.jsonl` | claim-evidence 绑定、引用覆盖、幻觉检测 |
 
 入口：

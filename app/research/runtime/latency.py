@@ -14,6 +14,10 @@ def _latency_bucket(meta: dict[str, Any]) -> dict[str, Any]:
             "enough_evidence_ms": None,
             "final_answer_ms": None,
             "waves": [],
+            "supervisor_ms": [],
+            "worker_queue_ms": [],
+            "worker_execution_ms": [],
+            "coverage_ms": [],
         }
         meta["latency"] = bucket
     return bucket
@@ -95,12 +99,48 @@ def note_dispatch_wave(
     return wave_id
 
 
+def note_stage_duration(state: Any, stage: str, duration_ms: int) -> None:
+    meta = getattr(state, "metadata", None)
+    if not isinstance(meta, dict) or duration_ms < 0:
+        return
+    bucket = _latency_bucket(meta)
+    if stage in {"supervisor", "coverage"}:
+        values = list(bucket.get(f"{stage}_ms") or [])
+        values.append(int(duration_ms))
+        bucket[f"{stage}_ms"] = values
+        return
+    if stage in {"brief", "synthesis", "quality", "finalize"}:
+        bucket[f"{stage}_ms"] = int(duration_ms)
+
+
+def note_worker_durations(state: Any, results: list[Any]) -> None:
+    meta = getattr(state, "metadata", None)
+    if not isinstance(meta, dict):
+        return
+    bucket = _latency_bucket(meta)
+    queue_values = list(bucket.get("worker_queue_ms") or [])
+    execution_values = list(bucket.get("worker_execution_ms") or [])
+    for result in results:
+        queue_values.append(int(getattr(result, "queue_ms", 0) or 0))
+        execution_values.append(int(getattr(result, "execution_ms", 0) or 0))
+    bucket["worker_queue_ms"] = queue_values
+    bucket["worker_execution_ms"] = execution_values
+
+
 def critical_path_summary(meta: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(meta, dict):
         return {}
     raw_bucket = meta.get("latency")
     bucket = raw_bucket if isinstance(raw_bucket, dict) else {}
     return {
+        "brief_ms": bucket.get("brief_ms"),
+        "supervisor_ms": list(bucket.get("supervisor_ms") or []),
+        "worker_queue_ms": list(bucket.get("worker_queue_ms") or []),
+        "worker_execution_ms": list(bucket.get("worker_execution_ms") or []),
+        "coverage_ms": list(bucket.get("coverage_ms") or []),
+        "synthesis_ms": bucket.get("synthesis_ms"),
+        "quality_ms": bucket.get("quality_ms"),
+        "finalize_ms": bucket.get("finalize_ms"),
         "time_to_first_evidence_ms": bucket.get("first_evidence_ms"),
         "time_to_enough_evidence_ms": bucket.get("enough_evidence_ms"),
         "time_to_final_answer_ms": bucket.get("final_answer_ms"),

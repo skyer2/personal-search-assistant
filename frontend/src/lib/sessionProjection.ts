@@ -4,6 +4,7 @@ import {
   IDLE_ELAPSED_CLOCK,
   type ElapsedClockState
 } from "./elapsedClock";
+import { deriveRunStatus, type RunStatus } from "./runStatus";
 
 const ACTIVE_SERVER = new Set(["queued", "running", "awaiting_approval", "cancelling"]);
 
@@ -18,6 +19,16 @@ export function eventDedupeKey(message: MonitorMessage): string | null {
     return eventId;
   }
   return null;
+}
+
+export function eventBelongsToRun(message: MonitorMessage, runId: string): boolean {
+  const eventRunId =
+    message.run_id ||
+    (typeof message.data?.run_id === "string" ? message.data.run_id : "");
+  if (eventRunId) {
+    return eventRunId === runId;
+  }
+  return Boolean(runId);
 }
 
 export function mergeMonitorEvents(
@@ -84,13 +95,21 @@ export function turnsFromBootstrap(data: SessionBootstrap): ChatTurn[] {
 export function runToTurn(run: RunSnapshot, data: SessionBootstrap): ChatTurn {
   const active = ACTIVE_SERVER.has(String(run.status));
   const isCurrent = data.current_run?.run_id === run.run_id;
+  const result = run.final_result || run.error || "";
+  const runStatus: RunStatus = deriveRunStatus({
+    isRunning: active,
+    events: isCurrent ? data.events || [] : [],
+    result,
+    serverStatus: run.status
+  });
   return {
     id: run.run_id,
     content: run.query,
     events: isCurrent ? data.events || [] : [],
     files: isCurrent ? data.output_files || [] : [],
     isRunning: active,
-    result: run.final_result || run.error || "",
+    result,
+    runStatus,
     timestamp: run.started_at || run.created_at || new Date().toISOString(),
     elapsedClock: runToElapsedClock(run)
   };

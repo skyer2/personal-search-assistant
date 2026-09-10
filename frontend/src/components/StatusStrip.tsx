@@ -7,16 +7,12 @@ import {
   ToolOutlined
 } from "@ant-design/icons";
 import type { ConnectionState } from "../types";
+import type { RunStatsProjection } from "../lib/runStats";
 
 interface StatusStripProps {
   connectionState: ConnectionState;
   isRunning: boolean;
-  stats: {
-    toolEvents: number;
-    assistantEvents: number;
-    errorEvents: number;
-    fileCount: number;
-  };
+  stats: RunStatsProjection;
 }
 
 function connectionLabel(state: ConnectionState): string {
@@ -52,14 +48,42 @@ export function StatusStrip({ connectionState, isRunning, stats }: StatusStripPr
         <ToolOutlined aria-hidden />
         <div>
           <span>工具调用</span>
-          <strong>{stats.toolEvents}</strong>
+          <strong>{stats.toolCalls}</strong>
         </div>
       </div>
       <div className="metric-tile">
         <BranchesOutlined aria-hidden />
         <div>
-          <span>助手调度</span>
-          <strong>{stats.assistantEvents}</strong>
+          <span>Worker 执行</span>
+          <strong>{stats.workerRuns}</strong>
+        </div>
+      </div>
+      <div className="metric-tile">
+        <BranchesOutlined aria-hidden />
+        <div>
+          <span>Worker 成功</span>
+          <strong>{stats.workerSucceeded}</strong>
+        </div>
+      </div>
+      <div className="metric-tile">
+        <BranchesOutlined aria-hidden />
+        <div>
+          <span>Worker 部分</span>
+          <strong>{stats.workerPartial}</strong>
+        </div>
+      </div>
+      <div className={`metric-tile ${stats.workerFailed > 0 ? "metric-tile--error" : ""}`}>
+        <CloseCircleOutlined aria-hidden />
+        <div>
+          <span>Worker 失败</span>
+          <strong>{stats.workerFailed}</strong>
+        </div>
+      </div>
+      <div className={`metric-tile ${stats.toolFailed > 0 ? "metric-tile--error" : ""}`}>
+        <CloseCircleOutlined aria-hidden />
+        <div>
+          <span>工具失败</span>
+          <strong>{stats.toolFailed}</strong>
         </div>
       </div>
       <div className="metric-tile">
@@ -69,11 +93,18 @@ export function StatusStrip({ connectionState, isRunning, stats }: StatusStripPr
           <strong>{stats.fileCount}</strong>
         </div>
       </div>
-      <div className={`metric-tile ${stats.errorEvents > 0 ? "metric-tile--error" : ""}`}>
+      <div className={`metric-tile ${stats.runtimeFailed > 0 ? "metric-tile--error" : ""}`}>
         <CloseCircleOutlined aria-hidden />
         <div>
-          <span>异常</span>
-          <strong>{stats.errorEvents}</strong>
+          <span>运行异常</span>
+          <strong>{stats.runtimeFailed}</strong>
+        </div>
+      </div>
+      <div className={`metric-tile ${stats.providerFailed > 0 ? "metric-tile--error" : ""}`}>
+        <CloseCircleOutlined aria-hidden />
+        <div>
+          <span>Provider 异常</span>
+          <strong>{stats.providerFailed}</strong>
         </div>
       </div>
     </section>

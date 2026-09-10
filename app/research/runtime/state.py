@@ -11,6 +11,7 @@ from app.research.runtime.reducers import merge_findings
 from app.research.runtime.reducers import merge_records
 from app.research.runtime.reducers import merge_strings
 from app.research.runtime.reducers import keep_last
+from app.research.runtime.reducers import merge_value_signals
 
 
 class BudgetState(TypedDict):
@@ -77,7 +78,7 @@ class ResearchState(TypedDict):
     task_fingerprints: Annotated[dict[str, dict[str, Any]], merge_dicts]
     processed_worker_result_ids: Annotated[list[str], merge_strings]
     search_query_fingerprints: Annotated[list[str], merge_strings]
-    research_value_signal: dict[str, Any]
+    research_value_signal: Annotated[dict[str, Any], merge_value_signals]
     low_value_rounds: int
 
     draft_ref: str | None

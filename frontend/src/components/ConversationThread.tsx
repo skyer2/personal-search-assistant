@@ -34,6 +34,7 @@ export interface ChatTurn {
   files: OutputFile[];
   isRunning: boolean;
   result: string;
+  runStatus: RunStatus;
   timestamp: string;
   elapsedClock: ElapsedClockState;
 }
@@ -189,7 +190,9 @@ function qualityFromEvents(events: MonitorMessage[]): Record<string, unknown> | 
 }
 
 function terminationFromEvents(events: MonitorMessage[]): Record<string, unknown> | undefined {
-  const event = [...events].reverse().find((item) => item.event === "task_result");
+  const event = [...events].reverse().find(
+    (item) => item.event === "task_result" || item.event === "termination"
+  );
   const termination = event?.data?.termination;
   return typeof termination === "object" && termination !== null
     ? (termination as Record<string, unknown>)
@@ -372,19 +375,6 @@ function AssistantMessage({
   );
 }
 
-function resultStatus(turn: ChatTurn): RunStatus {
-  if (turn.events.some((event) => event.event === "error")) {
-    return "failed";
-  }
-  if (turn.result || turn.events.some((event) => event.event === "task_result")) {
-    return "completed";
-  }
-  if (turn.events.some((event) => event.event === "task_cancelled")) {
-    return "idle";
-  }
-  return "idle";
-}
-
 export function ConversationThread({
   onArchiveSession,
   onClearSession,
@@ -435,7 +425,7 @@ export function ConversationThread({
             <span className="panel-kicker">TASK EXAMPLES</span>
             <h3>发起一次长任务</h3>
             <p>
-              每个任务走 Brief → Plan → Worker → Progress / Replan。
+              每个任务走 Brief → Supervisor → Worker → Coverage → Synthesis。
             </p>
           </div>
 
@@ -495,7 +485,7 @@ export function ConversationThread({
 
       {turns.map((turn, index) => {
         const isLatest = index === turns.length - 1;
-        const turnStatus = turn.isRunning ? runStatus : resultStatus(turn);
+        const turnStatus = turn.isRunning ? runStatus : turn.runStatus;
         const showProcess = turn.events.length > 0 || turn.isRunning || turnStatus !== "idle";
 
         return (

@@ -69,6 +69,8 @@ def _plan_from_tasks(
                 "kind": "research_task",
                 "task_kind": "supervisor_research",
                 "priority": item.priority,
+                "target_criteria": list(item.target_criteria),
+                "target_gaps": list(item.target_gaps),
                 "expected_evidence": list(item.expected_evidence),
                 "source_hints": list(item.source_hints),
                 "required": True,
@@ -108,7 +110,15 @@ def brief_node(state: ResearchState) -> dict[str, Any]:
     }
     if eligibility.eligible:
         plan = _plan_from_tasks(
-            [ResearchTaskRequest(brief.objective, priority="high", expected_evidence=("primary source",), task_id="fast_path:search")],
+            [
+                ResearchTaskRequest(
+                    brief.objective,
+                    priority="high",
+                    expected_evidence=("primary source",),
+                    target_criteria=tuple(brief.success_criteria or brief.key_questions),
+                    task_id="fast_path:search",
+                )
+            ],
             plan_version=int(state.get("plan_version") or 1),
             planning_mode="brief_fast_path",
         )
@@ -179,7 +189,8 @@ def supervisor_node(state: ResearchState) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "supervisor_action": action.to_dict(),
         "supervisor": {
-            "iteration": int((state.get("supervisor") or {}).get("iteration") or 0) + 1,
+            "iteration": int((state.get("supervisor") or {}).get("iteration") or 0)
+            + (1 if state.get("plan") else 0),
             "last_action": action.action,
             "reasoning_summary": action.reason,
         },
@@ -282,6 +293,7 @@ def coverage_judge_node(state: ResearchState) -> dict[str, Any]:
         brief,
         [row for row in state.get("findings") or [] if isinstance(row, dict)],
         claims=[row for row in state.get("claims") or [] if isinstance(row, dict)],
+        evidence=[row for row in state.get("evidence_records") or [] if isinstance(row, dict)],
         previous=previous,
     )
     progress_projection = {

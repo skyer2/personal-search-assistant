@@ -85,6 +85,7 @@ def run_coverage_eval(path: Path | None = None) -> list[TaskEvalResult]:
             brief,
             list(case.get("findings") or []),
             claim_conflicts=list(case.get("claim_conflicts") or []),
+            evidence=list(case.get("evidence") or []),
         )
         expect = dict(case.get("expected") or {})
         issues: list[str] = []

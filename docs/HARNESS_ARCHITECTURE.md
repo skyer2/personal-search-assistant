@@ -42,9 +42,9 @@ Named graph nodes:
 
 - `brief` compiles the query, conversation delta, entities, key questions, source constraints, freshness, and deliverable into a `StructuredResearchBrief`.
 - Fast-path eligibility is derived from the Brief. A simple fact does not bypass the main graph; it branches after `brief`.
-- `supervisor` turns the Brief and the latest Coverage Judgement into `THINK`, `CONDUCT_RESEARCH`, or `COMPLETE` actions. It owns task granularity and research strategy.
-- `researcher` executes one isolated task attempt and returns raw results. It cannot declare coverage complete.
-- `ingest_findings` compresses worker results into evidence-backed findings.
+- `supervisor` turns the Brief and the latest Coverage Judgement into `CONDUCT_RESEARCH` or `COMPLETE` actions. It owns task granularity and research strategy.
+- `researcher` executes one isolated task attempt, immediately ingests its own typed result, and returns the idempotent ingestion update. It cannot declare coverage complete.
+- `ingest_findings` performs the final wave reconciliation and processes only WorkerResults that were not already ingested.
 - `coverage_judge` compares findings with Brief requirements and emits actionable missing questions, weak claims, and conflicts.
 - `synthesize` consumes Brief, findings, admitted evidence, claims, conflicts, and limitations. It cannot search or mutate coverage.
 - `quality_gate` validates citation, grounding, coverage, and final content. It can only request a bounded synthesis retry or finalize.
@@ -71,6 +71,8 @@ Workers own execution, not research completion. Each result is scoped to:
 - its own raw payload and evidence IDs.
 
 Workers can return findings, facts, candidates, sources, evidence IDs, and confidence. They cannot mutate coverage, mark research complete, or choose the next strategy.
+
+Worker leases split the remaining research capacity by the actual approved wave size and enforce the task-level LLM-call ceiling. Early fan-in does not cancel required workers; it can only skip optional workers after partial-wave Coverage is sufficient.
 
 ## Stop Semantics
 

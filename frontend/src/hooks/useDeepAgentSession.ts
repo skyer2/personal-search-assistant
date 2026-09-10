@@ -23,8 +23,10 @@ import {
   stopElapsedClock
 } from "../lib/elapsedClock";
 import { deriveRunStatus } from "../lib/runStatus";
+import { deriveRunStats } from "../lib/runStats";
 import {
   clockFromRun,
+  eventBelongsToRun,
   eventDedupeKey,
   hitlFromBootstrap,
   isActiveServerStatus,
@@ -65,7 +67,6 @@ export function useDeepAgentSession() {
   const lastEventSeqRef = useRef(0);
   const lastEventFileRefreshRef = useRef(0);
   const currentRunIdRef = useRef("");
-  const statsBaseRef = useRef({ tool: 0, assistant: 0, errors: 0 });
   const [threadId, setThreadId] = useState(getStoredThreadId);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [events, setEvents] = useState<MonitorMessage[]>([]);
@@ -89,7 +90,6 @@ export function useDeepAgentSession() {
   const [currentRunId, setCurrentRunId] = useState("");
   const [serverStatus, setServerStatus] = useState("");
   const [hasMoreEvents, setHasMoreEvents] = useState(false);
-  const [liveStats, setLiveStats] = useState({ tool: 0, assistant: 0, errors: 0 });
 
   const applyCurrentRun = useCallback((runId: string) => {
     currentRunIdRef.current = runId;
@@ -100,34 +100,12 @@ export function useDeepAgentSession() {
     if (incoming.length === 0) {
       return;
     }
-    const delta = { tool: 0, assistant: 0, errors: 0 };
     incoming.forEach((message) => {
       const seq = messageSeq(message);
       if (seq > lastEventSeqRef.current) {
         lastEventSeqRef.current = seq;
       }
-      const replayed = Boolean(message.replay || message.data?.replay);
-      if (!replayed) {
-        if (message.event === "tool_start") {
-          delta.tool += 1;
-        }
-        if (message.event === "assistant_call" || message.event === "worker") {
-          if (message.event === "assistant_call" || /\[worker\] start/.test(message.message)) {
-            delta.assistant += 1;
-          }
-        }
-        if (message.event === "error" || message.event === "tool_error") {
-          delta.errors += 1;
-        }
-      }
     });
-    if (delta.tool || delta.assistant || delta.errors) {
-      setLiveStats((previous) => ({
-        tool: previous.tool + delta.tool,
-        assistant: previous.assistant + delta.assistant,
-        errors: previous.errors + delta.errors
-      }));
-    }
     setEvents((previous) => mergeMonitorEvents(previous, incoming, seenEventKeysRef.current, VIEW_EVENT_WINDOW));
   }, []);
 
@@ -135,7 +113,7 @@ export function useDeepAgentSession() {
     seenEventKeysRef.current.clear();
     lastEventSeqRef.current = 0;
     currentRunIdRef.current = "";
-    statsBaseRef.current = { tool: 0, assistant: 0, errors: 0 };
+    lastEventFileRefreshRef.current = 0;
     setEvents([]);
     setFiles([]);
     setSessionPath("");
@@ -153,7 +131,6 @@ export function useDeepAgentSession() {
     setCurrentRunId("");
     setServerStatus("");
     setHasMoreEvents(false);
-    setLiveStats({ tool: 0, assistant: 0, errors: 0 });
     setSessionFound(true);
     setBootstrapNotice("");
     setHydrated(false);
@@ -255,12 +232,6 @@ export function useDeepAgentSession() {
       setIsCancelling(current?.status === "cancelling");
       setServerStatus(current?.status || "");
       setElapsedClock(clockFromRun(current));
-      statsBaseRef.current = {
-        tool: data.stats?.tool_calls || 0,
-        assistant: data.stats?.assistant_calls || 0,
-        errors: data.stats?.errors || 0
-      };
-      setLiveStats({ tool: 0, assistant: 0, errors: 0 });
       setInitialTurns(turnsFromBootstrap(data));
       if (current?.status === "failed" && current.error) {
         setLastError(current.error);
@@ -365,11 +336,7 @@ export function useDeepAgentSession() {
             return;
           }
           // Run 隔离：忽略其他 Run（含旧 Run 迟到的 terminal 事件）的实时消息
-          if (
-            payload.run_id &&
-            currentRunIdRef.current &&
-            payload.run_id !== currentRunIdRef.current
-          ) {
+          if (!eventBelongsToRun(payload, currentRunIdRef.current)) {
             return;
           }
 
@@ -496,19 +463,22 @@ export function useDeepAgentSession() {
       }
 
       const startedAt = Date.now();
-    setElapsedClock(startElapsedClock(startedAt));
+      setElapsedClock(startElapsedClock(startedAt));
       setIsRunning(true);
       setIsCancelling(false);
       setEvents([]);
+      setFiles([]);
       seenEventKeysRef.current.clear();
       lastEventSeqRef.current = 0;
+      lastEventFileRefreshRef.current = 0;
+      currentRunIdRef.current = "";
+      setCurrentRunId("");
+      setHasMoreEvents(false);
       setResult("");
       setLastError("");
       setHitlPending(null);
       setTaskFailure(null);
       setServerStatus("running");
-      statsBaseRef.current = { tool: 0, assistant: 0, errors: 0 };
-      setLiveStats({ tool: 0, assistant: 0, errors: 0 });
       try {
         const response = await startTask(cleanQuery, threadId, { mode });
         if (response.thread_id && response.thread_id !== threadId) {
@@ -517,6 +487,9 @@ export function useDeepAgentSession() {
         }
         if (response.run_id) {
           applyCurrentRun(response.run_id);
+          void fetchRunEvents(response.run_id)
+            .then((eventResponse) => ingestEvents(eventResponse.events || []))
+            .catch(() => undefined);
         }
         setSessionFound(true);
         setBootstrapNotice("");
@@ -529,7 +502,7 @@ export function useDeepAgentSession() {
         throw error;
       }
     },
-    [applyCurrentRun, threadId]
+    [applyCurrentRun, ingestEvents, threadId]
   );
 
   const cancelCurrentTask = useCallback(async () => {
@@ -660,13 +633,8 @@ export function useDeepAgentSession() {
   }, [events, ingestEvents]);
 
   const stats = useMemo(
-    () => ({
-      toolEvents: statsBaseRef.current.tool + liveStats.tool,
-      assistantEvents: statsBaseRef.current.assistant + liveStats.assistant,
-      errorEvents: statsBaseRef.current.errors + liveStats.errors,
-      fileCount: files.length
-    }),
-    [files.length, liveStats]
+    () => deriveRunStats(events, { fileCount: files.length, runId: currentRunId }),
+    [currentRunId, events, files.length]
   );
 
   const runStatus = useMemo(

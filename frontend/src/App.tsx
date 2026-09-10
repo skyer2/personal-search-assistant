@@ -13,7 +13,7 @@ import {
   ToolOutlined
 } from "@ant-design/icons";
 import { Alert, App as AntApp, Button } from "antd";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ApprovalPanel } from "./components/ApprovalPanel";
 import { ChatComposer } from "./components/ChatComposer";
 import { ConversationThread } from "./components/ConversationThread";
@@ -26,6 +26,7 @@ import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
 import { IDLE_ELAPSED_CLOCK } from "./lib/elapsedClock";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
 import { usePersistentNumber } from "./hooks/usePersistentNumber";
+import { deriveRunSources } from "./lib/runStats";
 import { isLiveRun, runStatusLabel } from "./lib/runStatus";
 import type { ConnectionState, UploadedItem, WorkspaceTab } from "./types";
 
@@ -47,6 +48,7 @@ function createTurn(content: string): ChatTurn {
     files: [],
     isRunning: true,
     result: "",
+    runStatus: "running",
     timestamp: new Date().toISOString(),
     elapsedClock: IDLE_ELAPSED_CLOCK
   };
@@ -63,6 +65,10 @@ export default function App() {
   const streamRef = useRef<HTMLElement | null>(null);
   const failureHandledRef = useRef<string | null>(null);
   const session = useDeepAgentSession();
+  const sourceStats = useMemo(
+    () => deriveRunSources(session.events, { runId: session.currentRunId }),
+    [session.currentRunId, session.events]
+  );
 
   useEffect(() => {
     if (!session.hydrated) {
@@ -89,12 +95,21 @@ export default function App() {
         files: session.files,
         isRunning: session.isRunning,
         result: session.result,
-        elapsedClock: session.elapsedClock
+        elapsedClock: session.elapsedClock,
+        runStatus: session.runStatus
       };
 
       return [...previous.slice(0, index), nextLatestTurn, ...previous.slice(index + 1)];
     });
-  }, [session.currentRunId, session.elapsedClock, session.events, session.files, session.isRunning, session.result]);
+  }, [
+    session.currentRunId,
+    session.elapsedClock,
+    session.events,
+    session.files,
+    session.isRunning,
+    session.result,
+    session.runStatus
+  ]);
 
   useEffect(() => {
     if (!session.taskFailure) {
@@ -119,7 +134,8 @@ export default function App() {
         {
           ...lastTurn,
           isRunning: false,
-          result: `执行失败：${failureMessage}`
+          result: `执行失败：${failureMessage}`,
+          runStatus: "failed"
         }
       ];
     });
@@ -270,7 +286,7 @@ export default function App() {
             type={workspace === "eval" ? "primary" : "default"}
             block
           >
-            Eval 面板
+            Regression Eval
           </Button>
           <Button
             className={workspace === "trace" ? "workspace-nav-btn workspace-nav-btn--active" : "workspace-nav-btn"}
@@ -321,30 +337,47 @@ export default function App() {
           <div className="sidebar-status">
             <ToolOutlined aria-hidden />
             <span>工具调用</span>
-            <strong>{session.stats.toolEvents}</strong>
+            <strong>{session.stats.toolCalls}</strong>
           </div>
           <div className="sidebar-status">
             <BranchesOutlined aria-hidden />
-            <span>助手调度</span>
-            <strong>{session.stats.assistantEvents}</strong>
+            <span>Worker 执行</span>
+            <strong>{session.stats.workerRuns}</strong>
           </div>
-          <div className={session.stats.errorEvents > 0 ? "sidebar-status sidebar-status--error" : "sidebar-status"}>
+          <div className={session.stats.workerFailed > 0 ? "sidebar-status sidebar-status--error" : "sidebar-status"}>
             <CloseCircleOutlined aria-hidden />
-            <span>异常</span>
-            <strong>{session.stats.errorEvents}</strong>
+            <span>Worker 失败</span>
+            <strong>{session.stats.workerFailed}</strong>
+          </div>
+          <div className={session.stats.toolFailed > 0 ? "sidebar-status sidebar-status--error" : "sidebar-status"}>
+            <CloseCircleOutlined aria-hidden />
+            <span>工具失败</span>
+            <strong>{session.stats.toolFailed}</strong>
           </div>
         </div>
 
         <div className="sidebar-section">
-          <span className="sidebar-label">SOURCES</span>
+          <span className="sidebar-label">SOURCES · 本次研究</span>
           <ul className="agent-mini-list">
             <li>
               <CloudServerOutlined aria-hidden />
-              环境：web_search
+              Web Search：{sourceStats.webSearchQueries} queries
             </li>
             <li>
               <FileTextOutlined aria-hidden />
-              上传文件 / URL
+              上传文件：{sourceStats.uploadedFiles}
+            </li>
+            <li>
+              <DatabaseOutlined aria-hidden />
+              数据库 / KB：{sourceStats.databaseSources}
+            </li>
+            <li>
+              <CloudServerOutlined aria-hidden />
+              Web Sources：{sourceStats.webSources} / Evidence：{sourceStats.evidenceSources}
+            </li>
+            <li>
+              <CheckCircleOutlined aria-hidden />
+              Primary / HQ Secondary / Other：{sourceStats.primarySources} / {sourceStats.highQualitySecondarySources} / {sourceStats.otherSecondarySources}
             </li>
           </ul>
         </div>

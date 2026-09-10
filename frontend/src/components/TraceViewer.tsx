@@ -249,7 +249,15 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
       if (generation !== requestGeneration.current) return;
       setSummary((previous) => ({ ...previous, lineage: response.items }));
       setLineageTotal(response.total);
-    } else if (key === "tree" || key === "langfuse") {
+    } else if (key === "tree") {
+      const [treeResponse, eventResponse] = await Promise.all([
+        fetchRunTree(selectedRunId),
+        fetchRunEvents(selectedRunId, { limit: 100 })
+      ]);
+      if (generation !== requestGeneration.current) return;
+      setTraceTree(treeResponse.tree);
+      setJsonlEvents((eventResponse.events || []) as unknown as JsonlTraceEvent[]);
+    } else if (key === "langfuse") {
       const response = await fetchRunTree(selectedRunId);
       if (generation !== requestGeneration.current) return;
       setTraceTree(response.tree);
@@ -327,7 +335,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
 
       {/* 语义流水线 → 产物证据 → 运行时/调试：
           Overview → Understanding → Strategy → Worker → Supervisor/Coverage → Synthesis →
-          证据链 → Lineage → 因果树 → Eval → JSONL → Langfuse */}
+          Evidence → Lineage → Span Tree → Run Eval → JSONL → Langfuse */}
       <Tabs
         activeKey={activeTab}
         destroyInactiveTabPane
@@ -793,9 +801,12 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "citations",
-            label: `证据链 (${loadState === "loaded" ? citationsTotal : "—"})`,
+            label: `证据源 / Evidence (${loadState === "loaded" ? citationsTotal : "—"})`,
             children: (
               <Card size="small">
+                <Typography.Paragraph type="secondary">
+                  Evidence 是本 Run 已登记的证据源与来源定位；它回答“用了哪些来源”，不表示最终结论的因果执行路径。
+                </Typography.Paragraph>
                 {citationsMessage ? <Alert message={citationsMessage} showIcon type="info" /> : null}
                 <ResizableTable
                   dataSource={citations.map((source, index) => ({
@@ -856,7 +867,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                 {highlightSourceId ? (
                   <Alert
                     className="trace-citation-hint"
-                    message={`已高亮 source_id=${highlightSourceId} 对应 execute 步骤，请查看 JSONL 页签`}
+                    message={`已高亮 source_id=${highlightSourceId} 对应 execute 步骤；可在 Span Tree 中查看该步骤的 Related events`}
                     showIcon
                     type="success"
                   />
@@ -869,6 +880,9 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
             label: `Lineage (${loadState === "loaded" ? lineageTotal : "—"})`,
             children: (
               <Card size="small">
+                <Typography.Paragraph type="secondary">
+                  Lineage 是结论溯源：Claim / Finding / Evidence / Artifact / Source 之间的语义血缘，用于核查最终结论来自哪里。
+                </Typography.Paragraph>
                 {lineage.length === 0 ? (
                   <Alert message="尚无 semantic lineage edges（需要 brief/plan/worker/evidence/synthesis refs）" showIcon type="info" />
                 ) : (
@@ -902,7 +916,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "tree",
-            label: `因果树 (${loadState === "loaded" ? traceTree.span_count || Number(summary.counts?.spans || 0) : "—"})`,
+            label: `Span Tree (${loadState === "loaded" ? traceTree.span_count || Number(summary.counts?.spans || 0) : "—"})`,
             children: (
               <div style={{ display: "grid", gridTemplateColumns: selectedSpan ? "1.2fr 0.8fr" : "1fr", gap: 12 }}>
                 <Card size="small">
@@ -975,7 +989,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           },
           {
             key: "eval",
-            label: `Eval (${loadState === "loaded" ? evals.length : "—"})`,
+            label: `Run Quality Eval (${loadState === "loaded" ? evals.length : "—"})`,
             children: (
               <Card size="small">
                 {summary.usage ? (

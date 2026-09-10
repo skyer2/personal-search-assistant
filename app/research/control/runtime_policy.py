@@ -47,8 +47,9 @@ def decide_control(state: dict[str, Any]) -> RuntimeDecision:
     supervisor = state.get("supervisor_action") if isinstance(state.get("supervisor_action"), dict) else {}
     action = str(supervisor.get("action") or "")
     supervisor_meta = state.get("supervisor") if isinstance(state.get("supervisor"), dict) else {}
-    iteration_limit = max(1, int(budget.get("max_replan_count") or 3))
-    if int(supervisor_meta.get("iteration") or 0) >= iteration_limit and action != "COMPLETE":
+    raw_iteration_limit = budget.get("max_replan_count")
+    iteration_limit = 3 if raw_iteration_limit is None else max(0, int(raw_iteration_limit))
+    if int(supervisor_meta.get("iteration") or 0) >= max(1, iteration_limit) and action != "COMPLETE":
         if _usable_evidence(state):
             return RuntimeDecision("deliver_partial", ("supervisor_iteration_limit", "usable_evidence"))
         return RuntimeDecision("finalize_failure", ("supervisor_iteration_limit",))

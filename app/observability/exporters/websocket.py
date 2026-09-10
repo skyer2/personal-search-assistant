@@ -26,8 +26,10 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
         "duration_ms": event.duration_ms,
         "input_refs": list(event.input_refs or []),
         "output_refs": list(event.output_refs or []),
+        "canonical_event": event.type,
         **{k: v for k, v in attrs.items() if k not in {"metadata", "args"}},
     }
+    data.setdefault("status", event.status)
     mapping = {
         EventType.TOOL_STARTED: ("tool_start", f"开始执行工具: {attrs.get('tool_name') or ''}"),
         EventType.TOOL_COMPLETED: (
@@ -66,6 +68,16 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
         EventType.RUN_COMPLETED: ("task_result", "任务执行完成"),
         EventType.PLAN_CREATED: ("plan", "[plan] created"),
         EventType.BRIEF_COMPILED: ("brief", "[brief] compiled"),
+        EventType.TOPOLOGY_DECIDED: ("topology", "[topology] decided"),
+        EventType.COVERAGE_ASSESSED: (
+            "coverage",
+            f"[coverage] {attrs.get('status') or event.status or ''}",
+        ),
+        EventType.FINDING_COMPRESSED: ("finding", "[finding] compressed"),
+        EventType.RUN_TERMINATED: (
+            "termination",
+            f"[termination] {attrs.get('outcome') or event.status or ''}",
+        ),
         EventType.SYNTHESIS_STARTED: ("synthesis", "[synthesis] start"),
         EventType.SYNTHESIS_COMPLETED: ("synthesis", "[synthesis] done"),
         EventType.SYNTHESIS_FAILED: ("synthesis", "[synthesis] failed"),

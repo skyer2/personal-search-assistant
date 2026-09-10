@@ -585,6 +585,7 @@ class UsageTrackingCallback(BaseCallbackHandler):
                 "usage_missing": usage_missing,
                 "duration_ms": duration_ms,
                 "finish_reason": finish_reason,
+                "worker_task_id": get_current_worker_task_id(),
                 "prompt_template_id": template_id,
                 "prompt_template_version": template_version,
                 "prompt_ref": prompt_ref,

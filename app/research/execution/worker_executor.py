@@ -42,11 +42,64 @@ class WorkerExecutorV2:
         context: ResearchContext,
     ) -> WorkerResult:
         started = time.perf_counter()
+        queue_started = time.perf_counter()
         step_index = int(task.step_index)
         plan = getattr(self.session.state, "plan", None)
         if plan is None or step_index >= len(plan.steps):
             return self._result(task, started, ok=False, status="failed", summary="missing_step")
         step = plan.steps[step_index]
+        if bool(step.metadata.get("optional")) and bool(getattr(self.session, "wave_early_stop", False)):
+            try:
+                from app.observability import EventType, get_recorder
+
+                recorder = get_recorder()
+                if recorder.is_active:
+                    span_key = recorder.start_span(
+                        "worker.execute_v2",
+                        phase="execute",
+                        task_id=task.task_id,
+                        plan_version=task.plan_version,
+                        attempt=task.attempt,
+                        attributes={"objective": task.objective, "worker_status": "skipped"},
+                    )
+                    recorder.emit(
+                        EventType.WORKER_STARTED,
+                        phase="execute",
+                        status="start",
+                        task_id=task.task_id,
+                        plan_version=task.plan_version,
+                        attempt=task.attempt,
+                        attributes={"objective": task.objective, "worker_status": "skipped"},
+                        run_id=context.run_id,
+                        session_id=context.session_id,
+                    )
+                    recorder.emit(
+                        EventType.WORKER_COMPLETED,
+                        phase="execute",
+                        status="skipped",
+                        task_id=task.task_id,
+                        plan_version=task.plan_version,
+                        attempt=task.attempt,
+                        attributes={
+                            "objective": task.objective,
+                            "worker_status": "skipped",
+                            "fail_reason": "optional_wave_coverage_complete",
+                        },
+                        run_id=context.run_id,
+                        session_id=context.session_id,
+                    )
+                    recorder.end_span(span_key, status="skipped")
+            except Exception:
+                pass
+            return self._result(
+                task,
+                started,
+                ok=True,
+                status="skipped",
+                summary="skipped_optional_wave_coverage_complete",
+                fail_reason="optional_wave_coverage_complete",
+                queue_ms=int((time.perf_counter() - queue_started) * 1000),
+            )
         worker_result: WorkerResult | None = None
         worker_ok: bool | None = None
         simple_fact = bool(step.metadata.get("simple_fact_fast_path"))
@@ -97,6 +150,7 @@ class WorkerExecutorV2:
             token_ceiling=int(step.metadata.get("token_ceiling") or 0) or None,
             parallel_workers=parallel_workers,
         )
+        queue_ms = int((time.perf_counter() - queue_started) * 1000)
         if not lease_id:
             worker_ok = False
             return self._result(
@@ -106,6 +160,7 @@ class WorkerExecutorV2:
                 status="blocked",
                 summary=f"budget_blocked:{block_reason}",
                 fail_reason=block_reason,
+                queue_ms=queue_ms,
             )
 
         recorder_span = ""
@@ -226,6 +281,8 @@ class WorkerExecutorV2:
                 sources=list(payload.get("sources") or []),
                 raw=result,
                 fail_reason="" if ok else str(payload.get("error_code") or "worker_failed"),
+                metrics=self._worker_metrics(context, task, tool_usage),
+                queue_ms=queue_ms,
             )
         except BudgetReservationError as exc:
             worker_ok = False
@@ -240,6 +297,7 @@ class WorkerExecutorV2:
                 fail_reason=reason,
                 status="blocked",
                 ok=False,
+                queue_ms=queue_ms,
             )
             worker_ok = recovered.ok
             worker_result = recovered
@@ -256,6 +314,7 @@ class WorkerExecutorV2:
                 fail_reason="worker_timeout",
                 status="failed",
                 ok=False,
+                queue_ms=queue_ms,
             )
             worker_ok = recovered.ok
             worker_result = recovered
@@ -273,6 +332,7 @@ class WorkerExecutorV2:
                 fail_reason=reason,
                 status="failed",
                 ok=False,
+                queue_ms=queue_ms,
             )
             worker_ok = recovered.ok
             worker_result = recovered
@@ -350,6 +410,7 @@ class WorkerExecutorV2:
                             ),
                             tool_calls=int(tool_usage.get("tool_calls") or 0),
                             duration_ms=duration_ms,
+                            metrics=worker_result.metrics if worker_result is not None else {},
                         ),
                         run_id=context.run_id,
                         session_id=context.session_id,
@@ -697,6 +758,67 @@ class WorkerExecutorV2:
         except Exception:
             return
 
+    def _worker_metrics(
+        self,
+        context: ResearchContext,
+        task: ResearchTask,
+        tool_usage: dict[str, Any],
+        *,
+        fail_reason: str = "",
+        artifact_count: int | None = None,
+    ) -> dict[str, Any]:
+        tools_invoked = [str(item) for item in tool_usage.get("tools_invoked") or []]
+        llm_calls = 0
+        input_tokens = 0
+        output_tokens = 0
+        cache_hits = 0
+        try:
+            from app.agent.harness.usage_tracker import get_usage_tracker
+
+            records = get_usage_tracker().session_summary(context.session_id).get("records") or []
+            for raw_record in records:
+                record = raw_record if isinstance(raw_record, dict) else {}
+                if str((record.get("extra") or {}).get("worker_task_id") or "") != task.task_id:
+                    continue
+                llm_calls += 1
+                input_tokens += int(record.get("prompt_tokens") or 0)
+                output_tokens += int(record.get("completion_tokens") or 0)
+                if int(record.get("cache_read_tokens") or 0) > 0:
+                    cache_hits += 1
+        except Exception:
+            pass
+        if artifact_count is None:
+            try:
+                from app.agent.harness.artifacts import get_artifact_store
+
+                artifact_count = sum(
+                    1
+                    for item in get_artifact_store().iter_artifacts()
+                    if str(item.metadata.get("run_id") or "") == context.run_id
+                    and str(item.metadata.get("task_id") or "") == task.task_id
+                )
+            except Exception:
+                artifact_count = 0
+        return {
+            "llm_calls": llm_calls,
+            "search_calls": sum(
+                1
+                for name in tools_invoked
+                if any(token in name.lower() for token in ("search", "tavily", "bocha"))
+            ),
+            "fetch_calls": sum(
+                1
+                for name in tools_invoked
+                if any(token in name.lower() for token in ("fetch", "read_url"))
+            ),
+            "tool_calls": int(tool_usage.get("tool_calls") or len(tools_invoked) or 0),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_hits": cache_hits,
+            "artifact_count": int(artifact_count or 0),
+            "fail_reason": fail_reason,
+        }
+
     def _salvage_or_fail(
         self,
         task: ResearchTask,
@@ -709,6 +831,7 @@ class WorkerExecutorV2:
         fail_reason: str,
         status: WorkerResultStatus,
         ok: bool,
+        queue_ms: int = 0,
     ) -> WorkerResult:
         salvaged = salvage_worker_evidence(
             run_id=context.run_id,
@@ -765,9 +888,18 @@ class WorkerExecutorV2:
             evidence_refs=evidence_refs,
             facts=facts,
             sources=sources,
-            raw=raw,
-            fail_reason=fail_reason,
-        )
+                candidates=candidates,
+                raw=raw,
+                fail_reason=fail_reason,
+                metrics=self._worker_metrics(
+                    context,
+                    task,
+                    {"tool_calls": 0, "tools_invoked": []},
+                    fail_reason=fail_reason,
+                    artifact_count=len(evidence_refs),
+                ),
+                queue_ms=queue_ms,
+            )
 
     def _result(
         self,
@@ -781,8 +913,11 @@ class WorkerExecutorV2:
         evidence_refs: list[str] | None = None,
         facts: list[str] | None = None,
         sources: list[str] | None = None,
+        candidates: list[dict[str, Any]] | None = None,
         raw: Any = None,
         fail_reason: str = "",
+        metrics: dict[str, Any] | None = None,
+        queue_ms: int = 0,
     ) -> WorkerResult:
         duration_ms = int((time.perf_counter() - started) * 1000)
         return WorkerResult(
@@ -794,10 +929,24 @@ class WorkerExecutorV2:
             evidence_refs=evidence_refs or [],
             facts=facts or [],
             sources=sources or [],
+            candidates=candidates or [],
             raw=raw,
             fail_reason=fail_reason,
+            metrics=metrics
+            or {
+                "llm_calls": 0,
+                "search_calls": 0,
+                "fetch_calls": 0,
+                "tool_calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_hits": 0,
+                "artifact_count": 0,
+                "fail_reason": fail_reason,
+            },
             duration_ms=duration_ms,
-            execution_ms=duration_ms,
+            execution_ms=max(0, duration_ms - max(0, queue_ms)),
+            queue_ms=queue_ms,
         )
 
 
