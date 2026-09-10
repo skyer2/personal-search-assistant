@@ -14,10 +14,13 @@ from app.research.brief.models import FastPathEligibility, StructuredResearchBri
 from app.research.control.runtime_policy import decide_control
 from app.research.control.terminal_policy import terminal_update
 from app.research.control.transitions import transition_update
-from app.research.coverage.judge import judge_coverage
+from app.research.coverage.judge import CoverageJudgement, judge_coverage
 from app.research.domain.contracts import WorkflowPhase
 from app.research.domain.task_state import initialize_tasks, retry_task
-from app.research.findings.compress import compress_worker_results
+from app.research.delivery.partial_renderer import render_partial_delivery, scrub_internal_ids
+from app.research.delivery.synthesis_context import EvidenceDigest
+from app.research.runtime.ingestion import ingest_new_worker_results
+from app.research.runtime.task_identity import execution_task_id, semantic_fingerprint
 from app.research.routing.mode_router import canonicalize_mode
 from app.research.runtime.state import ResearchState
 from app.research.supervisor.agent import SupervisorAgent
@@ -66,7 +69,7 @@ def _plan_from_tasks(
                 "kind": "research_task",
                 "task_kind": "supervisor_research",
                 "priority": item.priority,
-                "expected_evidence": item.expected_evidence,
+                "expected_evidence": list(item.expected_evidence),
                 "source_hints": list(item.source_hints),
                 "required": True,
                 "optional": False,
@@ -105,7 +108,7 @@ def brief_node(state: ResearchState) -> dict[str, Any]:
     }
     if eligibility.eligible:
         plan = _plan_from_tasks(
-            [ResearchTaskRequest("fast_path:search", brief.objective, "high", "primary source")],
+            [ResearchTaskRequest(brief.objective, priority="high", expected_evidence=("primary source",), task_id="fast_path:search")],
             plan_version=int(state.get("plan_version") or 1),
             planning_mode="brief_fast_path",
         )
@@ -152,6 +155,27 @@ def supervisor_node(state: ResearchState) -> dict[str, Any]:
     budget = dict(state.get("budget"))
     action = SupervisorAgent(agent=None).fallback_action(brief, judgement, budget)
     action = SupervisorAgent(agent=None).resolve_action(action, judgement, brief)
+    from dataclasses import replace
+
+    known = {
+        str(item) for item in (state.get("task_fingerprints") or {}).keys() if str(item).strip()
+    }
+    wave_id = int(state.get("dispatch_wave_id") or 0) + 1
+    approved_tasks = []
+    fingerprints: dict[str, dict[str, Any]] = {}
+    for item in action.research_tasks:
+        fingerprint = semantic_fingerprint(
+            objective=item.objective,
+            target_gaps=item.target_gaps,
+            target_criteria=item.target_criteria,
+        )
+        if fingerprint in known:
+            continue
+        task_id = execution_task_id(wave_id, fingerprint)
+        approved_tasks.append(replace(item, task_id=task_id))
+        fingerprints[fingerprint] = {"task_id": task_id, "objective": item.objective}
+        known.add(fingerprint)
+    action = SupervisorAction(action.action, action.reason, tuple(approved_tasks), action.source)
     payload: dict[str, Any] = {
         "supervisor_action": action.to_dict(),
         "supervisor": {
@@ -171,7 +195,8 @@ def supervisor_node(state: ResearchState) -> dict[str, Any]:
                 "plan": plan.to_dict(),
                 "plan_version": plan.plan_version,
                 "tasks": initialize_tasks(plan),
-                "dispatch_wave_id": int(state.get("dispatch_wave_id") or 0) + 1,
+                "dispatch_wave_id": wave_id,
+                "task_fingerprints": fingerprints,
             }
         )
     enriched = {**state, **payload}
@@ -241,19 +266,33 @@ def researcher_node(state: ResearchState) -> dict[str, Any]:
 
 
 def ingest_findings_node(state: ResearchState) -> dict[str, Any]:
-    findings = [item.to_dict() for item in compress_worker_results(state.get("worker_results") or [])]
-    return transition_update(state, WorkflowPhase.INGEST_FINDINGS, {"findings": findings})
+    update = ingest_new_worker_results(dict(state))
+    return transition_update(state, WorkflowPhase.INGEST_FINDINGS, update)
 
 
 def coverage_judge_node(state: ResearchState) -> dict[str, Any]:
     brief = _brief(state)
-    judgement = judge_coverage(brief, [row for row in state.get("findings") or [] if isinstance(row, dict)])
+    previous_raw = state.get("coverage_judgement")
+    previous = (
+        CoverageJudgement.from_dict(previous_raw)
+        if isinstance(previous_raw, dict) and previous_raw
+        else None
+    )
+    judgement = judge_coverage(
+        brief,
+        [row for row in state.get("findings") or [] if isinstance(row, dict)],
+        claims=[row for row in state.get("claims") or [] if isinstance(row, dict)],
+        previous=previous,
+    )
     progress_projection = {
         "status": judgement.status,
         "coverage_ratio": 1.0 if judgement.sufficient else 0.0,
         "unresolved_conflicts": list(judgement.conflicts),
         "missing": list(judgement.missing),
         "missing_ids": list(judgement.missing),
+        "semantic_gap_ids": [
+            row.criterion_id for row in judgement.criteria if row.status != "supported"
+        ],
         "reason_codes": [] if judgement.sufficient else ["coverage_gap"],
     }
     return transition_update(
@@ -269,33 +308,62 @@ def coverage_judge_node(state: ResearchState) -> dict[str, Any]:
 
 def route_coverage_judge(state: ResearchState) -> str:
     judgement = state.get("coverage_judgement") if isinstance(state.get("coverage_judgement"), dict) else {}
+    decision = state.get("control_decision") if isinstance(state.get("control_decision"), dict) else {}
+    if str(decision.get("action") or "") in {"synthesize", "deliver_partial"}:
+        return "synthesize"
     return "synthesize" if bool(judgement.get("sufficient")) else "supervisor"
 
 
 def synthesize_node(state: ResearchState) -> dict[str, Any]:
     brief = _brief(state)
-    lines = [f"# {brief.objective}", ""]
-    content_rows = [row for row in state.get("findings") or [] if isinstance(row, dict)]
-    if not content_rows:
-        content_rows = [row for row in state.get("claims") or [] if isinstance(row, dict)]
-    for finding in content_rows:
-        evidence = ", ".join(str(item) for item in finding.get("evidence_ids") or [])
-        text = str(finding.get("summary") or finding.get("text") or finding.get("claim") or "").strip()
-        lines.append(f"- {text} [{evidence}]")
     decision = state.get("control_decision") if isinstance(state.get("control_decision"), dict) else {}
-    missing = [str(item) for item in (state.get("coverage_state") or {}).get("missing_ids") or []]
-    if missing:
-        lines.extend(["", "## Limitations"])
-        lines.extend(f"- Uncovered coverage unit: {item}" for item in missing)
-    if str(decision.get("action") or "") == "deliver_partial":
-        lines.extend(
-            [
-                "",
-                "## 部分交付",
-                "以上内容基于已准入证据，不能视为完整成功。",
-            ]
+    judgement = state.get("coverage_judgement") if isinstance(state.get("coverage_judgement"), dict) else {}
+    findings = [row for row in state.get("findings") or [] if isinstance(row, dict)]
+    partial_findings = findings or [
+        {"claim": row.get("text"), "evidence_ids": row.get("evidence_ids")}
+        for row in state.get("claims") or []
+        if isinstance(row, dict) and str(row.get("text") or "").strip()
+    ]
+    evidence_digests = [
+        EvidenceDigest(
+            evidence_id=str(row.get("evidence_id") or row.get("source_id") or ""),
+            title=str(row.get("title") or row.get("source_id") or "来源")[:120],
+            locator=str(row.get("locator") or row.get("source_id") or "")[:240],
+            excerpt=str(row.get("excerpt") or "")[:500],
         )
-    content = "\n".join(lines)
+        for row in state.get("evidence_records") or []
+        if isinstance(row, dict) and (row.get("evidence_id") or row.get("locator") or row.get("source_id"))
+    ]
+    if str(decision.get("action") or "") == "deliver_partial" or not bool(judgement.get("sufficient")):
+        content = render_partial_delivery(
+            objective=brief.objective,
+            findings=partial_findings,
+            evidence_digests=evidence_digests,
+            worker_summaries=[
+                {"task_id": row.get("task_id"), "summary": row.get("summary")}
+                for row in state.get("worker_results") or []
+                if isinstance(row, dict) and row.get("summary")
+            ],
+            semantic_gaps=[str(item) for item in judgement.get("missing") or []],
+            limitations=[],
+            unresolved_conflicts=[str(item) for item in judgement.get("conflicts") or []],
+            worker_failure_reasons=[],
+            synthesis_failure_reason="coverage_gap",
+        )
+    else:
+        content = scrub_internal_ids(
+            "\n".join(
+                [
+                    f"# {brief.objective}",
+                    "",
+                    *[
+                        f"- {row.get('summary') or row.get('claim')}"
+                        for row in findings
+                        if str(row.get("summary") or row.get("claim") or "").strip()
+                    ],
+                ]
+            )
+        )
     return transition_update(
         state,
         WorkflowPhase.SYNTHESIS,
@@ -314,7 +382,13 @@ def quality_gate_node(state: ResearchState) -> dict[str, Any]:
         issues.append("no_usable_evidence")
     if not bool(judgement.get("sufficient")):
         issues.append("coverage_gap")
-    verdict = "pass" if not issues else "fail"
+    verdict = (
+        "pass"
+        if not issues
+        else "partial"
+        if content and evidence and issues == [item for item in ("coverage_gap", "synthesis_failed") if item in issues]
+        else "fail"
+    )
     assessment = {
         "verdict": verdict,
         "issues": issues,
@@ -339,7 +413,7 @@ def finalize_node(state: ResearchState) -> dict[str, Any]:
     assessment = state.get("quality_assessment") if isinstance(state.get("quality_assessment"), dict) else {}
     return terminal_update(
         state,
-        reason=str((state.get("termination") or {}).get("reason") or "research_completed"),
+        reason=str((state.get("termination") or {}).get("reason") or ""),
         stage=WorkflowPhase.FINALIZE.value,
         research_completed=str(assessment.get("verdict") or "") == "pass",
         synthesis_attempted=bool(state.get("final_content")) or int(state.get("synthesis_attempts") or 0) > 0,

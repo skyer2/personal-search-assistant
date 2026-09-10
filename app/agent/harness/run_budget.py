@@ -25,6 +25,9 @@ class PhaseBudgetPlan:
     def research_cap_tokens(self, total: int) -> int:
         return max(0, int(total * (self.research + self.supervisor)))
 
+    def quality_reserve_tokens(self, total: int) -> int:
+        return max(0, int(total * self.quality))
+
 
 @dataclass
 class RunBudgetSnapshot:
@@ -45,6 +48,9 @@ class RunBudgetSnapshot:
     reserved_tokens: int = 0
     reserved_llm_calls: int = 0
     active_worker_leases: int = 0
+    remaining_for_research_tokens: int = 0
+    remaining_for_synthesis_tokens: int = 0
+    remaining_for_quality_tokens: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +73,9 @@ class RunBudgetSnapshot:
             "reserved_tokens": self.reserved_tokens,
             "reserved_llm_calls": self.reserved_llm_calls,
             "active_worker_leases": self.active_worker_leases,
+            "remaining_for_research_tokens": self.remaining_for_research_tokens,
+            "remaining_for_synthesis_tokens": self.remaining_for_synthesis_tokens,
+            "remaining_for_quality_tokens": self.remaining_for_quality_tokens,
         }
 
 
@@ -435,6 +444,40 @@ class RunBudgetManager:
         """Research may not consume the synthesis time reserve."""
         return max(0.0, self.remaining_run_sec() - self.synthesis_reserve_sec)
 
+    def remaining_for_research_tokens(self) -> int:
+        """Tokens research may still reserve; synthesis and quality are protected."""
+        with self._lock:
+            return max(
+                0,
+                self.phase_plan.research_cap_tokens(self.token_limit)
+                - self._used_tokens
+                - self._effective_reserved_tokens_locked(),
+            )
+
+    def remaining_for_supervisor_tokens(self) -> int:
+        """Supervisor shares the research admission ceiling, not the synthesis reserve."""
+        return self.remaining_for_research_tokens()
+
+    def remaining_for_synthesis_tokens(self) -> int:
+        """Tokens available after protecting only the quality reserve."""
+        with self._lock:
+            return max(
+                0,
+                self.token_limit
+                - self.phase_plan.quality_reserve_tokens(self.token_limit)
+                - self._used_tokens
+                - self._effective_reserved_tokens_locked(),
+            )
+
+    def remaining_for_quality_tokens(self) -> int:
+        with self._lock:
+            return max(
+                0,
+                self.token_limit
+                - self._used_tokens
+                - self._effective_reserved_tokens_locked(),
+            )
+
     def elapsed_sec(self) -> float:
         return max(0.0, time.perf_counter() - self._started)
 
@@ -459,6 +502,9 @@ class RunBudgetManager:
                 reserved_tokens=self._effective_reserved_tokens_locked(),
                 reserved_llm_calls=self._reserved_llm_calls,
                 active_worker_leases=len(self._worker_leases),
+                remaining_for_research_tokens=self.remaining_for_research_tokens(),
+                remaining_for_synthesis_tokens=self.remaining_for_synthesis_tokens(),
+                remaining_for_quality_tokens=self.remaining_for_quality_tokens(),
             )
 
     def _research_block_reason_locked(self) -> str:

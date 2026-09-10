@@ -10,6 +10,7 @@ from app.api.tracing import build_run_config
 from app.research.brief.models import StructuredResearchBrief
 from app.research.coverage.judge import CoverageJudgement
 from app.research.execution.llm_gateway import LLMGateway
+from app.research.runtime.task_identity import semantic_fingerprint
 from app.research.supervisor.models import ResearchTaskRequest, SupervisorAction
 from app.research.supervisor.prompt import SUPERVISOR_PROMPT
 
@@ -19,12 +20,24 @@ class SupervisorAgent:
         self.agent = agent
         self.budget_manager = budget_manager
 
-    def _task(self, index: int, objective: str) -> ResearchTaskRequest:
+    def _task(
+        self,
+        index: int,
+        objective: str,
+        *,
+        target_criteria: tuple[str, ...] = (),
+        target_gaps: tuple[str, ...] = (),
+    ) -> ResearchTaskRequest:
         return ResearchTaskRequest(
-            task_id=f"supervisor_task_{index}",
             objective=objective,
+            target_criteria=target_criteria,
+            target_gaps=target_gaps,
             priority="high" if index == 1 else "normal",
-            expected_evidence="一手来源或高质量独立来源",
+            expected_evidence=("一手来源", "高质量独立来源"),
+            novelty_reason="针对当前 Coverage 缺口收敛研究范围",
+            estimated_effort="small" if index > 2 else "medium",
+            max_search_calls=4,
+            max_llm_calls=4,
         )
 
     def fallback_action(
@@ -32,18 +45,36 @@ class SupervisorAgent:
         brief: StructuredResearchBrief,
         judgement: CoverageJudgement | None,
         budget: dict[str, Any] | None,
+        previous_fingerprints: set[str] | None = None,
     ) -> SupervisorAction:
         if bool((budget or {}).get("exhausted")):
             return SupervisorAction("COMPLETE", "budget exhausted; synthesize available evidence")
         if judgement is not None and judgement.sufficient:
             return SupervisorAction("COMPLETE", "coverage meets brief success criteria")
         candidates = self._actionable_questions(brief, judgement)
-        objectives = list(dict.fromkeys(item for item in candidates if str(item).strip()))
-        tasks = tuple(self._task(index, objective) for index, objective in enumerate(objectives[:4], start=1))
+        criteria = tuple(brief.success_criteria or brief.key_questions)
+        known = set(previous_fingerprints or set())
+        tasks: list[ResearchTaskRequest] = []
+        for index, objective in enumerate(candidates[:4], start=1):
+            gap = judgement.missing[index - 1] if judgement and index <= len(judgement.missing) else objective
+            task = self._task(
+                index,
+                objective,
+                target_criteria=criteria[:2],
+                target_gaps=(gap,),
+            )
+            fingerprint = semantic_fingerprint(
+                objective=task.objective,
+                target_gaps=task.target_gaps,
+                target_criteria=task.target_criteria,
+            )
+            if fingerprint not in known:
+                tasks.append(task)
+                known.add(fingerprint)
         return SupervisorAction(
             "CONDUCT_RESEARCH",
             judgement.reason if judgement and judgement.reason else "brief questions are not yet covered",
-            tasks,
+            tuple(tasks),
         )
 
     def resolve_action(
@@ -51,13 +82,18 @@ class SupervisorAgent:
         action: SupervisorAction,
         judgement: CoverageJudgement | None = None,
         brief: StructuredResearchBrief | None = None,
+        previous_fingerprints: set[str] | None = None,
     ) -> SupervisorAction:
         if action.action != "CONDUCT_RESEARCH" or action.research_tasks:
             return action
         questions = self._actionable_questions(brief, judgement)
-        objectives = list(dict.fromkeys(item for item in questions if str(item).strip()))
-        tasks = tuple(self._task(index, objective) for index, objective in enumerate(objectives[:4], start=1))
-        return SupervisorAction(action.action, action.reason, tasks, action.source)
+        resolved = self.fallback_action(
+            brief or StructuredResearchBrief("", 1, "", "research"),
+            judgement,
+            {},
+            previous_fingerprints=previous_fingerprints,
+        )
+        return SupervisorAction(action.action, action.reason, resolved.research_tasks, action.source)
 
     @staticmethod
     def _actionable_questions(
@@ -78,8 +114,15 @@ class SupervisorAgent:
         budget: dict[str, Any],
         *,
         research_history: str = "",
+        previous_fingerprints: set[str] | None = None,
+        duplicate_search_ratio: float = 0.0,
     ) -> SupervisorAction:
-        fallback = self.fallback_action(brief, judgement, budget)
+        fallback = self.fallback_action(
+            brief,
+            judgement,
+            budget,
+            previous_fingerprints=previous_fingerprints,
+        )
         if self.agent is None:
             return fallback
         prompt = SUPERVISOR_PROMPT.format(
@@ -87,6 +130,19 @@ class SupervisorAgent:
             findings=json.dumps(findings[:24], ensure_ascii=False, indent=2),
             coverage=json.dumps(judgement.to_dict() if judgement else {}, ensure_ascii=False, indent=2),
             budget=json.dumps(budget, ensure_ascii=False, indent=2),
+            value_signal=json.dumps(
+                {
+                    "evidence_count": len(findings),
+                    "supported_criteria": [
+                        row.get("supported_criteria")
+                        for row in findings
+                        if isinstance(row, dict) and row.get("supported_criteria")
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            previous_fingerprints=sorted(previous_fingerprints or [])[-32:],
+            duplicate_search_ratio=f"{max(0.0, min(1.0, float(duplicate_search_ratio))):.2%}",
         )
         texts: list[str] = []
         try:

@@ -68,7 +68,8 @@ def test_landscape_timeout_salvage_reaches_partial_pdf_and_run_download(tmp_path
     assert summary["brief"]["objective"]
     assert summary["brief"]["dimensions"]
     assert summary["plans"] and summary["plans"][-1]["task_ids"]
-    assert summary["worker_count"] == 6
+    assert summary["worker_count"] == 3
+    assert len(summary["plans"]) == 1
     assert all(row["execution_status"] == "stopped" for row in summary["workers"])
     assert all(row["result_status"] == "partial" for row in summary["workers"])
     assert all(row["evidence_ids"] for row in summary["workers"])

@@ -116,15 +116,6 @@ def test_findings_are_compressed_and_evidence_backed() -> None:
     assert finding.finding_id
 
 
-def test_legacy_semantic_modules_are_deprecated_projections() -> None:
-    from app.research.runtime import legacy
-
-    registry = legacy.legacy_registry()
-    assert registry["research_spec"] == "projection"
-    assert registry["coverage_contract"] == "projection"
-    assert registry["semantic_gaps"] == "projection"
-
-
 def test_trace_summary_projects_semantic_loop_events() -> None:
     from app.observability.journal import summarize_trace
 

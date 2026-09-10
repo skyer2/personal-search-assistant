@@ -16,7 +16,6 @@ import pytest
 
 from app.agent.harness.state import ExecutionPlan, PlanStep
 from app.research.planning.candidate import Candidate, build_candidate_set, stable_candidate_id
-from app.research.runtime.semantic_ingest import ingest_semantics
 from app.research.runtime.state import empty_research_state
 from app.research.spec.compiler import compile_research_spec
 
@@ -131,73 +130,20 @@ def test_evidence_never_finishes_with_empty_content():
     from app.research.runtime.graph import synthesize_node
 
     state = empty_research_state(run_id="r", session_id="s", task_query=LANDSCAPE_QUERY)
-    state["research_spec"] = compile_research_spec(LANDSCAPE_QUERY).to_dict()
     state["phase"] = "coverage_judge"
     state["evidence_records"] = [{"evidence_id": "ev_1", "authority_score": 0.8}]
+    state["coverage_judgement"] = {"sufficient": False, "status": "gap", "missing": ["候选池"]}
     state["claims"] = [{"claim_id": "claim_1", "text": "Company A has funding.", "evidence_ids": ["ev_1"]}]
-    state["coverage_state"] = {
-        "coverage_ratio": 0.4,
-        "missing_ids": ["coverage_missing"],
-        "conflicted_ids": [],
-    }
     state["evidence_assessment"] = {"status": "partial", "evidence_count": 1}
     state["control_decision"] = {"action": "deliver_partial"}
     update = synthesize_node(state)
     content = str(update["final_content"])
     assert content.strip()
     assert "Company A has funding." in content
-    assert "ev_1" in content
+    assert "ev_1" not in content
     assert "部分交付" in content
-    assert "已准入证据" in content
+    assert "证据" in content
     assert "不能视为完整成功" in content
-
-
-def test_semantic_wave_gains_accumulate():
-    spec = compile_research_spec(LANDSCAPE_QUERY)
-    plan = _discovery_plan()
-    state = empty_research_state(run_id="r", session_id="s", task_query=LANDSCAPE_QUERY)
-    state.update(
-        {
-            "research_spec": spec.to_dict(),
-            "plan": plan.to_dict(),
-            "dispatch_wave_id": 2,
-            "tasks": {"t_discovery": {"execution_status": "succeeded"}},
-            "semantic_wave_gains": [
-                {
-                    "wave_id": 1,
-                    "coverage_delta": 0.0,
-                    "newly_covered_units": 0,
-                    "newly_resolved_gaps": 0,
-                    "conflicts_resolved": 0,
-                    "confidence_delta": 0.0,
-                    "new_high_quality_sources": 0,
-                    "semantic_gain": 0.0,
-                }
-            ],
-            "worker_results": [
-                {
-                    "task_id": "t_discovery",
-                    "ok": True,
-                    "status": "succeeded",
-                    "summary": "landscape",
-                    "task_metadata": {
-                        "task_kind": "discovery",
-                        "subject_id": "company_landscape:ai_startup:china",
-                        "coverage_keys": ["candidate_set"],
-                    },
-                    "payload": {
-                        "candidates": [{"name": "月之暗面", "confidence": 0.9, "evidence_ids": ["ev_1"]}],
-                        "findings": [{"claim": "月之暗面 is an AI startup.", "evidence_ids": ["ev_1"], "confidence": 0.9}],
-                        "sources": ["https://example.com/moonshot"],
-                        "evidence_ids": ["ev_1"],
-                    },
-                }
-            ],
-        }
-    )
-    update = ingest_semantics(state)
-    wave_ids = [int(row["wave_id"]) for row in update["semantic_wave_gains"]]
-    assert wave_ids == [1, 2]
 
 
 def test_landscape_spec_extracts_decision_dimensions():

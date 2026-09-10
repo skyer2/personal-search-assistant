@@ -51,35 +51,6 @@ def merge_strings(left: list[str] | None, right: list[str] | None) -> list[str]:
     return list(dict.fromkeys([*(left or []), *(right or [])]))
 
 
-def merge_semantic_waves(
-    left: list[Any] | None,
-    right: list[Any] | None,
-    *,
-    limit: int = 100,
-) -> list[dict[str, Any]]:
-    """Merge semantic wave history by wave ID without losing earlier waves."""
-    merged: dict[int | str, dict[str, Any]] = {}
-    for row in [*(left or []), *(right or [])]:
-        if not isinstance(row, dict):
-            continue
-        wave_id = row.get("wave_id")
-        if isinstance(wave_id, bool):
-            key: int | str = str(wave_id)
-        elif isinstance(wave_id, int):
-            key = wave_id
-        elif isinstance(wave_id, float):
-            key = int(wave_id)
-        elif isinstance(wave_id, str) and wave_id.isdigit():
-            key = int(wave_id)
-        else:
-            key = str(wave_id or "")
-        merged[key] = row
-    return sorted(
-        merged.values(),
-        key=lambda row: int(row.get("wave_id") or 0),
-    )[-max(1, int(limit)):]
-
-
 def merge_worker_payloads(results: list[dict[str, Any]]) -> dict[str, Any]:
     facts: list[str] = []
     sources: list[str] = []

@@ -55,13 +55,12 @@ def test_graph_branch_for_mode():
     print("[OK] graph branches")
 
 
-def test_research_state_has_spec_and_findings():
+def test_research_state_has_brief_and_findings():
     state = empty_research_state(run_id="r", session_id="s", task_query="q")
-    assert state["research_spec"] == {}
-    assert state["coverage_contract"] == {}
+    assert state["brief"] == {}
     assert state["findings"] == []
     assert state["search_mode"] == "agent"
-    print("[OK] ResearchState spec/findings")
+    print("[OK] ResearchState brief/findings")
 
 
 def test_sync_execution_projection_is_one_way():

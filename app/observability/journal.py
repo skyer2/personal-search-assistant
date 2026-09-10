@@ -63,11 +63,14 @@ def build_span_tree(events: list[dict[str, Any]]) -> dict[str, Any]:
             omitted += 1
             continue
         span_id = str(event.get("span_id") or event.get("event_id") or f"anon-{len(nodes)}")
+        is_run_root = event_type in {"run.started", "run.completed", "run.failed", "run_summary"} and not event.get(
+            "parent_span_id"
+        )
         if span_id not in nodes:
             nodes[span_id] = {
                 "span_id": span_id,
                 "parent_span_id": event.get("parent_span_id"),
-                "name": event.get("type") or event.get("event") or event.get("phase") or "event",
+                "name": "research.run" if is_run_root else event.get("type") or event.get("event") or event.get("phase") or "event",
                 "phase": event.get("phase"),
                 "status": event.get("status"),
                 "duration_ms": event.get("duration_ms"),
@@ -168,6 +171,8 @@ _SPAN_NAME_PRIORITY = (
 
 def _preferred_span_name(node: dict[str, Any], event: dict[str, Any]) -> str:
     current = str(node.get("name") or "")
+    if current == "research.run":
+        return current
     incoming = str(event.get("type") or event.get("event") or event.get("phase") or "")
     if current in _SPAN_NAME_PRIORITY and incoming not in _SPAN_NAME_PRIORITY:
         return current

@@ -2,24 +2,21 @@ from __future__ import annotations
 
 from app.research.runtime.graph import finalize_node, quality_gate_node, synthesize_node
 from app.research.runtime.state import empty_research_state
-from app.research.spec.compiler import compile_research_spec
 
 
 QUERY = "你觉得当下国内 AI 初创有潜力值得加入的公司有哪些？为什么？"
 
 
 def test_partial_delivery_keeps_usable_evidence_and_discloses_limits():
-    spec = compile_research_spec(QUERY)
     state = empty_research_state(run_id="e2e-partial", session_id="s", task_query=QUERY)
     state.update(
         {
             "phase": "coverage_judge",
-            "research_spec": spec.to_dict(),
             "control_decision": {"action": "deliver_partial"},
-            "coverage_state": {
-                "coverage_ratio": 0.4,
-                "missing_ids": ["coverage_technology"],
-                "partial_ids": ["coverage_funding"],
+            "coverage_judgement": {
+                "sufficient": False,
+                "status": "gap",
+                "missing": ["技术路线与产品"],
             },
             "evidence_assessment": {"status": "partial", "evidence_count": 1},
             "evidence_records": [
@@ -38,6 +35,15 @@ def test_partial_delivery_keeps_usable_evidence_and_discloses_limits():
                     "confidence": 0.82,
                 }
             ],
+            "findings": [
+                {
+                    "finding_id": "finding_partial",
+                    "task_id": "t_discovery",
+                    "summary": "月之暗面具有可验证的 AI 初创证据。",
+                    "claims": ["月之暗面具有可验证的 AI 初创证据。"],
+                    "evidence_ids": ["ev_partial"],
+                }
+            ],
             "worker_results": [
                 {
                     "task_id": "t_discovery",
@@ -52,8 +58,10 @@ def test_partial_delivery_keeps_usable_evidence_and_discloses_limits():
     state.update(synthesize_node(state))
     content = state["final_content"]
     assert "月之暗面具有可验证的 AI 初创证据。" in content
-    assert "ev_partial" in content
-    assert "Uncovered coverage unit: coverage_technology" in content
+    assert "https://example.com/ai-startup" in content
+    assert "技术路线与产品" in content
+    assert "ev_partial" not in content
+    assert "finding_partial" not in content
     assert "部分交付" in content
     assert "不能视为完整成功" in content
 

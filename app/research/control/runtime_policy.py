@@ -78,6 +78,12 @@ def decide_control(state: dict[str, Any]) -> RuntimeDecision:
         str(item.get("task_id") or "") for item in supervisor.get("research_tasks") or []
         if isinstance(item, dict) and str(item.get("task_id") or "").strip()
     ]
+    if not requested_tasks:
+        requested_tasks = [
+            task_id
+            for task_id, task in tasks.items()
+            if str(task.get("execution_status") or "") == "pending"
+        ]
     if action == "CONDUCT_RESEARCH" and requested_tasks:
         return RuntimeDecision("dispatch", ("supervisor_conduct_research",), tuple(requested_tasks))
     if _coverage_sufficient(state) and _usable_evidence(state):

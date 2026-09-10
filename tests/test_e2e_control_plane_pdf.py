@@ -22,8 +22,9 @@ class DeterministicWorkerExecutor:
 
     async def execute(self, task: ResearchTask, context: ResearchContext) -> WorkerResult:
         facts = [
-            "DeepSeek focuses on frontier open models and has strong engineer adoption.",
-            "Moonshot AI provides the Kimi assistant and long-context model products.",
+            "DeepSeek 和 Moonshot AI 是当下国内 AI 初创中最相关的候选，依据是一手官网来源。",
+            "用户决策需要的关键事实包括模型技术、开发者采用率和产品差异化。",
+            "主要风险和限制是估值、商业化进展和管理团队信息仍需独立来源验证。",
         ]
         locators = ["https://www.deepseek.com/", "https://www.moonshot.ai/"]
         manager = self.session.ctx.citation_manager

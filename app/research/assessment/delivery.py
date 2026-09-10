@@ -41,7 +41,10 @@ def assess_delivery(state: dict[str, Any]) -> DeliveryReadiness:
     if progress["status"] == SemanticProgress.UNKNOWN.value:
         blockers.append("progress_unknown")
     elif progress["status"] == SemanticProgress.GAP.value:
-        blockers.append("progress_gap")
+        if evidence["status"] in {EvidenceStatus.PARTIAL.value, EvidenceStatus.SUFFICIENT.value}:
+            limitations.append("progress_gap")
+        else:
+            blockers.append("progress_gap")
     if evidence["status"] == EvidenceStatus.UNKNOWN.value:
         blockers.append("evidence_unknown")
     elif evidence["status"] == EvidenceStatus.INSUFFICIENT.value:

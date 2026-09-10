@@ -93,6 +93,8 @@ class WorkerExecutorV2:
         parallel_workers = max(1, int(active_wave_size))
         lease_id, block_reason = reserve_worker_lease(
             task.task_id,
+            max_llm_calls=int(step.metadata.get("max_llm_calls") or 0) or None,
+            token_ceiling=int(step.metadata.get("token_ceiling") or 0) or None,
             parallel_workers=parallel_workers,
         )
         if not lease_id:
@@ -419,7 +421,11 @@ class WorkerExecutorV2:
             },
         )
         gateway = LLMGateway(self.session.budget_manager)
-        tool_gateway = ToolGateway(self._remaining_tool_calls())
+        tool_limit = self._remaining_tool_calls()
+        step_search_cap = int(step.metadata.get("max_search_calls") or 0)
+        if step_search_cap > 0 and tool_limit is not None:
+            tool_limit = min(tool_limit, step_search_cap)
+        tool_gateway = ToolGateway(tool_limit)
         messages: list[Any] = []
         tools_invoked: list[str] = []
         tool_call_ids: set[tuple[str, str]] = set()

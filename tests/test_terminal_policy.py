@@ -45,4 +45,4 @@ def test_terminal_update_contains_lifecycle_and_termination():
 def test_default_failure_reason_is_not_completed():
     update = terminal_update({"quality_assessment": {"verdict": "fail"}}, reason="", stage="done")
     assert update["termination"]["outcome"] == "failed"
-    assert update["termination"]["reason"] == "failed"
+    assert update["termination"]["reason"] == "NO_USABLE_EVIDENCE"

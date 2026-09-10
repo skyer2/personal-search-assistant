@@ -8,11 +8,17 @@ from typing import Any, Literal
 
 @dataclass(frozen=True)
 class ResearchTaskRequest:
-    task_id: str
     objective: str
+    target_criteria: tuple[str, ...] = ()
+    target_gaps: tuple[str, ...] = ()
     priority: str = "normal"
-    expected_evidence: str = ""
+    expected_evidence: tuple[str, ...] = ()
     source_hints: tuple[str, ...] = ()
+    novelty_reason: str = ""
+    estimated_effort: str = "medium"
+    max_search_calls: int = 4
+    max_llm_calls: int = 4
+    task_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -20,18 +26,27 @@ class ResearchTaskRequest:
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ResearchTaskRequest":
         row = data or {}
+        expected = row.get("expected_evidence")
+        if isinstance(expected, str):
+            expected = [expected]
         return cls(
-            task_id=str(row.get("task_id") or ""),
             objective=str(row.get("objective") or ""),
+            target_criteria=tuple(str(item) for item in row.get("target_criteria") or []),
+            target_gaps=tuple(str(item) for item in row.get("target_gaps") or []),
             priority=str(row.get("priority") or "normal"),
-            expected_evidence=str(row.get("expected_evidence") or ""),
+            expected_evidence=tuple(str(item) for item in expected or []),
             source_hints=tuple(str(item) for item in row.get("source_hints") or []),
+            novelty_reason=str(row.get("novelty_reason") or ""),
+            estimated_effort=str(row.get("estimated_effort") or "medium"),
+            max_search_calls=max(0, int(row.get("max_search_calls") or 0)),
+            max_llm_calls=max(0, int(row.get("max_llm_calls") or 0)),
+            task_id=str(row.get("task_id") or ""),
         )
 
 
 @dataclass(frozen=True)
 class SupervisorAction:
-    action: Literal["THINK", "CONDUCT_RESEARCH", "COMPLETE"]
+    action: Literal["CONDUCT_RESEARCH", "COMPLETE"]
     reason: str
     research_tasks: tuple[ResearchTaskRequest, ...] = field(default_factory=tuple)
     source: str = "deterministic_fallback"
@@ -48,7 +63,9 @@ class SupervisorAction:
     def from_dict(cls, data: dict[str, Any] | None) -> "SupervisorAction":
         row = data or {}
         action = str(row.get("action") or "CONDUCT_RESEARCH")
-        if action not in {"THINK", "CONDUCT_RESEARCH", "COMPLETE"}:
+        if action == "THINK":
+            action = "COMPLETE"
+        if action not in {"CONDUCT_RESEARCH", "COMPLETE"}:
             action = "CONDUCT_RESEARCH"
         return cls(
             action=action,  # type: ignore[arg-type]

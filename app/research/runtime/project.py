@@ -26,17 +26,6 @@ def sync_execution_projection(loop: LoopState, gstate: dict[str, Any]) -> LoopSt
         )
     elif isinstance(intent, dict) and intent:
         loop.intent = TaskIntent.from_dict(intent)
-    elif isinstance(gstate.get("research_spec"), dict):
-        spec = dict(gstate["research_spec"])
-        delivery = dict(spec.get("delivery_requirements") or {})
-        requested_format = str(delivery.get("format") or "markdown")
-        loop.intent = TaskIntent(
-            raw_query=str(spec.get("objective") or gstate.get("task_query") or ""),
-            summary=str(spec.get("objective") or gstate.get("task_query") or ""),
-            needs_network=True,
-            deliverable="pdf" if requested_format == "pdf" else "md" if requested_format == "markdown" else "text",
-        )
-
     plan = gstate.get("plan")
     if isinstance(plan, dict) and plan:
         loop.plan = ExecutionPlan.from_dict(plan)

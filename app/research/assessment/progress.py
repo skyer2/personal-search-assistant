@@ -1,12 +1,9 @@
-"""Coverage-derived progress assessment. Task state stays in execution health."""
+"""Criterion-derived progress assessment."""
 
 from __future__ import annotations
 
 from enum import StrEnum
 from typing import Any, TypedDict
-
-from app.research.spec.models import ResearchSpec
-from app.research.spec.validator import validate_research_spec
 
 
 class SemanticProgress(StrEnum):
@@ -33,122 +30,66 @@ class ProgressAssessment(TypedDict):
 
 
 def assess_progress(state: dict[str, Any]) -> ProgressAssessment:
-    raw_spec = state.get("research_spec")
-    raw_coverage = state.get("coverage_state")
+    raw = state.get("coverage_judgement")
     plan_version = int(state.get("plan_version") or 1)
-    if not isinstance(raw_spec, dict) or not isinstance(raw_coverage, dict):
-        return _assessment(
-            SemanticProgress.UNKNOWN,
-            0.0,
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            "unknown",
-            0.0,
-            0.0,
-            ["missing_spec_or_coverage"],
-            plan_version,
+    if not isinstance(raw, dict) or not raw:
+        return ProgressAssessment(
+            status=SemanticProgress.UNKNOWN.value,
+            coverage_ratio=0.0,
+            covered_ids=[],
+            partial_ids=[],
+            missing_ids=[],
+            semantic_gap_ids=[],
+            unresolved_conflicts=[],
+            stale_units=[],
+            candidate_state="not_required",
+            semantic_gain=0.0,
+            marginal_gain=0.0,
+            reason_codes=["coverage_judgement_missing"],
+            plan_version=plan_version,
         )
 
-    spec = ResearchSpec.from_dict(raw_spec)
-    spec_issues = validate_research_spec(spec)
-    if spec_issues:
-        return _assessment(
-            SemanticProgress.BLOCKED,
-            0.0,
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            "unknown",
-            0.0,
-            0.0,
-            spec_issues,
-            plan_version,
-        )
-
-    coverage_ratio = float(raw_coverage.get("coverage_ratio") or 0.0)
-    covered = [str(item) for item in raw_coverage.get("covered_ids") or []]
-    partial = [str(item) for item in raw_coverage.get("partial_ids") or []]
-    missing = [str(item) for item in raw_coverage.get("missing_ids") or []]
-    conflicts = [str(item) for item in raw_coverage.get("conflicted_ids") or []]
-    stale = [str(item) for item in raw_coverage.get("stale_ids") or []]
-    gaps = {
-        str(gap_id): gap
-        for gap_id, gap in (state.get("semantic_gaps") or {}).items()
-        if isinstance(gap, dict)
-    }
-    candidate = state.get("candidate_set") if isinstance(state.get("candidate_set"), dict) else {}
-    if candidate and not candidate.get("available"):
-        candidate_state = str(candidate.get("status") or "pending")
-    elif candidate and not bool(candidate.get("expanded")):
-        candidate_state = "ready_not_expanded"
-    elif candidate:
-        candidate_state = "expanded"
-    else:
-        candidate_state = "not_required"
-    gain = float((state.get("marginal_gain") or {}).get("semantic_gain") or 0.0)
-    marginal = float((state.get("marginal_gain") or {}).get("marginal_gain") or gain)
-
-    if not gaps and coverage_ratio >= 1.0:
-        status = SemanticProgress.SUFFICIENT
-        reasons = ["coverage_sufficient"]
-    elif candidate_state == "ready_not_expanded":
-        status = SemanticProgress.GAP
-        reasons = ["candidate_ready_not_expanded"]
-    else:
-        status = SemanticProgress.GAP
-        reasons = ["semantic_gap"]
-    return _assessment(
-        status,
-        coverage_ratio,
-        covered,
-        partial,
-        missing,
-        list(gaps),
-        conflicts,
-        stale,
-        candidate_state,
-        gain,
-        marginal,
-        reasons,
-        plan_version,
+    criteria = [
+        row for row in raw.get("criteria") or [] if isinstance(row, dict)
+    ]
+    supported = [
+        str(row.get("criterion_id") or "")
+        for row in criteria
+        if str(row.get("status") or "") == "supported"
+    ]
+    partial = [
+        str(row.get("criterion_id") or "")
+        for row in criteria
+        if str(row.get("status") or "") == "partial"
+    ]
+    missing = [
+        str(row.get("criterion_id") or "")
+        for row in criteria
+        if str(row.get("status") or "") in {"unsupported", "conflicted", "indeterminate"}
+    ]
+    delta = raw.get("delta") if isinstance(raw.get("delta"), dict) else {}
+    gain = float(
+        len(delta.get("new_evidence_ids") or [])
+        + len(delta.get("new_supported_claim_ids") or [])
+        + len(delta.get("closed_criterion_ids") or [])
+        + len(delta.get("resolved_conflict_ids") or [])
     )
-
-
-def _assessment(
-    status: SemanticProgress,
-    coverage_ratio: float,
-    covered: list[str],
-    partial: list[str],
-    missing: list[str],
-    gaps: list[str],
-    conflicts: list[str],
-    stale: list[str],
-    candidate_state: str,
-    semantic_gain: float,
-    marginal_gain: float,
-    reasons: list[str],
-    plan_version: int,
-) -> ProgressAssessment:
+    sufficient = bool(raw.get("sufficient"))
     return ProgressAssessment(
-        status=status.value,
-        coverage_ratio=coverage_ratio,
-        covered_ids=covered,
+        status=SemanticProgress.SUFFICIENT.value if sufficient else SemanticProgress.GAP.value,
+        coverage_ratio=1.0 if sufficient else (
+            len(supported) / len(criteria) if criteria else 0.0
+        ),
+        covered_ids=supported,
         partial_ids=partial,
         missing_ids=missing,
-        semantic_gap_ids=gaps,
-        unresolved_conflicts=conflicts,
-        stale_units=stale,
-        candidate_state=candidate_state,
-        semantic_gain=semantic_gain,
-        marginal_gain=marginal_gain,
-        reason_codes=reasons,
+        semantic_gap_ids=[*missing, *partial],
+        unresolved_conflicts=[str(item) for item in raw.get("conflicts") or []],
+        stale_units=[],
+        candidate_state="not_required",
+        semantic_gain=gain,
+        marginal_gain=gain,
+        reason_codes=[] if sufficient else ["coverage_gap"],
         plan_version=plan_version,
     )
 

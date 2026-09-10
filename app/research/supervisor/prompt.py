@@ -14,10 +14,19 @@ Coverage Judgement：
 预算快照：
 {budget}
 
-只输出 JSON：
-{{"action":"THINK|CONDUCT_RESEARCH|COMPLETE","reason":"一句话说明","research_tasks":[{{"task_id":"task_1","objective":"...","priority":"high|normal|low","expected_evidence":"...","source_hints":["..."]}}]}}
+研究价值信号：
+{value_signal}
 
-要求：只有真正独立的方向才并行；一个任务可覆盖多个强相关问题；优先复用 Findings；低收益时切换策略；达到 success criteria 后 COMPLETE；不负责 retry、timeout、token accounting 或工具权限。
+历史任务语义指纹：
+{previous_fingerprints}
+
+重复搜索比例：
+{duplicate_search_ratio}
+
+只输出 JSON：
+{{"action":"CONDUCT_RESEARCH|COMPLETE","reason":"一句话说明","research_tasks":[{{"objective":"聚焦一个可验证研究缺口","target_criteria":["Brief success criterion"],"target_gaps":["上一轮仍未覆盖的具体缺口"],"priority":"high|normal|low","expected_evidence":["需要确认的事实类型"],"source_hints":["..."],"novelty_reason":"为什么不是重复任务","estimated_effort":"small|medium|large","max_search_calls":4,"max_llm_calls":4}}]}}
+
+要求：只有真正独立的方向才并行；任务必须比 Brief question 更聚焦；不得复用历史语义指纹；优先复用 Findings；预算低时减少任务数和 estimated_effort；重复搜索比例高时必须改变搜索对象、证据类型或验证角度；达到 success criteria 后 COMPLETE；不负责 retry、timeout、token accounting、machine task_id 或工具权限。
 """
 
 __all__ = ["SUPERVISOR_PROMPT"]

@@ -39,6 +39,8 @@ def decide_terminal_outcome(state: dict[str, Any]) -> FinalOutcome:
         if degraded_delivery and bool(str(state.get("final_content") or "").strip()) and usable_evidence:
             return FinalOutcome.PARTIAL
         return FinalOutcome.SUCCESS
+    if verdict == "partial" and bool(str(state.get("final_content") or "").strip()) and usable_evidence:
+        return FinalOutcome.PARTIAL
     if (
         verdict == "fail"
         and bool(state.get("final_content"))

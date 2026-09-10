@@ -25,6 +25,12 @@ class LifecycleStatus(StrEnum):
     TERMINATED = "terminated"
 
 
+class RuntimeStatus(StrEnum):
+    FINISHED = "finished"
+    CANCELLED = "cancelled"
+    CRASHED = "crashed"
+
+
 class OutcomeStatus(StrEnum):
     SUCCESS = "success"
     PARTIAL = "partial"
@@ -66,6 +72,7 @@ __all__ = [
     "BudgetStatus",
     "LifecycleStatus",
     "OutcomeStatus",
+    "RuntimeStatus",
     "StopReason",
     "WorkflowPhase",
     "budget_status",

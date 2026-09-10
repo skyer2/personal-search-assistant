@@ -1,10 +1,10 @@
-# Semantic Research Agent Harness Architecture
+# Research Agent Harness Architecture
 
-This document is the repository architecture authority. Legacy `ResearchSpec`, `CoverageContract`, and semantic action modules are projections or deprecated adapters; they do not control the production workflow.
+This document is the repository architecture authority. The production workflow is an eight-node, Brief-driven research graph. Legacy semantic planning and coverage modules do not control it.
 
 ## Position
 
-The system is a **Deep Research Agent Harness**. It gives open-ended research reasoning to a Brief compiler and Supervisor, while a thin deterministic runtime owns budgets, execution safety, evidence grounding, observability, and evaluation.
+The system is a production-oriented Deep Research Agent Harness. The Brief and Supervisor own research semantics; a deterministic runtime owns cost, scheduling, evidence admission, termination, and observability.
 
 ```text
 User Query
@@ -13,32 +13,24 @@ StructuredResearchBrief
   ↓
 Supervisor research action
   ↓
+Budget admission
+  ↓
 Isolated Researchers
   ↓
-Evidence-backed compressed findings
+Incremental evidence / claim / finding ingest
   ↓
-Coverage Judgement
-  ↓
-Grounded Synthesis
-  ↓
-Quality Gate
-  ↓
-Cited Final / Partial / Failed
+Criterion-based Coverage Judgement
+  ├─ gap → Supervisor
+  └─ enough / low ROI / budget stop
+        ↓
+      Grounded Synthesis
+      ↓
+      Quality Gate
+      ↓
+    Cited Final / Partial / Failed
 ```
 
-## Authority Model
-
-| Concern | Authority | Non-authority |
-|---|---|---|
-| What the user wants | `StructuredResearchBrief` | raw query, TaskShape, plan |
-| What research to do next | `Supervisor` | Worker, planner adapter, ControlPolicy |
-| Whether evidence is admitted | evidence admission | Worker payload |
-| Whether research is enough | Coverage Judge + Brief | task completion count |
-| Whether an action can execute | `RuntimePolicy` | Supervisor, Worker |
-| What can be delivered | citation and grounding gates | synthesis confidence |
-| What happened | `AgentTelemetry` and `RunStore` | frontend state |
-
-## Eight-node Runtime
+## Eight-Node Runtime
 
 ```text
 brief
@@ -51,72 +43,95 @@ quality_gate
 finalize
 ```
 
-Fast path is not a separate workflow. `brief` derives strict eligibility and can send an atomic fact directly to `researcher`; all other research enters the Supervisor loop.
+The atomic-fact fast path is not a second workflow. The `brief` node derives strict eligibility and sends eligible facts directly to `researcher`; every other query enters the Supervisor loop.
 
-## Supervisor Contract
+## Authority Model
 
-The Supervisor can return only:
+| Concern | Authority | Non-authority |
+|---|---|---|
+| User intent and success criteria | `StructuredResearchBrief` | raw query, planner, TaskShape |
+| What to research next | Supervisor | Worker, ControlPolicy, planner |
+| Machine task identity | Runtime identity module | Supervisor LLM |
+| Whether a request can execute | Budget admission and RuntimePolicy | Supervisor LLM |
+| Evidence admission | Evidence admission policy | Worker payload |
+| Whether coverage improved | Coverage Judge + Brief + evidence delta | worker count or finding count |
+| Final delivery | Citation and grounding gates | synthesis confidence |
+| Run history and causality | Recorder, journal, RunStore | frontend state |
 
-- `THINK`
+## Supervisor and Task Identity
+
+The Supervisor may return only:
+
 - `CONDUCT_RESEARCH`
 - `COMPLETE`
 
-It receives the Brief, compressed findings, Coverage Judgement, and budget state. It does not receive infinite raw tool history and cannot bypass RuntimePolicy.
+A research request declares its objective, target criteria, target gaps, expected evidence, effort, and worker call limits. It never supplies a machine `task_id`.
 
-## Deterministic Runtime
+The runtime derives:
 
-RuntimePolicy owns:
+- a semantic fingerprint from the objective, target criteria, and target gaps;
+- an execution task ID from wave ID plus fingerprint;
+- a stable WorkerResult ID.
 
-- tool, token, worker, time, and iteration budgets;
-- deterministic retry;
-- worker lease and timeout;
-- partial delivery eligibility;
-- terminal-state validity.
+Non-retry requests with an already-executed semantic fingerprint are rejected. A retry keeps its attempt identity and is separated from genuinely new research.
 
-It contains no semantic actions such as `GAP_FILL`, `EXPAND_PLAN`, or `REPLAN`.
+## Budget Admission
 
-## Evidence and Findings
+Budget admission runs before dispatch. It approves, defers, or denies each Supervisor request using:
 
-Workers return raw results. The findings boundary:
+- remaining research tokens;
+- remaining LLM calls;
+- remaining research time;
+- actual approved wave size;
+- semantic novelty;
+- configured worker slots.
 
-1. compresses worker results;
-2. preserves claims, evidence IDs, confidence, limitations, and unresolved questions;
-3. rejects unsupported findings as sufficient evidence;
-4. feeds Coverage Judge and synthesis.
+Research cannot consume the synthesis or quality reserves. When research tokens are exhausted, the runtime forces synthesis instead of launching more workers.
 
-Unadmitted evidence can never support a final claim.
+## Workers and Ingest
 
-## Quality and Delivery
+Workers are bounded leaf researchers. They do not run a second deep-research loop. On timeout or budget stop, artifact-backed evidence is salvaged and the worker becomes a partial result while preserving its exact failure reason.
 
-| Outcome | Meaning |
-|---|---|
-| `success` | coverage, citation, grounding, and content gates pass |
-| `partial` | usable evidence exists but coverage or quality remains incomplete; limitations are disclosed |
-| `failed` | no usable semantic result or a required gate fails |
-| `cancelled` | user or policy cancellation |
+`ingest_findings` processes only unprocessed WorkerResults for the current wave. Evidence, claims, conflicts, resolutions, findings, and search-query fingerprints are deterministic and idempotent. Replaying a WorkerResult does not duplicate records or findings.
 
-## State and Durability
+## Coverage
 
-`ResearchState` is the workflow truth and is checkpointed through LangGraph. Legacy fields such as `research_spec`, `coverage_contract`, and `coverage_state` are projections for adapters and observability. Task state records execution facts only.
+Coverage is judged against Brief key questions and success criteria. Each criterion records supported claim IDs, evidence IDs, missing information, conflicts, and confidence. A criterion is supported only when its required independent evidence is present.
 
-## Observability
+Coverage is monotonic:
 
-Canonical events include:
+- no evidence delta means `gap` cannot become `sufficient`;
+- judge failure is fail-closed;
+- finding count and worker completion are not progress;
+- a closed gap must be traceable to new evidence, a supported claim, criterion closure, or conflict resolution.
 
-```text
-brief.compiled
-topology.decided
-supervisor.decided
-plan.created
-finding.compressed
-coverage.assessed
-progress.assessed
-quality.assessed
-run.terminated
-```
+## Synthesis and Partial Delivery
 
-See [OBSERVABILITY.md](./OBSERVABILITY.md).
+Synthesis reads a Brief-native context built from evidence digests, findings, claims, worker limitations, and coverage gaps. It does not read legacy coverage state.
+
+If synthesis tokens are low or the provider fails while usable evidence exists, the runtime renders a deterministic user-readable partial result. Partial content:
+
+- contains recovered facts and evidence links;
+- discloses unresolved questions and execution limits;
+- never leaks internal task, finding, claim, evidence, gap, or coverage IDs;
+- is never empty when usable evidence exists.
+
+## Termination
+
+Termination separates:
+
+- runtime status: `finished | cancelled | crashed`;
+- outcome: `success | partial | failed | cancelled`;
+- reason: for example `COVERAGE_SUFFICIENT`, `BUDGET_EXHAUSTED`, `NO_USABLE_EVIDENCE`, `MARGINAL_GAIN_LOW`, or `QUALITY_REJECTED`.
+
+Quality failure is never reported as completed research. Budget exhaustion with evidence is a partial result, not an empty failure.
+
+## State and Observability
+
+`ResearchState` is the workflow truth and is checkpointed through LangGraph. It contains the Brief, Supervisor decisions, task state, evidence, claims, findings, coverage judgement, budgets, and terminal projection. Legacy semantic state and semantic wave history are not part of the runtime.
+
+The trace has exactly one `research.run` root. Worker, evidence, coverage, synthesis, quality, and terminal events preserve lineage. Trace Integrity fails when required stages, progress, root spans, lineage, or terminal semantics are missing.
 
 ## Evaluation
 
-Component regression covers Brief, Coverage, Supervisor, and Evidence. Production fidelity, live scenarios, and BrowseComp-Plus are separate layers. See [EVALUATION.md](./EVALUATION.md).
+Regression covers Brief, Coverage, Supervisor, Evidence, capability scenarios, structural scenarios, production fault injection, and release smoke. See [EVALUATION.md](./EVALUATION.md) and [architecture/research-runtime-stabilization-result.md](./architecture/research-runtime-stabilization-result.md).

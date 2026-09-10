@@ -35,10 +35,7 @@ class SynthesisContext:
             claim = str(finding.get("claim") or finding.get("summary") or "").strip()
             if not claim:
                 continue
-            evidence_ids = ", ".join(
-                str(item) for item in finding.get("evidence_ids") or [] if str(item)
-            )
-            lines.append(f"- {claim}" + (f"（证据：{evidence_ids}）" if evidence_ids else ""))
+            lines.append(f"- {claim}")
         for row in self.worker_summaries:
             summary = str(row.get("summary") or "").strip()
             if summary:
@@ -169,15 +166,14 @@ class SynthesisContextBuilder:
 
     @staticmethod
     def _semantic_gaps(gstate: dict[str, Any]) -> list[str]:
-        output: list[str] = []
-        for gap_id, raw in (gstate.get("semantic_gaps") or {}).items():
-            if not isinstance(raw, dict):
-                value = str(gap_id)
-            else:
-                value = str(raw.get("gap_id") or gap_id).strip()
-            if value and value not in output:
-                output.append(value)
-        return output[:24]
+        judgement = gstate.get("coverage_judgement")
+        if not isinstance(judgement, dict):
+            return []
+        return [
+            str(item)
+            for item in judgement.get("missing") or []
+            if str(item).strip()
+        ][:24]
 
     def _digests(
         self,

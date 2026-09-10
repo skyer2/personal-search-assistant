@@ -8,8 +8,9 @@ from typing import Any, Iterable
 from app.research.findings.models import ResearchFinding
 
 
-def _finding_id(task_id: str, summary: str) -> str:
-    digest = hashlib.sha1(f"{task_id}|{summary}".encode("utf-8")).hexdigest()[:12]
+def _finding_id(task_id: str, summary: str, evidence: tuple[str, ...], wave_id: int) -> str:
+    payload = "|".join([task_id, str(wave_id), summary, *evidence])
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
     return f"finding_{digest}"
 
 
@@ -26,7 +27,9 @@ def compress_worker_result(
     *, task_id: str, summary: str, claims: Iterable[Any] | None = None,
     evidence_ids: Iterable[Any] | None = None, source_ids: Iterable[Any] | None = None,
     confidence: float = 0.0, unresolved_questions: Iterable[Any] | None = None,
-    limitations: Iterable[Any] | None = None,
+    limitations: Iterable[Any] | None = None, wave_id: int = 0,
+    supported_criteria: Iterable[Any] | None = None, target_gaps: Iterable[Any] | None = None,
+    claim_ids: Iterable[Any] | None = None,
 ) -> ResearchFinding:
     clean_summary = str(summary or "").strip() or "No worker summary was produced."
     evidence = tuple(dict.fromkeys(str(item) for item in evidence_ids or [] if str(item).strip()))
@@ -36,8 +39,12 @@ def compress_worker_result(
     if not evidence:
         finding_limitations = (*finding_limitations, "no_admitted_evidence")
     return ResearchFinding(
-        finding_id=_finding_id(task_id, clean_summary), task_id=str(task_id or ""),
-        summary=clean_summary, claims=clean_claims, evidence_ids=evidence,
+            finding_id=_finding_id(str(task_id or ""), clean_summary, evidence, int(wave_id or 0)),
+            task_id=str(task_id or ""), wave_id=max(0, int(wave_id or 0)),
+            supported_criteria=tuple(dict.fromkeys(_strings(supported_criteria))),
+            target_gaps=tuple(dict.fromkeys(_strings(target_gaps))),
+            claim_ids=tuple(dict.fromkeys(_strings(claim_ids))),
+            summary=clean_summary, claims=clean_claims, evidence_ids=evidence,
         source_ids=sources, confidence=max(0.0, min(1.0, float(confidence or 0.0))),
         unresolved_questions=tuple(dict.fromkeys(_strings(unresolved_questions))),
         limitations=finding_limitations,
@@ -59,6 +66,10 @@ def compress_worker_results(rows: Iterable[dict[str, Any]]) -> list[ResearchFind
             confidence=float(payload.get("confidence") or raw.get("confidence") or 0.0),
             unresolved_questions=payload.get("unresolved_questions") or [],
             limitations=payload.get("limitations") or [],
+            wave_id=int(raw.get("dispatch_wave_id") or raw.get("wave_id") or 0),
+            supported_criteria=(raw.get("task_metadata") or {}).get("target_criteria") or [],
+            target_gaps=(raw.get("task_metadata") or {}).get("target_gaps") or [],
+            claim_ids=payload.get("claim_ids") or [],
         )
         findings[finding.finding_id] = finding
     return list(findings.values())

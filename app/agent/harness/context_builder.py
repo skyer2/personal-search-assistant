@@ -316,13 +316,21 @@ class ContextBuilder:
                 f"本步与另外 {int(step.metadata['parallel_size']) - 1} 个检索步同时执行，"
                 "只需完成本步职责，不要等待其他步。"
             )
+        bounds: list[str] = []
+        if int(step.metadata.get("max_search_calls") or 0) > 0:
+            bounds.append(f"最多 {step.metadata['max_search_calls']} 次搜索")
+        if int(step.metadata.get("max_fetched_sources") or 0) > 0:
+            bounds.append(f"最多评估 {step.metadata['max_fetched_sources']} 个来源")
+        if int(step.metadata.get("max_llm_calls") or 0) > 0:
+            bounds.append(f"最多 {step.metadata['max_llm_calls']} 次模型调用")
+        bound_note = f"\n    Worker 边界：{'；'.join(bounds)}。不要展开第二层深度研究。" if bounds else ""
         return f"""
     【当前执行步骤 {step_index + 1}/{total_steps}】
     类型: {step.step_type}
     状态: {step.metadata.get('status', StepStatus.PENDING.value)}
     目标: {step.objective or step.description}
     允许工具: {", ".join(step.allowed_tools) if step.allowed_tools else "本步绑定工具"}
-    要求: 只完成当前步骤，{agent_hint}{parallel_note}
+    要求: 只完成当前步骤，{agent_hint}{parallel_note}{bound_note}
     """
 
     def build_working_notes_context(self, notes: str) -> str:

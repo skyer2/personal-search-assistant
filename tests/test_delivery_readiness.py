@@ -1,28 +1,26 @@
 from __future__ import annotations
 
 from app.research.assessment.delivery import DeliveryMode, DeliveryStatus, assess_delivery
-from app.research.coverage.compiler import compile_coverage_contract
-from app.research.spec.compiler import compile_research_spec
 
 
-def _semantic_state(*, partial: bool = False, semantic_stall: int = 0) -> dict:
-    spec = compile_research_spec("What is the research capability of the product?")
-    contract = compile_coverage_contract(spec)
-    coverage_ids = [unit.coverage_id for unit in contract.units]
+def _state(*, partial: bool = False, semantic_stall: int = 0) -> dict:
+    criteria = [
+        {
+            "criterion_id": "coverage_supported",
+            "status": "partial" if partial else "supported",
+            "evidence_ids": ["evidence_0"],
+        }
+    ]
     return {
-        "research_spec": spec.to_dict(),
-        "coverage_contract": contract.to_dict(),
-        "coverage_state": {
-            "coverage_ratio": 1.0,
-            "covered_ids": coverage_ids,
-            "partial_ids": coverage_ids if partial else [],
-            "missing_ids": [],
-            "conflicted_ids": [],
-            "stale_ids": [],
+        "coverage_judgement": {
+            "sufficient": not partial,
+            "status": "gap" if partial else "sufficient",
+            "criteria": criteria,
+            "delta": {},
         },
         "evidence_records": [
             {
-                "evidence_id": "e0",
+                "evidence_id": "evidence_0",
                 "source_id": "example.com",
                 "source_kind": "web",
                 "locator": "https://example.com",
@@ -30,7 +28,7 @@ def _semantic_state(*, partial: bool = False, semantic_stall: int = 0) -> dict:
             }
         ],
         "claims": [
-            {"claim_id": "c0", "text": "The product supports research.", "evidence_ids": ["e0"]}
+            {"claim_id": "claim_0", "text": "The product supports research.", "evidence_ids": ["evidence_0"]}
         ],
         "semantic_stall": semantic_stall,
     }
@@ -44,14 +42,14 @@ def test_unknown_facts_block_delivery():
 
 
 def test_partial_evidence_produces_degraded_delivery():
-    readiness = assess_delivery(_semantic_state(partial=True))
+    readiness = assess_delivery(_state(partial=True))
     assert readiness["status"] == DeliveryStatus.READY.value
     assert readiness["mode"] == DeliveryMode.DEGRADED.value
     assert "evidence_partial" in readiness["limitations"]
 
 
 def test_stalled_execution_is_a_limitation_not_a_progress_fact():
-    readiness = assess_delivery(_semantic_state(semantic_stall=2))
+    readiness = assess_delivery(_state(semantic_stall=2))
     assert readiness["status"] == DeliveryStatus.READY.value
     assert readiness["mode"] == DeliveryMode.DEGRADED.value
     assert "execution_stalled" in readiness["limitations"]

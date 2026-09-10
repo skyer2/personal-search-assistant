@@ -47,6 +47,7 @@ from app.observability.semantic_events import (
 
 logger = logging.getLogger(__name__)
 _SESSIONS: dict[str, RunSession] = {}
+_TASK_EFFORT_TOKENS = {"small": 4_000, "medium": 10_000, "large": 20_000}
 
 
 class RunSession:
@@ -425,6 +426,7 @@ class ResearchGraphRunner:
     async def node_supervisor(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.brief.models import StructuredResearchBrief
         from app.research.coverage.judge import CoverageJudgement
+        from app.research.runtime.admission import admit_dispatch
         from app.research.supervisor.agent import SupervisorAgent
         from app.research.supervisor.models import ResearchTaskRequest
 
@@ -435,7 +437,13 @@ class ResearchGraphRunner:
         findings = [row for row in state.get("findings") or [] if isinstance(row, dict)]
         judgement_raw = state.get("coverage_judgement")
         judgement = CoverageJudgement.from_dict(judgement_raw) if isinstance(judgement_raw, dict) and judgement_raw else None
-        budget = state.get("budget") if isinstance(state.get("budget"), dict) else {}
+        raw_budget = state.get("budget")
+        budget = raw_budget if isinstance(raw_budget, dict) else {}
+        previous_fingerprints = {
+            str(item) for item in (state.get("task_fingerprints") or {}).keys() if str(item).strip()
+        }
+        raw_value_signal = state.get("research_value_signal")
+        value_signal = raw_value_signal if isinstance(raw_value_signal, dict) else {}
         _emit(
             session,
             "supervisor.started",
@@ -448,8 +456,20 @@ class ResearchGraphRunner:
             },
         )
         supervisor = SupervisorAgent(getattr(self.harness, "agent", None), session.budget_manager)
-        action = await supervisor.decide(brief, findings, judgement, budget)
-        action = supervisor.resolve_action(action, judgement, brief)
+        action = await supervisor.decide(
+            brief,
+            findings,
+            judgement,
+            budget,
+            previous_fingerprints=previous_fingerprints,
+            duplicate_search_ratio=float(value_signal.get("duplicate_search_ratio") or 0.0),
+        )
+        action = supervisor.resolve_action(
+            action,
+            judgement,
+            brief,
+            previous_fingerprints=previous_fingerprints,
+        )
         payload: dict[str, Any] = {
             "supervisor_action": action.to_dict(),
             "supervisor": {
@@ -460,55 +480,122 @@ class ResearchGraphRunner:
         }
         if action.action == "CONDUCT_RESEARCH" and action.research_tasks:
             task_requests = [ResearchTaskRequest.from_dict(item.to_dict()) for item in action.research_tasks]
-            steps = [
-                PlanStep(
-                    step_type="research",
-                    description=item.objective,
-                    objective=item.objective,
-                    task_id=item.task_id,
-                    allowed_tools=["internet_search", "fetch_url"],
-                    metadata={
-                        "kind": "research_task",
-                        "task_kind": "supervisor_research",
-                        "priority": item.priority,
-                        "expected_evidence": item.expected_evidence,
-                        "source_hints": list(item.source_hints),
-                        "required": True,
-                        "optional": False,
-                    },
+            wave_id = int(state.get("dispatch_wave_id") or 0) + 1
+            admission = admit_dispatch(
+                task_requests,
+                wave_id=wave_id,
+                budget_manager=session.budget_manager,
+                state=state,
+            )
+            payload["dispatch_admission"] = admission.to_dict()
+            if admission.approved:
+                approved_requests = [item.request for item in admission.approved]
+                steps = [
+                    PlanStep(
+                        step_type="research",
+                        description=item.objective,
+                        objective=item.objective,
+                        task_id=item.task_id,
+                        allowed_tools=["internet_search", "fetch_url"],
+                        metadata={
+                            "kind": "research_task",
+                            "task_kind": "supervisor_research",
+                            "priority": item.priority,
+                            "target_criteria": list(item.target_criteria),
+                            "target_gaps": list(item.target_gaps),
+                            "objective": item.objective,
+                            "expected_evidence": list(item.expected_evidence),
+                            "source_hints": list(item.source_hints),
+                            "novelty_reason": item.novelty_reason,
+                            "estimated_effort": item.estimated_effort,
+                            "token_ceiling": _TASK_EFFORT_TOKENS.get(
+                                item.estimated_effort, _TASK_EFFORT_TOKENS["medium"]
+                            ),
+                            "max_search_calls": min(
+                                int(item.max_search_calls or 4),
+                                int(budget.get("max_search_calls_per_worker") or 4),
+                            ),
+                            "max_llm_calls": min(
+                                int(item.max_llm_calls or 4),
+                                int(getattr(self.harness.harness_config, "max_llm_calls_per_worker", 4) or 4),
+                            ),
+                            "max_fetched_sources": int(
+                                budget.get("max_fetched_sources_per_worker") or 6
+                            ),
+                            "semantic_fingerprint": next(
+                                approved.fingerprint
+                                for approved in admission.approved
+                                if approved.task_id == item.task_id
+                            ),
+                            "required": True,
+                            "optional": False,
+                        },
+                    )
+                    for item in approved_requests
+                ]
+                plan = ExecutionPlan(
+                    steps=steps,
+                    summary="Budget-approved Supervisor research action",
+                    plan_version=int(state.get("plan_version") or 1) + (1 if state.get("plan") else 0),
+                    planning_mode="supervisor_action",
                 )
-                for item in task_requests
-            ]
-            plan = ExecutionPlan(
-                steps=steps,
-                summary="Supervisor research action",
-                plan_version=int(state.get("plan_version") or 1) + (1 if state.get("plan") else 0),
-                planning_mode="supervisor_action",
-            )
-            session.state.plan = plan
-            session.active_wave_size = max(1, len(plan.steps))
-            payload.update(
-                {
-                    "plan": plan.to_dict(),
-                    "plan_version": plan.plan_version,
-                    "tasks": initialize_tasks(plan),
-                    "dispatch_wave_id": int(state.get("dispatch_wave_id") or 0) + 1,
-                }
-            )
-            _emit(
-                session,
-                "plan.created",
-                phase=WorkflowPhase.SUPERVISOR.value,
-                status="ok",
-                plan_version=plan.plan_version,
-                attributes=plan_event_attributes(
-                    plan,
-                    brief.to_dict(),
-                    run_id=session.run_id,
-                    planner_source="supervisor_action",
-                ),
-            )
+                session.state.plan = plan
+                session.active_wave_size = len(approved_requests)
+                payload.update(
+                    {
+                        "plan": plan.to_dict(),
+                        "plan_version": plan.plan_version,
+                        "tasks": initialize_tasks(plan),
+                        "dispatch_wave_id": wave_id,
+                        "task_fingerprints": {
+                            item.fingerprint: {
+                                "task_id": item.task_id,
+                                "objective": item.request.objective,
+                                "target_gaps": list(item.request.target_gaps),
+                                "wave_id": wave_id,
+                            }
+                            for item in admission.approved
+                        },
+                    }
+                )
+                _emit(
+                    session,
+                    "plan.created",
+                    phase=WorkflowPhase.SUPERVISOR.value,
+                    status="ok",
+                    plan_version=plan.plan_version,
+                    attributes=plan_event_attributes(
+                        plan,
+                        brief.to_dict(),
+                        run_id=session.run_id,
+                        planner_source="supervisor_action",
+                    ),
+                )
+            else:
+                session.active_wave_size = 1
         decision = decide_control({**state, **payload})
+        if action.action == "CONDUCT_RESEARCH":
+            raw_admission = payload.get("dispatch_admission")
+            admission_payload = raw_admission if isinstance(raw_admission, dict) else {}
+            if admission_payload.get("approved_task_ids"):
+                if decision.action in {"dispatch", "retry"}:
+                    decision = type(decision)(
+                        decision.action,
+                        (*decision.reason_codes, "budget_admission"),
+                        tuple(str(item) for item in admission_payload["approved_task_ids"]),
+                    )
+            elif bool(state.get("evidence_records")):
+                decision = type(decision)(
+                    "deliver_partial",
+                    ("budget_stop", "usable_evidence", "no_approved_dispatch"),
+                    (),
+                )
+            else:
+                decision = type(decision)(
+                    "finalize_failure",
+                    ("budget_stop", "no_usable_evidence", "no_approved_dispatch"),
+                    (),
+                )
         control_decision = {
             "action": decision.action,
             "reason_codes": list(decision.reason_codes),
@@ -560,19 +647,12 @@ class ResearchGraphRunner:
         return await self.node_research_worker(gstate)
 
     async def node_ingest_findings(self, gstate: dict[str, Any]) -> dict[str, Any]:
-        from app.research.brief.models import StructuredResearchBrief
-        from app.research.findings.compress import compress_worker_results
-        from app.research.runtime.legacy import project_research_spec
-        from app.research.runtime.semantic_ingest import ingest_semantics
+        from app.research.runtime.ingestion import ingest_new_worker_results
 
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
-        brief = StructuredResearchBrief.from_dict(gstate.get("brief"))
-        projected_state = {**gstate, "research_spec": project_research_spec(brief).to_dict()}
-        update = ingest_semantics(projected_state)
-        update.pop("findings", None)
-        findings = [item.to_dict() for item in compress_worker_results(gstate.get("worker_results") or [])]
-        update["findings"] = findings
+        update = ingest_new_worker_results(gstate)
+        findings = list(update.get("findings") or [])
         sync_execution_projection(session.state, {**gstate, **update})
         for finding in findings:
             _emit(
@@ -594,15 +674,15 @@ class ResearchGraphRunner:
             session.state.metadata.update(
                 {
                     "findings": findings,
-                    "research_spec": update.get("research_spec") or {},
-                    "coverage_contract": update.get("coverage_contract") or {},
-                    "coverage_state": update.get("coverage_state") or {},
+                    "research_value_signal": dict(update.get("research_value_signal") or {}),
+                    "processed_worker_result_ids": list(update.get("processed_worker_result_ids") or []),
                 }
             )
         return transition_update(gstate, WorkflowPhase.INGEST_FINDINGS, update)
 
     async def node_coverage_judge(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.brief.models import StructuredResearchBrief
+        from app.research.coverage.judge import CoverageJudgement
         from app.research.coverage.judge import CoverageJudge
 
         session = _require_session(gstate)
@@ -610,25 +690,76 @@ class ResearchGraphRunner:
         state = _sync_assessments(session, dict(gstate))
         brief = StructuredResearchBrief.from_dict(state.get("brief"))
         findings = [row for row in state.get("findings") or [] if isinstance(row, dict)]
+        claims = [row for row in state.get("claims") or [] if isinstance(row, dict)]
         conflicts = [row for row in state.get("claim_conflicts") or [] if isinstance(row, dict)]
+        previous_raw = state.get("coverage_judgement")
+        previous = (
+            CoverageJudgement.from_dict(previous_raw)
+            if isinstance(previous_raw, dict) and previous_raw
+            else None
+        )
         judgement = await CoverageJudge(getattr(self.harness, "agent", None), session.budget_manager).evaluate(
             brief,
             findings,
             claim_conflicts=conflicts,
+            claims=claims,
+            previous=previous,
+        )
+        supported_count = sum(
+            1 for row in judgement.criteria if row.status == "supported"
+        )
+        coverage_ratio = (
+            supported_count / len(judgement.criteria) if judgement.criteria else 0.0
         )
         progress_projection = {
             "status": judgement.status,
-            "coverage_ratio": 1.0 if judgement.sufficient else 0.0,
+            "coverage_ratio": 1.0 if judgement.sufficient else round(coverage_ratio, 4),
             "unresolved_conflicts": list(judgement.conflicts),
             "missing": list(judgement.missing),
             "missing_ids": list(judgement.missing),
-            "semantic_gap_ids": list(judgement.missing),
+            "criterion_ids": [row.criterion_id for row in judgement.criteria],
+            "semantic_gap_ids": [
+                row.criterion_id
+                for row in judgement.criteria
+                if row.status in {"unsupported", "partial", "conflicted", "indeterminate"}
+            ],
             "reason_codes": [] if judgement.sufficient else ["coverage_gap"],
         }
+        value_signal = dict(state.get("research_value_signal") or {})
+        value_signal.update(
+            {
+                "closed_criteria_count": len(judgement.delta.closed_criterion_ids),
+                "new_high_quality_evidence_count": int(
+                    value_signal.get("new_high_quality_evidence_count") or 0
+                ),
+                "new_supported_claim_count": len(judgement.delta.new_supported_claim_ids),
+                "duplicate_search_ratio": float(value_signal.get("duplicate_search_ratio") or 0.0),
+            }
+        )
+        low_value_rounds = int(state.get("low_value_rounds") or 0)
+        has_value = bool(
+            value_signal.get("closed_criteria_count")
+            or value_signal.get("new_high_quality_evidence_count")
+            or value_signal.get("new_supported_claim_count")
+        )
+        low_value_rounds = 0 if has_value else low_value_rounds + 1
+        marginal_stop = low_value_rounds >= 2 and bool(state.get("evidence_records"))
         update = {
             "coverage_judgement": judgement.to_dict(),
             "progress_assessment": progress_projection,
-            "control_decision": {},
+            "research_value_signal": value_signal,
+            "low_value_rounds": low_value_rounds,
+            "control_decision": (
+                {
+                    "action": "deliver_partial",
+                    "reason_codes": ["marginal_gain_low", "usable_evidence"],
+                    "task_ids": [],
+                    "policy_version": "runtime-policy.v1",
+                }
+                if marginal_stop
+                else {}
+            ),
+            "stop_reason": "marginal_gain_low" if marginal_stop else "",
         }
         sync_execution_projection(session.state, {**gstate, **update})
         if isinstance(session.state.metadata, dict):
@@ -636,6 +767,7 @@ class ResearchGraphRunner:
                 {
                     "coverage_judgement": judgement.to_dict(),
                     "progress_assessment": progress_projection,
+                    "research_value_signal": value_signal,
                 }
             )
         _emit(
@@ -651,6 +783,8 @@ class ResearchGraphRunner:
                 "recommended_next_questions": list(judgement.recommended_next_questions),
                 "source": judgement.source,
                 "reason": judgement.reason,
+                "criteria": [row.to_dict() for row in judgement.criteria],
+                "delta": judgement.delta.to_dict(),
             },
         )
         _emit(
@@ -720,6 +854,7 @@ class ResearchGraphRunner:
         from app.research.runtime.findings import normalize_findings
         from app.research.runtime.isolation import worker_row
         from app.research.runtime.worker import ResearchContext, ResearchTask, WorkerResult
+        from app.research.runtime.task_identity import worker_result_id
 
         session = _require_session(gstate)
         sync_execution_projection(session.state, gstate)
@@ -779,8 +914,18 @@ class ResearchGraphRunner:
             session.state.step_results.append(result.raw)
         row = worker_row(task_id, step, result.ok, result.raw) if result.raw is not None else {"task_id": task_id, "ok": result.ok, "summary": result.summary, "step_type": step.step_type, "payload": {"facts": result.facts, "sources": result.sources, "findings": result.findings, "evidence_ids": result.evidence_refs, "candidates": result.candidates}}
         row.update(status=result.status, fail_reason=result.fail_reason, queue_ms=result.queue_ms, execution_ms=result.execution_ms)
+        row.update(
+            dispatch_wave_id=dispatch_wave_id,
+            attempt=attempt,
+        )
+        row["worker_result_id"] = worker_result_id(row)
         normalized_findings, _ = normalize_findings(result.findings, task_id=task_id, subject_id=str(step.metadata.get("subject_id") or "general"), dimension=str((step.metadata.get("coverage_keys") or ["general"])[0]))
-        row["payload"] = {**(row.get("payload") or {}), "findings": normalized_findings, "evidence_ids": result.evidence_refs}
+        row["payload"] = {
+            **(row.get("payload") or {}),
+            "findings": normalized_findings,
+            "evidence_ids": result.evidence_refs,
+            "search_queries": list((row.get("payload") or {}).get("search_queries") or []),
+        }
         execution_status, result_status, stop_reason, failure = worker_result_lifecycle(result)
         tasks = transition_task(
             running,
@@ -910,28 +1055,33 @@ class ResearchGraphRunner:
             )
 
     def _semantic_synthesis_digest(self, gstate: dict[str, Any], *, compact: bool) -> str:
-        spec = dict(gstate.get("research_spec") or {})
+        from app.research.brief.models import StructuredResearchBrief
+
+        brief = StructuredResearchBrief.from_dict(gstate.get("brief"))
         claims = [dict(row) for row in gstate.get("claims") or [] if isinstance(row, dict)]
-        coverage = dict(gstate.get("coverage_state") or {})
-        lines = [f"# {spec.get('objective') or gstate.get('task_query')}", ""]
+        judgement = dict(gstate.get("coverage_judgement") or {})
+        lines = [f"# {brief.objective or gstate.get('task_query')}", ""]
         for claim in claims[:12 if compact else 40]:
-            evidence_ids = ", ".join(str(item) for item in claim.get("evidence_ids") or [])
             text = str(claim.get("text") or claim.get("claim") or "").strip()
-            lines.append(f"- {text} [{evidence_ids}]")
-        missing = [str(item) for item in coverage.get("missing_ids") or []]
+            if text:
+                lines.append(f"- {text}")
+        missing = [str(item) for item in judgement.get("missing") or []]
         if missing:
             lines.extend(["", "## Known limitations"])
-            lines.extend(f"- Uncovered coverage unit: {item}" for item in missing[:8 if compact else 20])
-        conflicts = [str(item) for item in coverage.get("conflicted_ids") or []]
+            lines.extend(f"- {item}" for item in missing[:8 if compact else 20])
+        conflicts = [str(item) for item in judgement.get("conflicts") or []]
         if conflicts:
             lines.extend(["", "## Conflict disclosures"])
-            lines.extend(f"- Unresolved coverage unit: {item}" for item in conflicts[:8 if compact else 20])
+            lines.extend(f"- {item}" for item in conflicts[:8 if compact else 20])
         return "\n".join(lines)
 
     async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
         import app.research.execution.synthesis_executor as synthesis_executor_module
         from dataclasses import replace
         from types import SimpleNamespace
+        from app.research.brief.models import StructuredResearchBrief
+        from app.research.delivery.partial_renderer import render_partial_delivery, scrub_internal_ids
+        from app.research.delivery.synthesis_context import SynthesisContextBuilder
         from app.research.delivery.synthesis_context import EvidenceDigest
         from app.research.runtime.simple_fact import render_simple_fact_answer
         from app.research.runtime.worker import ResearchContext
@@ -1020,6 +1170,13 @@ class ResearchGraphRunner:
         mode = "degraded" if compact or decision.get("action") == "deliver_partial" else "normal"
         evidence_records = [dict(row) for row in gstate.get("evidence_records") or [] if isinstance(row, dict)]
         claims = [dict(row) for row in gstate.get("claims") or [] if isinstance(row, dict)]
+        judgement = dict(gstate.get("coverage_judgement") or {})
+        synthesis_context = SynthesisContextBuilder(self.harness, session).build(
+            gstate,
+            limitations=list(judgement.get("missing") or []),
+            unresolved_conflicts=list(judgement.get("conflicts") or []),
+            compact=compact,
+        )
         evidence_refs = [str(row.get("evidence_id")) for row in evidence_records]
         digests = [
             EvidenceDigest(
@@ -1035,28 +1192,61 @@ class ResearchGraphRunner:
             )
             for row in evidence_records[:20 if compact else 40]
         ]
-        coverage = dict(gstate.get("coverage_state") or {})
         request = synthesis_executor_module.SynthesisRequest(
             mode=mode,
             evidence_refs=evidence_refs,
-            limitations=[f"Uncovered coverage unit: {item}" for item in coverage.get("missing_ids") or []],
-            unresolved_conflicts=[f"Unresolved coverage unit: {item}" for item in coverage.get("conflicted_ids") or []],
+            limitations=list(judgement.get("missing") or []),
+            unresolved_conflicts=list(judgement.get("conflicts") or []),
             research_summary=self._semantic_synthesis_digest(gstate, compact=compact),
-            evidence_digests=digests,
-            findings=claims[:12 if compact else 40],
+            evidence_digests=list(synthesis_context.evidence_digests),
+            findings=list(synthesis_context.findings),
             worker_summaries=[],
-            token_budget=20_000 if compact else 40_000,
+            token_budget=synthesis_context.token_budget,
+        )
+        remaining_synthesis_method = getattr(
+            session.budget_manager, "remaining_for_synthesis_tokens", None
+        )
+        remaining_synthesis_tokens = (
+            int(remaining_synthesis_method())
+            if callable(remaining_synthesis_method)
+            else int(getattr(session.budget_manager, "token_limit", 0) or 0)
+        )
+        request = replace(
+            request,
+            token_budget=min(request.token_budget, max(0, remaining_synthesis_tokens)),
         )
         executor = synthesis_executor_module.SynthesisExecutor(self.harness, session)
+        brief = StructuredResearchBrief.from_dict(gstate.get("brief"))
         context = ResearchContext(
             run_id=session.run_id,
-            query=str((gstate.get("research_spec") or {}).get("objective") or gstate["task_query"]),
+            query=brief.objective or gstate["task_query"],
             user_id=session.ctx.user_id,
             tenant_id=session.ctx.tenant_id,
             project_id=session.ctx.project_id,
             session_id=session.session_id,
         )
-        result = await executor.execute(request, context)
+        skip_llm_synthesis = bool(evidence_records) and remaining_synthesis_tokens < 1_000
+        if skip_llm_synthesis:
+            content = render_partial_delivery(
+                objective=brief.objective,
+                findings=list(synthesis_context.findings),
+                evidence_digests=list(synthesis_context.evidence_digests),
+                worker_summaries=[],
+                semantic_gaps=list(synthesis_context.semantic_gaps),
+                limitations=list(synthesis_context.limitations),
+                unresolved_conflicts=list(synthesis_context.unresolved_conflicts),
+                worker_failure_reasons=[],
+                synthesis_failure_reason="synthesis_budget_low",
+            )
+            result = SimpleNamespace(
+                ok=False,
+                status="stopped",
+                summary=content,
+                duration_ms=0,
+                fail_reason="synthesis_budget_low",
+            )
+        else:
+            result = await executor.execute(request, context)
         retried = False
         if not result.ok and (
             result.fail_reason in synthesis_executor_module.RETRYABLE_SYNTHESIS_FAILURES
@@ -1091,31 +1281,25 @@ class ResearchGraphRunner:
             result = await executor.execute(request, context)
         fallback = not result.ok or not str(result.summary or "").strip()
         if fallback:
-            from app.research.runtime.graph import synthesize_node
-
-            fallback_state = {
-                **gstate,
-                "control_decision": {
-                    **decision,
-                    "action": "deliver_partial",
-                    "reason_codes": [*decision.get("reason_codes", []), "synthesis_fallback"],
-                },
-            }
-            content = str(synthesize_node(cast(ResearchState, fallback_state)).get("final_content") or "")
+            worker_failure_reasons = [
+                str(row.get("fail_reason") or "")
+                for row in gstate.get("worker_results") or []
+                if isinstance(row, dict) and str(row.get("fail_reason") or "").strip()
+            ]
+            content = render_partial_delivery(
+                objective=brief.objective,
+                findings=list(synthesis_context.findings),
+                evidence_digests=list(synthesis_context.evidence_digests),
+                worker_summaries=[],
+                semantic_gaps=list(synthesis_context.semantic_gaps),
+                limitations=list(synthesis_context.limitations),
+                unresolved_conflicts=list(synthesis_context.unresolved_conflicts),
+                worker_failure_reasons=worker_failure_reasons,
+                synthesis_failure_reason=str(result.fail_reason or "synthesis_failed"),
+            )
         else:
             content = result.summary
-        if not fallback:
-            missing_evidence_ids = [
-                evidence_id
-                for evidence_id in evidence_refs
-                if evidence_id and evidence_id not in content
-            ]
-            if missing_evidence_ids:
-                content = (
-                    content.rstrip()
-                    + "\n\n## Evidence references\n"
-                    + "\n".join(f"- [{evidence_id}]" for evidence_id in missing_evidence_ids)
-                )
+        content = scrub_internal_ids(content)
         manager = session.ctx.citation_manager
         if manager is not None and content:
             content = manager.build_cited_report(content)
@@ -1129,7 +1313,8 @@ class ResearchGraphRunner:
                     "synthesis_status": result.status,
                     "synthesis_failed": fallback,
                     "synthesis_fail_reason": result.fail_reason,
-                    "fallback_used": "semantic_digest" if fallback else "",
+                    "fallback_used": "deterministic_partial" if fallback else "",
+                    "synthesis_budget_low": skip_llm_synthesis,
                 }
             )
         _emit(
@@ -1146,7 +1331,7 @@ class ResearchGraphRunner:
                 "evidence_count": len(evidence_refs),
                 "claim_count": len(claims),
                 "fail_reason": result.fail_reason,
-                "fallback_action": "semantic_digest" if fallback else "",
+                "fallback_action": "deterministic_partial" if fallback else "",
             },
         )
         return transition_update(
@@ -1182,9 +1367,20 @@ class ResearchGraphRunner:
             citation_valid, citation_reason = manager.validate_citations(content)
             if not citation_valid:
                 issues.append(citation_reason or "citation_validation_failed")
+        blocking = bool(issues)
+        degradation_issues = [
+            item for item in ("coverage_gap", "synthesis_failed") if item in issues
+        ]
         repairable = bool(content) and not citation_valid and int(gstate.get("synthesis_attempts") or 0) < 2
+        verdict = (
+            "pass"
+            if not issues
+            else "partial"
+            if content and evidence_records and issues == degradation_issues
+            else "fail"
+        )
         assessment = {
-            "verdict": "pass" if not issues else "fail",
+            "verdict": verdict,
             "issues": issues,
             "repairable": repairable,
             "suggested_action": "repair" if repairable else "",
@@ -1196,7 +1392,15 @@ class ResearchGraphRunner:
             },
         }
         decision = {
-            "action": "repair_synthesis" if repairable else ("finalize_success" if assessment["verdict"] == "pass" else "finalize_failure"),
+            "action": (
+                "repair_synthesis"
+                if repairable
+                else "finalize_success"
+                if verdict == "pass"
+                else "finalize_partial"
+                if verdict == "partial"
+                else "finalize_failure"
+            ),
             "reason_codes": issues or ["quality_pass"],
         }
         update = transition_update(gstate, WorkflowPhase.QUALITY, {"quality_assessment": assessment})
@@ -1207,6 +1411,8 @@ class ResearchGraphRunner:
                     "quality_attempted": True,
                     "answer_grounded": bool(assessment.get("grounding")),
                     "control_decision": decision,
+                    "quality_rejection": verdict == "fail",
+                    "partial_delivery": verdict == "partial",
                 }
             )
         _emit(
