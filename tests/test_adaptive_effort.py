@@ -19,7 +19,7 @@ from app.research.planning.effort import (
     estimate_complexity,
     grant_on_gap,
     resolve_effective_budget,
-    retrieval_budget_for_effort_hint,
+    search_query_budget_for_effort_hint,
     stamp_effort_on_plan,
 )
 from app.research.planning.lead_planner import LEAD_PLANNER_PROMPT
@@ -114,7 +114,7 @@ def test_compose_stamps_effort_metadata():
     research = [s for s in plan.steps if s.step_type == "research"]
     assert research
     assert any(
-        isinstance(getattr(s, "metadata", None), dict) and "max_retrieval_calls" in s.metadata
+        isinstance(getattr(s, "metadata"), dict) and "max_search_queries" in s.metadata
         for s in research
     )
     print("[OK] compose stamps effort on plan/steps", "issues=", issues)
@@ -130,11 +130,11 @@ def test_per_task_effort_hint_scales_retrieval():
     research[0].metadata["effort"] = "low"
     research[1].metadata["effort"] = "high" if len(research) > 1 else "high"
     stamp_effort_on_plan(plan, effective)
-    low = int(research[0].metadata["max_retrieval_calls"])
-    high = int(research[1].metadata["max_retrieval_calls"]) if len(research) > 1 else low
+    low = int(research[0].metadata["max_search_queries"])
+    high = int(research[1].metadata["max_search_queries"]) if len(research) > 1 else low
     assert low <= high
     assert low <= effective.hard.max_step_tool_calls
-    assert retrieval_budget_for_effort_hint(4, "low", hard_step=8) <= retrieval_budget_for_effort_hint(
+    assert search_query_budget_for_effort_hint(4, "low", hard_step=8) <= search_query_budget_for_effort_hint(
         4, "high", hard_step=8
     )
     print("[OK] effort hint scales retrieval", low, high)

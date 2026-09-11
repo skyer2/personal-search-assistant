@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from langchain_core.messages import AIMessage
+from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -53,6 +54,7 @@ class SmokeToolGateway(ToolGateway):
         step_index: int = -1,
         run_id: str = "",
         session_id: str = "",
+        worker_lease_id: str = "",
     ) -> Iterator[None]:
         previous = SmokeToolGateway.current
         SmokeToolGateway.current = self
@@ -62,13 +64,23 @@ class SmokeToolGateway(ToolGateway):
                 step_index=step_index,
                 run_id=run_id,
                 session_id=session_id,
+                worker_lease_id=worker_lease_id,
             ):
                 yield
         finally:
             SmokeToolGateway.current = previous
 
 
+class SmokeSearchArgs(BaseModel):
+    query: str
+    topic: str = "general"
+    max_results: int = 5
+    include_raw_content: bool = False
+
+
 class SmokeSearchProvider:
+    args_schema = SmokeSearchArgs
+
     def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
         query = str(payload.get("query") or "")
         if "transformer" in query.lower():
@@ -101,6 +113,21 @@ class SmokeLLMProvider:
         self.calls = 0
         self.estimated_tokens = 0
 
+    async def ainvoke(self, payload: Any, config: dict[str, Any] | None = None):
+        if isinstance(payload, list):
+            prompt = str(getattr(payload[-1], "content", "") or "") if payload else ""
+            self.calls += 1
+            self.estimated_tokens += estimate_tokens(prompt)
+            if prompt.startswith("任务：") and "合成模式" in prompt:
+                return AIMessage(
+                    content=(
+                        "# 研究结果\n\n"
+                        "- 基于已恢复证据，本次得到可追溯的部分结论。[1]\n"
+                        "- 部分研究维度尚未完成完整交叉验证，本结果属于降级部分交付。\n"
+                    )
+                )
+        raise RuntimeError("raw synthesis model must only receive synthesis prompts")
+
     async def astream(self, payload: dict[str, Any], config: dict[str, Any] | None = None):
         messages = list(payload.get("messages") or [])
         last_message = messages[-1]
@@ -119,7 +146,7 @@ class SmokeLLMProvider:
                             content=(
                                 "# 研究结果\n\n"
                                 "- 基于已恢复证据，本次得到可追溯的部分结论。[1]\n"
-                                "- 由于 research_token_cap，本结果属于部分交付。\n"
+                                "- 部分研究维度尚未完成完整交叉验证，本结果属于降级部分交付。\n"
                             )
                         )
                     ]

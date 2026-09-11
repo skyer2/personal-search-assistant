@@ -97,13 +97,15 @@ Research cannot consume the synthesis or quality reserves. When research tokens 
 
 Worker leases use the actual approved wave size, not the configured maximum. Admission and execution share the same `TaskBudgetProfile`. The default profiles are:
 
-| Effort | Token ceiling | LLM calls | Searches | Fetches | Output tokens / call |
-|---|---:|---:|---:|---:|---:|
-| small | 12,000 | 3 | 3 | 6 | 1,500 |
-| medium | 24,000 | 4 | 4 | 8 | 2,000 |
-| large | 40,000 | 6 | 6 | 12 | 2,500 |
+| Effort | Token ceiling | LLM calls | Search queries | Fetch sources | Tool invocations | Output tokens / call |
+|---|---:|---:|---:|---:|---:|---:|
+| small | 12,000 | 3 | 3 | 6 | 4 | 1,500 |
+| medium | 24,000 | 4 | 4 | 8 | 6 | 2,000 |
+| large | 40,000 | 6 | 6 | 12 | 8 | 2,500 |
 
 Each call receives `max_output_tokens_per_call`; a small task cannot consume the full research token ceiling on its first LLM call.
+
+The three retrieval resources are independent. `batch_search(N)` consumes `N` search queries and one logical tool invocation, but no fetch budget. `batch_fetch(N)` consumes `N` fetched sources and one logical tool invocation, but no search budget. A worker can therefore execute the intended `batch_search → batch_fetch → structured result` sequence without a search quota accidentally blocking all fetches.
 
 ## Workers and Ingest
 
@@ -133,6 +135,7 @@ If synthesis tokens are low or the provider fails while usable evidence exists, 
 - contains recovered facts and evidence links;
 - discloses unresolved questions and execution limits;
 - never leaks internal task, finding, claim, evidence, gap, or coverage IDs;
+- never renders internal runtime codes such as token, search, fetch, tool, timeout, or synthesis failure reasons as research facts;
 - is never empty when usable evidence exists.
 
 ## Termination
@@ -154,6 +157,8 @@ Chat is the primary delivery surface. A report request may additionally produce 
 `ResearchState` is the workflow truth and is checkpointed through LangGraph. It contains the Brief, Supervisor decisions, task state, evidence, claims, findings, coverage judgement, budgets, and terminal projection. Legacy semantic state and semantic wave history are not part of the runtime.
 
 The trace has exactly one `research.run` root. Worker, evidence, coverage, synthesis, quality, and terminal events preserve lineage. Trace Integrity fails when required stages, progress, root spans, lineage, or terminal semantics are missing.
+
+Budget denials emit one canonical `budget.denied` event with scope, resource, reason, used, limit, and worker/run snapshots. Structured Brief/Supervisor fallbacks emit `semantic.fallback` with error type, message, category, model, and schema. Worker terminal events carry the complete worker budget snapshot, and LLM events carry phase, task, call index, token estimate, duration, and remaining worker limits.
 
 Root spans never inherit Worker task, plan, or attempt context. Lineage edges are derived from explicit input/output references; matching IDs only fills in the missing side of an edge and never creates duplicate edges.
 

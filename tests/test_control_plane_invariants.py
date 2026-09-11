@@ -14,7 +14,10 @@ sys.path.insert(0, str(ROOT))
 from app.agent.harness.research_brief import attach_brief, compile_research_brief
 from app.agent.harness.run_budget import BudgetReservationError, PhaseBudgetPlan, RunBudgetManager
 from app.agent.harness.state import ExecutionPlan, PlanStep, TaskIntent
-from app.agent.harness.step_budget import consume_retrieval_or_block, retrieval_budget
+from app.agent.harness.step_budget import (
+    consume_search_queries_or_block,
+    worker_retrieval_budget,
+)
 from app.agent.harness.usage_tracker import (
     UsageTrackingCallback,
     bind_budget_manager,
@@ -66,11 +69,11 @@ def test_parallel_worker_leases_cannot_overcommit_research_pool() -> None:
         estimated_tokens=10, worker_task_id="t2", phase="execute"
     )
     assert not blocked
-    assert blocked_reason == "research_token_cap"
+    assert blocked_reason == "worker_token_cap"
 
     lease_three, lease_three_reason = manager.reserve_worker_lease("t3")
     assert not lease_three
-    assert lease_three_reason == "research_token_cap"
+    assert lease_three_reason == "research_phase_token_cap"
 
 
 def test_exact_token_exhaustion_reason_is_not_wall_deadline() -> None:
@@ -86,7 +89,7 @@ def test_exact_token_exhaustion_reason_is_not_wall_deadline() -> None:
         ),
     )
     manager.commit_tokens(60)
-    assert manager.exhaustion_reason() == "research_token_cap"
+    assert manager.exhaustion_reason() == "research_phase_token_cap"
     assert manager.force_synthesis() is True
     assert manager.remaining_run_sec() > 0
 
@@ -118,15 +121,18 @@ def test_llm_callback_blocks_request_before_provider_call() -> None:
     with bind_budget_manager(manager):
         with pytest.raises(BudgetReservationError) as exc_info:
             callback.on_llm_start({}, ["x" * 100], run_id="r_block")
-    assert exc_info.value.reason == "budget_tokens"
+    assert exc_info.value.reason == "run_token_cap"
     assert manager.snapshot().reserved_llm_calls == 0
 
 
 def test_retrieval_tool_reserves_global_tool_quota() -> None:
     manager = RunBudgetManager(token_limit=100, tool_call_limit=1, deadline_sec=600)
-    with retrieval_budget(2), bind_budget_manager(manager):
-        assert consume_retrieval_or_block("internet_search") is None
-        blocked = consume_retrieval_or_block("internet_search")
+    with (
+        worker_retrieval_budget(search_queries=2, fetch_sources=2, tool_invocations=2),
+        bind_budget_manager(manager),
+    ):
+        assert consume_search_queries_or_block(1) is None
+        blocked = consume_search_queries_or_block(1)
     assert blocked is not None
     assert manager.snapshot().tool_calls == 1
 
@@ -307,13 +313,13 @@ def test_trace_summary_exposes_quality_and_termination_attribution() -> None:
                 "metadata": {
                     "termination": {
                         "status": "partial",
-                        "reason": "research_token_cap",
+                        "reason": "research_phase_token_cap",
                         "origin_stage": "research",
                         "detected_stage": "dispatch",
                         "cause_event_id": "budget-1",
                         "causal_chain": [
                             "worker wave overconsumed tokens",
-                            "research_token_cap",
+                            "research_phase_token_cap",
                             "force_synthesis",
                             "quality_failed",
                         ],
@@ -326,6 +332,6 @@ def test_trace_summary_exposes_quality_and_termination_attribution() -> None:
     assert summary["event_count"] == 3
     assert summary["quality"]["reason"] == "citation_coverage_low"
     assert summary["quality"]["repairable"] is True
-    assert summary["termination"]["reason"] == "research_token_cap"
+    assert summary["termination"]["reason"] == "research_phase_token_cap"
     assert summary["failure_origin"]["origin_stage"] == "research"
     assert summary["failure_origin"]["cause_event_id"] == "budget-1"

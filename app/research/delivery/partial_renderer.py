@@ -13,10 +13,22 @@ _INTERNAL_ID = re.compile(
     re.IGNORECASE,
 )
 
+_RUNTIME_CODE = re.compile(
+    r"(?:budget_blocked:.+|"
+    r"(?:worker|research_phase|run)_(?:token|llm_call)_cap|"
+    r"search_query_cap|fetch_source_cap|tool_call_cap|"
+    r"synthesis_timeout|worker_timeout|step_timeout)",
+    re.IGNORECASE,
+)
+
 
 def scrub_internal_ids(content: str) -> str:
     """Remove machine-only semantic IDs from user-facing delivery."""
     return _INTERNAL_ID.sub("内部记录", str(content or ""))
+
+
+def _user_visible_limitation(value: str) -> bool:
+    return bool(value.strip() and not _RUNTIME_CODE.search(value))
 
 
 def render_partial_delivery(
@@ -32,7 +44,7 @@ def render_partial_delivery(
     synthesis_failure_reason: str,
 ) -> str:
     """Render recovered material only; never invent missing facts."""
-    _ = worker_summaries
+    _ = (worker_summaries, worker_failure_reasons, synthesis_failure_reason)
     if not findings and not evidence_digests:
         return ""
 
@@ -51,7 +63,7 @@ def render_partial_delivery(
     if findings:
         for finding in findings[:24]:
             claim = str(finding.get("claim") or finding.get("text") or finding.get("summary") or "").strip()
-            if claim:
+            if _user_visible_limitation(claim):
                 lines.append(f"- {claim}")
     else:
         lines.append("- 本轮仅恢复了可追溯证据，尚未形成结构化结论。")
@@ -68,22 +80,23 @@ def render_partial_delivery(
         lines.append("- 证据摘要不可用；请查看本次运行的证据文件。")
 
     lines.extend(["", "## 尚未完成", ""])
-    unfinished = [str(item) for item in semantic_gaps or limitations if str(item).strip()]
-    lines.extend(f"- {item}" for item in unfinished[:12] or ["- 部分研究维度尚未完成交叉验证。"])
+    unfinished = [
+        str(item)
+        for item in semantic_gaps or limitations
+        if _user_visible_limitation(str(item))
+    ]
+    if unfinished:
+        lines.extend(f"- {item}" for item in unfinished[:12])
+    else:
+        lines.append("- 部分研究维度尚未完成交叉验证。")
     lines.append("- 完整模型综合未完成，因此本结果不构成完整终稿。")
 
-    execution_limits = [str(item) for item in limitations if str(item).strip()]
-    execution_limits.extend(
-        f"Research worker: {item}" for item in worker_failure_reasons if str(item).strip()
-    )
-    if synthesis_failure_reason:
-        execution_limits.append(f"Synthesis: {synthesis_failure_reason}")
     lines.extend(["", "## 执行限制", ""])
-    lines.extend(f"- {item}" for item in list(dict.fromkeys(execution_limits))[:12])
+    lines.append("- 部分研究执行因资源限制提前停止。")
     if unresolved_conflicts:
         lines.extend(["", "## 未解决冲突", ""])
         lines.extend(f"- {item}" for item in unresolved_conflicts[:8])
-    lines.extend(["", "因此本结果属于部分交付，不能视为完整成功。", ""])
+    lines.extend(["", "因此本结果属于降级部分交付，不能视为完整成功。", ""])
     return scrub_internal_ids("\n".join(lines).strip() + "\n")
 
 

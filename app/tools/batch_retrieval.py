@@ -11,7 +11,11 @@ from typing import Any, Literal
 
 from langchain_core.tools import tool
 
-from app.agent.harness.step_budget import consume_n_retrieval_or_block
+from app.agent.harness.step_budget import (
+    BudgetBlock,
+    consume_fetch_sources_or_block,
+    consume_search_queries_or_block,
+)
 from app.tools.fetch_url import fetch_url_content
 from app.tools.tavily_core import search_internet
 
@@ -81,9 +85,9 @@ def run_batch_search(
     if not cleaned:
         return {"ok": False, "error": "empty_queries", "results": []}
 
-    blocked = consume_n_retrieval_or_block(len(cleaned), tool_name="batch_search")
+    blocked = consume_search_queries_or_block(len(cleaned), tool_name="batch_search")
     if blocked:
-        return {"ok": False, "error": "step_retrieval_budget", "message": blocked, "results": []}
+        return _denied(blocked)
 
     results: list[dict[str, Any]] = []
     workers = min(_DEFAULT_SEARCH_WORKERS, len(cleaned))
@@ -124,9 +128,9 @@ def run_batch_fetch(urls: list[str], *, max_chars: int = 8000) -> dict[str, Any]
     if not cleaned:
         return {"ok": False, "error": "empty_urls", "results": []}
 
-    blocked = consume_n_retrieval_or_block(len(cleaned), tool_name="batch_fetch")
+    blocked = consume_fetch_sources_or_block(len(cleaned), tool_name="batch_fetch")
     if blocked:
-        return {"ok": False, "error": "step_retrieval_budget", "message": blocked, "results": []}
+        return _denied(blocked)
 
     results: list[dict[str, Any]] = []
     workers = min(_DEFAULT_FETCH_WORKERS, len(cleaned))
@@ -180,3 +184,16 @@ def batch_fetch(urls: list[str], max_chars: int = 8000) -> dict[str, Any]:
     :param max_chars: 每个页面保留的最大正文字符数
     """
     return run_batch_fetch(urls, max_chars=max_chars)
+
+
+def _denied(blocked: BudgetBlock) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": "budget_denied",
+        "reason": blocked.reason,
+        "resource": blocked.resource,
+        "used": blocked.used,
+        "limit": blocked.limit,
+        "message": str(blocked),
+        "results": [],
+    }

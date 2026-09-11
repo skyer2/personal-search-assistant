@@ -97,8 +97,8 @@ def test_synthesis_failure_taxonomy():
         "bad request": "provider_bad_request",
         "content_filter": "provider_content_filter",
         "context_length_exceeded": "context_length_exceeded",
-        "budget_tokens": "budget_tokens",
-        "budget_llm_calls": "budget_llm_calls",
+        "run_token_cap": "run_token_cap",
+        "run_llm_call_cap": "run_llm_call_cap",
         "provider unavailable": "provider_unavailable",
         "stream error": "stream_error",
     }
@@ -144,6 +144,9 @@ def test_partial_renderer_discloses_limitations_and_never_claims_success():
     assert "部分研究结果" in content
     assert "执行限制" in content
     assert "不能视为完整成功" in content
+    assert "research_token_cap" not in content
+    assert "worker_llm_call_cap" not in content
+    assert "synthesis_timeout" not in content
     assert render_partial_delivery(
         objective="q",
         findings=[],
@@ -160,7 +163,7 @@ def test_partial_renderer_discloses_limitations_and_never_claims_success():
 def test_research_cap_still_reserves_synthesis_tokens():
     manager = RunBudgetManager(token_limit=100_000, llm_call_limit=10)
     manager.commit_tokens(manager.phase_plan.research_cap_tokens(100_000))
-    assert manager.research_allowed() == (False, "research_token_cap")
+    assert manager.research_allowed() == (False, "research_phase_token_cap")
     reservation, reason = manager.reserve_llm_call(estimated_tokens=1_000, phase="synthesis")
     assert reservation
     assert reason == ""

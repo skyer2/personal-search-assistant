@@ -137,14 +137,17 @@ class ProductionFaultProvider:
             payload["error_code"] = self.worker_failure
         yield {"worker": {"messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))]}}
 
-    async def ainvoke(self, payload: dict[str, Any], config: dict[str, Any] | None = None):
-        messages = list(payload.get("messages") or [])
-        last_message = messages[-1]
-        prompt = (
-            str(last_message.get("content") or "")
-            if isinstance(last_message, dict)
-            else str(getattr(last_message, "content", "") or "")
-        )
+    async def ainvoke(self, payload: Any, config: dict[str, Any] | None = None):
+        if isinstance(payload, list):
+            prompt = str(getattr(payload[-1], "content", "") or "") if payload else ""
+        else:
+            messages = list(payload.get("messages") or [])
+            last_message = messages[-1] if messages else None
+            prompt = (
+                str(last_message.get("content") or "")
+                if isinstance(last_message, dict)
+                else str(getattr(last_message, "content", "") or "")
+            )
         if prompt.startswith("任务：") and "合成模式" in prompt:
             return await self._synthesis_message()
         raise RuntimeError("raw synthesis model must only receive synthesis prompts")
@@ -170,7 +173,7 @@ class ProductionFaultProvider:
         if failure == "auth":
             raise RuntimeError("invalid auth")
         if failure == "budget":
-            raise RuntimeError("budget_tokens")
+            raise RuntimeError("run_token_cap")
         return AIMessage(
             content=(
                 "# 国内 AI 初创公司部分评估\n\n"
@@ -375,7 +378,7 @@ def test_l3_budget_exhausted_with_evidence_falls_back_to_partial_delivery(
     events, summary = _trace("l3-synthesis-budget", result)
     _assert_common_invariants(result, summary)
     assert provider.synthesis_calls == 1
-    assert result.metadata["synthesis_fail_reason"] == "budget_tokens"
+    assert result.metadata["synthesis_fail_reason"] == "run_token_cap"
     assert result.metadata["fallback_used"] == "deterministic_partial"
 
 

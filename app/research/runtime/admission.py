@@ -126,14 +126,14 @@ def admit_dispatch(
             deferred.append(f"request_{index}")
             continue
         if remaining_tokens < estimated:
-            denied[f"request_{index}"] = "research_token_cap"
+            denied[f"request_{index}"] = "research_phase_token_cap"
             continue
         if (
             max_llm_calls
             and llm_calls + reserved_llm_calls + requested_llm_calls
             > max_llm_calls
         ):
-            denied[f"request_{index}"] = "budget_llm_calls"
+            denied[f"request_{index}"] = "run_llm_call_cap"
             continue
         task_id = execution_task_id(wave_id, fingerprint)
         approved_request = replace(request, task_id=task_id)

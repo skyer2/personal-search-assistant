@@ -28,8 +28,9 @@ class BudgetState(TypedDict):
     max_task_attempts: int
     max_semantic_stall_cycles: int
     max_active_tasks: int
-    max_search_calls_per_worker: int
-    max_fetched_sources_per_worker: int
+    max_search_queries_per_worker: int
+    max_fetch_sources_per_worker: int
+    max_tool_invocations_per_worker: int
     exhausted: bool
     low: bool
 
@@ -186,8 +187,9 @@ def empty_research_state(
             "max_task_attempts": 2,
             "max_semantic_stall_cycles": 2,
             "max_active_tasks": 3,
-            "max_search_calls_per_worker": 4,
-            "max_fetched_sources_per_worker": 6,
+            "max_search_queries_per_worker": 4,
+            "max_fetch_sources_per_worker": 6,
+            "max_tool_invocations_per_worker": 6,
             "exhausted": False,
             "low": False,
         },

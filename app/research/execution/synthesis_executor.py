@@ -12,39 +12,48 @@ from app.agent.harness.token_counter import estimate_tokens
 from app.research.execution.llm_gateway import LLMGateway
 from app.research.delivery.synthesis_context import EvidenceDigest
 from app.research.runtime.worker import ResearchContext, WorkerResult
+from langchain_core.messages import HumanMessage
 
 
 RETRYABLE_SYNTHESIS_FAILURES = frozenset(
     {"provider_rate_limit", "provider_unavailable", "context_length_exceeded"}
 )
 NON_RETRYABLE_SYNTHESIS_FAILURES = frozenset(
-    {"provider_auth", "provider_bad_request", "budget_tokens", "budget_llm_calls"}
+    {"provider_auth", "provider_bad_request", "run_token_cap", "run_llm_call_cap"}
 )
 
 
-def _failure_reason(exc: Exception) -> str:
+def _failure_details(exc: Exception) -> tuple[str, str]:
     message = str(exc).lower()
-    if "budget_tokens" in message:
-        return "budget_tokens"
-    if "budget_llm_calls" in message:
-        return "budget_llm_calls"
+    if "run_token_cap" in message:
+        return "run_token_cap", "budget_denied"
+    if "run_llm_call_cap" in message:
+        return "run_llm_call_cap", "budget_denied"
+    if isinstance(exc, (TypeError, ValueError)) and any(
+        token in message for token in ("invalid input", "expected", "input type", "message")
+    ):
+        return "local_validation", "local_validation"
     if "sensitivecontentdetected" in message or "content_filter" in message:
-        return "provider_content_filter"
+        return "provider_content_filter", "content_filter"
     if "rate limit" in message or "ratelimit" in message:
-        return "provider_rate_limit"
+        return "provider_rate_limit", "rate_limit"
     if "usage limit" in message or "quota" in message:
-        return "provider_usage_limit"
+        return "provider_usage_limit", "provider_quota"
     if "auth" in message or "401" in message or "permission" in message:
-        return "provider_auth"
+        return "provider_auth", "auth"
     if "bad request" in message or "400" in message:
-        return "provider_bad_request"
+        return "provider_bad_request", "provider_bad_request"
     if "context length" in message or "context_length_exceeded" in message:
-        return "context_length_exceeded"
+        return "context_length_exceeded", "context_length"
     if "unavailable" in message or "connection" in message or "503" in message:
-        return "provider_unavailable"
+        return "provider_unavailable", "connection"
     if "stream" in message or "incomplete" in message:
-        return "stream_error"
-    return "unknown_provider_error"
+        return "stream_error", "stream_error"
+    return "unknown_provider_error", "unknown"
+
+
+def _failure_reason(exc: Exception) -> str:
+    return _failure_details(exc)[0]
 
 
 @dataclass(frozen=True)
@@ -107,15 +116,31 @@ class SynthesisExecutor:
                 summary="synthesis_timeout",
                 fail_reason="synthesis_timeout",
                 evidence_refs=request.evidence_refs,
+                metadata=self._failure_metadata(
+                    request,
+                    context,
+                    model,
+                    error_type="asyncio.TimeoutError",
+                    error_message="synthesis timeout",
+                    error_category="timeout",
+                ),
             )
         except Exception as exc:
-            fail_reason = _failure_reason(exc)
+            fail_reason, error_category = _failure_details(exc)
             return self._result(
                 started,
                 ok=False,
                 summary=f"synthesis_failed:{fail_reason}",
                 fail_reason=fail_reason,
                 evidence_refs=request.evidence_refs,
+                metadata=self._failure_metadata(
+                    request,
+                    context,
+                    model,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc)[:500],
+                    error_category=error_category,
+                ),
             )
 
         if not content.strip():
@@ -152,7 +177,7 @@ class SynthesisExecutor:
         with gateway.execution_scope(phase="synthesis"):
             response = await gateway.ainvoke(
                 model,
-                {"messages": [{"role": "user", "content": self._prompt(request, context)}]},
+                [HumanMessage(content=self._prompt(request, context))],
                 config,
             )
         return self._response_content(response)
@@ -225,6 +250,43 @@ class SynthesisExecutor:
             return min(float(timeout_sec), remaining_sec)
         return float(timeout_sec)
 
+    def _failure_metadata(
+        self,
+        request: SynthesisRequest,
+        context: ResearchContext,
+        model: Any,
+        *,
+        error_type: str,
+        error_message: str,
+        error_category: str,
+    ) -> dict[str, Any]:
+        snapshot_method = getattr(self.session.budget_manager, "snapshot", None)
+        snapshot = snapshot_method() if callable(snapshot_method) else None
+        return {
+            "error": {
+                "type": error_type,
+                "message": error_message,
+                "category": error_category,
+            },
+            "model": str(
+                getattr(model, "model_name", None)
+                or getattr(model, "model", None)
+                or "unknown"
+            ),
+            "provider": "openai-compatible",
+            "mode": request.mode,
+            "estimated_input_tokens": self.estimate_input_tokens(request, context),
+            "remaining_run_tokens": max(
+                0,
+                int(getattr(snapshot, "token_limit", 0) or 0)
+                - int(getattr(snapshot, "used_tokens", 0) or 0),
+            ),
+            "remaining_run_sec": max(
+                0.0, float(getattr(snapshot, "remaining_run_sec", 0.0) or 0.0)
+            ),
+            "fallback": "deterministic_partial",
+        }
+
     def _result(
         self,
         started: float,
@@ -233,6 +295,7 @@ class SynthesisExecutor:
         summary: str,
         evidence_refs: list[str] | None = None,
         fail_reason: str = "",
+        metadata: dict[str, Any] | None = None,
     ) -> WorkerResult:
         duration_ms = int((time.perf_counter() - started) * 1000)
         return WorkerResult(
@@ -242,6 +305,7 @@ class SynthesisExecutor:
             summary=summary,
             evidence_refs=list(dict.fromkeys(evidence_refs or [])),
             fail_reason=fail_reason,
+            metadata=dict(metadata or {}),
             duration_ms=duration_ms,
             execution_ms=duration_ms,
         )

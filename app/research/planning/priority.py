@@ -157,11 +157,12 @@ def normalize_priority_meta(
     meta["evidence_target"] = target
     # Runtime constraint, not decorative planner metadata. One retrieval call may
     # yield multiple documents, but it cannot keep searching past max_sources.
-    current_cap = meta.get("max_retrieval_calls")
+    current_cap = meta.get("max_search_queries")
     try:
-        meta["max_retrieval_calls"] = min(int(current_cap), int(target["max_sources"])) if current_cap is not None else int(target["max_sources"])
+        meta["max_search_queries"] = min(int(current_cap), int(target["max_sources"])) if current_cap is not None else int(target["max_sources"])
     except (TypeError, ValueError):
-        meta["max_retrieval_calls"] = int(target["max_sources"])
+        meta["max_search_queries"] = int(target["max_sources"])
+    meta["max_fetch_sources"] = int(target["max_sources"])
     step.metadata = meta
     return meta
 

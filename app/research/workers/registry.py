@@ -182,8 +182,17 @@ def build_worker_registry(
             if tool is None:
                 continue
             name = getattr(tool, "name", "")
-            if name in {"read_artifact", "read_evidence", "fetch_url", "batch_fetch"}:
+            if name in {"read_artifact", "read_evidence"}:
                 wrapped.append(tool)
+            elif name in {"fetch_url", "batch_fetch"}:
+                wrapped.append(
+                    wrap_tool_with_contract(
+                        tool,
+                        tool_name=name,
+                        step_type=step_type,
+                        apply_output_contract=False,
+                    )
+                )
             else:
                 wrapped.append(wrap_tool_with_contract(tool, tool_name=name, step_type=step_type))
         return wrapped

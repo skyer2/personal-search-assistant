@@ -65,7 +65,7 @@ from app.agent.harness.orchestration import (
     validate_structured_worker_payload,
 )
 from app.agent.harness.worker_runtime import resolve_execute_target
-from app.agent.harness.step_budget import retrieval_budget
+from app.agent.harness.step_budget import worker_retrieval_budget
 from app.agent.harness.observability import build_observability_snapshot
 from app.agent.harness.planner_llm import build_plan_for_intent, understand_intent
 from app.agent.harness.recovery import RecoveryManager
@@ -1544,9 +1544,9 @@ class AgentHarness:
                     int(run_budget.get("max_step_tool_calls", step_cap) or step_cap),
                 )
         step_meta = dict(getattr(step, "metadata", None) or {})
-        if "max_retrieval_calls" in step_meta:
+        if "max_tool_invocations" in step_meta:
             try:
-                step_cap = max(0, min(step_cap, int(step_meta["max_retrieval_calls"])))
+                step_cap = max(0, min(step_cap, int(step_meta["max_tool_invocations"])))
             except (TypeError, ValueError):
                 pass
         session_max = int(
@@ -1562,7 +1562,13 @@ class AgentHarness:
         else:
             retrieval_remaining = None
 
-        with retrieval_budget(retrieval_remaining):
+        search_remaining = int(step_meta.get("max_search_queries") or 0) or retrieval_remaining
+        fetch_remaining = int(step_meta.get("max_fetch_sources") or 0) or retrieval_remaining
+        with worker_retrieval_budget(
+            search_queries=search_remaining,
+            fetch_sources=fetch_remaining,
+            tool_invocations=retrieval_remaining,
+        ):
             async for chunk in execute_agent.astream(
                 {"messages": [{"role": "user", "content": user_message}]},
                 config=config,

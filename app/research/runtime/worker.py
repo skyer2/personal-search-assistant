@@ -217,6 +217,7 @@ class WorkerResult:
     raw: Any = None
     fail_reason: str = ""
     metrics: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     queue_ms: int = 0
     execution_ms: int = 0
     duration_ms: int = 0
@@ -795,7 +796,7 @@ class LangChainWorkerRuntime:
             from app.agent.harness.run_budget import BudgetReservationError
 
             if isinstance(exc, BudgetReservationError):
-                reason = str(exc.reason or "budget_tokens")
+                reason = str(exc.reason or "run_token_cap")
                 salvaged = salvage_worker_evidence(
                     run_id=session.run_id,
                     task_id=task.task_id,

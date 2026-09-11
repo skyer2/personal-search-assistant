@@ -51,6 +51,7 @@ gen_ai.chat · evidence.registered · evidence.assessed
 synthesis.* · quality.assessed · delivery.assessed
 checkpoint.* · budget.* · context.* · run.terminated
 observability.internal_error · eval.scored
+budget.denied · semantic.fallback
 ```
 
 每个重要事件可带：
@@ -89,6 +90,21 @@ Trace Viewer 的 `Understanding` 面板展示 Brief 与拓扑；`Supervisor / Co
 ## Latency Breakdown
 
 Run latency 汇总包含 brief、supervisor、worker、coverage、synthesis、quality 与 finalize 阶段。Worker 结果还包含 queue、execution、tool、LLM、token、cache、artifact 与失败原因指标。任何分钟级等待都应能定位到具体阶段或 Worker，而不是只看到全局 elapsed。
+
+## Failure Observability
+
+`budget.denied` 是所有预算拒绝的唯一事件口径，携带：
+
+| 字段 | 含义 |
+|---|---|
+| `scope` | `worker` / `research` / `run` |
+| `resource` / `reason` | 被拒绝资源与稳定原因码 |
+| `used` / `limit` | 当前资源计数 |
+| `worker_*` / `run_*` | Worker lease 与 Run 级 token / LLM / tool 快照 |
+
+`semantic.fallback` 记录 Brief / Supervisor 结构化输出降级，不吞异常：`error_type`、`error_message`、`error_category`、`model`、`schema`、`fallback` 全部保留。Run metadata 同时聚合 `control_plane`，用于显示控制面是否 degraded。
+
+Worker 终态事件携带完整预算快照：LLM calls、tokens、search queries、fetch sources、tool invocations 的 used/limit。`gen_ai.chat` 记录 phase、task、call index、token 估算、duration、TTFT 与 Worker 剩余额度。工具事件只记录 `args_meta`（参数名和列表条目数），不记录 query、URL、prompt 或网页正文。
 
 ## 看哪里
 
@@ -156,6 +172,8 @@ Run metadata 同步暴露 `synthesis_attempts`、`synthesis_failed`、`synthesis
 ## 隐私
 
 默认 `OBS_CONTENT_MODE=reference`：事件只保留 metadata + `*_ref` / `*_hash` / ids；完整结构化 payload 在本地 payload store。`redacted` 更激进地去掉正文；`full` 才把截断后的原文放进事件（opt-in）。
+
+`args_meta` 是白名单字段，只允许 `arg_names` 和 `item_count`。即使误传完整参数，`args` 仍会被 privacy 层降级为字节数，不允许进入事件正文。
 
 ## JSONL 布局
 

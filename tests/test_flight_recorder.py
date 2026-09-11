@@ -405,7 +405,7 @@ def test_tool_and_generation_are_child_spans():
 def test_failure_attribution_and_eval_matrix():
     from app.observability.failure import classify_failure
 
-    classified = classify_failure("budget_tool_calls", phase="abort")
+    classified = classify_failure("tool_call_cap", phase="abort")
     assert classified["failure.stage"] == "runtime"
     assert classified["failure.type"] == "budget_exhausted"
     events = [

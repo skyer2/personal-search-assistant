@@ -46,7 +46,10 @@ class WorkerExecutorV2:
         step_index = int(task.step_index)
         plan = getattr(self.session.state, "plan", None)
         if plan is None or step_index >= len(plan.steps):
-            return self._result(task, started, ok=False, status="failed", summary="missing_step")
+            worker_result = self._result(
+                task, started, ok=False, status="failed", summary="missing_step"
+            )
+            return worker_result
         step = plan.steps[step_index]
         if bool(step.metadata.get("optional")) and bool(getattr(self.session, "wave_early_stop", False)):
             try:
@@ -91,7 +94,7 @@ class WorkerExecutorV2:
                     recorder.end_span(span_key, status="skipped")
             except Exception:
                 pass
-            return self._result(
+            worker_result = self._result(
                 task,
                 started,
                 ok=True,
@@ -100,6 +103,7 @@ class WorkerExecutorV2:
                 fail_reason="optional_wave_coverage_complete",
                 queue_ms=int((time.perf_counter() - queue_started) * 1000),
             )
+            return worker_result
         worker_result: WorkerResult | None = None
         worker_ok: bool | None = None
         simple_fact = bool(step.metadata.get("simple_fact_fast_path"))
@@ -118,7 +122,7 @@ class WorkerExecutorV2:
                 )
             except Exception as exc:
                 worker_ok = False
-                return self._result(
+                worker_result = self._result(
                     task,
                     started,
                     ok=False,
@@ -126,6 +130,7 @@ class WorkerExecutorV2:
                     summary=f"worker_unavailable:{type(exc).__name__}",
                     fail_reason=type(exc).__name__,
                 )
+                return worker_result
         reserve_worker_lease = getattr(
             self.session.budget_manager, "reserve_worker_lease", None
         )
@@ -139,6 +144,7 @@ class WorkerExecutorV2:
                 summary="budget_blocked:budget_manager_unavailable",
                 fail_reason="budget_manager_unavailable",
             )
+            return worker_result
         active_wave_size = getattr(self.session, "active_wave_size", None)
         if active_wave_size is None:
             resolve_parallel = getattr(self.session, "_resolve_max_workers", None)
@@ -156,7 +162,8 @@ class WorkerExecutorV2:
         queue_ms = int((time.perf_counter() - queue_started) * 1000)
         if not lease_id:
             worker_ok = False
-            return self._result(
+            self._emit_budget_denial(task, context, block_reason)
+            worker_result = self._result(
                 task,
                 started,
                 ok=False,
@@ -165,6 +172,7 @@ class WorkerExecutorV2:
                 fail_reason=block_reason,
                 queue_ms=queue_ms,
             )
+            return worker_result
 
         recorder_span = ""
         try:
@@ -236,6 +244,7 @@ class WorkerExecutorV2:
                     execute_agent=execute_agent,
                     dispatch_mode=dispatch_mode,
                     tool_usage=tool_usage,
+                    **({} if simple_fact else {"worker_lease_id": lease_id}),
                 ),
                 timeout=timeout_sec,
             )
@@ -272,7 +281,7 @@ class WorkerExecutorV2:
             evidence_refs = list(payload.get("evidence_ids") or []) + list(
                 payload.get("artifact_ids") or []
             )
-            return self._result(
+            worker_result = self._result(
                 task,
                 started,
                 ok=ok,
@@ -287,9 +296,10 @@ class WorkerExecutorV2:
                 metrics=self._worker_metrics(context, task, tool_usage),
                 queue_ms=queue_ms,
             )
+            return worker_result
         except BudgetReservationError as exc:
             worker_ok = False
-            reason = str(getattr(exc, "reason", "") or "budget_tokens")
+            reason = str(getattr(exc, "reason", "") or "run_token_cap")
             recovered = self._salvage_or_fail(
                 task,
                 context,
@@ -342,6 +352,9 @@ class WorkerExecutorV2:
             return recovered
         finally:
             self._sync_tool_usage(tool_usage)
+            budget_snapshot = self._worker_budget_snapshot(lease_id, tool_usage)
+            if worker_result is not None:
+                worker_result.metrics["budget"] = budget_snapshot
             if lease_id:
                 try:
                     release_worker_lease = getattr(
@@ -414,6 +427,7 @@ class WorkerExecutorV2:
                             tool_calls=int(tool_usage.get("tool_calls") or 0),
                             duration_ms=duration_ms,
                             metrics=worker_result.metrics if worker_result is not None else {},
+                            budget=budget_snapshot,
                         ),
                         run_id=context.run_id,
                         session_id=context.session_id,
@@ -451,6 +465,25 @@ class WorkerExecutorV2:
         except Exception:
             return
 
+    def _emit_budget_denial(
+        self,
+        task: ResearchTask,
+        context: ResearchContext,
+        reason: str,
+    ) -> None:
+        from app.agent.harness.budget_events import emit_budget_denied
+
+        scope = "run" if reason in {"run_token_cap", "run_llm_call_cap"} else "research_phase"
+        resource = "token" if reason.endswith("token_cap") else "llm_call"
+        emit_budget_denied(
+            scope=scope,
+            resource=resource,
+            reason=reason,
+            task_id=task.task_id,
+            budget_manager=self.session.budget_manager,
+            extra={"run_id": context.run_id, "session_id": context.session_id},
+        )
+
     async def _invoke_leaf(
         self,
         *,
@@ -461,6 +494,7 @@ class WorkerExecutorV2:
         execute_agent: Any,
         dispatch_mode: str,
         tool_usage: dict[str, Any],
+        worker_lease_id: str = "",
     ) -> StepResult:
         self._record_direct_assistant(step)
         builder = self.harness.context_builder
@@ -485,21 +519,20 @@ class WorkerExecutorV2:
             },
         )
         gateway = LLMGateway(self.session.budget_manager)
-        tool_limit = self._remaining_tool_calls()
-        step_search_cap = int(step.metadata.get("max_search_calls") or 0)
-        if step_search_cap > 0 and tool_limit is not None:
-            tool_limit = min(tool_limit, step_search_cap)
-        tool_gateway = ToolGateway(tool_limit)
+        tool_gateway = ToolGateway(**self._worker_budget_limits(step))
         messages: list[Any] = []
         tools_invoked: list[str] = []
         tool_call_ids: set[tuple[str, str]] = set()
+        retrieval_budget = None
         try:
             with tool_gateway.execution_scope(
                 worker_task_id=task.task_id,
                 step_index=step_index,
                 run_id=context.run_id,
                 session_id=context.session_id,
-            ):
+                worker_lease_id=worker_lease_id,
+            ) as active_retrieval_budget:
+                retrieval_budget = active_retrieval_budget
                 with gateway.execution_scope(
                     phase="execute",
                     worker_task_id=task.task_id,
@@ -529,6 +562,8 @@ class WorkerExecutorV2:
         finally:
             tool_usage["tool_calls"] = len(tool_call_ids)
             tool_usage["tools_invoked"] = tools_invoked
+            if retrieval_budget is not None:
+                tool_usage["budget"] = retrieval_budget.snapshot()
         content = ""
         for message in reversed(messages):
             content = str(getattr(message, "content", "") or "")
@@ -567,20 +602,29 @@ class WorkerExecutorV2:
             classify_source_tier,
         )
         from app.research.evidence.policy import SIMPLE_FACT_EVIDENCE_POLICY
+        from app.agent.harness.tool_contract import wrap_tool_with_contract
         from app.tools.tavily_tool import internet_search
 
-        tool_gateway = ToolGateway(self._remaining_tool_calls())
+        tool_gateway = ToolGateway(**self._worker_budget_limits(step))
+        search_tool = wrap_tool_with_contract(
+            internet_search,
+            tool_name="internet_search",
+            step_type="network_search",
+            apply_output_contract=False,
+        )
         responses: list[dict[str, Any]] = []
         queries: list[str] = [context.query]
+        retrieval_budget = None
         try:
             with tool_gateway.execution_scope(
                 worker_task_id=task.task_id,
                 step_index=step_index,
                 run_id=context.run_id,
                 session_id=context.session_id,
-            ):
+            ) as active_retrieval_budget:
+                retrieval_budget = active_retrieval_budget
                 first_response = tool_gateway.call(
-                    internet_search.invoke,
+                    search_tool.invoke,
                     {
                         "query": context.query,
                         "topic": "general",
@@ -625,7 +669,7 @@ class WorkerExecutorV2:
                     )
                     queries.append(followup_query)
                     second_response = tool_gateway.call(
-                        internet_search.invoke,
+                        search_tool.invoke,
                         {
                             "query": followup_query,
                             "topic": "general",
@@ -638,6 +682,8 @@ class WorkerExecutorV2:
         finally:
             tool_usage["tool_calls"] = len(queries)
             tool_usage["tools_invoked"] = ["internet_search"] * len(queries)
+            if retrieval_budget is not None:
+                tool_usage["budget"] = retrieval_budget.snapshot()
 
         if not responses:
             raise RuntimeError("simple_fact_search_invalid_response")
@@ -708,14 +754,56 @@ class WorkerExecutorV2:
             },
         )
 
-    def _remaining_tool_calls(self) -> int | None:
+    def _worker_budget_limits(self, step: Any) -> dict[str, int | None]:
+        from app.research.runtime.task_budget import task_budget_profile
+
+        profile = task_budget_profile(str(step.metadata.get("estimated_effort") or "medium"))
         config = self.harness.harness_config
-        step_cap = int(getattr(config, "max_step_tool_calls", 8) or 0)
-        run_cap = int(getattr(config, "max_tool_calls", 20) or 0)
+        step_tool_cap = int(getattr(config, "max_step_tool_calls", 8) or 0)
+        run_tool_cap = int(getattr(config, "max_tool_calls", 20) or 0)
         used = int(getattr(self.session.state, "tool_calls_count", 0) or 0)
-        if step_cap <= 0:
-            return None
-        return max(0, min(step_cap, run_cap - used))
+        run_tool_remaining = max(0, run_tool_cap - used) if run_tool_cap > 0 else None
+        tool_limit = min(
+            int(step.metadata.get("max_tool_invocations") or profile.max_tool_invocations),
+            step_tool_cap or 10_000,
+            run_tool_remaining or 10_000,
+        )
+        return {
+            "search_queries_remaining": int(
+                step.metadata.get("max_search_queries") or profile.max_search_queries
+            ),
+            "fetch_sources_remaining": int(
+                step.metadata.get("max_fetch_sources") or profile.max_fetch_sources
+            ),
+            "tool_invocations_remaining": max(0, tool_limit),
+        }
+
+    def _worker_budget_snapshot(
+        self,
+        lease_id: str,
+        tool_usage: dict[str, Any],
+    ) -> dict[str, int]:
+        lease_snapshot_method = getattr(
+            self.session.budget_manager, "worker_lease_snapshot", None
+        )
+        lease = (
+            dict(lease_snapshot_method(lease_id=lease_id))
+            if callable(lease_snapshot_method)
+            else {}
+        )
+        retrieval = dict(tool_usage.get("budget") or {})
+        return {
+            "llm_calls_used": int(lease.get("llm_calls_used", 0) or 0),
+            "llm_calls_limit": int(lease.get("llm_calls_limit", 0) or 0),
+            "tokens_used": int(lease.get("tokens_used", 0) or 0),
+            "token_limit": int(lease.get("token_limit", 0) or 0),
+            "search_queries_used": int(retrieval.get("search_queries_used", 0) or 0),
+            "search_queries_limit": int(retrieval.get("search_queries_limit", 0) or 0),
+            "fetch_sources_used": int(retrieval.get("fetch_sources_used", 0) or 0),
+            "fetch_sources_limit": int(retrieval.get("fetch_sources_limit", 0) or 0),
+            "tool_invocations_used": int(retrieval.get("tool_invocations_used", 0) or 0),
+            "tool_invocations_limit": int(retrieval.get("tool_invocations_limit", 0) or 0),
+        }
 
     def _timeout_for(self, step: Any) -> float:
         config = self.harness.harness_config
@@ -771,6 +859,7 @@ class WorkerExecutorV2:
         artifact_count: int | None = None,
     ) -> dict[str, Any]:
         tools_invoked = [str(item) for item in tool_usage.get("tools_invoked") or []]
+        budget_usage = dict(tool_usage.get("budget") or {})
         llm_calls = 0
         input_tokens = 0
         output_tokens = 0
@@ -804,17 +893,28 @@ class WorkerExecutorV2:
                 artifact_count = 0
         return {
             "llm_calls": llm_calls,
-            "search_calls": sum(
-                1
-                for name in tools_invoked
-                if any(token in name.lower() for token in ("search", "tavily", "bocha"))
+            "search_calls": int(
+                budget_usage.get("search_queries_used")
+                or sum(
+                    1
+                    for name in tools_invoked
+                    if any(token in name.lower() for token in ("search", "tavily", "bocha"))
+                )
             ),
-            "fetch_calls": sum(
-                1
-                for name in tools_invoked
-                if any(token in name.lower() for token in ("fetch", "read_url"))
+            "fetch_calls": int(
+                budget_usage.get("fetch_sources_used")
+                or sum(
+                    1
+                    for name in tools_invoked
+                    if any(token in name.lower() for token in ("fetch", "read_url"))
+                )
             ),
-            "tool_calls": int(tool_usage.get("tool_calls") or len(tools_invoked) or 0),
+            "tool_calls": int(
+                budget_usage.get("tool_invocations_used")
+                or tool_usage.get("tool_calls")
+                or len(tools_invoked)
+                or 0
+            ),
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cache_hits": cache_hits,

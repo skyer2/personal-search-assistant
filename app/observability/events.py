@@ -31,6 +31,9 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "tool.started",
     "tool.completed",
     "tool.failed",
+    "tool.denied",
+    "budget.denied",
+    "semantic.fallback",
     "gen_ai.chat",
     "retrieval.search",
     "evidence.registered",
@@ -63,6 +66,7 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "hitl.interrupt",
     "run_summary",
     "llm_usage",
+    "llm.failed",
 )
 
 
@@ -88,6 +92,9 @@ class EventType:
     TOOL_STARTED = "tool.started"
     TOOL_COMPLETED = "tool.completed"
     TOOL_FAILED = "tool.failed"
+    TOOL_DENIED = "tool.denied"
+    BUDGET_DENIED = "budget.denied"
+    SEMANTIC_FALLBACK = "semantic.fallback"
     GEN_AI_CHAT = "gen_ai.chat"
     RETRIEVAL_SEARCH = "retrieval.search"
     EVIDENCE_REGISTERED = "evidence.registered"
@@ -120,6 +127,7 @@ class EventType:
     HITL_INTERRUPT = "hitl.interrupt"
     RUN_SUMMARY = "run_summary"
     LLM_USAGE = "llm_usage"
+    LLM_FAILED = "llm.failed"
 
 
 def new_id(size: int = 16) -> str:

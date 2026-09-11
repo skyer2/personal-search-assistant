@@ -78,7 +78,7 @@ POST /api/task
 | 长期 Memory | 跨任务，按身份和项目隔离 | `app/agent/memory/`，由 Memory 面板显式管理 |
 | LangGraph messages | Leaf Worker 图内 replay | 进程内 |
 
-检索工具不是上下文工程。search / fetch / file 的结果进入本步 `StepResult`，再被压缩/digest。
+检索工具不是上下文工程。search / fetch / file 的原始结果先经 Tool Output Contract 外置到 Artifact Store，Worker 只接收短卡、`artifact_id` 与必要的结构化摘要；随后进入本步 `StepResult`，再被压缩/digest。
 
 ---
 
@@ -250,8 +250,8 @@ Finalize：
 `harness.yml` `budget`：
 
 - `max_total_tokens`（对 step 原文 + final 的粗估）
-- `max_tool_calls`（Run 上限；默认 240，给并行研究 + 写报告留余量）
-- `max_step_tool_calls`（**步内** `internet_search` / `fetch_url` 硬上限，默认 8；超限工具返回「停止检索，立刻输出 JSON」，不是等下一步才 abort）
+- `max_tool_calls`（Run 级逻辑工具调用上限；默认 240，给并行研究 + 写报告留余量）
+- `TaskBudgetProfile.max_search_queries` / `max_fetch_sources` / `max_tool_invocations`（Worker 级三资源独立上限；`batch_search(N)` 只扣搜索和一次逻辑调用，`batch_fetch(N)` 只扣抓取和一次逻辑调用）
 - `max_run_sec`
 - `max_plan_steps` / `max_replan_count`
 
@@ -270,7 +270,7 @@ Finalize：
 | Manus 并行子任务各开窗口 | 检索步 fan-out，join 后用 digest，子 Agent 互不通信 |
 | Gemini 百万窗口 + RAG | 本仓窗口小，靠压缩和 digest 换保真 |
 | OpenAI 报告来源侧栏 | CitationManager + evidence.json |
-| 「工具结果写文件只留指针」 | DeepAgents 示例有 FilesystemBackend；**Harness 主路径没有把 tool 结果 offload 成指针**，而是压缩进 state |
+| 「工具结果写文件只留指针」 | DeepAgents 示例有 FilesystemBackend；本仓主路径由 Tool Output Contract 统一外置原文，LLM 只看短卡与 `artifact_id`，需要时再 JIT 读取 |
 
 旧设计文档 §6.2 写的「DeepAgents SummarizationMiddleware 85% 自动摘要」**不是当前 Harness 主路径**。面试请按：子 Agent 隔离 + 显式 compress + 步消息预算。
 

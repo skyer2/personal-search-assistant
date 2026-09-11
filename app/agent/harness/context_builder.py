@@ -317,10 +317,12 @@ class ContextBuilder:
                 "只需完成本步职责，不要等待其他步。"
             )
         bounds: list[str] = []
-        if int(step.metadata.get("max_search_calls") or 0) > 0:
-            bounds.append(f"最多 {step.metadata['max_search_calls']} 次搜索")
-        if int(step.metadata.get("max_fetched_sources") or 0) > 0:
-            bounds.append(f"最多评估 {step.metadata['max_fetched_sources']} 个来源")
+        if int(step.metadata.get("max_search_queries") or 0) > 0:
+            bounds.append(f"最多 {step.metadata['max_search_queries']} 条搜索查询")
+        if int(step.metadata.get("max_fetch_sources") or 0) > 0:
+            bounds.append(f"最多抓取 {step.metadata['max_fetch_sources']} 个来源")
+        if int(step.metadata.get("max_tool_invocations") or 0) > 0:
+            bounds.append(f"最多 {step.metadata['max_tool_invocations']} 次工具调用")
         if int(step.metadata.get("max_llm_calls") or 0) > 0:
             bounds.append(f"最多 {step.metadata['max_llm_calls']} 次模型调用")
         bound_note = f"\n    Worker 边界：{'；'.join(bounds)}。不要展开第二层深度研究。" if bounds else ""

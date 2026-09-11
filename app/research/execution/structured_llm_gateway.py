@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, TypeVar
 
 from pydantic import TypeAdapter
@@ -12,6 +13,65 @@ from app.research.execution.llm_gateway import LLMGateway
 
 
 T = TypeVar("T")
+
+
+def classify_structured_error(exc: Exception) -> str:
+    from app.agent.harness.run_budget import BudgetReservationError
+
+    message = str(exc).lower()
+    if isinstance(exc, BudgetReservationError) or "budget" in message:
+        return "budget"
+    if isinstance(exc, asyncio.TimeoutError) or "timeout" in message or "timed out" in message:
+        return "timeout"
+    if "validation" in message or type(exc).__name__ == "ValidationError":
+        return "validation"
+    if any(token in message for token in ("connection", "http", "api", "provider", "rate limit")):
+        return "provider"
+    if isinstance(exc, (TypeError, ValueError)):
+        return "structured_output"
+    return "unknown"
+
+
+def emit_semantic_fallback(
+    *,
+    phase: str,
+    component: str,
+    fallback: str,
+    exc: Exception,
+    schema: type[Any],
+    model: Any,
+    started: float,
+) -> None:
+    try:
+        from app.observability import EventType, get_recorder
+
+        recorder = get_recorder()
+        if not recorder.is_active:
+            return
+        model_name = str(
+            getattr(model, "model_name", None)
+            or getattr(model, "model", None)
+            or "unknown"
+        )
+        recorder.emit(
+            EventType.SEMANTIC_FALLBACK,
+            phase=phase,
+            status="fallback",
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            attributes={
+                "phase": phase,
+                "component": component,
+                "fallback": fallback,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:500],
+                "error_category": classify_structured_error(exc),
+                "model": model_name,
+                "provider": "openai-compatible",
+                "schema": schema.__name__,
+            },
+        )
+    except Exception:
+        return
 
 
 class StructuredLLMGateway:
@@ -55,4 +115,8 @@ class StructuredLLMGateway:
         raise TypeError("structured model returned an unsupported value")
 
 
-__all__ = ["StructuredLLMGateway"]
+__all__ = [
+    "StructuredLLMGateway",
+    "classify_structured_error",
+    "emit_semantic_fallback",
+]

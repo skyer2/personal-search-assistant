@@ -10,8 +10,10 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from langchain_core.tools import tool
-
-from app.agent.harness.step_budget import consume_retrieval_or_block
+from app.agent.harness.step_budget import (
+    BudgetBlock,
+    consume_fetch_sources_or_block,
+)
 
 Fetcher = Callable[[str, float], tuple[str, str]]
 
@@ -153,7 +155,19 @@ def fetch_url_content(
 @tool
 def fetch_url(url: str, max_chars: int = 8000) -> dict[str, Any]:
     """按 URL 拉取网页正文并外置为 Artifact。搜索卡片不够用时再调用。"""
-    blocked = consume_retrieval_or_block("fetch_url")
+    blocked = consume_fetch_sources_or_block(1, tool_name="fetch_url")
     if blocked:
-        return {"ok": False, "error": "step_retrieval_budget", "message": blocked}
+        return _denied(blocked)
     return fetch_url_content(url, max_chars=max_chars)
+
+
+def _denied(blocked: BudgetBlock) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": "budget_denied",
+        "reason": blocked.reason,
+        "resource": blocked.resource,
+        "used": blocked.used,
+        "limit": blocked.limit,
+        "message": str(blocked),
+    }

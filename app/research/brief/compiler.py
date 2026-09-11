@@ -8,7 +8,7 @@ available; it never routes from TaskShape.
 from __future__ import annotations
 
 import hashlib
-import asyncio
+import time
 import re
 from dataclasses import replace
 from typing import Any
@@ -20,7 +20,10 @@ from app.research.brief.models import (
     StructuredResearchBrief,
 )
 from app.research.brief.validator import validate_structured_brief
-from app.research.execution.structured_llm_gateway import StructuredLLMGateway
+from app.research.execution.structured_llm_gateway import (
+    StructuredLLMGateway,
+    emit_semantic_fallback,
+)
 
 BRIEF_AGENT_PROMPT = """你是研究任务的结构化 Brief 编译器。理解用户真正目标，不要按表面关键词分类。
 
@@ -204,20 +207,27 @@ async def compile_structured_brief_with_llm(
     if agent is None:
         return fallback
     prompt = BRIEF_AGENT_PROMPT.format(query=query, conversation_delta=conversation_delta or "无")
+    started = time.perf_counter()
     try:
         gateway = StructuredLLMGateway(budget_manager)
         with gateway.gateway.execution_scope(phase="brief"):
-            structured = await asyncio.wait_for(
-                gateway.ainvoke(
-                    model=agent,
-                    schema=StructuredResearchBrief,
-                    prompt=prompt,
-                    phase="brief",
-                    timeout_sec=20,
-                ),
-                timeout=20,
+            structured = await gateway.ainvoke(
+                model=agent,
+                schema=StructuredResearchBrief,
+                prompt=prompt,
+                phase="brief",
+                timeout_sec=20,
             )
-    except Exception:
+    except Exception as exc:
+        emit_semantic_fallback(
+            phase="brief",
+            component="StructuredLLMGateway",
+            fallback="deterministic",
+            exc=exc,
+            schema=StructuredResearchBrief,
+            model=agent,
+            started=started,
+        )
         return fallback
     return _merge_llm_brief(fallback, structured.to_dict())
 

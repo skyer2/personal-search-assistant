@@ -20,8 +20,9 @@ from app.agent.harness.orchestration import (
 from app.agent.harness.state import PlanStep, StepResult
 from app.agent.harness.step_budget import (
     STOP_JSON_MESSAGE,
-    consume_retrieval_or_block,
-    retrieval_budget,
+    consume_fetch_sources_or_block,
+    consume_search_queries_or_block,
+    worker_retrieval_budget,
 )
 from app.agent.harness.validator import ResultValidator
 from app.research.planning.policy import SOURCE_TOOLS, tools_for_sources
@@ -148,13 +149,13 @@ def test_json_retry_forbids_research():
 
 
 def test_step_retrieval_budget_blocks():
-    with retrieval_budget(0):
-        msg = consume_retrieval_or_block("internet_search")
+    with worker_retrieval_budget(search_queries=0, fetch_sources=0, tool_invocations=0):
+        msg = consume_search_queries_or_block(1)
         assert msg == STOP_JSON_MESSAGE
-    with retrieval_budget(1):
-        assert consume_retrieval_or_block("internet_search") is None
-        assert consume_retrieval_or_block("fetch_url") == STOP_JSON_MESSAGE
-    assert consume_retrieval_or_block("internet_search") is None
+    with worker_retrieval_budget(search_queries=1, fetch_sources=1, tool_invocations=1):
+        assert consume_search_queries_or_block(1) is None
+        assert consume_fetch_sources_or_block(1) == STOP_JSON_MESSAGE
+    assert consume_search_queries_or_block(1) is None
     print("[OK] step retrieval budget")
 
 

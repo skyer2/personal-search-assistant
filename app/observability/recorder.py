@@ -38,8 +38,11 @@ _SPAN_END_STATUSES = frozenset(
         "rejected",
         "budget_exceeded",
         "warning",
-        "budget_tool_calls",
-        "budget_tokens",
+        "denied",
+        "tool_call_cap",
+        "run_token_cap",
+        "research_phase_token_cap",
+        "run_llm_call_cap",
         "deadline_exceeded",
     }
 )
@@ -509,11 +512,41 @@ class AgentTelemetry:
         tool_call_id: str = "",
         args: dict[str, Any] | None = None,
     ) -> str:
+        from app.agent.harness.usage_tracker import (
+            get_current_worker_run_id,
+            get_current_worker_session_id,
+            get_current_worker_step_index,
+            get_current_worker_task_id,
+        )
+
         call_id = tool_call_id or new_id()
+        safe_args = {
+            "arg_names": sorted(str(key) for key in (args or {}).keys()),
+            "item_count": next(
+                (
+                    len(value)
+                    for value in (args or {}).values()
+                    if isinstance(value, (list, tuple, set))
+                ),
+                0,
+            ),
+        }
+        task_id = get_current_worker_task_id()
+        step_index = get_current_worker_step_index()
+        run_id = get_current_worker_run_id()
+        session_id = get_current_worker_session_id()
         key = self.start_span(
             f"tool.{tool_name}",
             phase="execute",
-            attributes={"tool_name": tool_name, "tool_call_id": call_id},
+            task_id=task_id or None,
+            attributes={
+                "tool_name": tool_name,
+                "tool_call_id": call_id,
+                "task_id": task_id,
+                "step_index": step_index,
+                "run_id": run_id,
+                "session_id": session_id,
+            },
         )
         with self._lock:
             self._tool_spans[call_id] = key
@@ -522,9 +555,18 @@ class AgentTelemetry:
             EventType.TOOL_STARTED,
             phase="execute",
             status="start",
+            task_id=task_id or None,
             span_id=handle.span_id if handle else None,
             parent_span_id=handle.parent_span_id if handle else None,
-            attributes={"tool_name": tool_name, "tool_call_id": call_id, "args": args or {}},
+            run_id=run_id or None,
+            session_id=session_id or None,
+            attributes={
+                "tool_name": tool_name,
+                "tool_call_id": call_id,
+                "task_id": task_id,
+                "step_index": step_index,
+                "args_meta": safe_args,
+            },
         )
         return call_id
 
@@ -542,16 +584,36 @@ class AgentTelemetry:
         artifact_ids: list[str] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
+        from app.agent.harness.usage_tracker import (
+            get_current_worker_run_id,
+            get_current_worker_session_id,
+            get_current_worker_step_index,
+            get_current_worker_task_id,
+        )
+
         call_id = tool_call_id or ""
+        task_id = get_current_worker_task_id()
+        step_index = get_current_worker_step_index()
+        run_id = get_current_worker_run_id()
+        session_id = get_current_worker_session_id()
         with self._lock:
             key = self._tool_spans.pop(call_id, "") if call_id else ""
             if not key and not call_id and self._tool_spans:
                 call_id, key = self._tool_spans.popitem()
         handle = self._handle(key) if key else None
-        event_type = EventType.TOOL_COMPLETED if status == "ok" else EventType.TOOL_FAILED
+        if status == "ok":
+            event_type = EventType.TOOL_COMPLETED
+        elif status == "denied":
+            event_type = EventType.TOOL_DENIED
+        else:
+            event_type = EventType.TOOL_FAILED
         attrs = {
             "tool_name": tool_name,
             "tool_call_id": call_id,
+            "task_id": task_id,
+            "step_index": step_index,
+            "run_id": run_id,
+            "session_id": session_id,
             "error": error,
             "fail_reason": error if status != "ok" else "",
             "result_ref": result_ref,
@@ -585,7 +647,10 @@ class AgentTelemetry:
             event_type,
             phase="execute",
             status=status,
+            task_id=task_id or None,
             duration_ms=duration_ms,
+            run_id=run_id or None,
+            session_id=session_id or None,
             span_id=handle.span_id if handle else None,
             parent_span_id=handle.parent_span_id if handle else None,
             attributes=attrs,
@@ -636,6 +701,12 @@ class AgentTelemetry:
     def _record_metrics(self, event: AgentEvent) -> None:
         if event.type == EventType.TOOL_STARTED:
             self.metrics.inc("harness.tool.calls")
+        if event.type == EventType.TOOL_DENIED:
+            self.metrics.inc("harness.tool.denied")
+        if event.type == EventType.BUDGET_DENIED:
+            self.metrics.inc("harness.budget.denied")
+        if event.type == EventType.SEMANTIC_FALLBACK:
+            self.metrics.inc("harness.semantic.fallback")
         if event.type in {EventType.TOOL_COMPLETED, EventType.TOOL_FAILED} and event.duration_ms is not None:
             self.metrics.observe("harness.tool.duration_ms", float(event.duration_ms))
         if event.type == EventType.WORKER_FAILED:
@@ -660,7 +731,12 @@ class AgentTelemetry:
                 self.metrics.observe("harness.llm.tokens", tokens)
             if cost:
                 self.metrics.observe("harness.llm.cost_usd", cost)
-        if event.status in {"budget_exceeded", "budget_tool_calls", "budget_tokens", "deadline_exceeded"}:
+        if event.status in {
+            "budget_exceeded",
+            "tool_call_cap",
+            "run_token_cap",
+            "deadline_exceeded",
+        }:
             self.metrics.inc("harness.budget.exhausted")
 
 

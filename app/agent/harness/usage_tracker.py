@@ -34,6 +34,9 @@ _current_worker_run_id: ContextVar[str] = ContextVar("harness_worker_run_id", de
 _current_worker_session_id: ContextVar[str] = ContextVar(
     "harness_worker_session_id", default=""
 )
+_current_worker_lease_id: ContextVar[str] = ContextVar(
+    "harness_worker_lease_id", default=""
+)
 _current_llm_reservation: ContextVar[str] = ContextVar(
     "harness_llm_reservation", default=""
 )
@@ -80,14 +83,17 @@ def bind_worker_execution_scope(
     step_index: int,
     run_id: str = "",
     session_id: str = "",
+    worker_lease_id: str = "",
 ) -> Iterator[None]:
     task_token = _current_worker_task.set(task_id)
     step_token = _current_worker_step_index.set(step_index)
     run_token = _current_worker_run_id.set(run_id)
     session_token = _current_worker_session_id.set(session_id)
+    lease_token = _current_worker_lease_id.set(worker_lease_id)
     try:
         yield
     finally:
+        _current_worker_lease_id.reset(lease_token)
         _current_worker_session_id.reset(session_token)
         _current_worker_run_id.reset(run_token)
         _current_worker_step_index.reset(step_token)
@@ -120,6 +126,10 @@ def get_current_worker_run_id() -> str:
 
 def get_current_worker_session_id() -> str:
     return _current_worker_session_id.get()
+
+
+def get_current_worker_lease_id() -> str:
+    return _current_worker_lease_id.get()
 
 
 def set_current_llm_reservation(reservation_id: str) -> Any:
@@ -276,6 +286,21 @@ class UsageTracker:
     def record(self, rec: LLMCallRecord) -> None:
         with self._lock:
             self._by_session.setdefault(rec.session_id, []).append(rec)
+            rec.extra["call_index"] = len(self._by_session[rec.session_id])
+        manager = get_current_budget_manager()
+        task_id = str(rec.extra.get("task_id") or "")
+        if manager is not None and task_id:
+            lease_snapshot = getattr(manager, "worker_lease_snapshot", None)
+            if callable(lease_snapshot):
+                lease = dict(lease_snapshot(task_id) or {})
+                rec.extra.update(
+                    {
+                        "worker_llm_calls_used": int(lease.get("llm_calls_used", 0) or 0),
+                        "worker_llm_calls_limit": int(lease.get("llm_calls_limit", 0) or 0),
+                        "worker_tokens_used": int(lease.get("tokens_used", 0) or 0),
+                        "worker_token_limit": int(lease.get("token_limit", 0) or 0),
+                    }
+                )
         try:
             from app.observability import get_recorder
 
@@ -377,6 +402,7 @@ class UsageTrackingCallback(BaseCallbackHandler):
         self.session_id = session_id
         self.phase = phase
         self._starts: dict[str, float] = {}
+        self._first_token: dict[str, float] = {}
         self._prompt_meta: dict[str, dict[str, Any]] = {}
         self._activity_operations: dict[str, str] = {}
         self._budget_reservations: dict[str, str] = {}
@@ -391,35 +417,40 @@ class UsageTrackingCallback(BaseCallbackHandler):
         if tracker is not None:
             self._activity_operations[run_id] = tracker.begin_operation("llm.request")
         prompt_blob = prompts if prompts is not None else kwargs.get("messages")
+        worker_task_id = get_current_worker_task_id()
+        manager = get_current_budget_manager()
+        output_limit_method = getattr(manager, "worker_output_limit", None)
+        output_limit = (
+            int(output_limit_method(worker_task_id))
+            if callable(output_limit_method) and worker_task_id
+            else 4_096
+        )
+        estimated_tokens = estimate_llm_tokens(
+            prompt_blob,
+            max_output_tokens=output_limit,
+        )
         self._prompt_meta[run_id] = {
             "input_hash": _hash_text(prompt_blob) if prompt_blob is not None else "",
             "prompt_bytes": len(str(prompt_blob or "")),
+            "estimated_tokens": estimated_tokens,
         }
-        manager = get_current_budget_manager()
         if pre_reserved:
             self._budget_reservations[run_id] = pre_reserved
         elif manager is not None:
             from app.agent.harness.run_budget import BudgetReservationError
 
-            worker_task_id = get_current_worker_task_id()
-            output_limit_method = getattr(manager, "worker_output_limit", None)
-            output_limit = (
-                int(output_limit_method(worker_task_id))
-                if callable(output_limit_method) and worker_task_id
-                else 4_096
-            )
             reservation_id, reason = manager.reserve_llm_call(
-                estimated_tokens=estimate_llm_tokens(
-                    prompt_blob,
-                    max_output_tokens=output_limit,
-                ),
+                estimated_tokens=estimated_tokens,
                 worker_task_id=worker_task_id,
                 phase=self.phase or get_llm_phase(),
             )
             if not reservation_id:
-                raise BudgetReservationError(reason or "budget_tokens")
+                raise BudgetReservationError(reason or "run_token_cap")
             self._budget_reservations[run_id] = reservation_id
     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+        run_id = str(kwargs.get("run_id") or "default")
+        if run_id not in self._first_token:
+            self._first_token[run_id] = time.perf_counter()
         from app.research.runtime.activity import get_current_worker_activity
 
         tracker = get_current_worker_activity()
@@ -450,6 +481,7 @@ class UsageTrackingCallback(BaseCallbackHandler):
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
         run_id = str(kwargs.get("run_id") or "default")
         self._starts.pop(run_id, None)
+        self._first_token.pop(run_id, None)
         self._prompt_meta.pop(run_id, None)
         reservation_id = self._budget_reservations.pop(run_id, "")
         if reservation_id:
@@ -463,6 +495,26 @@ class UsageTrackingCallback(BaseCallbackHandler):
             tracker = get_current_worker_activity()
             if tracker is not None:
                 tracker.end_operation(operation_id, status="error")
+        try:
+            from app.observability import EventType, get_recorder
+
+            recorder = get_recorder()
+            if recorder.is_active:
+                recorder.emit(
+                    EventType.LLM_FAILED,
+                    phase=self.phase or get_llm_phase(),
+                    status="failed",
+                    task_id=get_current_worker_task_id() or None,
+                    run_id=get_current_worker_run_id() or None,
+                    session_id=self.session_id or get_llm_session() or None,
+                    attributes={
+                        "error_type": type(error).__name__,
+                        "error_message": str(error)[:500],
+                        "task_id": get_current_worker_task_id(),
+                    },
+                )
+        except Exception:
+            return
 
     def _handle_llm_end(
         self, response: Any, *, reservation_id: str = "", **kwargs: Any
@@ -535,8 +587,14 @@ class UsageTrackingCallback(BaseCallbackHandler):
         cost = estimate_cost_usd(model_name, prompt_tokens, completion_tokens)
         run_key = str(kwargs.get("run_id") or "default")
         started = self._starts.pop(run_key, None)
+        first_token = self._first_token.pop(run_key, None)
         prompt_meta = self._prompt_meta.pop(run_key, {})
         duration_ms = int((time.perf_counter() - started) * 1000) if started is not None else None
+        ttft_ms = (
+            int((first_token - started) * 1000)
+            if started is not None and first_token is not None
+            else None
+        )
         finish_reason = ""
         temperature = None
         response_format = ""
@@ -592,8 +650,13 @@ class UsageTrackingCallback(BaseCallbackHandler):
             cost_usd=cost,
             run_id=str(kwargs.get("run_id") or ""),
             extra={
+                "task_id": get_current_worker_task_id(),
+                "run_id": get_current_worker_run_id(),
+                "call_index": 0,
                 "usage_missing": usage_missing,
                 "duration_ms": duration_ms,
+                "ttft_ms": ttft_ms,
+                "estimated_tokens": int(prompt_meta.get("estimated_tokens") or 0),
                 "finish_reason": finish_reason,
                 "worker_task_id": get_current_worker_task_id(),
                 "prompt_template_id": template_id,
@@ -639,7 +702,7 @@ def _begin_llm_reservation(prompt: Any) -> tuple[Any, str, int, Any] | None:
     if not reservation_id:
         from app.agent.harness.run_budget import BudgetReservationError
 
-        raise BudgetReservationError(reason or "budget_tokens")
+        raise BudgetReservationError(reason or "run_token_cap")
     token = set_current_llm_reservation(reservation_id)
     return manager, reservation_id, estimated_tokens, token
 

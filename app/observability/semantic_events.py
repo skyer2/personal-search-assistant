@@ -114,6 +114,7 @@ def worker_event_attributes(
     tool_calls: int | None = None,
     duration_ms: int | None = None,
     metrics: dict[str, Any] | None = None,
+    budget: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     return {
         "objective": str(objective or ""),
@@ -132,6 +133,7 @@ def worker_event_attributes(
         "tool_calls": _optional_int(tool_calls),
         "duration_ms": _optional_int(duration_ms),
         "metrics": dict(metrics or {}),
+        "budget": dict(budget or {}),
     }
 
 

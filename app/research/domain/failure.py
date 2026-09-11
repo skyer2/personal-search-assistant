@@ -53,7 +53,7 @@ def classify_failure(code: str, *, message: str = "") -> FailureInfo:
     if normalized in {"coverage_gap", "evidence_conflict", "unsupported_claim", "quality_failed"}:
         return failure_info(code, FailureClass.SEMANTIC, message=message)
     if normalized in {
-        "budget_tokens", "research_token_cap", "budget_llm_calls", "budget_tool_calls",
+        "run_token_cap", "research_phase_token_cap", "run_llm_call_cap", "tool_call_cap",
         "budget_exhausted", "deadline_exceeded", "synthesis_time_reserve",
     }:
         return failure_info(code, FailureClass.BUDGET, message=message)

@@ -48,6 +48,8 @@ def should_sample(event_type: str) -> bool:
         "checkpoint.saved",
         "checkpoint.resumed",
     "budget.exhausted",
+    "budget.denied",
+    "semantic.fallback",
     "observability.internal_error",
         "recovery.decided",
         "context.built",

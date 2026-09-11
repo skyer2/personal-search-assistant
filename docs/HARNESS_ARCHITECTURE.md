@@ -56,7 +56,7 @@ Named graph nodes:
 `RuntimePolicy` is deterministic and intentionally contains no semantic actions. It decides only:
 
 - dispatch, retry, synthesize, partial delivery, wait, or stop;
-- iteration, worker, tool-call, token, and time budgets;
+- iteration, worker, token, time, search-query, fetch-source, and logical tool-invocation budgets;
 - whether terminal metadata is valid;
 - whether partial delivery is allowed because usable evidence exists.
 
@@ -73,7 +73,7 @@ Workers own execution, not research completion. Each result is scoped to:
 
 Workers can return findings, facts, candidates, sources, evidence IDs, and confidence. They cannot mutate coverage, mark research complete, or choose the next strategy.
 
-Worker leases split remaining research capacity by the actual approved wave size and enforce the shared `TaskBudgetProfile`: token ceiling, LLM/search/fetch ceilings, and `max_output_tokens_per_call`. Early fan-in does not cancel required workers; it can only skip optional workers after partial-wave Coverage is sufficient.
+Worker leases split remaining research capacity by the actual approved wave size and enforce the shared `TaskBudgetProfile`: token ceiling, LLM/search-query/fetch-source/tool-invocation ceilings, and `max_output_tokens_per_call`. `batch_search(N)` and `batch_fetch(N)` each count as one logical tool invocation while consuming only their own resource type. Early fan-in does not cancel required workers; it can only skip optional workers after partial-wave Coverage is sufficient.
 
 ## Stop Semantics
 
@@ -98,3 +98,5 @@ Budget stop, timeout, and worker `STOPPED` do not automatically map to `failed`.
 - `app/research/runtime/graph.py` — eight-node graph topology
 - `app/research/runtime/runner.py` — production graph nodes and telemetry
 - `app/research/runtime/state.py` — canonical state schema
+- `app/agent/harness/step_budget.py` — per-worker search, fetch, and logical invocation budgets
+- `app/research/execution/tool_gateway.py` — worker-local retrieval execution scope

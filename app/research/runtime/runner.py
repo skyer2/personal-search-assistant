@@ -401,6 +401,15 @@ class ResearchGraphRunner:
                     "task_shape": brief.user_intent,
                     "execution_path": "fast_path" if eligibility.eligible else "harness",
                     "route_signals": update.get("route_signals") or [],
+                    "control_plane": {
+                        "brief_source": brief.compiler_source,
+                        "brief_fallback": brief.compiler_source != "structured_llm",
+                        "supervisor_sources": [],
+                        "supervisor_structured_success": 0,
+                        "supervisor_fallback_count": 0,
+                        "fallback_rate": 0.0,
+                        "control_plane_degraded": brief.compiler_source != "structured_llm",
+                    },
                 }
             )
         _emit(
@@ -493,6 +502,15 @@ class ResearchGraphRunner:
                 + (1 if state.get("plan") else 0),
                 "last_action": action.action,
                 "reasoning_summary": action.reason,
+                "source": action.source,
+                "source_history": [
+                    *[
+                        str(item)
+                        for item in (state.get("supervisor") or {}).get("source_history") or []
+                        if str(item).strip()
+                    ],
+                    action.source,
+                ],
             },
         }
         raw_iteration_limit = state.get("budget", {}).get("max_replan_count")
@@ -532,17 +550,21 @@ class ResearchGraphRunner:
                             "novelty_reason": item.novelty_reason,
                             "estimated_effort": item.estimated_effort,
                             "token_ceiling": (profile := task_budget_profile(item.estimated_effort)).token_ceiling,
-                            "max_search_calls": min(
-                                int(item.max_search_calls or profile.max_search_calls),
-                                int(budget.get("max_search_calls_per_worker") or 4),
+                            "max_search_queries": min(
+                                int(item.max_search_queries or profile.max_search_queries),
+                                int(budget.get("max_search_queries_per_worker") or 4),
                             ),
                             "max_llm_calls": min(
                                 int(item.max_llm_calls or profile.max_llm_calls),
                                 int(getattr(self.harness.harness_config, "max_llm_calls_per_worker", 4) or 4),
                             ),
-                            "max_fetched_sources": min(
+                            "max_fetch_sources": min(
                                 profile.max_fetch_sources,
-                                int(budget.get("max_fetched_sources_per_worker") or 8),
+                                int(budget.get("max_fetch_sources_per_worker") or 8),
+                            ),
+                            "max_tool_invocations": min(
+                                profile.max_tool_invocations,
+                                int(budget.get("max_tool_invocations_per_worker") or 6),
                             ),
                             "max_output_tokens_per_call": profile.max_output_tokens_per_call,
                             "semantic_fingerprint": next(
@@ -647,6 +669,10 @@ class ResearchGraphRunner:
                     "supervisor_action": action.to_dict(),
                     "control_decision": control_decision,
                     "supervisor_iterations": payload["supervisor"]["iteration"],
+                    "control_plane": self._control_plane_status(
+                        brief.compiler_source,
+                        list(payload["supervisor"]["source_history"]),
+                    ),
                 }
             )
         _emit(
@@ -1355,6 +1381,7 @@ class ResearchGraphRunner:
             )
         else:
             result = await executor.execute(request, context)
+        synthesis_metadata = dict(getattr(result, "metadata", {}) or {})
         retried = False
         retry_allowed = bool(
             not result.ok
@@ -1367,6 +1394,7 @@ class ResearchGraphRunner:
         )
         if retry_allowed:
             retried = True
+            synthesis_error = dict(synthesis_metadata.get("error") or {})
             _emit(
                 session,
                 "synthesis.failed",
@@ -1381,6 +1409,20 @@ class ResearchGraphRunner:
                     "claim_count": len(claims),
                     "fail_reason": result.fail_reason,
                     "fallback_action": "compact_retry",
+                    "error_type": str(synthesis_error.get("type") or ""),
+                    "error_message": str(synthesis_error.get("message") or ""),
+                    "error_category": str(synthesis_error.get("category") or ""),
+                    "model": str(synthesis_metadata.get("model") or ""),
+                    "provider": str(synthesis_metadata.get("provider") or ""),
+                    "estimated_input_tokens": int(
+                        synthesis_metadata.get("estimated_input_tokens") or 0
+                    ),
+                    "remaining_run_tokens": int(
+                        synthesis_metadata.get("remaining_run_tokens") or 0
+                    ),
+                    "remaining_run_sec": float(
+                        synthesis_metadata.get("remaining_run_sec") or 0.0
+                    ),
                     "retry_timeout_sec": getattr(
                         self.harness.harness_config,
                         "synthesis_retry_timeout_sec",
@@ -1454,6 +1496,26 @@ class ResearchGraphRunner:
             attempt=attempts_before + (2 if retried else 1),
             duration_ms=result.duration_ms,
             attributes={
+                **{
+                    "error_type": str((synthesis_metadata.get("error") or {}).get("type") or ""),
+                    "error_message": str(
+                        (synthesis_metadata.get("error") or {}).get("message") or ""
+                    ),
+                    "error_category": str(
+                        (synthesis_metadata.get("error") or {}).get("category") or ""
+                    ),
+                    "model": str(synthesis_metadata.get("model") or ""),
+                    "provider": str(synthesis_metadata.get("provider") or ""),
+                    "estimated_input_tokens": int(
+                        synthesis_metadata.get("estimated_input_tokens") or 0
+                    ),
+                    "remaining_run_tokens": int(
+                        synthesis_metadata.get("remaining_run_tokens") or 0
+                    ),
+                    "remaining_run_sec": float(
+                        synthesis_metadata.get("remaining_run_sec") or 0.0
+                    ),
+                },
                 "mode": mode,
                 "compact": compact or retried,
                 "evidence_ids": list(evidence_refs),
@@ -1602,6 +1664,16 @@ class ResearchGraphRunner:
             attributes={
                 **termination_event_attributes(termination_payload),
                 "final_content_chars": len(session.state.final_content),
+                **(
+                    session.state.metadata.get("control_plane")
+                    if isinstance(session.state.metadata.get("control_plane"), dict)
+                    else {}
+                ),
+                "control_plane_degraded": bool(
+                    (session.state.metadata.get("control_plane") or {}).get(
+                        "control_plane_degraded"
+                    )
+                ),
             },
         )
         result = await self.harness._phase_finalize(
@@ -1627,6 +1699,12 @@ class ResearchGraphRunner:
                     "workers": len(gstate.get("tasks") or {}),
                     "primary_sources": int(source_counts.get(SourceTier.PRIMARY.value, 0) or 0),
                     "partial_renderer_called": str((gstate.get("control_decision") or {}).get("action") or "") == "deliver_partial",
+                    "control_plane": dict(session.state.metadata.get("control_plane") or {}),
+                    "control_plane_degraded": bool(
+                        (session.state.metadata.get("control_plane") or {}).get(
+                            "control_plane_degraded"
+                        )
+                    ),
                     "latency": critical_path_summary(session.state.metadata),
                 }
             )
@@ -1640,3 +1718,24 @@ class ResearchGraphRunner:
             result.metadata["latency"] = critical_path_summary(session.state.metadata)
         session.result = result
         return termination
+
+    @staticmethod
+    def _control_plane_status(
+        brief_source: str,
+        supervisor_sources: list[str],
+    ) -> dict[str, Any]:
+        fallback_count = sum(
+            1 for source in supervisor_sources if source != "structured_llm"
+        )
+        total = len(supervisor_sources)
+        brief_fallback = brief_source != "structured_llm"
+        fallback_rate = round(fallback_count / total, 4) if total else 0.0
+        return {
+            "brief_source": brief_source,
+            "brief_fallback": brief_fallback,
+            "supervisor_sources": list(supervisor_sources),
+            "supervisor_structured_success": total - fallback_count,
+            "supervisor_fallback_count": fallback_count,
+            "fallback_rate": fallback_rate,
+            "control_plane_degraded": brief_fallback or fallback_count > 0,
+        }

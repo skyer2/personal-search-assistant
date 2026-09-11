@@ -136,14 +136,14 @@ def test_worker_budget_stop_preserves_recovered_evidence():
             ),
             2,
             0.0,
-            cause="budget_blocked:research_token_cap",
-            fail_reason="research_token_cap",
+            cause="budget_blocked:research_phase_token_cap",
+            fail_reason="research_phase_token_cap",
             status="blocked",
             ok=False,
         )
         assert result.ok is False
         assert result.status == "partial"
-        assert result.fail_reason == "research_token_cap"
+        assert result.fail_reason == "research_phase_token_cap"
         assert result.evidence_refs
         assert result.findings
     finally:
@@ -209,7 +209,7 @@ def test_dispatch_admission_counts_reserved_llm_calls():
         state={"budget": {"max_parallel_workers": 2}},
     )
     assert admission.approved == ()
-    assert admission.denied_reason == {"request_0": "budget_llm_calls"}
+    assert admission.denied_reason == {"request_0": "run_llm_call_cap"}
 
 
 async def test_low_synthesis_budget_skips_llm_and_renders_partial(monkeypatch):
@@ -313,4 +313,4 @@ def test_actual_wave_size_splits_leases_by_approved_count():
     assert manager.snapshot().active_worker_leases == 2
     third, third_reason = manager.reserve_worker_lease("task_c", parallel_workers=2)
     assert third == ""
-    assert third_reason == "research_token_cap"
+    assert third_reason == "research_phase_token_cap"

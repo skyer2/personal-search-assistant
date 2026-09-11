@@ -490,7 +490,8 @@ def grant_on_gap(
 
     return {
         "max_new_tasks": int(want_tasks),
-        "max_retrieval_calls": int(want_retrieval),
+        "max_search_queries": int(want_retrieval),
+        "max_tool_invocations": int(want_retrieval),
         "remaining_plan_patch_tasks": int(remaining_tasks),
         "remaining_reserve_step_tool_calls": int(remaining_retrieval),
         "gap_severity": severity,
@@ -506,7 +507,7 @@ def apply_grant_to_run_budget(
     """PlanPatch 成功后扣减剩余 reserve。"""
     budget = dict(run_budget or {})
     used_tasks = max(0, int(tasks_granted or grant.get("max_new_tasks") or 0))
-    used_retrieval = max(0, int(grant.get("max_retrieval_calls") or 0)) if used_tasks else 0
+    used_retrieval = max(0, int(grant.get("max_search_queries") or 0)) if used_tasks else 0
     rem_tasks = max(
         0,
         int(budget.get("remaining_plan_patch_tasks", budget.get("max_plan_patch_tasks", 0)) or 0)
@@ -540,13 +541,13 @@ def apply_grant_to_run_budget(
     return {k: int(v) if isinstance(v, (int, float)) else v for k, v in budget.items()}
 
 
-def retrieval_budget_for_effort_hint(
+def search_query_budget_for_effort_hint(
     base: int,
     hint: str | None,
     *,
     hard_step: int,
 ) -> int:
-    """task.metadata.effort (low|medium|high) → 步检索额度，仍 ≤ hard step。"""
+    """task.metadata.effort (low|medium|high) → 步搜索查询额度，仍 ≤ hard step。"""
     scale = _EFFORT_HINT_SCALE.get(str(hint or "").strip().lower(), 1.0)
     return max(1, min(int(hard_step), int(round(base * scale))))
 
@@ -565,9 +566,12 @@ def stamp_effort_on_plan(plan: Any, effective: EffectiveBudget) -> None:
             continue
         step_meta = dict(getattr(step, "metadata", None) or {})
         hint = str(step_meta.get("effort") or "").strip().lower() or None
-        step_meta["max_retrieval_calls"] = retrieval_budget_for_effort_hint(
+        search_queries = search_query_budget_for_effort_hint(
             base, hint, hard_step=hard_step
         )
+        step_meta["max_search_queries"] = search_queries
+        step_meta["max_fetch_sources"] = min(hard_step * 2, search_queries * 2)
+        step_meta["max_tool_invocations"] = min(hard_step, search_queries)
         step_meta.setdefault("effort_tier", effective.effort.tier)
         step_meta.setdefault("complexity", effective.effort.complexity)
         if hint:

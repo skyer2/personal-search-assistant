@@ -196,6 +196,30 @@ class RunBudgetManager:
                 self.tool_call_limit = new_limit
                 self._maybe_force_synthesis_locked()
 
+    def _emit_denied(
+        self,
+        *,
+        scope: str,
+        resource: str,
+        reason: str,
+        task_id: str = "",
+        used: int = 0,
+        reserved: int = 0,
+        limit: int = 0,
+    ) -> None:
+        from app.agent.harness.budget_events import emit_budget_denied
+
+        emit_budget_denied(
+            scope=scope,
+            resource=resource,
+            reason=reason,
+            task_id=task_id,
+            used=used,
+            reserved=reserved,
+            limit=limit,
+            budget_manager=self,
+        )
+
     def commit_tokens(self, tokens: int) -> None:
         with self._lock:
             self._used_tokens += max(0, int(tokens or 0))
@@ -238,12 +262,26 @@ class RunBudgetManager:
         with self._lock:
             reason = self._research_block_reason_locked()
             if reason:
+                self._emit_denied(
+                    scope="run" if reason.startswith("run_") else "research_phase",
+                    resource="token" if reason.endswith("token_cap") else "llm_call",
+                    reason=reason,
+                    task_id=str(task_id or ""),
+                )
                 return "", reason
             active = self._active_worker_ceiling_locked()
             if research_cap > 0:
                 remaining = research_cap - self._used_tokens - active
                 if remaining <= 0:
-                    return "", "research_token_cap"
+                    self._emit_denied(
+                        scope="research_phase",
+                        resource="token",
+                        reason="research_phase_token_cap",
+                        task_id=str(task_id or ""),
+                        used=self._used_tokens,
+                        limit=research_cap,
+                    )
+                    return "", "research_phase_token_cap"
                 requested = min(requested, remaining)
             if self.token_limit > 0:
                 remaining_hard = (
@@ -253,7 +291,15 @@ class RunBudgetManager:
                     - active
                 )
                 if remaining_hard <= 0:
-                    return "", "budget_tokens"
+                    self._emit_denied(
+                        scope="run",
+                        resource="token",
+                        reason="run_token_cap",
+                        task_id=str(task_id or ""),
+                        used=self._used_tokens,
+                        limit=self.token_limit,
+                    )
+                    return "", "run_token_cap"
                 requested = min(requested, remaining_hard)
 
             lease_id = f"lease_{uuid.uuid4().hex[:16]}"
@@ -293,6 +339,35 @@ class RunBudgetManager:
             )
             return lease.max_output_tokens_per_call if lease else 4_096
 
+    def worker_lease_snapshot(
+        self,
+        task_id: str = "",
+        *,
+        lease_id: str = "",
+    ) -> dict[str, int]:
+        with self._lock:
+            lease = None
+            if lease_id:
+                lease = self._worker_leases.get(lease_id)
+            if lease is None and task_id:
+                lease = next(
+                    (
+                        item
+                        for item in self._worker_leases.values()
+                        if item.task_id == str(task_id or "")
+                    ),
+                    None,
+                )
+            if lease is None:
+                return {}
+            return {
+                "llm_calls_used": lease.llm_calls,
+                "llm_calls_limit": lease.max_llm_calls,
+                "tokens_used": lease.used_tokens,
+                "token_limit": lease.token_ceiling,
+                "in_flight_tokens": lease.in_flight_tokens,
+            }
+
     def reserve_llm_call(
         self,
         *,
@@ -308,7 +383,16 @@ class RunBudgetManager:
                 self.llm_call_limit > 0
                 and self._llm_calls + self._reserved_llm_calls >= self.llm_call_limit
             ):
-                return "", "budget_llm_calls"
+                self._emit_denied(
+                    scope="run",
+                    resource="llm_call",
+                    reason="run_llm_call_cap",
+                    task_id=worker_task_id,
+                    used=self._llm_calls,
+                    reserved=self._reserved_llm_calls,
+                    limit=self.llm_call_limit,
+                )
+                return "", "run_llm_call_cap"
 
             lease = None
             if worker_task_id:
@@ -317,14 +401,37 @@ class RunBudgetManager:
                     None,
                 )
                 if lease is None:
+                    self._emit_denied(
+                        scope="worker",
+                        resource="llm_call",
+                        reason="worker_lease_missing",
+                        task_id=worker_task_id,
+                    )
                     return "", "worker_lease_missing"
                 if lease.llm_calls >= lease.max_llm_calls:
+                    self._emit_denied(
+                        scope="worker",
+                        resource="llm_call",
+                        reason="worker_llm_call_cap",
+                        task_id=worker_task_id,
+                        used=lease.llm_calls,
+                        limit=lease.max_llm_calls,
+                    )
                     return "", "worker_llm_call_cap"
                 if (
                     lease.token_ceiling > 0
                     and lease.used_tokens + lease.in_flight_tokens + total > lease.token_ceiling
                 ):
-                    return "", "research_token_cap"
+                    self._emit_denied(
+                        scope="worker",
+                        resource="token",
+                        reason="worker_token_cap",
+                        task_id=worker_task_id,
+                        used=lease.used_tokens,
+                        reserved=lease.in_flight_tokens,
+                        limit=lease.token_ceiling,
+                    )
+                    return "", "worker_token_cap"
                 effective_after = self._used_tokens + self._effective_reserved_tokens_locked()
             else:
                 effective_after = (
@@ -332,13 +439,31 @@ class RunBudgetManager:
                 )
 
             if self.token_limit > 0 and effective_after > self.token_limit:
-                return "", "budget_tokens"
+                self._emit_denied(
+                    scope="run",
+                    resource="token",
+                    reason="run_token_cap",
+                    task_id=worker_task_id,
+                    used=self._used_tokens,
+                    reserved=self._effective_reserved_tokens_locked(),
+                    limit=self.token_limit,
+                )
+                return "", "run_token_cap"
             if (
                 normalized_phase in self._RESEARCH_LLM_PHASES
                 and self.token_limit > 0
                 and effective_after > self.phase_plan.research_cap_tokens(self.token_limit)
             ):
-                return "", "research_token_cap"
+                self._emit_denied(
+                    scope="research_phase",
+                    resource="token",
+                    reason="research_phase_token_cap",
+                    task_id=worker_task_id,
+                    used=self._used_tokens,
+                    reserved=self._effective_reserved_tokens_locked(),
+                    limit=self.phase_plan.research_cap_tokens(self.token_limit),
+                )
+                return "", "research_phase_token_cap"
 
             reservation_id = f"llmres_{uuid.uuid4().hex[:16]}"
             self._llm_reservations[reservation_id] = _LLMReservation(
@@ -431,7 +556,15 @@ class RunBudgetManager:
         calls = max(1, int(count or 1))
         with self._lock:
             if self.tool_call_limit > 0 and self._tool_calls + calls > self.tool_call_limit:
-                return False, "budget_tool_calls"
+                self._emit_denied(
+                    scope="run",
+                    resource="tool_call",
+                    reason="tool_call_cap",
+                    used=self._tool_calls,
+                    reserved=calls,
+                    limit=self.tool_call_limit,
+                )
+                return False, "tool_call_cap"
             self._tool_calls += calls
             self._maybe_force_synthesis_locked()
             return True, ""
@@ -532,16 +665,16 @@ class RunBudgetManager:
         snap = self.snapshot()
         effective_used = snap.used_tokens + snap.reserved_tokens
         if snap.token_limit > 0 and effective_used >= snap.token_limit:
-            return "budget_tokens"
+            return "run_token_cap"
         if snap.token_limit > 0 and effective_used >= snap.research_cap_tokens:
-            return "research_token_cap"
+            return "research_phase_token_cap"
         if (
             snap.llm_call_limit > 0
             and snap.llm_calls + snap.reserved_llm_calls >= snap.llm_call_limit
         ):
-            return "budget_llm_calls"
+            return "run_llm_call_cap"
         if snap.tool_call_limit > 0 and snap.tool_calls >= snap.tool_call_limit:
-            return "budget_tool_calls"
+            return "tool_call_cap"
         if self.deadline_sec > 0 and snap.elapsed_sec >= self.deadline_sec:
             return "deadline_exceeded"
         if self.deadline_sec > 0 and snap.remaining_research_sec <= 0:
@@ -557,13 +690,13 @@ class RunBudgetManager:
         """Return the exact committed exhaustion reason, if any."""
         snap = self.snapshot()
         if snap.token_limit > 0 and snap.used_tokens >= snap.token_limit:
-            return "budget_tokens"
+            return "run_token_cap"
         if snap.token_limit > 0 and snap.used_tokens >= snap.research_cap_tokens:
-            return "research_token_cap"
+            return "research_phase_token_cap"
         if snap.llm_call_limit > 0 and snap.llm_calls >= snap.llm_call_limit:
-            return "budget_llm_calls"
+            return "run_llm_call_cap"
         if snap.tool_call_limit > 0 and snap.tool_calls >= snap.tool_call_limit:
-            return "budget_tool_calls"
+            return "tool_call_cap"
         if self.deadline_sec > 0 and snap.remaining_run_sec <= 0:
             return "deadline_exceeded"
         if self.deadline_sec > 0 and snap.remaining_research_sec <= 0:

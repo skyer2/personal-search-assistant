@@ -264,7 +264,57 @@ def apply_tool_output_contract(
     return text
 
 
-def wrap_tool_with_contract(tool: Any, *, tool_name: str = "", step_type: str = "") -> Any:
+def _tool_item_count(raw: Any) -> int:
+    if not isinstance(raw, dict):
+        return 1
+    for key in ("query_count", "url_count", "item_count"):
+        try:
+            value = int(raw.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    results = raw.get("results")
+    return len(results) if isinstance(results, list) else 1
+
+
+def _tool_success_count(raw: Any) -> int:
+    if not isinstance(raw, dict):
+        return 1
+    for key in ("ok_count", "success_count"):
+        try:
+            value = int(raw.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    results = raw.get("results")
+    if isinstance(results, list):
+        return sum(1 for item in results if isinstance(item, dict) and item.get("ok"))
+    return 1 if raw.get("ok") else 0
+
+
+def _raw_artifact_ids(raw: Any) -> list[str]:
+    if not isinstance(raw, dict):
+        return []
+    ids: list[str] = []
+    direct = raw.get("artifact_id")
+    if direct:
+        ids.append(str(direct))
+    ids.extend(str(item) for item in raw.get("artifact_ids") or [] if str(item).strip())
+    for item in raw.get("results") or []:
+        if isinstance(item, dict) and item.get("artifact_id"):
+            ids.append(str(item["artifact_id"]))
+    return list(dict.fromkeys(ids))
+
+
+def wrap_tool_with_contract(
+    tool: Any,
+    *,
+    tool_name: str = "",
+    step_type: str = "",
+    apply_output_contract: bool = True,
+) -> Any:
     """包装 LangChain tool：执行后按合同外置原文。"""
     if tool is None:
         return tool
@@ -301,31 +351,58 @@ def wrap_tool_with_contract(tool: Any, *, tool_name: str = "", step_type: str = 
                 else:
                     func = getattr(tool, "func", None)
                     raw = func(**kwargs) if callable(func) else tool(**kwargs)
-            output = apply_tool_output_contract(raw, tool_name=name, step_type=step_type)
+            if (
+                isinstance(raw, dict)
+                and raw.get("error") == "budget_denied"
+            ):
+                if recorder.is_active:
+                    recorder.finish_tool(
+                        name,
+                        tool_call_id=call_id,
+                        duration_ms=int((time.perf_counter() - started) * 1000),
+                        status="denied",
+                        error=str(raw.get("reason") or "budget_denied"),
+                        extra={
+                            "error_type": "BudgetDenied",
+                            "reason": str(raw.get("reason") or ""),
+                            "resource": str(raw.get("resource") or ""),
+                            "item_count": _tool_item_count(raw),
+                            "success_count": 0,
+                            "failure_count": _tool_item_count(raw),
+                        },
+                    )
+                return raw
+            output = (
+                raw
+                if not apply_output_contract
+                else apply_tool_output_contract(raw, tool_name=name, step_type=step_type)
+            )
             tracker = get_current_worker_activity()
             if tracker is not None:
                 tracker.artifact_written()
             if recorder.is_active:
-                payload = json.loads(output) if isinstance(output, str) else {}
+                payload = json.loads(output) if isinstance(output, str) else None
                 artifact_ids: list[str] = []
+                artifact_ids.extend(_raw_artifact_ids(raw))
                 if isinstance(payload, dict):
                     artifact_id = str(payload.get("artifact_id") or "")
                     if artifact_id:
                         artifact_ids.append(artifact_id)
-                    artifact_ids.extend(
-                        str(item)
-                        for item in payload.get("artifact_ids") or []
-                        if str(item).strip()
-                    )
-                    payload["instrumentation"] = "tool_contract"
-                    output = json.dumps(payload, ensure_ascii=False)
+                artifact_ids = list(dict.fromkeys(artifact_ids))
                 recorder.finish_tool(
                     name,
                     tool_call_id=call_id,
                     duration_ms=int((time.perf_counter() - started) * 1000),
                     status="ok",
                     result_ref=artifact_ids[0] if artifact_ids else "",
-                    result_count=1 if output else 0,
+                    result_count=_tool_success_count(raw) if output else 0,
+                    extra={
+                        "item_count": _tool_item_count(raw),
+                        "success_count": _tool_success_count(raw),
+                        "failure_count": max(
+                            0, _tool_item_count(raw) - _tool_success_count(raw)
+                        ),
+                    },
                     result_bytes=len(output.encode("utf-8")) if isinstance(output, str) else 0,
                     artifact_ids=artifact_ids,
                 )

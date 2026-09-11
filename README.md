@@ -25,6 +25,7 @@ This project is not a search engine. Search is only an environment tool. The har
 - Synthesis consumes semantic digests and cannot change coverage.
 - The final answer must pass coverage, conflict, citation, and grounding gates.
 - Semantic LLM calls go through one structured invocation boundary; workers cannot reinterpret user intent.
+- Worker budgets separate search queries, fetched sources, and logical tool invocations.
 - Chat is the primary answer surface. `FILES` lists only explicit user deliverables, never internal run artifacts.
 
 ## Execution Path
@@ -65,7 +66,7 @@ Production fidelity, live scenarios, and BrowseComp-Plus are documented in [docs
 - [StateGraph runtime](docs/HARNESS_ARCHITECTURE.md)
 - [Observability contract](docs/OBSERVABILITY.md)
 - [Evaluation system](docs/EVALUATION.md)
-- [Runtime delivery stabilization result](docs/architecture/runtime-delivery-stabilization-result.md)
+- [Runtime failure observability result](docs/architecture/runtime-failure-observability-result.md)
 - [BrowseComp-Plus](docs/BROWSECOMP_PLUS_EVAL.md)
 - [Context and memory boundaries](docs/CONTEXT_SYSTEM.md)
 - [Deployment](docs/OPENEULER_BARE_METAL.md)

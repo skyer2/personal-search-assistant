@@ -10,8 +10,9 @@ from dataclasses import dataclass
 class TaskBudgetProfile:
     token_ceiling: int
     max_llm_calls: int
-    max_search_calls: int
+    max_search_queries: int
     max_fetch_sources: int
+    max_tool_invocations: int
     max_output_tokens_per_call: int
 
 
@@ -23,9 +24,9 @@ def _env_int(name: str, default: int) -> int:
 
 
 _PROFILE_DEFAULTS = {
-    "small": (12_000, 3, 3, 6, 1_500),
-    "medium": (24_000, 4, 4, 8, 2_000),
-    "large": (40_000, 6, 6, 12, 2_500),
+    "small": (12_000, 3, 3, 6, 4, 1_500),
+    "medium": (24_000, 4, 4, 8, 6, 2_000),
+    "large": (40_000, 6, 6, 12, 8, 2_500),
 }
 
 
@@ -38,10 +39,11 @@ def task_budget_profile(effort: str) -> TaskBudgetProfile:
     return TaskBudgetProfile(
         token_ceiling=_env_int(f"{prefix}TOKEN_CEILING", defaults[0]),
         max_llm_calls=_env_int(f"{prefix}MAX_LLM_CALLS", defaults[1]),
-        max_search_calls=_env_int(f"{prefix}MAX_SEARCH_CALLS", defaults[2]),
+        max_search_queries=_env_int(f"{prefix}MAX_SEARCH_QUERIES", defaults[2]),
         max_fetch_sources=_env_int(f"{prefix}MAX_FETCH_SOURCES", defaults[3]),
+        max_tool_invocations=_env_int(f"{prefix}MAX_TOOL_INVOCATIONS", defaults[4]),
         max_output_tokens_per_call=_env_int(
-            f"{prefix}MAX_OUTPUT_TOKENS_PER_CALL", defaults[4]
+            f"{prefix}MAX_OUTPUT_TOKENS_PER_CALL", defaults[5]
         ),
     )
 

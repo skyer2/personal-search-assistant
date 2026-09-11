@@ -26,6 +26,7 @@ _REDACT_KEYS = {
 _KEEP_KEYS = {
     "tool_name",
     "tool_call_id",
+    "args_meta",
     "model",
     "phase",
     "status",

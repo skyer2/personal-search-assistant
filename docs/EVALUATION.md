@@ -78,6 +78,7 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 
 ```bash
 .\.venv\Scripts\python.exe tests\e2e\test_production_fidelity_synthesis.py
+.\.venv\Scripts\python.exe tests\test_runtime_failure_observability.py
 .\.venv\Scripts\python.exe scripts\release_smoke.py --q1-runs 3
 ```
 
@@ -87,6 +88,8 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 - Worker 生命周期；
 - root span 与 lineage；
 - synthesis attempt / fail reason / fallback；
+- search-query / fetch-source / logical tool-invocation budget separation；
+- `budget.denied` 与 `semantic.fallback` 诊断；
 - Trace Integrity；
 - repeated run 非空 `partial` 或 `success`。
 

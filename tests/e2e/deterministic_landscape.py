@@ -15,8 +15,18 @@ from app.research.execution.tool_gateway import ToolGateway
 class CapturingToolGateway(ToolGateway):
     current: CapturingToolGateway | None = None
 
-    def __init__(self, remaining_calls: int | None):
-        super().__init__(remaining_calls)
+    def __init__(
+        self,
+        *,
+        search_queries_remaining: int | None,
+        fetch_sources_remaining: int | None,
+        tool_invocations_remaining: int | None,
+    ):
+        super().__init__(
+            search_queries_remaining=search_queries_remaining,
+            fetch_sources_remaining=fetch_sources_remaining,
+            tool_invocations_remaining=tool_invocations_remaining,
+        )
         CapturingToolGateway.current = self
 
 

@@ -169,6 +169,67 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
     for row in prepared_rows:
         payload = dict(row.get("payload") or {})
         meta = metadata.get(str(row.get("task_id") or ""), {})
+        payload_findings = [
+            dict(item)
+            for item in payload.get("findings") or []
+            if isinstance(item, dict)
+        ]
+        if payload_findings:
+            for raw_finding in payload_findings:
+                evidence_ids = [
+                    str(item)
+                    for item in raw_finding.get("evidence_ids") or []
+                    if str(item) in admitted_ids
+                ]
+                if not evidence_ids:
+                    continue
+                claim = str(
+                    raw_finding.get("claim")
+                    or raw_finding.get("summary")
+                    or ""
+                ).strip()
+                findings.append(
+                    {
+                        **raw_finding,
+                        "evidence_ids": evidence_ids[:12],
+                        "claims": [claim] if claim else [],
+                        "supported_criteria": list(
+                            dict.fromkeys(
+                                [
+                                    *(
+                                        str(item)
+                                        for item in raw_finding.get("supported_criteria") or []
+                                        if str(item).strip()
+                                    ),
+                                    *(
+                                        str(item)
+                                        for item in meta.get("target_criteria") or []
+                                        if str(item).strip()
+                                    ),
+                                ]
+                            )
+                        ),
+                        "target_gaps": list(
+                            dict.fromkeys(
+                                [
+                                    *(
+                                        str(item)
+                                        for item in raw_finding.get("target_gaps") or []
+                                        if str(item).strip()
+                                    ),
+                                    *(
+                                        str(item)
+                                        for item in meta.get("target_gaps") or []
+                                        if str(item).strip()
+                                    ),
+                                ]
+                            )
+                        ),
+                        "claim_ids": claims_by_task.get(str(row.get("task_id") or ""), []),
+                        "wave_id": current_wave,
+                    }
+                )
+            continue
         findings.append(
             compress_worker_result(
                 task_id=str(row.get("task_id") or ""),

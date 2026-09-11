@@ -20,7 +20,11 @@ def test_search_artifact_has_task_step_and_run_provenance():
             }
         ],
     }
-    with ToolGateway(None).execution_scope(
+    with ToolGateway(
+        search_queries_remaining=None,
+        fetch_sources_remaining=None,
+        tool_invocations_remaining=None,
+    ).execution_scope(
         worker_task_id="t_landscape",
         step_index=0,
         run_id="run-artifact",
@@ -88,7 +92,11 @@ def test_salvage_rejects_same_step_from_other_run():
 def test_empty_search_fallback_keeps_full_provenance():
     store = ArtifactStore()
     set_artifact_store(store)
-    with ToolGateway(None).execution_scope(
+    with ToolGateway(
+        search_queries_remaining=None,
+        fetch_sources_remaining=None,
+        tool_invocations_remaining=None,
+    ).execution_scope(
         worker_task_id="t_empty",
         step_index=3,
         run_id="run-empty",

@@ -12,7 +12,10 @@ sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.run_budget import RunBudgetManager, create_run_budget_manager
 from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep
-from app.agent.harness.step_budget import retrieval_budget, consume_n_retrieval_or_block
+from app.agent.harness.step_budget import (
+    current_worker_retrieval_budget,
+    worker_retrieval_budget,
+)
 from app.research.runtime.scheduler import (
     annotate_plan_tasks,
     readiness_map,
@@ -32,16 +35,19 @@ def test_batch_search_runs_in_parallel_and_respects_budget():
         return {"ok": True, "query": query, "results": [{"url": f"https://ex/{query}"}]}
 
     with patch("app.tools.batch_retrieval.search_internet", side_effect=_fake_search):
-        with retrieval_budget(10):
+        with worker_retrieval_budget(
+            search_queries=10, fetch_sources=10, tool_invocations=10
+        ):
             out = run_batch_search(["q1", "q2", "q3"], max_results=3)
     assert out["ok"] is True
     assert out["query_count"] == 3
     assert set(calls) == {"q1", "q2", "q3"}
 
-    with retrieval_budget(1):
+    with worker_retrieval_budget(search_queries=1, fetch_sources=1, tool_invocations=1):
         blocked = run_batch_search(["a", "b"])
     assert blocked["ok"] is False
-    assert blocked["error"] == "step_retrieval_budget"
+    assert blocked["error"] == "budget_denied"
+    assert blocked["reason"] == "search_query_cap"
     print("[OK] batch_search parallel + budget")
 
 
@@ -52,10 +58,15 @@ def test_batch_fetch_parallel():
         return {"ok": True, "url": url, "title": url, "snippet": "x", "artifact_id": "a1"}
 
     with patch("app.tools.batch_retrieval.fetch_url_content", side_effect=_fake_fetch):
-        with retrieval_budget(10):
+        with worker_retrieval_budget(
+            search_queries=10, fetch_sources=10, tool_invocations=10
+        ) as budget:
             out = run_batch_fetch(["https://a.example", "https://b.example"])
     assert out["ok"] is True
     assert out["url_count"] == 2
+    assert budget.search_queries_used == 0
+    assert budget.fetch_sources_used == 2
+    assert budget.tool_invocations_used == 1
     print("[OK] batch_fetch parallel")
 
 
@@ -156,11 +167,21 @@ def test_optional_tasks_and_early_skip():
     print("[OK] optional research does not block control policy")
 
 
-def test_consume_n_retrieval_budget():
-    with retrieval_budget(3):
-        assert consume_n_retrieval_or_block(2) is None
-        assert consume_n_retrieval_or_block(2) is not None  # only 1 left
-    print("[OK] consume_n retrieval budget")
+def test_batch_search_does_not_consume_fetch_budget():
+    def _fake_search(query, topic="general", max_results=5, include_raw_content=False):
+        return {"ok": True, "query": query, "results": []}
+
+    with patch("app.tools.batch_retrieval.search_internet", side_effect=_fake_search):
+        with worker_retrieval_budget(
+            search_queries=4, fetch_sources=8, tool_invocations=6
+        ):
+            assert run_batch_search(["a", "b", "c", "d"])["ok"] is True
+            budget = current_worker_retrieval_budget()
+            assert budget is not None
+            assert budget.search_queries_used == 4
+            assert budget.fetch_sources_used == 0
+            assert budget.tool_invocations_used == 1
+    print("[OK] batch search keeps fetch budget independent")
 
 
 def test_worker_timeout_cap_formula():
@@ -182,6 +203,6 @@ if __name__ == "__main__":
     test_absolute_deadline_uses_run_started_origin()
     test_create_run_budget_manager_binds_run_started()
     test_optional_tasks_and_early_skip()
-    test_consume_n_retrieval_budget()
+    test_batch_search_does_not_consume_fetch_budget()
     test_worker_timeout_cap_formula()
     print("all latency tests passed")
