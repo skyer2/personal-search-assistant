@@ -150,11 +150,14 @@ def test_task_result_carries_structured_status():
 
 def test_budget_ceiling_raised_for_deep_research():
     cfg = reload_harness_config()
-    assert cfg.max_tool_calls == 240
-    assert cfg.max_step_tool_calls == 24
+    assert cfg.max_tool_calls == 300
+    assert cfg.max_step_tool_calls == 40
     assert cfg.max_run_sec == 1800
-    assert cfg.max_total_tokens == 300000
-    print("[OK] budget ceiling 240/24/1800s")
+    assert cfg.max_total_tokens == 500000
+    assert cfg.max_llm_calls_per_run == 120
+    assert cfg.max_llm_calls_per_worker == 24
+    assert cfg.worker_idle_timeout_sec == 120
+    print("[OK] generous budget baseline 300/40/120/500K")
 
 
 if __name__ == "__main__":

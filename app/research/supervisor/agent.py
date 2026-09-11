@@ -40,8 +40,6 @@ class SupervisorAgent:
             expected_evidence=("一手来源", "高质量独立来源"),
             novelty_reason="针对当前 Coverage 缺口收敛研究范围",
             estimated_effort="small" if index > 2 else "medium",
-            max_search_queries=profile.max_search_queries,
-            max_llm_calls=profile.max_llm_calls,
         )
 
     def fallback_action(
@@ -114,8 +112,6 @@ class SupervisorAgent:
                     source_hints=item.source_hints,
                     novelty_reason=item.novelty_reason,
                     estimated_effort=item.estimated_effort,
-                    max_search_queries=profile.max_search_queries,
-                    max_llm_calls=profile.max_llm_calls,
                     task_id="",
                 )
             )

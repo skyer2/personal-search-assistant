@@ -390,8 +390,12 @@ class LangChainWorkerRuntime:
                     if callable(reserve_worker_lease):
                         task_max_llm_calls = int(
                             step.metadata.get("max_llm_calls")
-                            or getattr(self.harness.harness_config, "max_llm_calls_per_worker", 4)
-                            or 4
+                            or getattr(
+                                self.harness.harness_config,
+                                "max_llm_calls_per_worker",
+                                24,
+                            )
+                            or 24
                         )
                         task_token_ceiling = int(step.metadata.get("token_ceiling") or 0)
                         lease_id, why = reserve_worker_lease(

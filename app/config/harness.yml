@@ -102,9 +102,9 @@ harness:
   budget:
     # Hard Safety Ceiling（确定性顶；Adaptive Effort 只能 clamp 到其下，不能抬高）
     # 复杂深研搜允许最多 30 分钟；Research 必须给 Synthesis 留出固定墙钟预算。
-    max_total_tokens: 300000
-    max_tool_calls: 240
-    max_step_tool_calls: 24
+    max_total_tokens: 500000
+    max_tool_calls: 300
+    max_step_tool_calls: 40
     max_run_sec: 1800
     synthesis_reserve_sec: 180
     understand_wall_budget_sec: 30
@@ -112,11 +112,11 @@ harness:
     context_build_budget_sec: 30
     fast_synthesis_threshold_sec: 45
     emergency_context_budget_sec: 10
-    worker_idle_timeout_sec: 75
+    worker_idle_timeout_sec: 120
     max_replan_count: 3
     max_plan_steps: 12
-    max_llm_calls_per_run: 80
-    max_llm_calls_per_worker: 14
+    max_llm_calls_per_run: 120
+    max_llm_calls_per_worker: 24
 
   effort:
     adaptive_enabled: true

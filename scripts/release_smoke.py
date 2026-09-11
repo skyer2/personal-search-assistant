@@ -226,7 +226,7 @@ def assert_production_config() -> None:
         "planner_llm_enabled": True,
         "max_replan_count": 3,
         "direct_worker_invoke": True,
-        "max_total_tokens": 300000,
+        "max_total_tokens": 500000,
         "synthesis_step_timeout_sec": 60,
     }
     for key, value in expected.items():

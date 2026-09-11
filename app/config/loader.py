@@ -108,9 +108,9 @@ class HarnessConfig:
     prometheus_enabled: bool = True
     obs_content_mode: str = "reference"
 
-    max_total_tokens: int = 100_000
-    max_tool_calls: int = 20
-    max_step_tool_calls: int = 8
+    max_total_tokens: int = 500_000
+    max_tool_calls: int = 300
+    max_step_tool_calls: int = 40
     max_run_sec: int = 600
     synthesis_reserve_sec: float = 210.0
     understand_wall_budget_sec: float = 30.0
@@ -118,11 +118,11 @@ class HarnessConfig:
     context_build_budget_sec: float = 30.0
     fast_synthesis_threshold_sec: float = 45.0
     emergency_context_budget_sec: float = 10.0
-    worker_idle_timeout_sec: float = 75.0
+    worker_idle_timeout_sec: float = 120.0
     max_replan_count: int = 3
     max_plan_steps: int = 12
-    max_llm_calls_per_run: int = 30
-    max_llm_calls_per_worker: int = 8
+    max_llm_calls_per_run: int = 120
+    max_llm_calls_per_worker: int = 24
 
     personal_search: dict[str, Any] = field(default_factory=dict)
 
@@ -470,9 +470,9 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             or os.getenv("HARNESS_OBS_CONTENT_MODE")
             or observability.get("content_mode", "reference")
         ),
-        max_total_tokens=int(budget.get("max_total_tokens", 100_000)),
-        max_tool_calls=int(budget.get("max_tool_calls", 20)),
-        max_step_tool_calls=int(budget.get("max_step_tool_calls", 8)),
+        max_total_tokens=int(budget.get("max_total_tokens", 500_000)),
+        max_tool_calls=int(budget.get("max_tool_calls", 300)),
+        max_step_tool_calls=int(budget.get("max_step_tool_calls", 40)),
         max_run_sec=int(
             os.getenv("HARNESS_MAX_RUN_SEC", budget.get("max_run_sec", 600))
         ),
@@ -515,7 +515,7 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         worker_idle_timeout_sec=float(
             os.getenv(
                 "HARNESS_WORKER_IDLE_TIMEOUT_SEC",
-                budget.get("worker_idle_timeout_sec", 75),
+                budget.get("worker_idle_timeout_sec", 120),
             )
         ),
         max_replan_count=int(budget.get("max_replan_count", 3)),
@@ -582,13 +582,13 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         max_llm_calls_per_run=int(
             os.getenv(
                 "HARNESS_MAX_LLM_CALLS",
-                (raw.get("budget") or {}).get("max_llm_calls_per_run", 30),
+                (raw.get("budget") or {}).get("max_llm_calls_per_run", 120),
             )
         ),
         max_llm_calls_per_worker=int(
             os.getenv(
                 "HARNESS_MAX_LLM_CALLS_PER_WORKER",
-                (raw.get("budget") or {}).get("max_llm_calls_per_worker", 8),
+                (raw.get("budget") or {}).get("max_llm_calls_per_worker", 24),
             )
         ),
         parallel_retrieval_enabled=_env_bool(

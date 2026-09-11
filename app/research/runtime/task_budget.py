@@ -24,9 +24,9 @@ def _env_int(name: str, default: int) -> int:
 
 
 _PROFILE_DEFAULTS = {
-    "small": (12_000, 3, 3, 6, 4, 1_500),
-    "medium": (24_000, 4, 4, 8, 6, 2_000),
-    "large": (40_000, 6, 6, 12, 8, 2_500),
+    "small": (40_000, 10, 6, 10, 10, 2_500),
+    "medium": (80_000, 16, 10, 16, 16, 3_500),
+    "large": (120_000, 24, 16, 24, 24, 5_000),
 }
 
 
@@ -48,9 +48,24 @@ def task_budget_profile(effort: str) -> TaskBudgetProfile:
     )
 
 
+def task_budget_metadata(profile: TaskBudgetProfile) -> dict[str, int]:
+    return {
+        "max_llm_calls": profile.max_llm_calls,
+        "max_search_queries": profile.max_search_queries,
+        "max_fetch_sources": profile.max_fetch_sources,
+        "max_tool_invocations": profile.max_tool_invocations,
+        "max_output_tokens_per_call": profile.max_output_tokens_per_call,
+    }
+
+
 TASK_BUDGET_PROFILES = {
     effort: task_budget_profile(effort) for effort in _PROFILE_DEFAULTS
 }
 
 
-__all__ = ["TASK_BUDGET_PROFILES", "TaskBudgetProfile", "task_budget_profile"]
+__all__ = [
+    "TASK_BUDGET_PROFILES",
+    "TaskBudgetProfile",
+    "task_budget_metadata",
+    "task_budget_profile",
+]

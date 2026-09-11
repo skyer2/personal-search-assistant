@@ -213,7 +213,7 @@ def test_supervisor_iteration_limit_emits_control_decision(monkeypatch) -> None:
             llm_calls=0,
             max_llm_calls=80,
             total_tokens=0,
-            max_total_tokens=300000,
+            max_total_tokens=500000,
             remaining_run_sec=lambda: 1800.0,
             synthesis_reserve_sec=180.0,
         ),

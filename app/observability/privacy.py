@@ -55,6 +55,7 @@ _KEEP_KEYS = {
     "from_plan_version",
     "to_plan_version",
     "remaining_budget",
+    "budget",
     "prompt_tokens",
     "completion_tokens",
     "total_tokens",

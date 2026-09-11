@@ -39,7 +39,7 @@ from app.research.runtime.latency import (
     note_stage_duration,
     note_worker_durations,
 )
-from app.research.runtime.task_budget import task_budget_profile
+from app.research.runtime.task_budget import task_budget_metadata, task_budget_profile
 from app.research.runtime.state import ResearchState, empty_research_state
 from app.observability.semantic_events import (
     brief_event_attributes,
@@ -120,7 +120,7 @@ def _budget_snapshot(session: RunSession) -> dict[str, Any]:
         "llm_calls": int(getattr(manager, "llm_calls", 0) or 0),
         "max_llm_calls": int(getattr(manager, "max_llm_calls", 80) or 80),
         "total_tokens": int(getattr(manager, "total_tokens", 0) or 0),
-        "max_total_tokens": int(getattr(manager, "max_total_tokens", 300000) or 300000),
+        "max_total_tokens": int(getattr(manager, "max_total_tokens", 500000) or 500000),
     }
     try:
         budget["deadline_remaining_sec"] = float(manager.remaining_run_sec())
@@ -550,23 +550,7 @@ class ResearchGraphRunner:
                             "novelty_reason": item.novelty_reason,
                             "estimated_effort": item.estimated_effort,
                             "token_ceiling": (profile := task_budget_profile(item.estimated_effort)).token_ceiling,
-                            "max_search_queries": min(
-                                int(item.max_search_queries or profile.max_search_queries),
-                                int(budget.get("max_search_queries_per_worker") or 4),
-                            ),
-                            "max_llm_calls": min(
-                                int(item.max_llm_calls or profile.max_llm_calls),
-                                int(getattr(self.harness.harness_config, "max_llm_calls_per_worker", 4) or 4),
-                            ),
-                            "max_fetch_sources": min(
-                                profile.max_fetch_sources,
-                                int(budget.get("max_fetch_sources_per_worker") or 8),
-                            ),
-                            "max_tool_invocations": min(
-                                profile.max_tool_invocations,
-                                int(budget.get("max_tool_invocations_per_worker") or 6),
-                            ),
-                            "max_output_tokens_per_call": profile.max_output_tokens_per_call,
+                            **task_budget_metadata(profile),
                             "semantic_fingerprint": next(
                                 approved.fingerprint
                                 for approved in admission.approved

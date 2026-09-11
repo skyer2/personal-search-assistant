@@ -99,9 +99,11 @@ Worker leases use the actual approved wave size, not the configured maximum. Adm
 
 | Effort | Token ceiling | LLM calls | Search queries | Fetch sources | Tool invocations | Output tokens / call |
 |---|---:|---:|---:|---:|---:|---:|
-| small | 12,000 | 3 | 3 | 6 | 4 | 1,500 |
-| medium | 24,000 | 4 | 4 | 8 | 6 | 2,000 |
-| large | 40,000 | 6 | 6 | 12 | 8 | 2,500 |
+| small | 40,000 | 10 | 6 | 10 | 10 | 2,500 |
+| medium | 80,000 | 16 | 10 | 16 | 16 | 3,500 |
+| large | 120,000 | 24 | 16 | 24 | 24 | 5,000 |
+
+The current baseline intentionally prioritizes completeness over cost: the Run ceiling is 500K tokens, 120 LLM calls, 300 tool calls, and 30 minutes. These are runaway-protection limits, not normal stop conditions. Supervisor requests do not carry duplicate per-worker budget fields; admission, plan metadata, and worker leases all resolve from the same `TaskBudgetProfile`.
 
 Each call receives `max_output_tokens_per_call`; a small task cannot consume the full research token ceiling on its first LLM call.
 

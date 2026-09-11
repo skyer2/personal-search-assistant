@@ -205,7 +205,7 @@ def _assert_production_config() -> None:
     assert config.planner_llm_enabled is True
     assert config.max_replan_count == 3
     assert config.direct_worker_invoke is True
-    assert config.max_total_tokens == 300000
+    assert config.max_total_tokens == 500000
     assert config.synthesis_step_timeout_sec == 60
     assert config.synthesis_retry_timeout_sec == 30
 

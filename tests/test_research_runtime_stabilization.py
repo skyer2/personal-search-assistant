@@ -169,7 +169,6 @@ def test_duplicate_supervisor_task_is_rejected():
     request = ResearchTaskRequest(
         objective="Collect Company A funding evidence",
         target_gaps=("company-level funding",),
-        max_llm_calls=1,
     )
     fingerprint = semantic_fingerprint(
         objective=request.objective,
@@ -203,7 +202,7 @@ def test_dispatch_admission_counts_reserved_llm_calls():
         ),
     )
     admission = admit_dispatch(
-        [ResearchTaskRequest(objective="Collect new Company B evidence", max_llm_calls=1)],
+        [ResearchTaskRequest(objective="Collect new Company B evidence")],
         wave_id=1,
         budget_manager=manager,
         state={"budget": {"max_parallel_workers": 2}},

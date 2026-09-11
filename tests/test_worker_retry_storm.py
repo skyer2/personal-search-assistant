@@ -181,7 +181,7 @@ def test_worker_summary_skips_llm_compress():
 
 def test_config_step_tool_budget():
     cfg = reload_harness_config()
-    assert cfg.max_step_tool_calls == 24
+    assert cfg.max_step_tool_calls == 40
     assert cfg.max_tool_calls >= 40
     print("[OK] max_step_tool_calls loaded")
 

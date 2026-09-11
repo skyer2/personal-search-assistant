@@ -58,7 +58,7 @@ def _plan_from_tasks(
     plan_version: int,
     planning_mode: str,
 ) -> ExecutionPlan:
-    from app.research.runtime.task_budget import task_budget_profile
+    from app.research.runtime.task_budget import task_budget_metadata, task_budget_profile
 
     steps = [
         PlanStep(
@@ -78,11 +78,7 @@ def _plan_from_tasks(
                 "required": True,
                 "optional": False,
                 "token_ceiling": (profile := task_budget_profile(item.estimated_effort)).token_ceiling,
-                "max_search_queries": profile.max_search_queries,
-                "max_llm_calls": profile.max_llm_calls,
-                "max_fetch_sources": profile.max_fetch_sources,
-                "max_tool_invocations": profile.max_tool_invocations,
-                "max_output_tokens_per_call": profile.max_output_tokens_per_call,
+                **task_budget_metadata(profile),
             },
         )
         for item in tasks

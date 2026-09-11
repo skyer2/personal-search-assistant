@@ -66,7 +66,7 @@ Production fidelity, live scenarios, and BrowseComp-Plus are documented in [docs
 - [StateGraph runtime](docs/HARNESS_ARCHITECTURE.md)
 - [Observability contract](docs/OBSERVABILITY.md)
 - [Evaluation system](docs/EVALUATION.md)
-- [Runtime failure observability result](docs/architecture/runtime-failure-observability-result.md)
+- [Budget generous baseline result](docs/architecture/budget-generous-baseline-result.md)
 - [BrowseComp-Plus](docs/BROWSECOMP_PLUS_EVAL.md)
 - [Context and memory boundaries](docs/CONTEXT_SYSTEM.md)
 - [Deployment](docs/OPENEULER_BARE_METAL.md)

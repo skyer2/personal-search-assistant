@@ -78,6 +78,7 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 
 ```bash
 .\.venv\Scripts\python.exe tests\e2e\test_production_fidelity_synthesis.py
+.\.venv\Scripts\python.exe -m pytest tests\e2e\test_budget_generous_baseline_full_stack.py
 .\.venv\Scripts\python.exe tests\test_runtime_failure_observability.py
 .\.venv\Scripts\python.exe scripts\release_smoke.py --q1-runs 3
 ```
@@ -94,6 +95,8 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 - repeated run 非空 `partial` 或 `success`。
 
 `release_smoke.py` 还固定执行 3 次主研究查询、两个开放研究查询和 1 个原子事实查询。主查询必须 3 次均为非空 `partial` 或 `success`；原子事实必须命中快路径并回答受证据支持的年份，同时 Trace Integrity 通过。
+
+`test_budget_generous_baseline_full_stack.py` 固定执行 Budget 宽松基线的两个 Golden Query，走真实 `batch_search → batch_fetch → 补搜索 → structured result` 适配器，并断言 Worker 全部完成、无 budget cap、Trace Integrity 通过、终端事件携带完整 used / limit 快照。
 
 ### L4 BrowseComp-Plus
 
