@@ -6,6 +6,7 @@ import json
 import time
 from typing import Any
 
+from app.config.timeouts import model_timeout_sec
 from app.research.brief.models import StructuredResearchBrief
 from app.research.coverage.judge import CoverageJudgement
 from app.research.execution.structured_llm_gateway import (
@@ -30,14 +31,29 @@ class SupervisorAgent:
         *,
         target_criteria: tuple[str, ...] = (),
         target_gaps: tuple[str, ...] = (),
+        criterion_id: str = "",
+        gap_id: str = "",
+        missing_evidence_types: tuple[str, ...] = (),
+        blocking_conflict_ids: tuple[str, ...] = (),
     ) -> ResearchTaskRequest:
         profile = task_budget_profile("small" if index > 2 else "medium")
+        evidence = ("一手来源", "高质量独立来源")
+        if "primary_source" in missing_evidence_types:
+            evidence = ("primary source", "一手来源", "高质量独立来源")
+        elif "fresh_evidence" in missing_evidence_types:
+            evidence = ("fresh dated evidence", "一手来源", "高质量独立来源")
+        elif "conflict_resolution" in missing_evidence_types:
+            evidence = ("same-scope authoritative evidence", "一手来源")
         return ResearchTaskRequest(
             objective=objective,
             target_criteria=target_criteria,
             target_gaps=target_gaps,
+            criterion_id=criterion_id,
+            gap_id=gap_id,
+            missing_evidence_types=missing_evidence_types,
+            blocking_conflict_ids=blocking_conflict_ids,
             priority="high" if index == 1 else "normal",
-            expected_evidence=("一手来源", "高质量独立来源"),
+            expected_evidence=evidence,
             novelty_reason="针对当前 Coverage 缺口收敛研究范围",
             estimated_effort="small" if index > 2 else "medium",
         )
@@ -51,19 +67,53 @@ class SupervisorAgent:
     ) -> SupervisorAction:
         if bool((budget or {}).get("exhausted")):
             return SupervisorAction("COMPLETE", "budget exhausted; synthesize available evidence")
-        if judgement is not None and judgement.sufficient:
-            return SupervisorAction("COMPLETE", "coverage meets brief success criteria")
+        if judgement is not None and judgement.sufficient and not judgement.gaps:
+            return SupervisorAction("COMPLETE", "coverage meets brief key questions")
+        if judgement is not None and judgement.gaps:
+            known = set(previous_fingerprints or set())
+            tasks: list[ResearchTaskRequest] = []
+            priority_rank = {"high": 0, "medium": 1, "low": 2}
+            ordered_gaps = sorted(
+                judgement.gaps,
+                key=lambda item: (
+                    priority_rank.get(item.priority, 1),
+                    0 if item.blocking_conflict_ids else 1,
+                    item.criterion_id,
+                ),
+            )
+            for index, gap in enumerate(ordered_gaps[:2], start=1):
+                task = self._task(
+                    index,
+                    gap.description,
+                    target_criteria=(gap.criterion_id,),
+                    target_gaps=(gap.description,),
+                    criterion_id=gap.criterion_id,
+                    gap_id=gap.gap_id,
+                    missing_evidence_types=gap.missing_evidence_type,
+                    blocking_conflict_ids=gap.blocking_conflict_ids,
+                )
+                fingerprint = semantic_fingerprint(
+                    objective=task.objective,
+                    target_gaps=task.target_gaps,
+                    target_criteria=task.target_criteria,
+                )
+                if fingerprint not in known:
+                    tasks.append(task)
+                    known.add(fingerprint)
+            return SupervisorAction(
+                "CONDUCT_RESEARCH",
+                judgement.reason if judgement.reason else "structured coverage gaps remain",
+                tuple(tasks),
+            )
         candidates = self._actionable_questions(brief, judgement)
-        criteria = tuple(brief.success_criteria or brief.key_questions)
         known = set(previous_fingerprints or set())
         tasks: list[ResearchTaskRequest] = []
         for index, objective in enumerate(candidates[:2], start=1):
-            gap = judgement.missing[index - 1] if judgement and index <= len(judgement.missing) else objective
             task = self._task(
                 index,
                 objective,
-                target_criteria=(criteria[index - 1],) if criteria else (),
-                target_gaps=(gap,),
+                target_criteria=(objective,),
+                target_gaps=(objective,),
             )
             fingerprint = semantic_fingerprint(
                 objective=task.objective,
@@ -107,6 +157,10 @@ class SupervisorAgent:
                     objective=item.objective,
                     target_criteria=item.target_criteria,
                     target_gaps=item.target_gaps,
+                    criterion_id=item.criterion_id,
+                    gap_id=item.gap_id,
+                    missing_evidence_types=item.missing_evidence_types,
+                    blocking_conflict_ids=item.blocking_conflict_ids,
                     priority=item.priority,
                     expected_evidence=item.expected_evidence,
                     source_hints=item.source_hints,
@@ -180,7 +234,7 @@ class SupervisorAgent:
                     schema=SupervisorAction,
                     prompt=prompt,
                     phase="supervisor",
-                    timeout_sec=30,
+                    timeout_sec=model_timeout_sec("LLM_SUPERVISOR_TIMEOUT_SEC"),
                 )
         except Exception as exc:
             emit_semantic_fallback(

@@ -47,6 +47,10 @@ class BudgetStatus(StrEnum):
 
 class StopReason(StrEnum):
     NONE = "none"
+    LOCAL_EVIDENCE_SUFFICIENT = "local_evidence_sufficient"
+    SOFT_BUDGET_FINALIZE = "soft_budget_finalize"
+    SOFT_DEADLINE_FINALIZE = "soft_deadline_finalize"
+    NO_MORE_USEFUL_EVIDENCE = "no_more_useful_evidence"
     BUDGET = "budget"
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"

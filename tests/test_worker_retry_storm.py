@@ -35,9 +35,16 @@ def test_web_allowlist_includes_context_tools():
     tools = tools_for_sources(["web"])
     assert "internet_search" in tools
     assert "fetch_url" in tools
+    assert "batch_search" in tools
+    assert "batch_fetch" in tools
     assert "read_artifact" in tools
     assert "read_evidence" in tools
-    assert set(SOURCE_TOOLS["web"]) == {"internet_search", "fetch_url"}
+    assert set(SOURCE_TOOLS["web"]) == {
+        "internet_search",
+        "fetch_url",
+        "batch_search",
+        "batch_fetch",
+    }
     print("[OK] web allowlist includes JIT context tools")
 
 
@@ -60,7 +67,7 @@ def test_context_tools_never_unauthorized():
     step = PlanStep(
         step_type="research",
         description="搜",
-        allowed_tools=["internet_search", "fetch_url"],
+        allowed_tools=["internet_search", "fetch_url", "batch_search", "batch_fetch"],
     )
     ok, bad = check_unauthorized_tools(
         step, ["internet_search", "read_artifact", "read_evidence"], enforce=True
@@ -68,6 +75,10 @@ def test_context_tools_never_unauthorized():
     assert ok is True and not bad
     ok2, bad2 = check_unauthorized_tools(step, ["generate_markdown"], enforce=True)
     assert ok2 is False and "generate_markdown" in bad2
+    ok3, bad3 = check_unauthorized_tools(
+        step, ["batch_search", "batch_fetch"], enforce=True
+    )
+    assert ok3 is True and not bad3
     print("[OK] context tools always allowed")
 
 

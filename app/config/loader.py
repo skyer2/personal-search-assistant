@@ -13,6 +13,8 @@ from typing import Any
 
 import yaml
 
+from app.config.timeouts import wall_timeout_sec
+
 _CONFIG_PATH = Path(__file__).resolve().parent / "harness.yml"
 _cached_config: "HarnessConfig | None" = None
 
@@ -599,7 +601,11 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             os.getenv("HARNESS_MAX_PARALLEL_WORKERS", orch.get("max_parallel_workers", 3))
         ),
         step_timeout_sec=int(
-            os.getenv("HARNESS_STEP_TIMEOUT_SEC", orch.get("step_timeout_sec", 120))
+            wall_timeout_sec(
+                "HARNESS_STEP_TIMEOUT_SEC",
+                int(orch.get("step_timeout_sec", 120)),
+                model_margin_sec=10,
+            )
         ),
         enforce_subagent_binding=_env_bool(
             "HARNESS_ENFORCE_SUBAGENT_BINDING",
@@ -628,15 +634,15 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             bool(orch.get("direct_worker_invoke", True)),
         ),
         synthesis_step_timeout_sec=int(
-            os.getenv(
+            wall_timeout_sec(
                 "HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC",
-                orch.get("synthesis_step_timeout_sec", 60),
+                int(orch.get("synthesis_step_timeout_sec", 60)),
             )
         ),
         synthesis_retry_timeout_sec=int(
-            os.getenv(
+            wall_timeout_sec(
                 "HARNESS_SYNTHESIS_RETRY_TIMEOUT_SEC",
-                orch.get("synthesis_retry_timeout_sec", 30),
+                int(orch.get("synthesis_retry_timeout_sec", 30)),
             )
         ),
         progress_eval_enabled=_env_bool(

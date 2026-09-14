@@ -8,6 +8,8 @@ import time
 from dataclasses import asdict
 from typing import Any
 
+from app.config.timeouts import model_timeout_sec
+
 from app.agent.harness.orchestration import (
     SYNTHESIS_STEP_TYPES,
     attach_structured_payload,
@@ -35,6 +37,18 @@ class WorkerExecutorV2:
     def __init__(self, harness: Any, session: Any):
         self.harness = harness
         self.session = session
+
+    @staticmethod
+    def _model_timeout_sec() -> float:
+        return model_timeout_sec("LLM_WORKER_TIMEOUT_SEC")
+
+    @staticmethod
+    def _soft_deadline_delay(timeout_sec: float) -> float:
+        model_timeout = WorkerExecutorV2._model_timeout_sec()
+        return max(
+            10.0,
+            min(float(timeout_sec) * 0.8, float(timeout_sec) - model_timeout - 10.0),
+        )
 
     async def execute(
         self,
@@ -244,6 +258,7 @@ class WorkerExecutorV2:
                     execute_agent=execute_agent,
                     dispatch_mode=dispatch_mode,
                     tool_usage=tool_usage,
+                    timeout_sec=timeout_sec,
                     **({} if simple_fact else {"worker_lease_id": lease_id}),
                 ),
                 timeout=timeout_sec,
@@ -276,11 +291,25 @@ class WorkerExecutorV2:
                     list(payload.get("facts") or []),
                     list(payload.get("sources") or []),
                 )
-            ok = bool(payload.get("ok", True))
-            worker_ok = ok
             evidence_refs = list(payload.get("evidence_ids") or []) + list(
                 payload.get("artifact_ids") or []
             )
+            normal_soft_stop = str(tool_usage.get("finalization_reason") or "") in {
+                "local_evidence_sufficient",
+                "soft_budget_finalize",
+                "soft_deadline_finalize",
+                "no_more_useful_evidence",
+            }
+            ok = bool(payload.get("ok", True)) or (
+                normal_soft_stop
+                and bool(
+                    evidence_refs
+                    or payload.get("findings")
+                    or payload.get("facts")
+                    or payload.get("sources")
+                )
+            )
+            worker_ok = ok
             worker_result = self._result(
                 task,
                 started,
@@ -295,6 +324,11 @@ class WorkerExecutorV2:
                 fail_reason="" if ok else str(payload.get("error_code") or "worker_failed"),
                 metrics=self._worker_metrics(context, task, tool_usage),
                 queue_ms=queue_ms,
+            )
+            worker_result.metrics["stop_reason"] = str(
+                payload.get("stop_reason")
+                or tool_usage.get("finalization_reason")
+                or ("local_evidence_sufficient" if ok else "")
             )
             return worker_result
         except BudgetReservationError as exc:
@@ -311,6 +345,7 @@ class WorkerExecutorV2:
                 status="blocked",
                 ok=False,
                 queue_ms=queue_ms,
+                stop_reason=str(tool_usage.get("finalization_reason") or ""),
             )
             worker_ok = recovered.ok
             worker_result = recovered
@@ -494,6 +529,7 @@ class WorkerExecutorV2:
         execute_agent: Any,
         dispatch_mode: str,
         tool_usage: dict[str, Any],
+        timeout_sec: float = 60.0,
         worker_lease_id: str = "",
     ) -> StepResult:
         self._record_direct_assistant(step)
@@ -519,7 +555,11 @@ class WorkerExecutorV2:
             },
         )
         gateway = LLMGateway(self.session.budget_manager)
-        tool_gateway = ToolGateway(**self._worker_budget_limits(step))
+        tool_gateway = ToolGateway(
+            **self._worker_budget_limits(step),
+            soft_deadline_at=time.monotonic()
+            + WorkerExecutorV2._soft_deadline_delay(timeout_sec),
+        )
         messages: list[Any] = []
         tools_invoked: list[str] = []
         tool_call_ids: set[tuple[str, str]] = set()
@@ -562,6 +602,7 @@ class WorkerExecutorV2:
         finally:
             tool_usage["tool_calls"] = len(tool_call_ids)
             tool_usage["tools_invoked"] = tools_invoked
+            tool_usage["finalization_reason"] = retrieval_budget.finalization_reason
             if retrieval_budget is not None:
                 tool_usage["budget"] = retrieval_budget.snapshot()
         content = ""
@@ -593,6 +634,7 @@ class WorkerExecutorV2:
         execute_agent: Any,
         dispatch_mode: str,
         tool_usage: dict[str, Any],
+        timeout_sec: float = 60.0,
     ) -> StepResult:
         """Run one authorized provider search without an LLM worker."""
         _ = (execute_agent, dispatch_mode)
@@ -808,6 +850,7 @@ class WorkerExecutorV2:
     def _timeout_for(self, step: Any) -> float:
         config = self.harness.harness_config
         timeout_sec = max(10, int(config.step_timeout_sec))
+        timeout_sec = max(timeout_sec, int(self._model_timeout_sec()) + 30)
         if str(step.step_type) in SYNTHESIS_STEP_TYPES:
             synthesis_timeout = int(
                 getattr(config, "synthesis_step_timeout_sec", 0) or 0
@@ -935,6 +978,7 @@ class WorkerExecutorV2:
         status: WorkerResultStatus,
         ok: bool,
         queue_ms: int = 0,
+        stop_reason: str = "",
     ) -> WorkerResult:
         salvaged = salvage_worker_evidence(
             run_id=context.run_id,
@@ -965,6 +1009,7 @@ class WorkerExecutorV2:
             "artifact_ids": evidence_refs,
             "candidates": candidates,
             "error_code": fail_reason,
+            "stop_reason": stop_reason,
             "worker": step.subagent or "",
             "step_type": step.step_type,
         }
@@ -981,11 +1026,19 @@ class WorkerExecutorV2:
                 "structured_ok": False,
             },
         )
-        return self._result(
+        normal_soft_stop = stop_reason in {
+            "local_evidence_sufficient",
+            "soft_budget_finalize",
+            "soft_deadline_finalize",
+            "no_more_useful_evidence",
+        } and bool(
+            findings or evidence_refs or sources or facts or candidates
+        )
+        result = self._result(
             task,
             started,
-            ok=False,
-            status="partial",
+            ok=normal_soft_stop,
+            status="done" if normal_soft_stop else "partial",
             summary=payload["summary"],
             findings=findings,
             evidence_refs=evidence_refs,
@@ -1003,6 +1056,8 @@ class WorkerExecutorV2:
                 ),
                 queue_ms=queue_ms,
             )
+        result.metrics["stop_reason"] = stop_reason
+        return result
 
     def _result(
         self,

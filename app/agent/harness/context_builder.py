@@ -326,13 +326,36 @@ class ContextBuilder:
         if int(step.metadata.get("max_llm_calls") or 0) > 0:
             bounds.append(f"最多 {step.metadata['max_llm_calls']} 次模型调用")
         bound_note = f"\n    Worker 边界：{'；'.join(bounds)}。不要展开第二层深度研究。" if bounds else ""
+        criterion_id = str(step.metadata.get("criterion_id") or "")
+        gap_id = str(step.metadata.get("gap_id") or "")
+        target_note = ""
+        if criterion_id or gap_id:
+            target_note = (
+                f"\n    Coverage 目标：criterion_id={criterion_id or '未指定'}；"
+                f"gap_id={gap_id or '未指定'}；"
+                f"target_gaps={'; '.join(step.metadata.get('target_gaps') or [])}"
+            )
+        missing_evidence = [
+            str(item)
+            for item in step.metadata.get("missing_evidence_types") or []
+            if str(item).strip()
+        ]
+        if missing_evidence:
+            target_note += f"\n    必须补足证据类型：{'；'.join(missing_evidence)}"
+        blocking_conflicts = [
+            str(item)
+            for item in step.metadata.get("blocking_conflict_ids") or []
+            if str(item).strip()
+        ]
+        if blocking_conflicts:
+            target_note += f"\n    必须解决的冲突：{'；'.join(blocking_conflicts)}"
         return f"""
     【当前执行步骤 {step_index + 1}/{total_steps}】
     类型: {step.step_type}
     状态: {step.metadata.get('status', StepStatus.PENDING.value)}
     目标: {step.objective or step.description}
     允许工具: {", ".join(step.allowed_tools) if step.allowed_tools else "本步绑定工具"}
-    要求: 只完成当前步骤，{agent_hint}{parallel_note}{bound_note}
+    要求: 只完成当前步骤，{agent_hint}{parallel_note}{bound_note}{target_note}
     """
 
     def build_working_notes_context(self, notes: str) -> str:

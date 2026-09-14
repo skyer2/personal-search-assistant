@@ -15,10 +15,12 @@ class ToolGateway:
         search_queries_remaining: int | None,
         fetch_sources_remaining: int | None,
         tool_invocations_remaining: int | None,
+        soft_deadline_at: float | None = None,
     ):
         self.search_queries_remaining = search_queries_remaining
         self.fetch_sources_remaining = fetch_sources_remaining
         self.tool_invocations_remaining = tool_invocations_remaining
+        self.soft_deadline_at = soft_deadline_at
 
     @contextmanager
     def execution_scope(
@@ -36,6 +38,7 @@ class ToolGateway:
             search_queries=self.search_queries_remaining,
             fetch_sources=self.fetch_sources_remaining,
             tool_invocations=self.tool_invocations_remaining,
+            soft_deadline_at=self.soft_deadline_at,
         ) as budget:
             if not worker_task_id:
                 yield budget

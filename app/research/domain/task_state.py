@@ -200,7 +200,14 @@ def worker_result_lifecycle(result: Any) -> tuple[TaskExecutionStatus, ResultSta
     failure = dict(classify_failure(fail_reason))
 
     if ok:
-        return TaskExecutionStatus.SUCCEEDED, ResultStatus.COMPLETE, StopReason.NONE, {}
+        semantic_stop = str(
+            (getattr(result, "metrics", None) or {}).get("stop_reason") or ""
+        ).lower()
+        try:
+            stop_reason = StopReason(semantic_stop) if semantic_stop else StopReason.NONE
+        except ValueError:
+            stop_reason = StopReason.NONE
+        return TaskExecutionStatus.SUCCEEDED, ResultStatus.COMPLETE, stop_reason, {}
     if status == "skipped":
         return TaskExecutionStatus.SKIPPED, ResultStatus.NONE, StopReason.NONE, {}
 

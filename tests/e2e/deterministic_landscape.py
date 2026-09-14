@@ -21,11 +21,13 @@ class CapturingToolGateway(ToolGateway):
         search_queries_remaining: int | None,
         fetch_sources_remaining: int | None,
         tool_invocations_remaining: int | None,
+        soft_deadline_at: float | None = None,
     ):
         super().__init__(
             search_queries_remaining=search_queries_remaining,
             fetch_sources_remaining=fetch_sources_remaining,
             tool_invocations_remaining=tool_invocations_remaining,
+            soft_deadline_at=soft_deadline_at,
         )
         CapturingToolGateway.current = self
 

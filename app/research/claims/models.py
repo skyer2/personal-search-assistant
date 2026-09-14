@@ -21,6 +21,7 @@ class ClaimRecord:
     subject: str = ""
     subject_id: str = ""
     dimension_id: str = ""
+    criterion_id: str = ""
     metric: str = ""
     value: float | None = None
     unit: str = ""
@@ -51,6 +52,7 @@ class ClaimRecord:
             subject=str(row.get("subject") or ""),
             subject_id=str(row.get("subject_id") or ""),
             dimension_id=str(row.get("dimension_id") or ""),
+            criterion_id=str(row.get("criterion_id") or ""),
             metric=str(row.get("metric") or ""),
             value=parsed,
             unit=str(row.get("unit") or ""),
@@ -87,6 +89,8 @@ class ClaimResolution:
     note: str = ""
     winner_id: str = ""
     evidence_ids: list[str] = field(default_factory=list)
+    blocking: bool = False
+    criterion_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -137,6 +141,8 @@ class ReconciliationResult:
                     note=str(x.get("note") or ""),
                     winner_id=str(x.get("winner_id") or ""),
                     evidence_ids=[str(e) for e in (x.get("evidence_ids") or []) if e],
+                    blocking=bool(x.get("blocking", False)),
+                    criterion_id=str(x.get("criterion_id") or ""),
                 )
                 for x in (row.get("resolutions") or [])
                 if isinstance(x, dict)

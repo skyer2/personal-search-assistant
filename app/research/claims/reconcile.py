@@ -29,6 +29,49 @@ def _values_conflict(a: float, b: float) -> bool:
     return abs(a - b) > max(0.08 * base, 0.01)
 
 
+_POSITIVE_TOKENS = (
+    "yes",
+    "true",
+    "profitable",
+    "profit",
+    "increase",
+    "grew",
+    "growth",
+    "supported",
+    "leading",
+    "领先",
+    "盈利",
+    "增长",
+    "支持",
+    "成立",
+)
+_NEGATIVE_TOKENS = (
+    "no",
+    "false",
+    "not profitable",
+    "loss",
+    "loss-making",
+    "decrease",
+    "declined",
+    "unsupported",
+    "lagging",
+    "亏损",
+    "下滑",
+    "反对",
+    "不成立",
+    "未盈利",
+)
+
+
+def _semantic_polarity(claim: ClaimRecord) -> str:
+    text = f"{claim.text} {claim.metric}".lower()
+    if any(token in text for token in _NEGATIVE_TOKENS):
+        return "negative"
+    if any(token in text for token in _POSITIVE_TOKENS):
+        return "positive"
+    return ""
+
+
 def detect_conflict_edges(claims: list[ClaimRecord]) -> list[ConflictEdge]:
     """Global fan-in conflict detection across workers."""
     by_key: dict[str, list[ClaimRecord]] = {}
@@ -65,6 +108,38 @@ def detect_conflict_edges(claims: list[ClaimRecord]) -> list[ConflictEdge]:
                     right_id=right.claim_id,
                     kind="unresolved_conflict",
                     reason="value_mismatch",
+                    label=label[:240],
+                )
+            )
+
+    semantic_groups: dict[tuple[str, str], list[ClaimRecord]] = {}
+    for claim in claims:
+        if claim.value is not None or not claim.criterion_id:
+            continue
+        polarity = _semantic_polarity(claim)
+        if not polarity:
+            continue
+        key = (claim.criterion_id, (claim.subject or claim.subject_id or "").lower())
+        semantic_groups.setdefault(key, []).append(claim)
+
+    for (_criterion_id, _subject), group in semantic_groups.items():
+        if len(group) < 2:
+            continue
+        for left, right in combinations(group, 2):
+            if _semantic_polarity(left) == _semantic_polarity(right):
+                continue
+            eid = _edge_id(left.claim_id, right.claim_id)
+            if eid in seen:
+                continue
+            seen.add(eid)
+            label = f"{left.subject or left.task_id}:{left.text[:80]} vs {right.text[:80]}"
+            edges.append(
+                ConflictEdge(
+                    edge_id=eid,
+                    left_id=left.claim_id,
+                    right_id=right.claim_id,
+                    kind="unresolved_conflict",
+                    reason="semantic_polarity_mismatch",
                     label=label[:240],
                 )
             )

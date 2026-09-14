@@ -55,7 +55,7 @@ Insufficient atomic-fact evidence is terminal. It never enters an open-research 
 
 | Concern | Authority | Non-authority |
 |---|---|---|
-| User intent and success criteria | `StructuredResearchBrief` | raw query, planner, TaskShape |
+| User intent, key questions, and final success criteria | `StructuredResearchBrief` | raw query, planner, TaskShape |
 | What to research next | Supervisor | Worker, ControlPolicy, planner |
 | Machine task identity | Runtime identity module | Supervisor LLM |
 | Whether a request can execute | Budget admission and RuntimePolicy | Supervisor LLM |
@@ -72,7 +72,7 @@ The Supervisor may return only:
 - `CONDUCT_RESEARCH`
 - `COMPLETE`
 
-A research request declares its objective, target criteria, target gaps, expected evidence, effort, and worker call limits. It never supplies a machine `task_id`.
+A research request declares its objective, target criterion, `CoverageGap` ID, missing evidence types, blocking conflict IDs, expected evidence, effort, and worker call limits. It never supplies a machine `task_id`. The deterministic fallback consumes `CoverageJudgement.gaps` directly; it never binds a criterion by array position.
 
 The runtime derives:
 
@@ -111,26 +111,41 @@ The three retrieval resources are independent. `batch_search(N)` consumes `N` se
 
 ## Workers and Ingest
 
-Workers are bounded leaf researchers. They do not run a second deep-research loop. On timeout or budget stop, artifact-backed evidence is salvaged and the worker becomes a partial result while preserving its exact failure reason.
+Workers are bounded leaf researchers. They do not run a second deep-research loop and never judge global coverage. A worker stops normally with `local_evidence_sufficient`, `no_more_useful_evidence`, `soft_budget_finalize`, or `soft_deadline_finalize`.
+
+Finalization is armed before an LLM request when projected usage would risk the token ceiling, when final LLM calls must be preserved, or when the wall clock must reserve one model call plus ten seconds. The token threshold is adaptive between 40% and 80%. The current request receives a Finalization Mode instruction, retrieval is disabled, and remaining capacity is preserved for the structured WorkerResult. Hard token, call, and timeout caps remain runaway-protection ceilings, not normal stop conditions. On a true timeout or hard budget stop, artifact-backed evidence is salvaged and the exact failure reason is preserved.
 
 Each `researcher` result is ingested immediately with the same deterministic ingestion contract. The graph still waits for required workers at the fan-in boundary, but evidence, claims, and findings become available as each worker returns. `ingest_findings` then processes only WorkerResults that were not already ingested; replay never duplicates records. If partial-wave coverage already satisfies the Brief, only optional or speculative workers may be skipped. Required workers are never cancelled for latency.
 
 ## Coverage
 
-Coverage is judged against Brief key questions and success criteria. Each criterion records supported claim IDs, evidence IDs, missing information, conflicts, and confidence. A criterion is supported only when its required independent evidence is present.
+Coverage is judged only against Brief key questions. `success_criteria` belongs to the final Quality Gate. Each criterion records supported claim IDs, evidence IDs, independent source IDs, missing evidence types, unresolved conflicts, and confidence.
+
+A criterion is `supported` only when all of the following hold:
+
+- a claim or finding is explicitly bound to the criterion (lexical overlap alone is at most `partial`);
+- evidence exists and the required independent source count is met;
+- `primary_required` is satisfied when configured;
+- `freshness_required` is satisfied with a usable publication/effective date;
+- no blocking unresolved conflict is bound to the criterion.
+
+Every non-supported criterion emits a structured `CoverageGap` with `gap_id`, `criterion_id`, current evidence, missing evidence type, blocking conflict IDs, and priority. `missing` and `recommended_next_questions` remain display/eval projections, not control-plane inputs.
 
 Coverage is monotonic:
 
 - no evidence delta means `gap` cannot become `sufficient`;
 - judge failure is fail-closed;
 - finding count and worker completion are not progress;
-- a closed gap must be traceable to new evidence, a supported claim, criterion closure, or conflict resolution.
+- a closed gap must be traceable to new evidence, a supported claim, criterion closure, or conflict resolution;
+- a blocking unresolved conflict always keeps coverage insufficient.
 
 ## Synthesis and Partial Delivery
 
-Synthesis reads a Brief-native context built from evidence digests, findings, claims, worker limitations, and coverage gaps. It does not read legacy coverage state.
+Synthesis reads a Brief-native context built from evidence digests, findings, claims, worker limitations, coverage gaps, and structured conflict resolutions. It does not read legacy coverage state and cannot search.
 
-The synthesis model is invoked directly through the LLM gateway with `ainvoke`. A normal synthesis attempt is capped at 60 seconds. Only provider rate limiting, provider unavailability, and context-length failures may retry once in degraded mode with a 30-second cap. Timeout, auth, bad request, content filter, and budget failures do not retry.
+Conflict reconciliation distinguishes `resolved`, `expected_disagreement`, and `unresolved`. An unresolved conflict bound to a required criterion is blocking. Synthesis must use the specified winner for resolved conflicts, explain scope/context for expected disagreement, disclose uncertainty for non-blocking unresolved conflicts, and force degraded mode for blocking unresolved conflicts. It must never choose a winner for an unresolved conflict.
+
+The synthesis model is invoked directly through the LLM gateway with `ainvoke`. A normal synthesis attempt uses the shared model timeout, defaulting to `LLM_TIMEOUT_SEC`. Only provider rate limiting, provider unavailability, and context-length failures may retry once in degraded mode. Timeout, auth, bad request, content filter, and budget failures do not retry. `HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC` and `HARNESS_SYNTHESIS_RETRY_TIMEOUT_SEC` override the defaults only when explicitly configured.
 
 If synthesis tokens are low or the provider fails while usable evidence exists, the runtime renders a deterministic user-readable partial result. Partial content:
 
@@ -160,7 +175,7 @@ Chat is the primary delivery surface. A report request may additionally produce 
 
 The trace has exactly one `research.run` root. Worker, evidence, coverage, synthesis, quality, and terminal events preserve lineage. Trace Integrity fails when required stages, progress, root spans, lineage, or terminal semantics are missing.
 
-Budget denials emit one canonical `budget.denied` event with scope, resource, reason, used, limit, and worker/run snapshots. Structured Brief/Supervisor fallbacks emit `semantic.fallback` with error type, message, category, model, and schema. Worker terminal events carry the complete worker budget snapshot, and LLM events carry phase, task, call index, token estimate, duration, and remaining worker limits.
+Budget denials emit one canonical `budget.denied` event with scope, resource, reason, used, limit, and worker/run snapshots. Soft finalization emits `budget.decided` with `status=finalize` and is not counted as denial. Structured Brief/Supervisor fallbacks emit `semantic.fallback` with error type, message, category, model, and schema. Worker terminal events carry the complete worker budget snapshot, normal stop reason, and LLM events carry phase, task, call index, token estimate, duration, and remaining worker limits.
 
 Root spans never inherit Worker task, plan, or attempt context. Lineage edges are derived from explicit input/output references; matching IDs only fills in the missing side of an edge and never creates duplicate edges.
 

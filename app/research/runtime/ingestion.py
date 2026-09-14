@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.research.claims.extract import extract_claims_from_worker_results
+from app.research.claims.models import ClaimRecord
 from app.research.claims.reconcile import detect_conflict_edges
 from app.research.claims.resolve import resolve_edges
 from app.research.evidence.admission import admit_evidence
@@ -69,8 +70,22 @@ def _prepare_evidence(rows: list[dict[str, Any]]) -> tuple[list[EvidenceRecord],
             locators = [f"evidence:{item}" for item in requested_ids]
         row_evidence: list[EvidenceRecord] = []
         source_quality = str(payload.get("source_quality") or "")
+        evidence_metadata = [
+            dict(item)
+            for item in payload.get("evidence_metadata") or []
+            if isinstance(item, dict)
+        ]
         for index, locator in enumerate(locators):
             requested = requested_ids[index] if index < len(requested_ids) else ""
+            metadata = next(
+                (
+                    item
+                    for item in evidence_metadata
+                    if str(item.get("evidence_id") or "") == requested
+                    or str(item.get("source") or item.get("locator") or "") == locator
+                ),
+                {},
+            )
             tier, authority = _authority(locator, source_quality)
             record = EvidenceRecord(
                 evidence_id=_evidence_id(task_id, locator, index, requested),
@@ -78,8 +93,16 @@ def _prepare_evidence(rows: list[dict[str, Any]]) -> tuple[list[EvidenceRecord],
                 source_kind=_source_kind(locator),
                 locator=locator,
                 retrieved_at=str(payload.get("retrieved_at") or _now()),
-                published_at=str(payload.get("published_at") or ""),
-                effective_at=str(payload.get("effective_at") or ""),
+                published_at=str(
+                    metadata.get("published_at")
+                    or payload.get("published_at")
+                    or ""
+                ),
+                effective_at=str(
+                    metadata.get("effective_at")
+                    or payload.get("effective_at")
+                    or ""
+                ),
                 source_tier=tier,
                 authority_score=authority,
                 excerpt_ref=str(payload.get("excerpt_ref") or ""),
@@ -148,10 +171,24 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
         claim.subject_id = str(claim.subject_id or meta.get("subject_id") or claim.subject or "general")
         dimensions = [str(item) for item in meta.get("coverage_keys") or [] if str(item).strip()]
         claim.dimension_id = str(claim.dimension_id or (dimensions[0] if dimensions else "key_fact"))
+        target_criteria = [
+            str(item) for item in meta.get("target_criteria") or [] if str(item).strip()
+        ]
+        claim.criterion_id = str(
+            claim.criterion_id
+            or meta.get("criterion_id")
+            or (target_criteria[0] if target_criteria else "")
+        )
         claim.evidence_ids = [item for item in claim.evidence_ids if item in admitted_ids]
     claims = [claim for claim in claims if claim.evidence_ids]
-    edges = detect_conflict_edges(claims)
-    reconciliation = resolve_edges(claims, edges)
+    existing_claims = [
+        ClaimRecord.from_dict(row)
+        for row in state.get("claims") or []
+        if isinstance(row, dict)
+    ]
+    all_claims = [*existing_claims, *claims]
+    edges = detect_conflict_edges(all_claims)
+    reconciliation = resolve_edges(all_claims, edges)
     new_claim_ids = {claim.claim_id for claim in claims}
     new_edges = [
         edge for edge in edges

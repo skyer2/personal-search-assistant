@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
@@ -24,6 +25,8 @@ class CriterionSupport:
     source_ids: tuple[str, ...] = ()
     missing: str = ""
     conflicts: tuple[str, ...] = ()
+    missing_evidence_types: tuple[str, ...] = ()
+    blocking_conflict_ids: tuple[str, ...] = ()
     confidence: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -40,7 +43,48 @@ class CriterionSupport:
             source_ids=tuple(str(item) for item in row.get("source_ids") or []),
             missing=str(row.get("missing") or ""),
             conflicts=tuple(str(item) for item in row.get("conflicts") or []),
+            missing_evidence_types=tuple(
+                str(item) for item in row.get("missing_evidence_types") or []
+            ),
+            blocking_conflict_ids=tuple(
+                str(item) for item in row.get("blocking_conflict_ids") or []
+            ),
             confidence=max(0.0, min(1.0, float(row.get("confidence") or 0.0))),
+        )
+
+
+@dataclass(frozen=True)
+class CoverageGap:
+    gap_id: str
+    criterion_id: str
+    description: str
+    current_evidence_ids: tuple[str, ...] = ()
+    missing_evidence_type: tuple[str, ...] = ()
+    blocking_conflict_ids: tuple[str, ...] = ()
+    priority: str = "medium"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "CoverageGap":
+        row = data or {}
+        missing = row.get("missing_evidence_type")
+        if isinstance(missing, str):
+            missing = [missing]
+        priority = str(row.get("priority") or "medium").lower()
+        return cls(
+            gap_id=str(row.get("gap_id") or ""),
+            criterion_id=str(row.get("criterion_id") or ""),
+            description=str(row.get("description") or ""),
+            current_evidence_ids=tuple(
+                str(item) for item in row.get("current_evidence_ids") or []
+            ),
+            missing_evidence_type=tuple(str(item) for item in missing or []),
+            blocking_conflict_ids=tuple(
+                str(item) for item in row.get("blocking_conflict_ids") or []
+            ),
+            priority=priority if priority in {"high", "medium", "low"} else "medium",
         )
 
 
@@ -75,6 +119,7 @@ class CoverageJudgement:
     conflicts: tuple[str, ...] = ()
     weak_claims: tuple[str, ...] = ()
     recommended_next_questions: tuple[str, ...] = ()
+    gaps: tuple[CoverageGap, ...] = ()
     reason: str = ""
     source: str = "deterministic_fallback"
 
@@ -99,6 +144,11 @@ class CoverageJudgement:
             recommended_next_questions=tuple(
                 str(item) for item in row.get("recommended_next_questions") or []
             ),
+            gaps=tuple(
+                CoverageGap.from_dict(item)
+                for item in row.get("gaps") or []
+                if isinstance(item, dict)
+            ),
             reason=str(row.get("reason") or ""),
             source=str(row.get("source") or "deterministic_fallback"),
         )
@@ -110,7 +160,7 @@ def _criterion_id(text: str) -> str:
 
 
 def _criteria(brief: StructuredResearchBrief) -> tuple[tuple[str, str], ...]:
-    rows = tuple(brief.success_criteria or brief.key_questions or (brief.objective,))
+    rows = tuple(brief.key_questions or (brief.objective,))
     return tuple((_criterion_id(item), item) for item in rows if str(item).strip())
 
 
@@ -150,6 +200,55 @@ def _explicitly_bound(criterion_id: str, criterion: str, finding: ResearchFindin
     return criterion_id in finding.supported_criteria or target in targets
 
 
+def _claim_bound(criterion_id: str, criterion: str, row: dict[str, Any]) -> bool:
+    criteria = {
+        *[
+            str(item)
+            for item in row.get("criterion_ids")
+            or [row.get("criterion_id")]
+            or []
+            if str(item).strip()
+        ],
+        *[
+            str(item)
+            for item in row.get("supported_criteria") or []
+            if str(item).strip()
+        ],
+    }
+    return criterion_id in criteria or _normalize(criterion) in {
+        _normalize(item) for item in criteria
+    }
+
+
+def _is_primary(row: dict[str, Any]) -> bool:
+    tier = str(row.get("source_tier") or row.get("source_kind") or "").upper()
+    locator = str(row.get("locator") or row.get("url") or "").lower()
+    return tier == "PRIMARY" or any(
+        token in locator
+        for token in ("gov.cn", "sec.gov", "/ir.", "investor", "docs.", "official")
+    )
+
+
+def _parse_date(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    except ValueError:
+        return None
+
+
+def _is_fresh(row: dict[str, Any], horizon: str) -> bool:
+    published = _parse_date(row.get("published_at")) or _parse_date(row.get("effective_at"))
+    if published is None:
+        return False
+    if horizon == "recent":
+        return datetime.now(timezone.utc) - published <= timedelta(days=365)
+    return True
+
+
 def _supported_rows(
     criterion_id: str,
     criterion: str,
@@ -158,23 +257,28 @@ def _supported_rows(
     evidence_by_id: dict[str, dict[str, Any]],
     *,
     atomic_fact: bool = False,
-) -> tuple[list[str], list[str], float, list[str]]:
+) -> tuple[list[str], list[str], float, list[str], bool]:
     claim_ids: list[str] = []
     evidence_ids: list[str] = []
+    directly_bound = False
     for row in claims:
         text = str(row.get("text") or row.get("claim") or "")
         refs = [str(item) for item in row.get("evidence_ids") or [] if str(item).strip()]
-        if refs and _matches(criterion, text):
+        explicit_claim = _claim_bound(criterion_id, criterion, row)
+        if refs and (explicit_claim or _matches(criterion, text)):
             claim_id = str(row.get("claim_id") or "")
             if claim_id:
                 claim_ids.append(claim_id)
             evidence_ids.extend(refs)
+            directly_bound = directly_bound or explicit_claim
     for finding in findings:
         if not finding.evidence_ids:
             continue
         text = " ".join([finding.summary, *finding.claims])
-        if _explicitly_bound(criterion_id, criterion, finding) or _matches(criterion, text):
+        explicit_finding = _explicitly_bound(criterion_id, criterion, finding)
+        if explicit_finding or _matches(criterion, text):
             evidence_ids.extend(finding.evidence_ids)
+            directly_bound = directly_bound or explicit_finding
     source_ids = [
         _source_identity(evidence_by_id[evidence_id])
         for evidence_id in dict.fromkeys(evidence_ids)
@@ -182,28 +286,51 @@ def _supported_rows(
     ]
     for finding in findings:
         if _explicitly_bound(criterion_id, criterion, finding):
+            directly_bound = True
             source_ids.extend(
                 registrable_domain(source) or source
                 for source in finding.source_ids
                 if str(source).strip()
             )
     if atomic_fact and (claim_ids or evidence_ids):
-        return claim_ids[:1], list(dict.fromkeys(evidence_ids)), 0.55, list(dict.fromkeys(source_ids))
+        return claim_ids[:1], list(dict.fromkeys(evidence_ids)), 0.55, list(dict.fromkeys(source_ids)), directly_bound
     unique_sources = list(dict.fromkeys(source_ids))
+    confidence = min(1.0, 0.35 + 0.2 * len(unique_sources))
+    if not directly_bound:
+        confidence = min(0.45, confidence)
     return (
         list(dict.fromkeys(claim_ids)),
         list(dict.fromkeys(evidence_ids)),
-        min(1.0, 0.35 + 0.2 * len(unique_sources)),
+        confidence,
         unique_sources,
+        directly_bound,
     )
 
 
-def _current_conflict_ids(conflicts: list[dict[str, Any]]) -> set[str]:
-    return {
-        str(row.get("edge_id") or row.get("kind") or row.get("label") or "conflict")
-        for row in conflicts
-        if isinstance(row, dict)
+def _unresolved_conflicts(
+    conflicts: list[dict[str, Any]],
+    resolutions: list[dict[str, Any]],
+) -> dict[str, tuple[bool, str]]:
+    resolution_by_edge = {
+        str(row.get("edge_id")): row
+        for row in resolutions
+        if isinstance(row, dict) and str(row.get("edge_id") or "").strip()
     }
+    output: dict[str, tuple[bool, str]] = {}
+    for row in conflicts:
+        if not isinstance(row, dict):
+            continue
+        edge_id = str(
+            row.get("edge_id") or row.get("kind") or row.get("label") or "conflict"
+        )
+        resolution = resolution_by_edge.get(edge_id, {})
+        status = str(resolution.get("status") or "unresolved")
+        if status == "unresolved":
+            output[edge_id] = (
+                bool(resolution.get("blocking", False)),
+                str(resolution.get("criterion_id") or ""),
+            )
+    return output
 
 
 def judge_coverage(
@@ -213,6 +340,7 @@ def judge_coverage(
     claim_conflicts: list[dict[str, Any]] | None = None,
     claims: list[dict[str, Any]] | None = None,
     evidence: list[dict[str, Any]] | None = None,
+    claim_resolutions: list[dict[str, Any]] | None = None,
     previous: CoverageJudgement | None = None,
 ) -> CoverageJudgement:
     normalized_findings = [
@@ -227,12 +355,18 @@ def judge_coverage(
         if isinstance(row, dict) and str(row.get("evidence_id") or "").strip()
     }
     conflicts = [dict(row) for row in claim_conflicts or [] if isinstance(row, dict)]
-    conflict_ids = _current_conflict_ids(conflicts)
+    resolutions = [dict(row) for row in claim_resolutions or [] if isinstance(row, dict)]
+    unresolved = _unresolved_conflicts(conflicts, resolutions)
+    conflict_ids = set(unresolved)
+    blocking_conflict_ids = {
+        edge_id for edge_id, (blocking, _) in unresolved.items() if blocking
+    }
     required_sources = max(1, int(brief.source_requirements.min_independent_sources or 1))
 
     supports: list[CriterionSupport] = []
+    gaps: list[CoverageGap] = []
     for criterion_id, criterion in _criteria(brief):
-        claim_ids, evidence_ids, confidence, source_ids = _supported_rows(
+        claim_ids, evidence_ids, confidence, source_ids, directly_bound = _supported_rows(
             criterion_id,
             criterion,
             normalized_findings,
@@ -240,15 +374,71 @@ def judge_coverage(
             evidence_by_id,
             atomic_fact=brief.user_intent == "atomic_fact",
         )
-        if source_ids and len(source_ids) >= required_sources:
+        unique_evidence_ids = list(dict.fromkeys(evidence_ids))
+        unique_source_ids = list(dict.fromkeys(source_ids))
+        bound_conflicts = {
+            edge_id
+            for edge_id, (_, bound_criterion) in unresolved.items()
+            if bound_criterion in {criterion_id, criterion}
+        }
+        bound_blocking_conflicts = bound_conflicts & blocking_conflict_ids
+        independent_ok = len(unique_source_ids) >= required_sources
+        primary_ok = (
+            not brief.source_requirements.primary_required
+            or any(
+                _is_primary(evidence)
+                for item in unique_evidence_ids
+                if (evidence := evidence_by_id.get(item)) is not None
+            )
+        )
+        fresh_ok = (
+            not brief.freshness_requirements.required
+            or any(
+                evidence is not None
+                and _is_fresh(evidence, brief.freshness_requirements.time_horizon)
+                for item in unique_evidence_ids
+                if (evidence := evidence_by_id.get(item)) is not None
+            )
+        )
+        missing_types: list[str] = []
+        if not directly_bound:
+            missing_types.append("direct_criterion_binding")
+        if not unique_evidence_ids:
+            missing_types.append("evidence")
+        if not independent_ok:
+            missing_types.append("independent_source")
+        if not primary_ok:
+            missing_types.append("primary_source")
+        if not fresh_ok:
+            missing_types.append("fresh_evidence")
+        if bound_blocking_conflicts:
+            missing_types.append("conflict_resolution")
+
+        if bound_blocking_conflicts:
+            status = "conflicted"
+            missing = f"{criterion}（存在 blocking unresolved conflict）"
+        elif directly_bound and unique_evidence_ids and independent_ok and primary_ok and fresh_ok:
             status = "supported"
             missing = ""
-        elif source_ids or evidence_ids:
+        elif unique_source_ids or unique_evidence_ids:
             status = "partial"
-            missing = f"{criterion}（仍缺少 {required_sources - len(source_ids)} 个独立来源）"
+            missing = f"{criterion}（缺少：{'、'.join(missing_types)}）"
         else:
             status = "unsupported"
             missing = criterion
+        priority = "high" if status in {"unsupported", "conflicted"} else "medium"
+        if status != "supported":
+            gaps.append(
+                CoverageGap(
+                    gap_id=f"gap_{criterion_id.removeprefix('coverage_')}",
+                    criterion_id=criterion_id,
+                    description=missing or criterion,
+                    current_evidence_ids=tuple(unique_evidence_ids),
+                    missing_evidence_type=tuple(missing_types),
+                    blocking_conflict_ids=tuple(sorted(bound_blocking_conflicts)),
+                    priority=priority,
+                )
+            )
         supports.append(
             CriterionSupport(
                 criterion_id=criterion_id,
@@ -257,7 +447,9 @@ def judge_coverage(
                 evidence_ids=tuple(evidence_ids),
                 source_ids=tuple(source_ids),
                 missing=missing,
-                conflicts=(),
+                conflicts=tuple(sorted(bound_conflicts)),
+                missing_evidence_types=tuple(missing_types),
+                blocking_conflict_ids=tuple(sorted(bound_blocking_conflicts)),
                 confidence=confidence if status != "unsupported" else 0.0,
             )
         )
@@ -307,8 +499,13 @@ def judge_coverage(
 
     deterministic_sufficient = bool(supports) and all(
         row.status == "supported" for row in supports
-    )
-    if previous is not None and previous.sufficient and not conflict_ids:
+    ) and not blocking_conflict_ids
+    if (
+        previous is not None
+        and previous.sufficient
+        and not conflict_ids
+        and not gaps
+    ):
         deterministic_sufficient = True
     progress = bool(
         delta.new_evidence_ids
@@ -319,7 +516,7 @@ def judge_coverage(
     if previous is not None and not previous.sufficient and not progress:
         deterministic_sufficient = False
 
-    missing = tuple(row.missing for row in supports if row.missing)
+    missing = tuple(gap.description for gap in gaps)
     weak = tuple(
         row.summary for row in normalized_findings if not row.evidence_ids
     )
@@ -331,7 +528,8 @@ def judge_coverage(
             delta=delta,
             conflicts=tuple(sorted(conflict_ids)),
             weak_claims=weak,
-            reason="all Brief success criteria have independently supported evidence",
+            gaps=(),
+            reason="all Brief key questions have independently supported evidence",
         )
     return CoverageJudgement(
         sufficient=False,
@@ -341,11 +539,12 @@ def judge_coverage(
         missing=missing or tuple(row[1] for row in _criteria(brief)),
         conflicts=tuple(sorted(conflict_ids)),
         weak_claims=weak,
-        recommended_next_questions=missing[:4],
+        recommended_next_questions=tuple(gap.description for gap in gaps[:4]),
+        gaps=tuple(gaps),
         reason=(
             "coverage cannot improve without an evidence, claim, gap-closure, or conflict delta"
             if previous is not None and not previous.sufficient and not progress
-            else f"{sum(1 for row in supports if row.status == 'supported')} of {len(supports)} Brief criteria are independently supported"
+            else f"{sum(1 for row in supports if row.status == 'supported')} of {len(supports)} Brief key questions are independently supported"
         ),
     )
 
@@ -363,6 +562,7 @@ class CoverageJudge:
         claim_conflicts: list[dict[str, Any]] | None = None,
         claims: list[dict[str, Any]] | None = None,
         evidence: list[dict[str, Any]] | None = None,
+        claim_resolutions: list[dict[str, Any]] | None = None,
         previous: CoverageJudgement | None = None,
     ) -> CoverageJudgement:
         fallback = judge_coverage(
@@ -371,6 +571,7 @@ class CoverageJudge:
             claim_conflicts=claim_conflicts,
             claims=claims,
             evidence=evidence,
+            claim_resolutions=claim_resolutions,
             previous=previous,
         )
         if self.agent is None:
@@ -380,13 +581,14 @@ class CoverageJudge:
             for item in findings[:24]
         ]
         prompt = (
-            "依据 Brief success criteria 判断研究是否足够。只输出 JSON："
+            "依据 Brief key questions 判断研究是否足够。只输出 JSON："
             "{\"sufficient\":false,\"status\":\"gap\",\"missing\":[\"可行动缺口\"],\"conflicts\":[],"
             "\"weak_claims\":[],\"recommended_next_questions\":[],\"reason\":\"...\"}\n"
             "无新增证据时不得把 gap 判为 sufficient。\n\n"
             f"Brief: {json.dumps(brief.to_dict(), ensure_ascii=False)}\n"
             f"Findings: {json.dumps(serialized, ensure_ascii=False)}\n"
             f"Claims: {json.dumps(claims or [], ensure_ascii=False)}\n"
+            f"ConflictResolutions: {json.dumps(claim_resolutions or [], ensure_ascii=False)}\n"
             f"Evidence: {json.dumps(evidence or [], ensure_ascii=False)}\n"
         )
         texts: list[str] = []
@@ -440,6 +642,7 @@ class CoverageJudge:
 
 __all__ = [
     "CoverageDelta",
+    "CoverageGap",
     "CoverageJudgement",
     "CoverageJudge",
     "CriterionSupport",

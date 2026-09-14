@@ -11,10 +11,11 @@ from dotenv import find_dotenv, load_dotenv
 from langchain.chat_models import init_chat_model
 
 from app.agent.harness.usage_tracker import wrap_model_with_budget
+from app.config.timeouts import llm_timeout_sec, model_timeout_sec
 
 load_dotenv(find_dotenv())
 
-_llm_timeout = float(os.getenv("LLM_TIMEOUT_SEC", "120"))
+_llm_timeout = llm_timeout_sec()
 _supervisor_temperature = float(os.getenv("HARNESS_SUPERVISOR_TEMPERATURE", "0.1"))
 _openai_base_url = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
 _openai_api_key = (os.getenv("OPENAI_API_KEY") or "").strip() or None
@@ -40,7 +41,7 @@ if _worker_model_name and _worker_model_name != os.getenv("LLM_QWEN_MAX"):
         worker_model = wrap_model_with_budget(init_chat_model(
             model=_worker_model_name,
             model_provider="openai",
-            timeout=min(_llm_timeout, float(os.getenv("LLM_WORKER_TIMEOUT_SEC", "60"))),
+            timeout=model_timeout_sec("LLM_WORKER_TIMEOUT_SEC"),
             temperature=_supervisor_temperature,
             base_url=_openai_base_url,
             api_key=_openai_api_key,
@@ -72,7 +73,7 @@ if _synthesis_model_name and _synthesis_model_name != os.getenv("LLM_QWEN_MAX"):
         synthesis_model = wrap_model_with_budget(init_chat_model(
             model=_synthesis_model_name,
             model_provider="openai",
-            timeout=min(_llm_timeout, float(os.getenv("LLM_SYNTHESIS_TIMEOUT_SEC", "60"))),
+            timeout=model_timeout_sec("LLM_SYNTHESIS_TIMEOUT_SEC"),
             temperature=_supervisor_temperature,
             base_url=_openai_base_url,
             api_key=_openai_api_key,

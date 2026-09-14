@@ -21,8 +21,10 @@ This project is not a search engine. Search is only an environment tool. The har
 - `Supervisor` is the only research-strategy authority.
 - `RuntimePolicy` is the only budget, retry, safety, and terminal-state authority.
 - Task state is execution state only. All workers finishing does not imply coverage.
-- Coverage is judged from evidence-backed findings against the Brief, not from task completion.
-- Synthesis consumes semantic digests and cannot change coverage.
+- Coverage is judged from evidence-backed findings against Brief key questions, not task completion or report-quality criteria.
+- Supervisor consumes structured Coverage gaps by exact `gap_id` and `criterion_id`.
+- Workers soft-finalize before hard budget ceilings and report a normal stop reason.
+- Synthesis consumes semantic digests and structured conflict resolutions; it cannot change coverage or resolve an unresolved conflict.
 - The final answer must pass coverage, conflict, citation, and grounding gates.
 - Semantic LLM calls go through one structured invocation boundary; workers cannot reinterpret user intent.
 - Worker budgets separate search queries, fetched sources, and logical tool invocations.
@@ -66,6 +68,7 @@ Production fidelity, live scenarios, and BrowseComp-Plus are documented in [docs
 - [StateGraph runtime](docs/HARNESS_ARCHITECTURE.md)
 - [Observability contract](docs/OBSERVABILITY.md)
 - [Evaluation system](docs/EVALUATION.md)
+- [Deep Research convergence](docs/architecture/deep-research-convergence.md)
 - [Budget generous baseline result](docs/architecture/budget-generous-baseline-result.md)
 - [BrowseComp-Plus](docs/BROWSECOMP_PLUS_EVAL.md)
 - [Context and memory boundaries](docs/CONTEXT_SYSTEM.md)

@@ -28,6 +28,7 @@ from app.agent.harness.run_budget import BudgetReservationError
 from app.agent.harness.tool_contract import apply_tool_output_contract
 from app.agent.harness.token_counter import estimate_tokens
 from app.config.loader import get_harness_config, reload_harness_config
+from app.config.timeouts import model_timeout_sec
 from app.observability import get_recorder
 from app.observability.journal import summarize_trace
 from app.research.execution import worker_executor as worker_executor_module
@@ -227,7 +228,7 @@ def assert_production_config() -> None:
         "max_replan_count": 3,
         "direct_worker_invoke": True,
         "max_total_tokens": 500000,
-        "synthesis_step_timeout_sec": 60,
+        "synthesis_step_timeout_sec": model_timeout_sec("LLM_SYNTHESIS_TIMEOUT_SEC"),
     }
     for key, value in expected.items():
         actual = getattr(config, key)

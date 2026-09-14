@@ -33,6 +33,7 @@ from app.research.domain.task_state import (
     worker_result_lifecycle,
 )
 from app.research.runtime.project import sync_execution_projection
+from app.research.runtime.reducers import merge_findings, merge_records, merge_strings
 from app.research.runtime.latency import (
     critical_path_summary,
     note_final_answer,
@@ -544,6 +545,10 @@ class ResearchGraphRunner:
                             "priority": item.priority,
                             "target_criteria": list(item.target_criteria),
                             "target_gaps": list(item.target_gaps),
+                            "criterion_id": item.criterion_id,
+                            "gap_id": item.gap_id,
+                            "missing_evidence_types": list(item.missing_evidence_types),
+                            "blocking_conflict_ids": list(item.blocking_conflict_ids),
                             "objective": item.objective,
                             "expected_evidence": list(item.expected_evidence),
                             "source_hints": list(item.source_hints),
@@ -755,6 +760,11 @@ class ResearchGraphRunner:
             brief,
             findings,
             claim_conflicts=conflicts,
+            claim_resolutions=[
+                row
+                for row in state.get("claim_resolutions") or []
+                if isinstance(row, dict)
+            ],
             claims=claims,
             evidence=evidence_records,
             previous=previous,
@@ -778,13 +788,11 @@ class ResearchGraphRunner:
             "status": judgement.status,
             "coverage_ratio": 1.0 if judgement.sufficient else round(coverage_ratio, 4),
             "unresolved_conflicts": list(judgement.conflicts),
-            "missing": list(judgement.missing),
-            "missing_ids": list(judgement.missing),
+            "missing": [gap.description for gap in judgement.gaps],
+            "missing_ids": [gap.gap_id for gap in judgement.gaps],
             "criterion_ids": [row.criterion_id for row in judgement.criteria],
             "semantic_gap_ids": [
-                row.criterion_id
-                for row in judgement.criteria
-                if row.status in {"unsupported", "partial", "conflicted", "indeterminate"}
+                gap.gap_id or gap.criterion_id for gap in judgement.gaps
             ],
             "reason_codes": [] if judgement.sufficient else ["coverage_gap"],
         }
@@ -1009,9 +1017,37 @@ class ResearchGraphRunner:
                 else None
             )
             partial_state = {**gstate, **ingest_update}
+            for record_field in (
+                "claims",
+                "claim_conflicts",
+                "claim_resolutions",
+                "evidence_records",
+            ):
+                partial_state[record_field] = merge_records(
+                    gstate.get(record_field),
+                    ingest_update.get(record_field),
+                )
+            partial_state["findings"] = merge_findings(
+                gstate.get("findings"),
+                ingest_update.get("findings"),
+            )
+            partial_state["search_query_fingerprints"] = merge_strings(
+                gstate.get("search_query_fingerprints"),
+                ingest_update.get("search_query_fingerprints"),
+            )
             judgement = judge_coverage(
                 brief,
                 [row for row in partial_state.get("findings") or [] if isinstance(row, dict)],
+                claim_conflicts=[
+                    row
+                    for row in partial_state.get("claim_conflicts") or []
+                    if isinstance(row, dict)
+                ],
+                claim_resolutions=[
+                    row
+                    for row in partial_state.get("claim_resolutions") or []
+                    if isinstance(row, dict)
+                ],
                 claims=[row for row in partial_state.get("claims") or [] if isinstance(row, dict)],
                 evidence=[row for row in partial_state.get("evidence_records") or [] if isinstance(row, dict)],
                 previous=previous,
@@ -1285,10 +1321,25 @@ class ResearchGraphRunner:
             status=str(decision.get("action") or "synthesize"),
             attributes=control_decision_event_attributes(decision or {"action": "synthesize"}),
         )
-        mode = "degraded" if compact or decision.get("action") == "deliver_partial" else "normal"
         evidence_records = [dict(row) for row in gstate.get("evidence_records") or [] if isinstance(row, dict)]
         claims = [dict(row) for row in gstate.get("claims") or [] if isinstance(row, dict)]
         judgement = dict(gstate.get("coverage_judgement") or {})
+        conflict_resolutions = [
+            dict(row)
+            for row in gstate.get("claim_resolutions") or []
+            if isinstance(row, dict)
+        ]
+        has_blocking_conflict = any(
+            str(row.get("status") or "") == "unresolved" and bool(row.get("blocking"))
+            for row in conflict_resolutions
+        )
+        mode = (
+            "degraded"
+            if compact
+            or decision.get("action") == "deliver_partial"
+            or has_blocking_conflict
+            else "normal"
+        )
         synthesis_context = SynthesisContextBuilder(self.harness, session).build(
             gstate,
             limitations=list(judgement.get("missing") or []),
@@ -1315,6 +1366,7 @@ class ResearchGraphRunner:
             evidence_refs=evidence_refs,
             limitations=list(judgement.get("missing") or []),
             unresolved_conflicts=list(judgement.get("conflicts") or []),
+            conflict_resolutions=conflict_resolutions,
             research_summary=self._semantic_synthesis_digest(gstate, compact=compact),
             evidence_digests=list(synthesis_context.evidence_digests),
             findings=list(synthesis_context.findings),

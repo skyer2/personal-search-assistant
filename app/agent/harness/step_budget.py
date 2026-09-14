@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+import time
 from typing import Iterator
 
 
@@ -46,6 +47,8 @@ class WorkerRetrievalBudget:
     search_queries_used: int = 0
     fetch_sources_used: int = 0
     tool_invocations_used: int = 0
+    soft_deadline_at: float | None = None
+    finalization_reason: str = ""
 
     def snapshot(self) -> dict[str, int]:
         return {
@@ -70,6 +73,13 @@ STOP_JSON_MESSAGE = (
     "已抓取原文请用 read_artifact / read_evidence 回读。"
 )
 
+FINALIZE_JSON_MESSAGE = (
+    "本步已进入 Finalization Mode：预算或时间接近上限。"
+    "不要再调用 internet_search / fetch_url / batch_search / batch_fetch。"
+    "请立即基于已抓取内容输出结构化 JSON（ok、summary、facts、sources、findings、evidence_ids、stop_reason）。"
+    "如需核对原文，只能使用 read_artifact / read_evidence。"
+)
+
 
 @contextmanager
 def worker_retrieval_budget(
@@ -77,11 +87,13 @@ def worker_retrieval_budget(
     search_queries: int | None,
     fetch_sources: int | None,
     tool_invocations: int | None,
+    soft_deadline_at: float | None = None,
 ) -> Iterator[WorkerRetrievalBudget]:
     budget = WorkerRetrievalBudget(
         search_queries_limit=None if search_queries is None else max(0, int(search_queries)),
         fetch_sources_limit=None if fetch_sources is None else max(0, int(fetch_sources)),
         tool_invocations_limit=None if tool_invocations is None else max(0, int(tool_invocations)),
+        soft_deadline_at=soft_deadline_at,
     )
     token = _worker_budget.set(budget)
     try:
@@ -140,6 +152,150 @@ def _deny(*, resource: str, reason: str, used: int, limit: int) -> str:
     )
 
 
+def _soft_finalize(*, resource: str, reason: str, used: int, limit: int) -> str:
+    from app.agent.harness.budget_events import emit_budget_decided
+    from app.agent.harness.usage_tracker import (
+        get_current_budget_manager,
+        get_current_worker_lease_id,
+        get_current_worker_task_id,
+    )
+
+    task_id = get_current_worker_task_id()
+    budget = _worker_budget.get()
+    if budget is not None:
+        budget.finalization_reason = reason
+    emit_budget_decided(
+        scope="worker",
+        resource=resource,
+        reason=reason,
+        task_id=task_id,
+        worker_lease_id=get_current_worker_lease_id(),
+        used=used,
+        limit=limit,
+        budget_manager=get_current_budget_manager(),
+    )
+    return BudgetBlock(
+        FINALIZE_JSON_MESSAGE,
+        resource=resource,
+        reason=reason,
+        used=used,
+        limit=limit,
+    )
+
+
+def _soft_finalization_block(resource: str) -> str | None:
+    budget = _worker_budget.get()
+    if budget is None:
+        return None
+    if budget.finalization_reason:
+        return BudgetBlock(
+            FINALIZE_JSON_MESSAGE,
+            resource=resource,
+            reason=budget.finalization_reason,
+            used=0,
+            limit=0,
+        )
+
+    return trigger_worker_soft_finalization_block(resource)
+
+
+def trigger_worker_soft_finalization_block(
+    resource: str = "token",
+    *,
+    projected_tokens: int = 0,
+    projected_llm_calls: int = 0,
+) -> str | None:
+    """Evaluate and arm finalization before another retrieval or LLM round."""
+    budget = _worker_budget.get()
+    if budget is None or budget.finalization_reason:
+        return None
+
+    if budget.soft_deadline_at is not None and time.monotonic() >= budget.soft_deadline_at:
+        return _soft_finalize(
+            resource=resource,
+            reason="soft_deadline_finalize",
+            used=0,
+            limit=0,
+        )
+
+    from app.agent.harness.usage_tracker import (
+        get_current_budget_manager,
+        get_current_worker_task_id,
+    )
+
+    manager = get_current_budget_manager()
+    task_id = get_current_worker_task_id()
+    if manager is None or not task_id:
+        return None
+    snapshot_method = getattr(manager, "worker_lease_snapshot", None)
+    if not callable(snapshot_method):
+        return None
+    snapshot = dict(snapshot_method(task_id) or {})
+    tokens_used = int(snapshot.get("tokens_used") or 0) + int(
+        snapshot.get("in_flight_tokens") or 0
+    ) + max(0, int(projected_tokens or 0))
+    token_limit = int(snapshot.get("token_limit") or 0)
+    if token_limit > 0:
+        token_threshold = max(1, int(token_limit * 0.8))
+        if projected_tokens > 0:
+            projected_threshold = token_limit - 2 * int(projected_tokens)
+            token_threshold = min(
+                token_threshold,
+                max(1, int(token_limit * 0.4), projected_threshold),
+            )
+        if tokens_used >= token_threshold:
+            return _soft_finalize(
+                resource="token",
+                reason="soft_budget_finalize",
+                used=tokens_used,
+                limit=token_limit,
+            )
+
+    llm_calls_used = int(snapshot.get("llm_calls_used") or 0) + max(
+        0,
+        int(projected_llm_calls or 0),
+    )
+    llm_calls_limit = int(snapshot.get("llm_calls_limit") or 0)
+    if llm_calls_limit > 0:
+        threshold = max(1, int((llm_calls_limit * 4 + 4) / 5), llm_calls_limit - 2)
+        if projected_llm_calls > 0:
+            projected_calls = int(projected_llm_calls)
+            threshold = min(
+                threshold,
+                max(
+                    1,
+                    int(llm_calls_limit * 0.5),
+                    llm_calls_limit - 2 * projected_calls,
+                ),
+            )
+        if llm_calls_used >= threshold:
+            return _soft_finalize(
+                resource="llm_call",
+                reason="soft_budget_finalize",
+                used=llm_calls_used,
+                limit=llm_calls_limit,
+            )
+    return None
+
+
+def arm_worker_soft_finalization(
+    *,
+    projected_tokens: int = 0,
+    projected_llm_calls: int = 0,
+) -> str:
+    """Arm finalization before or after an LLM usage boundary."""
+    budget = _worker_budget.get()
+    if budget is not None and budget.finalization_reason:
+        return budget.finalization_reason
+
+    block = trigger_worker_soft_finalization_block(
+        "token",
+        projected_tokens=projected_tokens,
+        projected_llm_calls=projected_llm_calls,
+    )
+    return str(getattr(block, "reason", "") or "")
+
+
 def _reserve_run_tool_invocation() -> str | None:
     from app.agent.harness.usage_tracker import get_current_budget_manager
 
@@ -159,6 +315,9 @@ def consume_search_queries_or_block(n: int, *, tool_name: str = "internet_search
     budget = _worker_budget.get()
     if budget is None:
         return None
+    soft_block = _soft_finalization_block("search_query")
+    if soft_block is not None:
+        return soft_block
     if (
         budget.search_queries_limit is not None
         and budget.search_queries_used + count > budget.search_queries_limit
@@ -200,6 +359,9 @@ def consume_fetch_sources_or_block(n: int, *, tool_name: str = "fetch_url") -> s
     budget = _worker_budget.get()
     if budget is None:
         return None
+    soft_block = _soft_finalization_block("fetch_source")
+    if soft_block is not None:
+        return soft_block
     if (
         budget.fetch_sources_limit is not None
         and budget.fetch_sources_used + count > budget.fetch_sources_limit
@@ -263,8 +425,10 @@ def consume_tool_invocations_or_block(n: int = 1) -> str | None:
 
 
 __all__ = [
+    "arm_worker_soft_finalization",
     "WorkerRetrievalBudget",
     "BudgetBlock",
+    "FINALIZE_JSON_MESSAGE",
     "consume_fetch_sources_or_block",
     "consume_search_queries_or_block",
     "consume_tool_invocations_or_block",

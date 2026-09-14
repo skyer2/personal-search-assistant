@@ -62,7 +62,7 @@ def _graph_state(session: runner_module.RunSession) -> dict[str, Any]:
                 objective="Collect Company A evidence",
                 allowed_tools=["internet_search", "fetch_url"],
                 metadata={
-                    "target_criteria": list(brief.success_criteria or brief.key_questions)[:1],
+                    "target_criteria": list(brief.key_questions or (brief.objective,))[:1],
                     "max_llm_calls": 2,
                     "token_ceiling": 4_000,
                 },

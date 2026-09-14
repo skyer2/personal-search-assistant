@@ -45,14 +45,14 @@ def test_coverage_is_recomputed_from_claims_and_evidence():
     assert state_one.covered_ids == [unit.coverage_id for unit in contract.units]
 
 
-def test_success_criteria_and_source_identity_drive_coverage():
+def test_key_questions_and_source_identity_drive_coverage():
     brief = StructuredResearchBrief(
         brief_id="brief-coverage",
         version=1,
         objective="Evaluate Company A",
         user_intent="research",
         key_questions=("How should Company A be studied?",),
-        success_criteria=("Confirm Company A funding",),
+        success_criteria=("回答直接对齐用户目标。",),
         source_requirements=SourceRequirements(min_independent_sources=2),
     )
     finding = ResearchFinding(
@@ -61,7 +61,7 @@ def test_success_criteria_and_source_identity_drive_coverage():
         summary="Unrelated wording for text-overlap fallback",
         claims=("Unrelated claim",),
         evidence_ids=("evidence-1", "evidence-2"),
-        supported_criteria=("Confirm Company A funding",),
+        supported_criteria=("How should Company A be studied?",),
     )
     same_source = [
         {"evidence_id": "evidence-1", "source_id": "company-a.com"},

@@ -676,13 +676,36 @@ class UsageTrackingCallback(BaseCallbackHandler):
                     reservation_id,
                     total_tokens or (prompt_tokens + completion_tokens),
                 )
+                _arm_worker_soft_finalization()
         get_usage_tracker().record(rec)
 
 
-def _begin_llm_reservation(prompt: Any) -> tuple[Any, str, int, Any] | None:
+def _append_finalization_instruction(prompt: Any) -> Any:
+    from app.agent.harness.step_budget import FINALIZE_JSON_MESSAGE
+
+    if isinstance(prompt, dict):
+        messages = prompt.get("messages")
+        if isinstance(messages, list):
+            updated = dict(prompt)
+            updated["messages"] = [
+                *messages,
+                {"role": "system", "content": FINALIZE_JSON_MESSAGE},
+            ]
+            return updated
+        return prompt
+    if isinstance(prompt, (list, tuple)):
+        from langchain_core.messages import SystemMessage
+
+        return [*prompt, SystemMessage(content=FINALIZE_JSON_MESSAGE)]
+    if isinstance(prompt, str):
+        return f"{prompt}\n\n{FINALIZE_JSON_MESSAGE}"
+    return prompt
+
+
+def _begin_llm_reservation(prompt: Any) -> tuple[Any, tuple[Any, str, int, Any] | None]:
     manager = get_current_budget_manager()
     if manager is None:
-        return None
+        return prompt, None
     worker_task_id = get_current_worker_task_id()
     output_limit_method = getattr(manager, "worker_output_limit", None)
     output_limit = (
@@ -694,6 +717,16 @@ def _begin_llm_reservation(prompt: Any) -> tuple[Any, str, int, Any] | None:
         prompt,
         max_output_tokens=output_limit,
     )
+    try:
+        from app.agent.harness.step_budget import arm_worker_soft_finalization
+
+        if arm_worker_soft_finalization(
+            projected_tokens=estimated_tokens,
+            projected_llm_calls=1,
+        ):
+            prompt = _append_finalization_instruction(prompt)
+    except Exception:
+        pass
     reservation_id, reason = manager.reserve_llm_call(
         estimated_tokens=estimated_tokens,
         worker_task_id=worker_task_id,
@@ -704,14 +737,39 @@ def _begin_llm_reservation(prompt: Any) -> tuple[Any, str, int, Any] | None:
 
         raise BudgetReservationError(reason or "run_token_cap")
     token = set_current_llm_reservation(reservation_id)
-    return manager, reservation_id, estimated_tokens, token
+    return prompt, (manager, reservation_id, estimated_tokens, token)
+
+
+def _call_args_with_prompt(
+    prompt: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    if args:
+        return (prompt, *args[1:]), kwargs
+    updated = dict(kwargs)
+    if "input" in updated:
+        updated["input"] = prompt
+    elif "messages" in updated:
+        updated["messages"] = prompt
+    return (), updated
 
 
 def _finish_llm_reservation(state: tuple[Any, str, int, Any]) -> None:
     manager, reservation_id, estimated_tokens, token = state
     if get_current_llm_reservation() == reservation_id:
         manager.commit_llm_usage(reservation_id, estimated_tokens)
+    _arm_worker_soft_finalization()
     reset_current_llm_reservation(token)
+
+
+def _arm_worker_soft_finalization() -> None:
+    try:
+        from app.agent.harness.step_budget import arm_worker_soft_finalization
+
+        arm_worker_soft_finalization()
+    except Exception:
+        return
 
 
 def _fail_llm_reservation(state: tuple[Any, str, int, Any]) -> None:
@@ -735,7 +793,8 @@ def wrap_model_with_budget(model: Any) -> Any:
 
     def budgeted_invoke(*args: Any, **kwargs: Any) -> Any:
         prompt = args[0] if args else kwargs.get("input") or kwargs.get("messages")
-        state = _begin_llm_reservation(prompt)
+        prompt, state = _begin_llm_reservation(prompt)
+        args, kwargs = _call_args_with_prompt(prompt, args, kwargs)
         if state is None:
             return original_invoke(*args, **kwargs)
         try:
@@ -748,7 +807,8 @@ def wrap_model_with_budget(model: Any) -> Any:
 
     async def budgeted_ainvoke(*args: Any, **kwargs: Any) -> Any:
         prompt = args[0] if args else kwargs.get("input") or kwargs.get("messages")
-        state = _begin_llm_reservation(prompt)
+        prompt, state = _begin_llm_reservation(prompt)
+        args, kwargs = _call_args_with_prompt(prompt, args, kwargs)
         if state is None:
             return await original_ainvoke(*args, **kwargs)
         try:
@@ -761,7 +821,8 @@ def wrap_model_with_budget(model: Any) -> Any:
 
     async def budgeted_astream(*args: Any, **kwargs: Any) -> Any:
         prompt = args[0] if args else kwargs.get("input") or kwargs.get("messages")
-        state = _begin_llm_reservation(prompt)
+        prompt, state = _begin_llm_reservation(prompt)
+        args, kwargs = _call_args_with_prompt(prompt, args, kwargs)
         if state is None:
             async for chunk in original_astream(*args, **kwargs):
                 yield chunk

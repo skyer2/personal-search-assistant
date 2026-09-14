@@ -297,7 +297,7 @@ HARNESS_HITL_ENABLED=false
 | `HARNESS_GRAPH_CHECKPOINT_PATH` | 默认 `output/.harness/graph_checkpoints.sqlite` |
 | `HARNESS_MAX_RUN_SEC` | 单次任务墙钟上限，yaml 默认 600 |
 | `HARNESS_MAX_PARALLEL_WORKERS` | 默认 3 |
-| `HARNESS_STEP_TIMEOUT_SEC` | 单步超时，默认 120 |
+| `HARNESS_STEP_TIMEOUT_SEC` | 单步超时，默认 `max(120, LLM_TIMEOUT_SEC + 10)` |
 | `BROWSECOMP_PLUS_*` | 固定语料评测，见 [BROWSECOMP_PLUS_EVAL.md](./BROWSECOMP_PLUS_EVAL.md)；开启后 **search 不再访问外部 Provider** |
 
 更细的开关在 `app/config/harness.yml`，环境变量可覆盖其中一部分（见 `app/config/loader.py`）。

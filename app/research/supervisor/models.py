@@ -11,6 +11,10 @@ class ResearchTaskRequest:
     objective: str
     target_criteria: tuple[str, ...] = ()
     target_gaps: tuple[str, ...] = ()
+    criterion_id: str = ""
+    gap_id: str = ""
+    missing_evidence_types: tuple[str, ...] = ()
+    blocking_conflict_ids: tuple[str, ...] = ()
     priority: str = "normal"
     expected_evidence: tuple[str, ...] = ()
     source_hints: tuple[str, ...] = ()
@@ -31,6 +35,14 @@ class ResearchTaskRequest:
             objective=str(row.get("objective") or ""),
             target_criteria=tuple(str(item) for item in row.get("target_criteria") or []),
             target_gaps=tuple(str(item) for item in row.get("target_gaps") or []),
+            criterion_id=str(row.get("criterion_id") or ""),
+            gap_id=str(row.get("gap_id") or ""),
+            missing_evidence_types=tuple(
+                str(item) for item in row.get("missing_evidence_types") or []
+            ),
+            blocking_conflict_ids=tuple(
+                str(item) for item in row.get("blocking_conflict_ids") or []
+            ),
             priority=str(row.get("priority") or "normal"),
             expected_evidence=tuple(str(item) for item in expected or []),
             source_hints=tuple(str(item) for item in row.get("source_hints") or []),

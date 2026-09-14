@@ -7,6 +7,7 @@ Tavily 搜索核心逻辑
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Literal
 
 from dotenv import load_dotenv
@@ -91,13 +92,37 @@ def search_internet(
             producer=_call,
         )
     except Exception:
-        return provider.search(
-            query=query,
-            topic=topic,
-            max_results=max_results,
-            include_raw_content=include_raw_content,
-            timeout=timeout,
-        )
+        time.sleep(0.5)
+        try:
+            return provider.search(
+                query=query,
+                topic=topic,
+                max_results=max_results,
+                include_raw_content=include_raw_content,
+                timeout=timeout,
+            )
+        except Exception as retry_exc:
+            return _structured_search_miss(query, retry_exc)
+
+
+def _structured_search_miss(query: str, exc: Exception) -> dict[str, Any]:
+    failure: dict[str, Any] = {
+        "query": query,
+        "answer": None,
+        "results": [],
+        "response_time": 0,
+        "provider": _configured_provider(),
+        "ok": False,
+        "error": "search_failed",
+        "provider_error_code": getattr(exc, "error_code", None) or type(exc).__name__,
+    }
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None:
+        failure["provider_status_code"] = status_code
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, str) and detail.strip():
+        failure["provider_error_message"] = detail[:300]
+    return failure
 
 
 def _search_browsecomp_plus(

@@ -7,6 +7,7 @@ Tavily path so callers do not need to know which provider is configured.
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Any, Literal
 
@@ -20,6 +21,29 @@ DEFAULT_TIMEOUT_SEC = 20.0
 
 class BochaSearchError(RuntimeError):
     """Raised when Bocha returns an unusable or failed response."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_code: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+        self.detail = detail
+
+
+def redact_secrets(text: str) -> str:
+    redacted = re.sub(r"(?:sk|tvly)-[A-Za-z0-9_-]+", "[REDACTED]", text)
+    redacted = re.sub(r"(?i)bearer\s+[^\s,;]+", "Bearer [REDACTED]", redacted)
+    return re.sub(
+        r"(?i)(api[_-]?key|authorization)(\s*[=:]\s*)[^\s,;&]+",
+        r"\1\2[REDACTED]",
+        redacted,
+    )
 
 
 class BochaSearchProvider:
@@ -71,10 +95,14 @@ class BochaSearchProvider:
             timeout=request_timeout,
         )
         elapsed = time.perf_counter() - started
+        detail = redact_secrets(response.text[:500]).strip()
         if response.status_code >= 400:
             raise BochaSearchError(
                 f"Bocha web search failed with HTTP {response.status_code}: "
-                f"{response.text[:500]}"
+                f"{detail}",
+                status_code=response.status_code,
+                error_code=f"http_{response.status_code}",
+                detail=detail,
             )
         try:
             body = response.json()

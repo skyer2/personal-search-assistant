@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.tools import tavily_core
-from app.tools.bocha_provider import BochaSearchProvider
+from app.tools.bocha_provider import BochaSearchError, BochaSearchProvider
 from app.tools.retrieval_cache import clear_retrieval_cache
 
 
@@ -23,6 +23,13 @@ class FakeResponse:
 
     def json(self) -> dict:
         return self._payload
+
+
+class FakeErrorResponse(FakeResponse):
+    def __init__(self, status_code: int, text: str) -> None:
+        super().__init__({})
+        self.status_code = status_code
+        self.text = text
 
 
 class FakeSession:
@@ -40,6 +47,32 @@ class FakeSession:
             }
         )
         return FakeResponse(self.payload)
+
+
+class FakeErrorSession:
+    def __init__(self, response: FakeErrorResponse) -> None:
+        self.response = response
+
+    def post(self, *_args, **_kwargs) -> FakeErrorResponse:
+        return self.response
+
+
+def test_bocha_error_is_structured_and_redacted(monkeypatch) -> None:
+    monkeypatch.setenv("BOCHA_API_KEY", "test-key")
+    response = FakeErrorResponse(
+        403,
+        "quota exhausted; api_key=sk-should-not-leak",
+    )
+
+    try:
+        BochaSearchProvider(session=FakeErrorSession(response)).search("quota test")
+    except BochaSearchError as exc:
+        assert exc.status_code == 403
+        assert exc.error_code == "http_403"
+        assert "sk-should-not-leak" not in (exc.detail or "")
+        assert "[REDACTED]" in (exc.detail or "")
+    else:
+        raise AssertionError("expected BochaSearchError")
 
 
 def test_bocha_provider_maps_response_to_tavily_shape(monkeypatch) -> None:
@@ -138,6 +171,36 @@ def test_bocha_provider_omits_raw_content_when_not_requested(monkeypatch) -> Non
     result = tavily_core.search_internet("博查 AI", max_results=3)
 
     assert result == {"query": "博查 AI", "results": [], "provider": "bocha"}
+    clear_retrieval_cache()
+
+
+def test_provider_failure_returns_structured_miss(monkeypatch) -> None:
+    monkeypatch.setenv("SEARCH_PROVIDER", "bocha")
+    monkeypatch.setattr(tavily_core.time, "sleep", lambda _seconds: None)
+
+    class Provider:
+        def search(self, **kwargs):
+            detail = "You do not have enough money or package quota"
+            raise BochaSearchError(
+                "Bocha web search failed with HTTP 403: quota exhausted",
+                status_code=403,
+                error_code="http_403",
+                detail=detail,
+            )
+
+    monkeypatch.setattr(tavily_core, "BochaSearchProvider", Provider)
+    clear_retrieval_cache()
+
+    result = tavily_core.search_internet("博查 AI", max_results=3)
+
+    assert result["ok"] is False
+    assert result["error"] == "search_failed"
+    assert result["results"] == []
+    assert result["provider"] == "bocha"
+    assert result["query"] == "博查 AI"
+    assert result["provider_error_code"] == "http_403"
+    assert result["provider_status_code"] == 403
+    assert result["provider_error_message"] == "You do not have enough money or package quota"
     clear_retrieval_cache()
 
 

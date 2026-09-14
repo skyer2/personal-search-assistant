@@ -104,7 +104,9 @@ Run latency 汇总包含 brief、supervisor、worker、coverage、synthesis、qu
 
 `semantic.fallback` 记录 Brief / Supervisor 结构化输出降级，不吞异常：`error_type`、`error_message`、`error_category`、`model`、`schema`、`fallback` 全部保留。Run metadata 同时聚合 `control_plane`，用于显示控制面是否 degraded。
 
-Worker 终态事件携带完整预算快照：LLM calls、tokens、search queries、fetch sources、tool invocations 的 used/limit。`gen_ai.chat` 记录 phase、task、call index、token 估算、duration、TTFT 与 Worker 剩余额度。工具事件只记录 `args_meta`（参数名和列表条目数），不记录 query、URL、prompt 或网页正文。
+`budget.decided` 记录非拒绝型预算决策。当前用于 Worker Finalization Mode：`status=finalize`，`reason=soft_budget_finalize|soft_deadline_finalize`，并携带 worker token / LLM call 快照。它不是 denial，也不计入预算拒绝率。
+
+Worker 终态事件携带完整预算快照与 `stop_reason`：LLM calls、tokens、search queries、fetch sources、tool invocations 的 used/limit，以及 `local_evidence_sufficient` / `soft_budget_finalize` / `soft_deadline_finalize` / `no_more_useful_evidence` 等正常停止语义。`gen_ai.chat` 记录 phase、task、call index、token 估算、duration、TTFT 与 Worker 剩余额度。工具事件只记录 `args_meta`（参数名和列表条目数），不记录 query、URL、prompt 或网页正文。
 
 ## 看哪里
 
@@ -134,7 +136,7 @@ Worker 终态事件携带完整预算快照：LLM calls、tokens、search querie
 | `runtime_reasons` | 预算、安全、终态等确定性理由 |
 | `task_count` | 本次行动生成的任务数 |
 
-`coverage.assessed` 携带 `sufficient`、`missing`、`conflicts`、`weak_claims`、`recommended_next_questions`、`source`、`reason`。`missing` 必须是可行动问题，而不是不可执行的泛化标签。
+`coverage.assessed` 携带 `sufficient`、`criteria`、`gaps`、`missing`、`conflicts`、`weak_claims`、`recommended_next_questions`、`source`、`reason`。每个 `CoverageGap` 必须携带 `gap_id`、`criterion_id`、缺失证据类型和 blocking conflict；Supervisor 任务可由此追溯到精确缺口。
 
 `progress.assessed` 是 Coverage 的兼容投影，供既有进度展示和 eval 使用；它不是第二个语义控制权。
 

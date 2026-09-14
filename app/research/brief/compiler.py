@@ -19,6 +19,7 @@ from app.research.brief.models import (
     SourceRequirements,
     StructuredResearchBrief,
 )
+from app.config.timeouts import model_timeout_sec
 from app.research.brief.validator import validate_structured_brief
 from app.research.execution.structured_llm_gateway import (
     StructuredLLMGateway,
@@ -216,7 +217,7 @@ async def compile_structured_brief_with_llm(
                 schema=StructuredResearchBrief,
                 prompt=prompt,
                 phase="brief",
-                timeout_sec=20,
+                timeout_sec=model_timeout_sec("LLM_BRIEF_TIMEOUT_SEC"),
             )
     except Exception as exc:
         emit_semantic_fallback(

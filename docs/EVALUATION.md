@@ -38,7 +38,7 @@ L5  Ablation                  Vanilla / Single-iteration / Full
 | 数据集 | 验证什么 |
 |---|---|
 | `brief_v1.jsonl` | 用户意图、时效、来源、交付物、fast-path 准入 |
-| `coverage_v1.jsonl` | Brief 对齐的 Coverage Judgement、缺口、冲突、弱证据 |
+| `coverage_v1.jsonl` | Brief key questions 对齐的 Coverage Judgement、primary/freshness、缺口、冲突、弱证据 |
 | `supervisor_v1.jsonl` | CONDUCT_RESEARCH / COMPLETE、任务边界、预算终止 |
 | `evidence_v1.jsonl` | claim-evidence 绑定、引用覆盖、幻觉检测 |
 
@@ -49,6 +49,16 @@ L5  Ablation                  Vanilla / Single-iteration / Full
 ```
 
 组件评测不调用真实 LLM、搜索工具，也不产生真实延迟。它证明结构语义，不证明线上答案质量。
+
+收敛闭环契约由 `tests/test_deep_research_convergence.py` 单独覆盖：
+
+- lexical-only 匹配只能是 `partial`；
+- primary / freshness 要求会阻止 `supported`；
+- blocking unresolved conflict 永远阻止 `sufficient`；
+- Supervisor 必须精确复制 `gap_id` / `criterion_id`；
+- soft deadline 禁止继续检索且不产生 hard denial；
+- bounded semantic conflict 会绑定 criterion；
+- Synthesis prompt 必须消费结构化 conflict resolution。
 
 ### L1.5 Capability Regression
 
@@ -90,13 +100,14 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 - root span 与 lineage；
 - synthesis attempt / fail reason / fallback；
 - search-query / fetch-source / logical tool-invocation budget separation；
-- `budget.denied` 与 `semantic.fallback` 诊断；
+- `budget.decided` Finalization、`budget.denied` 与 `semantic.fallback` 诊断；
+- Worker 正常 stop reason 与无主要 hard-cap 结束；
 - Trace Integrity；
 - repeated run 非空 `partial` 或 `success`。
 
 `release_smoke.py` 还固定执行 3 次主研究查询、两个开放研究查询和 1 个原子事实查询。主查询必须 3 次均为非空 `partial` 或 `success`；原子事实必须命中快路径并回答受证据支持的年份，同时 Trace Integrity 通过。
 
-`test_budget_generous_baseline_full_stack.py` 固定执行 Budget 宽松基线的两个 Golden Query，走真实 `batch_search → batch_fetch → 补搜索 → structured result` 适配器，并断言 Worker 全部完成、无 budget cap、Trace Integrity 通过、终端事件携带完整 used / limit 快照。
+`test_budget_generous_baseline_full_stack.py` 固定执行 Budget 宽松基线的两个 Golden Query，走真实 `batch_search → batch_fetch → 补搜索 → structured result` 适配器，并断言 Worker 全部完成、无 budget cap、Trace Integrity 通过、终端事件携带完整 used / limit 与 stop reason 快照。
 
 ### L4 BrowseComp-Plus
 

@@ -18,6 +18,7 @@ from app.agent.harness.loop import AgentHarness
 from app.agent.harness.run_budget import BudgetReservationError
 from app.agent.harness.tool_contract import apply_tool_output_contract
 from app.config.loader import get_harness_config, reload_harness_config
+from app.config.timeouts import llm_timeout_sec
 from app.observability import get_recorder
 from app.observability.journal import summarize_trace
 from app.research.execution import worker_executor as worker_executor_module
@@ -206,8 +207,8 @@ def _assert_production_config() -> None:
     assert config.max_replan_count == 3
     assert config.direct_worker_invoke is True
     assert config.max_total_tokens == 500000
-    assert config.synthesis_step_timeout_sec == 60
-    assert config.synthesis_retry_timeout_sec == 30
+    assert config.synthesis_step_timeout_sec == llm_timeout_sec()
+    assert config.synthesis_retry_timeout_sec == llm_timeout_sec()
 
 
 def _run(

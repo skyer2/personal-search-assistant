@@ -85,6 +85,8 @@ class WorkerResultPayload:
     suggested_followups: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
     artifact_ids: list[str] = field(default_factory=list)
+    stop_reason: str = ""
+    evidence_metadata: list[dict[str, Any]] = field(default_factory=list)
 
     def to_context_snippet(self, max_chars: int = 600) -> str:
         parts = [self.summary or ""]
@@ -203,6 +205,12 @@ def parse_worker_payload(
             artifact_ids=[str(x) for x in (json_blob.get("artifact_ids") or []) if x][
                 :20
             ],
+            stop_reason=str(json_blob.get("stop_reason", "")),
+            evidence_metadata=[
+                dict(item)
+                for item in (json_blob.get("evidence_metadata") or [])
+                if isinstance(item, dict)
+            ][:20],
         )
 
     return WorkerResultPayload(
@@ -413,6 +421,8 @@ def build_worker_output_instruction(step: PlanStep) -> str:
       "suggested_followups": [],
       "evidence_ids": ["E1"],
       "artifact_ids": ["art-web-1"],
+      "evidence_metadata": [{{"evidence_id":"E1","source":"URL","published_at":"2026-09-01"}}],
+      "stop_reason": "local_evidence_sufficient|soft_budget_finalize|soft_deadline_finalize|no_more_useful_evidence",
       "confidence": 0.0到1.0,
       "error_code": "",
       "worker": "{worker}",

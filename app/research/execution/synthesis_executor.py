@@ -64,6 +64,7 @@ class SynthesisRequest:
     evidence_refs: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
     unresolved_conflicts: list[str] = field(default_factory=list)
+    conflict_resolutions: list[dict[str, Any]] = field(default_factory=list)
     research_summary: str = ""
     evidence_digests: list[EvidenceDigest] = field(default_factory=list)
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -193,6 +194,7 @@ class SynthesisExecutor:
             f"合成模式：{request.mode}",
             f"要求：{mode_instruction}",
             "硬性约束：只允许使用下方研究摘要和证据摘录；禁止联网、读取文件或发明新证据。",
+            "冲突规则：resolved 只能采用指定 winner；expected_disagreement 必须说明口径差异；unresolved 只能披露不确定性，禁止自行选择任何一方。",
         ]
         evidence_lines: list[str] = []
         for digest in request.evidence_digests:
@@ -201,11 +203,20 @@ class SynthesisExecutor:
             )
         if not evidence_lines:
             evidence_lines.extend(f"- {item}" for item in request.evidence_refs[:80])
+        conflict_lines = [
+            f"- {row.get('edge_id')}｜{row.get('status')}｜blocking={bool(row.get('blocking'))}｜"
+            f"criterion={row.get('criterion_id') or 'unbound'}｜{row.get('label') or ''}"
+            for row in request.conflict_resolutions[:24]
+            if isinstance(row, dict)
+        ]
+        if not conflict_lines:
+            conflict_lines.extend(f"- {item}" for item in request.unresolved_conflicts[:20])
         sections = (
             ("研究摘要：", [request.research_summary] if request.research_summary else []),
             ("证据摘录：", evidence_lines),
             ("覆盖限制：", [f"- {item}" for item in request.limitations[:20]]),
             ("未解决冲突：", [f"- {item}" for item in request.unresolved_conflicts[:20]]),
+            ("冲突处理契约：", conflict_lines),
             ("输出要求：", ["直接输出面向用户的报告正文；引用证据对应的原始来源；不要输出 JSON。"]),
         )
         budget = max(1_000, request.token_budget)

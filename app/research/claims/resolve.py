@@ -1,6 +1,7 @@
 """Resolve conflict edges into expected_disagreement / unresolved / resolved."""
 
 from __future__ import annotations
+import re
 
 from app.research.claims.models import (
     ClaimRecord,
@@ -47,11 +48,9 @@ def _benchmarkish(claim: ClaimRecord) -> bool:
             "score",
             "accuracy",
             "pass@",
-            "verified",
-            "pro",
             "arena",
         )
-    )
+    ) or bool(re.search(r"\b(?:verified|pro)\b", blob))
 
 
 def resolve_edges(
@@ -103,6 +102,13 @@ def resolve_edges(
             note = "heterogeneous_context"
             winner = ""
 
+        criterion_id = ""
+        if left.criterion_id and left.criterion_id == right.criterion_id:
+            criterion_id = left.criterion_id
+        elif left.criterion_id or right.criterion_id:
+            criterion_id = left.criterion_id or right.criterion_id
+        blocking = status == "unresolved" and bool(criterion_id)
+
         label = edge.label or f"{left.text[:80]} vs {right.text[:80]}"
         res = ClaimResolution(
             edge_id=edge.edge_id,
@@ -112,6 +118,8 @@ def resolve_edges(
             note=note,
             winner_id=winner,
             evidence_ids=list(dict.fromkeys(left.evidence_ids + right.evidence_ids)),
+            blocking=blocking,
+            criterion_id=criterion_id,
         )
         resolutions.append(res)
         if status == "unresolved":

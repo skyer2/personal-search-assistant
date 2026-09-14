@@ -84,4 +84,58 @@ def emit_budget_denied(
         return
 
 
-__all__ = ["emit_budget_denied"]
+def emit_budget_decided(
+    *,
+    scope: str,
+    resource: str,
+    reason: str,
+    task_id: str = "",
+    worker_lease_id: str = "",
+    used: int = 0,
+    reserved: int = 0,
+    limit: int = 0,
+    budget_manager: Any | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Emit a non-denial budget decision such as worker finalization."""
+    try:
+        from app.observability import EventType, get_recorder
+
+        recorder = get_recorder()
+        if not recorder.is_active:
+            return
+        worker: dict[str, int] = {}
+        if budget_manager is not None and task_id:
+            lease_snapshot = getattr(budget_manager, "worker_lease_snapshot", None)
+            if callable(lease_snapshot):
+                worker = dict(lease_snapshot(task_id) or {})
+        snapshot_method = getattr(budget_manager, "snapshot", None)
+        snapshot = snapshot_method() if callable(snapshot_method) else None
+        recorder.emit(
+            EventType.BUDGET_DECIDED,
+            phase="execute",
+            status="finalize",
+            task_id=task_id or None,
+            attributes={
+                "scope": scope,
+                "resource": resource,
+                "reason": reason,
+                "task_id": task_id,
+                "worker_lease_id": worker_lease_id,
+                "used": int(used or 0),
+                "reserved": int(reserved or 0),
+                "limit": int(limit or 0),
+                "worker_tokens_used": int(worker.get("tokens_used", 0) or 0),
+                "worker_token_limit": int(worker.get("token_limit", 0) or 0),
+                "worker_llm_calls_used": int(worker.get("llm_calls_used", 0) or 0),
+                "worker_llm_calls_limit": int(worker.get("llm_calls_limit", 0) or 0),
+                "run_used_tokens": int(getattr(snapshot, "used_tokens", 0) or 0),
+                "run_token_limit": int(getattr(snapshot, "token_limit", 0) or 0),
+                **(extra or {}),
+            },
+        )
+    except Exception:
+        return
+
+
+__all__ = ["emit_budget_decided", "emit_budget_denied"]

@@ -73,6 +73,10 @@ def _plan_from_tasks(
                 "priority": item.priority,
                 "target_criteria": list(item.target_criteria),
                 "target_gaps": list(item.target_gaps),
+                "criterion_id": item.criterion_id,
+                "gap_id": item.gap_id,
+                "missing_evidence_types": list(item.missing_evidence_types),
+                "blocking_conflict_ids": list(item.blocking_conflict_ids),
                 "expected_evidence": list(item.expected_evidence),
                 "source_hints": list(item.source_hints),
                 "required": True,
@@ -119,7 +123,7 @@ def brief_node(state: ResearchState) -> dict[str, Any]:
                     brief.objective,
                     priority="high",
                     expected_evidence=("primary source",),
-                    target_criteria=tuple(brief.success_criteria or brief.key_questions),
+                    target_criteria=tuple(brief.key_questions or (brief.objective,)),
                     task_id="fast_path:search",
                 )
             ],
@@ -296,18 +300,25 @@ def coverage_judge_node(state: ResearchState) -> dict[str, Any]:
     judgement = judge_coverage(
         brief,
         [row for row in state.get("findings") or [] if isinstance(row, dict)],
+        claim_conflicts=[row for row in state.get("claim_conflicts") or [] if isinstance(row, dict)],
+        claim_resolutions=[row for row in state.get("claim_resolutions") or [] if isinstance(row, dict)],
         claims=[row for row in state.get("claims") or [] if isinstance(row, dict)],
         evidence=[row for row in state.get("evidence_records") or [] if isinstance(row, dict)],
         previous=previous,
     )
     progress_projection = {
         "status": judgement.status,
-        "coverage_ratio": 1.0 if judgement.sufficient else 0.0,
+        "coverage_ratio": (
+            sum(1 for row in judgement.criteria if row.status == "supported")
+            / len(judgement.criteria)
+            if judgement.criteria
+            else 0.0
+        ),
         "unresolved_conflicts": list(judgement.conflicts),
-        "missing": list(judgement.missing),
-        "missing_ids": list(judgement.missing),
+        "missing": [gap.description for gap in judgement.gaps],
+        "missing_ids": [gap.gap_id for gap in judgement.gaps],
         "semantic_gap_ids": [
-            row.criterion_id for row in judgement.criteria if row.status != "supported"
+            gap.gap_id or gap.criterion_id for gap in judgement.gaps
         ],
         "reason_codes": [] if judgement.sufficient else ["coverage_gap"],
     }
