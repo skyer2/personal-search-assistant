@@ -163,10 +163,11 @@ Worker 终态事件携带完整预算快照与 `stop_reason`：LLM calls、token
 | `mode` | synthesis 输入模式（例如 full / compact） |
 | `attempt` / `attempts` | 当前尝试 / 总尝试次数 |
 | `duration_ms` | 单次执行耗时 |
-| `input_tokens_estimated` | 去重与裁剪后的估算输入 |
+| `estimated_input_tokens` | 模型提示词的估算输入 |
+| `evidence_pack_tokens` | 确定性 Evidence Pack 的估算输入 |
 | `evidence_count` | 进入 synthesis 的 evidence 数 |
 | `fail_reason` | provider / context / budget / empty 等失败分类 |
-| `fallback_action` | `deterministic_partial` 或 `none` |
+| `fallback_action` | `compact_retry`、`deterministic_partial` 或空 |
 | `content_chars` | 最终 / 兜底内容长度 |
 
 Run metadata 同步暴露 `synthesis_attempts`、`synthesis_failed`、`synthesis_fail_reason`、`fallback_used`。这用于区分“模型临时失败但已部分交付”和“没有可信证据导致失败”。

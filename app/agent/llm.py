@@ -67,6 +67,7 @@ if _compression_enabled:
         print(f"[LLM] compression_model init failed, will use truncate: {exc}")
 
 _synthesis_model_name = os.getenv("LLM_SYNTHESIS_MODEL") or os.getenv("LLM_QWEN_MAX")
+_synthesis_max_tokens = int(os.getenv("LLM_SYNTHESIS_MAX_TOKENS", "3000"))
 synthesis_model = model
 if _synthesis_model_name and _synthesis_model_name != os.getenv("LLM_QWEN_MAX"):
     try:
@@ -77,6 +78,7 @@ if _synthesis_model_name and _synthesis_model_name != os.getenv("LLM_QWEN_MAX"):
             temperature=_supervisor_temperature,
             base_url=_openai_base_url,
             api_key=_openai_api_key,
+            max_tokens=_synthesis_max_tokens,
         ))
     except Exception as exc:
         print(f"[LLM] synthesis_model init failed, fallback to main model: {exc}")

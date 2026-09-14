@@ -247,6 +247,27 @@ def test_pdf_cjk_wrap_and_table_fits_page(tmp_path: Path):
     assert pdf_path.stat().st_size > 1500
 
 
+def test_large_json_code_fence_splits_across_pdf_pages(tmp_path: Path):
+    from app.utils.word_converter import convert_md_to_pdf
+
+    payload = "\n".join(
+        f'  "field_{index}": "这是一段必须能跨页排版的中文代码块内容，用来复现真实模型返回的超长 JSON。"'
+        for index in range(180)
+    )
+    md_path = tmp_path / "large-json.md"
+    pdf_path = tmp_path / "large-json.pdf"
+    md_path.write_text(
+        f"# 大代码块测试\n\n```json\n{{\n{payload}\n}}\n```\n",
+        encoding="utf-8",
+    )
+
+    result = convert_md_to_pdf(md_path, pdf_path)
+
+    assert "成功转换" in result
+    assert pdf_path.read_bytes()[:4] == b"%PDF"
+    assert pdf_path.stat().st_size > 10_000
+
+
 if __name__ == "__main__":
     test_user_query_locks_pdf_plan()
     test_llm_cannot_downgrade_pdf_to_text()

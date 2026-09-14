@@ -124,10 +124,14 @@ class ContextBuilder:
 {body}
     """
 
-    def build_tool_context(self, step_type: str) -> str:
+    def build_tool_context(
+        self,
+        step_type: str,
+        allowed_tools: list[str] | None = None,
+    ) -> str:
         from app.research.workers.registry import worker_tools_for_step
 
-        tools = worker_tools_for_step(step_type)
+        tools = list(allowed_tools or []) or worker_tools_for_step(step_type)
         if not tools:
             return ""
         return f"""
@@ -450,7 +454,7 @@ class ContextBuilder:
                 step, enforce=enforce_binding, dispatch_mode=dispatch_mode
             ),
             "worker_json": build_worker_output_instruction(step),
-            "tools": self.build_tool_context(step.step_type),
+            "tools": self.build_tool_context(step.step_type, step.allowed_tools),
             "resources": self._build_resources_layer(relative_session_dir),
             "path": self.build_path_instruction(relative_session_dir, uploaded_files_prompt),
             "extra": extra_instruction.strip(),

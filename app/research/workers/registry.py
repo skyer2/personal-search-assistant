@@ -48,24 +48,33 @@ class WorkerRegistry:
         return step_type in self._workers and self._workers[step_type] is not None
 
 
-def worker_tools_for_step(step_type: str) -> list[str]:
-    from app.agent.harness.worker_profiles import CONTEXT_TOOLS, resolve_worker_profile, tools_for_profile
+def worker_tools_for_step(
+    step_type: str,
+    *,
+    allowed_sources: list[str] | None = None,
+) -> list[str]:
+    from app.agent.harness.worker_profiles import (
+        CONTEXT_TOOLS,
+        PROFILE_FILE,
+        PROFILE_SYNTHESIS,
+        PROFILE_WEB,
+        resolve_worker_profile,
+        tools_for_profile,
+    )
+    from app.research.planning.policy import tools_for_sources
+
+    if step_type == "research" and allowed_sources is not None:
+        return tools_for_sources([str(item) for item in allowed_sources if str(item).strip()])
 
     profile = resolve_worker_profile(step_type)
     tools = tools_for_profile(profile)
     extras = {
-        "network_search": [
-            "internet_search",
-            "fetch_url",
-            "batch_search",
-            "batch_fetch",
-            *CONTEXT_TOOLS,
-        ],
-        "file_read": ["read_file_content", *CONTEXT_TOOLS],
+        "network_search": tools_for_profile(PROFILE_WEB),
+        "file_read": tools_for_profile(PROFILE_FILE),
         "research": tools,
-        "generate_markdown": ["generate_markdown", "read_file_content", *CONTEXT_TOOLS],
+        "generate_markdown": tools_for_profile(PROFILE_SYNTHESIS),
+        "summarize": tools_for_profile(PROFILE_SYNTHESIS),
         "convert_pdf": ["convert_md_to_pdf", "generate_markdown", "read_file_content", *CONTEXT_TOOLS],
-        "summarize": ["generate_markdown", "read_file_content", *CONTEXT_TOOLS],
     }
     return list(dict.fromkeys(extras.get(step_type, tools)))
 

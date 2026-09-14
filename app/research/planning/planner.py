@@ -17,12 +17,10 @@ def _slug(value: str) -> str:
 
 
 def _source_contract(spec: ResearchSpec) -> tuple[list[str], list[str]]:
+    from app.research.workers.registry import worker_tools_for_step
+
     allowed_sources = [str(item) for item in spec.source_policy.allowed if str(item).strip()] or ["web"]
-    allowed_tools: list[str] = []
-    if "web" in allowed_sources:
-        allowed_tools.extend(["web_search", "fetch"])
-    if "file" in allowed_sources:
-        allowed_tools.append("read_file_content")
+    allowed_tools = worker_tools_for_step("research", allowed_sources=allowed_sources)
     if not allowed_tools:
         raise ValueError("spec_has_no_allowed_sources")
     return allowed_sources, allowed_tools

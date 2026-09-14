@@ -113,6 +113,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _citation_numbers_by_evidence(manager: Any) -> dict[str, int]:
+    if manager is None or not hasattr(manager, "evidence_number_map"):
+        return {}
+    return dict(manager.evidence_number_map())
+
+
 def _budget_snapshot(session: RunSession) -> dict[str, Any]:
     manager = session.budget_manager
     budget: dict[str, Any] = {
@@ -531,6 +537,8 @@ class ResearchGraphRunner:
             )
             payload["dispatch_admission"] = admission.to_dict()
             if admission.approved:
+                from app.research.workers.registry import worker_tools_for_step
+
                 approved_requests = [item.request for item in admission.approved]
                 steps = [
                     PlanStep(
@@ -538,7 +546,7 @@ class ResearchGraphRunner:
                         description=item.objective,
                         objective=item.objective,
                         task_id=item.task_id,
-                        allowed_tools=["internet_search", "fetch_url"],
+                        allowed_tools=worker_tools_for_step("research"),
                         metadata={
                             "kind": "research_task",
                             "task_kind": "supervisor_research",
@@ -697,6 +705,16 @@ class ResearchGraphRunner:
         sync_execution_projection(session.state, gstate)
         update = ingest_new_worker_results(gstate)
         findings = list(update.get("findings") or [])
+        citation_manager = getattr(session.ctx, "citation_manager", None)
+        if citation_manager is not None:
+            citation_manager.bind_evidence_records(
+                [
+                    dict(row)
+                    for row in update.get("evidence_records") or []
+                    if isinstance(row, dict)
+                ],
+                findings,
+            )
         sync_execution_projection(session.state, {**gstate, **update})
         for finding in findings:
             _emit(
@@ -723,7 +741,7 @@ class ResearchGraphRunner:
                 }
             )
         if bool(gstate.get("fast_path")):
-            manager = getattr(session.ctx, "citation_manager", None)
+            manager = citation_manager
             atomic_answer = await extract_atomic_fact_answer(
                 query=str(gstate.get("task_query") or ""),
                 sources=list(getattr(manager, "sources", []) or []) if manager is not None else [],
@@ -1279,33 +1297,17 @@ class ResearchGraphRunner:
                 attributes={"operation": "synthesis_end_span", "error_type": type(exc).__name__},
             )
 
-    def _semantic_synthesis_digest(self, gstate: dict[str, Any], *, compact: bool) -> str:
-        from app.research.brief.models import StructuredResearchBrief
-
-        brief = StructuredResearchBrief.from_dict(gstate.get("brief"))
-        claims = [dict(row) for row in gstate.get("claims") or [] if isinstance(row, dict)]
-        judgement = dict(gstate.get("coverage_judgement") or {})
-        lines = [f"# {brief.objective or gstate.get('task_query')}", ""]
-        for claim in claims[:12 if compact else 40]:
-            text = str(claim.get("text") or claim.get("claim") or "").strip()
-            if text:
-                lines.append(f"- {text}")
-        missing = [str(item) for item in judgement.get("missing") or []]
-        if missing:
-            lines.extend(["", "## Known limitations"])
-            lines.extend(f"- {item}" for item in missing[:8 if compact else 20])
-        conflicts = [str(item) for item in judgement.get("conflicts") or []]
-        if conflicts:
-            lines.extend(["", "## Conflict disclosures"])
-            lines.extend(f"- {item}" for item in conflicts[:8 if compact else 20])
-        return "\n".join(lines)
-
     async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
         import app.research.execution.synthesis_executor as synthesis_executor_module
         from dataclasses import replace
         from types import SimpleNamespace
         from app.research.brief.models import StructuredResearchBrief
         from app.research.delivery.partial_renderer import render_partial_delivery, scrub_internal_ids
+        from app.research.delivery.evidence_pack import (
+            COMPACT_SYNTHESIS_INPUT_TOKENS,
+            NORMAL_SYNTHESIS_INPUT_TOKENS,
+            build_evidence_pack,
+        )
         from app.research.delivery.synthesis_context import SynthesisContextBuilder
         from app.research.delivery.synthesis_context import EvidenceDigest
         from app.research.runtime.atomic_fact import (
@@ -1419,13 +1421,29 @@ class ResearchGraphRunner:
             or has_blocking_conflict
             else "normal"
         )
+        brief = StructuredResearchBrief.from_dict(gstate.get("brief"))
         synthesis_context = SynthesisContextBuilder(self.harness, session).build(
             gstate,
             limitations=list(judgement.get("missing") or []),
             unresolved_conflicts=list(judgement.get("conflicts") or []),
             compact=compact,
         )
-        evidence_refs = [str(row.get("evidence_id")) for row in evidence_records]
+        criteria = list(
+            brief.key_questions
+            or brief.success_criteria
+            or (brief.objective,)
+        )
+        citation_numbers = _citation_numbers_by_evidence(session.ctx.citation_manager)
+        evidence_pack = build_evidence_pack(
+            criteria,
+            synthesis_context.findings,
+            claims,
+            evidence_records,
+            conflict_resolutions,
+            NORMAL_SYNTHESIS_INPUT_TOKENS,
+            compact=compact,
+        )
+        evidence_refs = list(evidence_pack.evidence_refs)
         digests = [
             EvidenceDigest(
                 evidence_id=str(row.get("evidence_id") or ""),
@@ -1437,20 +1455,21 @@ class ResearchGraphRunner:
                     for claim in claims
                     if str(row.get("evidence_id") or "") in [str(item) for item in claim.get("evidence_ids") or []]
                 ),
+                citation_number=citation_numbers.get(str(row.get("evidence_id") or ""), 0),
             )
-            for row in evidence_records[:20 if compact else 40]
+            for row in evidence_pack.evidence
         ]
         request = synthesis_executor_module.SynthesisRequest(
             mode=mode,
             evidence_refs=evidence_refs,
             limitations=list(judgement.get("missing") or []),
             unresolved_conflicts=list(judgement.get("conflicts") or []),
-            conflict_resolutions=conflict_resolutions,
-            research_summary=self._semantic_synthesis_digest(gstate, compact=compact),
-            evidence_digests=list(synthesis_context.evidence_digests),
-            findings=list(synthesis_context.findings),
+            conflict_resolutions=list(evidence_pack.conflict_resolutions),
+            research_summary=evidence_pack.research_summary,
+            evidence_digests=digests,
+            findings=list(evidence_pack.findings),
             worker_summaries=[],
-            token_budget=synthesis_context.token_budget,
+            token_budget=evidence_pack.token_budget,
         )
         remaining_synthesis_method = getattr(
             session.budget_manager, "remaining_for_synthesis_tokens", None
@@ -1465,7 +1484,6 @@ class ResearchGraphRunner:
             token_budget=min(request.token_budget, max(0, remaining_synthesis_tokens)),
         )
         executor = synthesis_executor_module.SynthesisExecutor(self.harness, session)
-        brief = StructuredResearchBrief.from_dict(gstate.get("brief"))
         context = ResearchContext(
             run_id=session.run_id,
             query=brief.objective or gstate["task_query"],
@@ -1522,6 +1540,7 @@ class ResearchGraphRunner:
                     "compact": False,
                     "evidence_count": len(evidence_refs),
                     "claim_count": len(claims),
+                    "evidence_pack_tokens": int(evidence_pack.estimated_tokens),
                     "fail_reason": result.fail_reason,
                     "fallback_action": "compact_retry",
                     "error_type": str(synthesis_error.get("type") or ""),
@@ -1546,24 +1565,55 @@ class ResearchGraphRunner:
                 },
             )
             mode = "degraded"
+            compact_pack = build_evidence_pack(
+                criteria,
+                synthesis_context.findings,
+                claims,
+                evidence_records,
+                conflict_resolutions,
+                COMPACT_SYNTHESIS_INPUT_TOKENS,
+                compact=True,
+            )
+            compact_digests = [
+                EvidenceDigest(
+                    evidence_id=str(row.get("evidence_id") or ""),
+                    title=str(row.get("source_id") or row.get("locator") or row.get("evidence_id") or ""),
+                    locator=str(row.get("locator") or ""),
+                    excerpt=str(row.get("excerpt_ref") or ""),
+                    supported_claims=tuple(
+                        str(claim.get("text") or claim.get("claim") or "")
+                        for claim in claims
+                        if str(row.get("evidence_id") or "") in [str(item) for item in claim.get("evidence_ids") or []]
+                    ),
+                    citation_number=citation_numbers.get(str(row.get("evidence_id") or ""), 0),
+                )
+                for row in compact_pack.evidence
+            ]
             request = replace(
                 request,
                 mode=mode,
-                research_summary=self._semantic_synthesis_digest(gstate, compact=True),
-                evidence_digests=digests[:12],
-                findings=claims[:8],
-                token_budget=min(12_000, remaining_synthesis_tokens),
+                evidence_refs=list(compact_pack.evidence_refs),
+                research_summary=compact_pack.research_summary,
+                evidence_digests=compact_digests,
+                findings=list(compact_pack.findings),
+                conflict_resolutions=list(compact_pack.conflict_resolutions),
+                token_budget=min(compact_pack.token_budget, max(0, remaining_synthesis_tokens)),
             )
-            result = await executor.execute(
-                request,
-                context,
-                timeout_sec=float(
+            evidence_refs = list(compact_pack.evidence_refs)
+            retry_timeout_sec = min(
+                float(
                     getattr(
                         self.harness.harness_config,
                         "synthesis_retry_timeout_sec",
                         30,
                     )
                 ),
+                90.0,
+            )
+            result = await executor.execute(
+                request,
+                context,
+                timeout_sec=retry_timeout_sec,
             )
         fallback = not result.ok or not str(result.summary or "").strip()
         if fallback:
@@ -1588,6 +1638,14 @@ class ResearchGraphRunner:
         content = scrub_internal_ids(content)
         manager = session.ctx.citation_manager
         if manager is not None and content:
+            selected_findings = list(
+                (compact_pack if retried else evidence_pack).findings
+            )
+            content = manager.inject_finding_citations(
+                content,
+                selected_findings,
+                citation_numbers,
+            )
             content = manager.build_cited_report(content)
         session.state.final_content = content
         if isinstance(session.state.metadata, dict):
@@ -1635,7 +1693,12 @@ class ResearchGraphRunner:
                 "compact": compact or retried,
                 "evidence_ids": list(evidence_refs),
                 "evidence_count": len(evidence_refs),
-                "claim_count": len(claims),
+                "claim_count": len(
+                    (compact_pack if retried else evidence_pack).findings
+                ),
+                "evidence_pack_tokens": int(
+                    (compact_pack if retried else evidence_pack).estimated_tokens
+                ),
                 "fail_reason": result.fail_reason,
                 "fallback_action": "deterministic_partial" if fallback else "",
             },

@@ -35,6 +35,19 @@ class FailingModel:
         return ""
 
 
+class BoundingModel:
+    def __init__(self):
+        self.bind_kwargs = None
+        self.bound = SimpleNamespace(ainvoke=self._ainvoke)
+
+    def bind(self, **kwargs: Any):
+        self.bind_kwargs = kwargs
+        return self.bound
+
+    async def _ainvoke(self, *args: Any, **kwargs: Any):
+        return AIMessage(content="synthesis result")
+
+
 class FakeSession:
     budget_manager = RunBudgetManager(token_limit=100_000, llm_call_limit=10)
     ctx = SimpleNamespace(citation_manager=None)
@@ -87,6 +100,17 @@ def test_synthesis_prompt_is_token_bounded():
     executor = SynthesisExecutor(FakeHarness(), FakeSession())
     prompt = executor._prompt(_request(token_budget=1_000), _context())
     assert estimate_tokens(prompt) <= 1_000
+
+
+def test_synthesis_output_is_bounded_by_mode():
+    model = BoundingModel()
+    harness = FakeHarness()
+    harness.synthesis_model = model
+    executor = SynthesisExecutor(harness, FakeSession())
+
+    asyncio.run(executor._invoke(model=model, request=_request(), context=_context()))
+
+    assert model.bind_kwargs == {"max_tokens": 1_800}
 
 
 def test_synthesis_failure_taxonomy():

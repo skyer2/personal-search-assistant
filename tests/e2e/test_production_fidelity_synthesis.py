@@ -18,7 +18,7 @@ from app.agent.harness.loop import AgentHarness
 from app.agent.harness.run_budget import BudgetReservationError
 from app.agent.harness.tool_contract import apply_tool_output_contract
 from app.config.loader import get_harness_config, reload_harness_config
-from app.config.timeouts import llm_timeout_sec
+from app.config.timeouts import llm_timeout_sec, wall_timeout_sec
 from app.observability import get_recorder
 from app.observability.journal import summarize_trace
 from app.research.execution import worker_executor as worker_executor_module
@@ -195,7 +195,7 @@ class VirtualTimeoutLoop(asyncio.SelectorEventLoop):
         real_time = super().time()
         if CLOCK_JUMPS_REQUESTED:
             CLOCK_JUMPS_REQUESTED -= 1
-            self._virtual_time = max(self._virtual_time, real_time) + 1000.0
+            self._virtual_time = max(self._virtual_time, real_time) + llm_timeout_sec() + 1.0
         else:
             self._virtual_time = max(self._virtual_time, real_time)
         return self._virtual_time
@@ -207,8 +207,12 @@ def _assert_production_config() -> None:
     assert config.max_replan_count == 3
     assert config.direct_worker_invoke is True
     assert config.max_total_tokens == 500000
-    assert config.synthesis_step_timeout_sec == llm_timeout_sec()
-    assert config.synthesis_retry_timeout_sec == llm_timeout_sec()
+    assert config.synthesis_step_timeout_sec == wall_timeout_sec(
+        "HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC", 60
+    )
+    assert config.synthesis_retry_timeout_sec == wall_timeout_sec(
+        "HARNESS_SYNTHESIS_RETRY_TIMEOUT_SEC", 30
+    )
 
 
 def _run(
@@ -418,7 +422,7 @@ def test_l3_release_blocker_research_cap_synthesis_timeout_yields_partial(
 
     assert result.metadata["termination"]["outcome"] == "partial"
     assert result.content.strip()
-    assert result.metadata["synthesis_attempts"] == 1
+    assert result.metadata["synthesis_attempts"] == 2
     assert result.metadata["synthesis_fail_reason"] == "synthesis_timeout"
     assert result.metadata["fallback_used"] == "deterministic_partial"
     assert result.content.strip()
@@ -431,10 +435,16 @@ def test_l3_release_blocker_research_cap_synthesis_timeout_yields_partial(
     assert integrity["span_tree"]["root_count"] >= 1
     assert integrity["lineage_edges"] > 0
     failures = [event for event in events if event["type"] == "synthesis.failed"]
-    assert len(failures) == 1
+    assert len(failures) == 2
     assert [event["attributes"]["fallback_action"] for event in failures] == [
+        "compact_retry",
         "deterministic_partial",
     ]
+    assert failures[1]["attributes"]["compact"] is True
+    assert (
+        failures[1]["attributes"]["evidence_pack_tokens"]
+        <= failures[0]["attributes"]["evidence_pack_tokens"]
+    )
     worker_failures = [event for event in events if event["type"] == "worker.failed"]
     assert worker_failures
     assert all(

@@ -199,7 +199,7 @@ compress(原文)            →  compressed_content 进 StepResult
 
 解析后放进 `result.metadata["worker_payload"]`。缺最终 AI、缺 findings 或证据引用无效时 **只补 JSON、禁止再搜**：Finalization-only retry 把 `internet_search` / `fetch_url` / `batch_search` / `batch_fetch` 额度置 0，只允许 `read_artifact` / `read_evidence`，并从最后一条无 tool_calls 的 **AIMessage** 抽 JSON；ToolMessage / raw search JSON 不能成为最终答案。不要整步 ReAct 重搜。
 
-研究步 `allowed_tools` 必须包含 `read_artifact` / `read_evidence`（JIT 回读原文）。计划白名单漏了它们时，校验也会把这两个工具视为始终允许，避免 `unauthorized_tool` 空转。
+研究步 `allowed_tools` 由 `worker_tools_for_step()` 统一生成，必须包含 `batch_search` / `batch_fetch` / `read_artifact` / `read_evidence` 等实际运行工具。Prompt 展示、Plan 白名单、Runtime 授权和 Worker Profile 使用同一 registry，不允许手写 `web_search` / `fetch` 这类历史名称。
 
 **为什么这是上下文工程：**  
 后面的 prior 和 digest **吃的是 facts/sources，不是网页 HTML**。没有这层，压缩只能对一坨散文做摘要，来源更容易丢。并行检索三路时，各路互不通信，join 后靠 digest 汇总，避免把三路原文同时塞进写报告窗口。

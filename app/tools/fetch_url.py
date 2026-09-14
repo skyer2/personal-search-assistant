@@ -26,6 +26,14 @@ _STYLE_RE = re.compile(r"(?is)<style[^>]*>.*?</style>")
 _TAG_RE = re.compile(r"(?s)<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 _TITLE_RE = re.compile(r"(?is)<title[^>]*>(.*?)</title>")
+_META_DATE_RE = re.compile(
+    r"(?is)<meta[^>]+(?:name|property)=(?:\"|')?"
+    r"(?:article:published_time|og:published_time|publishdate|pubdate|date)"
+    r"(?:\"|')?[^>]+content=(?:\"|')([^\"']+)"
+)
+_JSON_LD_DATE_RE = re.compile(r"(?is)\"datePublished\"\s*:\s*\"([^\"]+)\"")
+_TIME_DATETIME_RE = re.compile(r"(?is)<time[^>]+datetime=(?:\"|')([^\"']+)")
+_VISIBLE_DATE_RE = re.compile(r"\b(20\d{2}[-/年]\d{1,2}[-/月]\d{1,2}日?)\b")
 
 
 def _default_timeout() -> float:
@@ -51,6 +59,22 @@ def _default_fetch(url: str, timeout: float) -> tuple[str, str]:
     except LookupError:
         decoded = body.decode("utf-8", errors="replace")
     return decoded, content_type
+
+
+def _normalize_published_at(value: str) -> str:
+    normalized = str(value or "").strip().replace("年", "-").replace("月", "-").replace("日", "")
+    normalized = normalized.replace("/", "-")
+    match = re.match(r"^(\d{4}-\d{1,2}-\d{1,2})(?:[T ].*)?$", normalized)
+    return match.group(1) if match else normalized
+
+
+def _extract_published_at(raw: str, text: str) -> str:
+    for pattern in (_META_DATE_RE, _JSON_LD_DATE_RE, _TIME_DATETIME_RE, _VISIBLE_DATE_RE):
+        match = pattern.search(raw or "")
+        if match:
+            return _normalize_published_at(match.group(1))
+    match = _VISIBLE_DATE_RE.search(text or "")
+    return _normalize_published_at(match.group(1)) if match else ""
 
 
 def fetch_url_content(
@@ -95,6 +119,7 @@ def fetch_url_content(
             else (raw or "")
         )
         text = text[: max(200, int(max_chars or 8000))]
+        published_at = _extract_published_at(raw or "", text)
         if not text:
             return {"ok": False, "error": "empty_body", "url": target}
 
@@ -109,7 +134,11 @@ def fetch_url_content(
                 locator=target,
                 title=title or target,
                 summary=text[:280],
-                metadata={"tool_name": "fetch_url", "content_type": content_type},
+                metadata={
+                    "tool_name": "fetch_url",
+                    "content_type": content_type,
+                    **({"published_at": published_at} if published_at else {}),
+                },
                 step_type="network_search",
             )
             artifact_id = art.artifact_id
@@ -133,6 +162,7 @@ def fetch_url_content(
             "url": target,
             "title": title or target,
             "snippet": text[:280],
+            "published_at": published_at,
             "char_count": len(text),
             "artifact_id": artifact_id,
             "hint": "正文已进 Artifact；需要更多原文时 read_artifact(artifact_id)。",

@@ -58,6 +58,7 @@ def _plan_from_tasks(
     plan_version: int,
     planning_mode: str,
 ) -> ExecutionPlan:
+    from app.research.workers.registry import worker_tools_for_step
     from app.research.runtime.task_budget import task_budget_metadata, task_budget_profile
 
     steps = [
@@ -66,7 +67,7 @@ def _plan_from_tasks(
             description=item.objective,
             objective=item.objective,
             task_id=item.task_id,
-            allowed_tools=["internet_search", "fetch_url"],
+            allowed_tools=worker_tools_for_step("research"),
             metadata={
                 "kind": "research_task",
                 "task_kind": "supervisor_research",

@@ -11,8 +11,8 @@ from app.research.planning.policy import (
     SourcePolicy,
     extract_compare_entities,
     intent_allowed_sources,
-    tools_for_sources,
 )
+from app.research.workers.registry import worker_tools_for_step
 
 LEAD_PLANNER_PROMPT = """你是 Lead Research Planner，不是运行时。
 你只输出研究目标 DAG，禁止调用工具、禁止调度工人、禁止决定何时停止、禁止抬高预算。
@@ -135,7 +135,7 @@ def research_step_from_task(
         subagent="研究工人",
         task_id=task_id,
         depends_on=list(depends_on),
-        allowed_tools=tools_for_sources(sources),
+        allowed_tools=worker_tools_for_step("research", allowed_sources=sources),
         objective=objective,
         metadata=meta,
     )
@@ -145,7 +145,7 @@ def _dedupe_research_steps(
     steps: list[PlanStep], brief: Any
 ) -> list[PlanStep]:
     """Fan out by canonical subject, not lexical aliases."""
-    subjects = [
+    subjects: list[dict[str, Any]] = [
         {
             "id": str(getattr(subject, "subject_id", "") or subject.canonical),
             "canonical": str(subject.canonical),

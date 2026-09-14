@@ -87,7 +87,6 @@ class WorkerResultPayload:
     evidence_ids: list[str] = field(default_factory=list)
     artifact_ids: list[str] = field(default_factory=list)
     stop_reason: str = ""
-    evidence_metadata: list[dict[str, Any]] = field(default_factory=list)
 
     def to_context_snippet(self, max_chars: int = 600) -> str:
         parts = [self.summary or ""]
@@ -208,11 +207,6 @@ def parse_worker_payload(
             ],
             artifact_ids=artifact_ids,
             stop_reason=str(json_blob.get("stop_reason", "")),
-            evidence_metadata=[
-                dict(item)
-                for item in (json_blob.get("evidence_metadata") or [])
-                if isinstance(item, dict)
-            ][:20],
         )
 
     return WorkerResultPayload(
@@ -327,7 +321,6 @@ def worker_payload_from_dict(
         evidence_ids=[str(item) for item in row.get("evidence_ids") or [] if str(item).strip()][:20],
         artifact_ids=artifact_ids,
         stop_reason=str(row.get("stop_reason") or ""),
-        evidence_metadata=[dict(item) for item in row.get("evidence_metadata") or [] if isinstance(item, dict)][:20],
     )
 
 

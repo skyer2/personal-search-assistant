@@ -14,7 +14,7 @@ BOCHA_TIMEOUT_SEC=20
 - API：`POST https://api.bocha.cn/v1/web-search`
 - 鉴权：`Authorization: Bearer <BOCHA_API_KEY>`
 - 适配器：`app/tools/bocha_provider.py`
-- 返回结构：转换为现有 Tavily 兼容结构，字段包括 `query`、`results`、`response_time`。
+- 返回结构：转换为现有 Tavily 兼容结构，字段包括 `query`、`results`、`response_time`；`datePublished` 映射为 `published_at` 并由 Tool Runtime 写入 Artifact / Evidence metadata。
 
 ## 失败语义
 

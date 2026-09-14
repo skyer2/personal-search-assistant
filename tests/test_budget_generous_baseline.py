@@ -84,11 +84,11 @@ def test_medium_profile_reaches_worker_lease_without_legacy_clamp() -> None:
     metadata = dict(plan.steps[0].metadata)
     assert metadata["token_ceiling"] == profile.token_ceiling
     assert task_budget_metadata(profile) == {
-        "max_llm_calls": 16,
-        "max_search_queries": 10,
-        "max_fetch_sources": 16,
-        "max_tool_invocations": 16,
-        "max_output_tokens_per_call": 3_500,
+        "max_llm_calls": profile.max_llm_calls,
+        "max_search_queries": profile.max_search_queries,
+        "max_fetch_sources": profile.max_fetch_sources,
+        "max_tool_invocations": profile.max_tool_invocations,
+        "max_output_tokens_per_call": profile.max_output_tokens_per_call,
     }
 
     manager = RunBudgetManager(
@@ -115,8 +115,8 @@ def test_medium_profile_reaches_worker_lease_without_legacy_clamp() -> None:
 
     for task_id in ("task-a", "task-b", "task-c"):
         snapshot = manager.worker_lease_snapshot(task_id=task_id)
-        assert snapshot["token_limit"] == 80_000
-        assert snapshot["llm_calls_limit"] == 16
+        assert snapshot["token_limit"] == profile.token_ceiling
+        assert snapshot["llm_calls_limit"] == profile.max_llm_calls
 
 
 def test_medium_worker_can_search_fetch_and_supplement_search() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.agent.harness.state import TaskIntent
-from app.agent.harness.worker_profiles import CONTEXT_TOOLS
+from app.agent.harness.worker_profiles import CONTEXT_TOOLS, FILE_READ_TOOLS, WEB_TOOLS
 
 WEB_FORBIDDEN_MARKERS = (
     "不要联网",
@@ -22,8 +22,8 @@ COMPARE_MARKERS = ("比较", "对比", " vs ", " VS ", "versus", "横向比较")
 LANDSCAPE_MARKERS = ("竞争格局", "多维度", "综合对比")
 
 SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
-    "web": ("internet_search", "fetch_url", "batch_search", "batch_fetch"),
-    "file": ("read_file_content",),
+    "web": WEB_TOOLS,
+    "file": FILE_READ_TOOLS,
 }
 
 TOOL_TO_SOURCE: dict[str, str] = {

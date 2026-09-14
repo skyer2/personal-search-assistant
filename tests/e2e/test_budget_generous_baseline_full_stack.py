@@ -14,6 +14,7 @@ from app.config.loader import get_harness_config
 from app.observability import get_recorder
 from app.observability.journal import summarize_trace
 from app.research.execution import worker_executor as worker_executor_module
+from app.research.runtime.task_budget import task_budget_profile
 from app.tools.batch_retrieval import run_batch_fetch, run_batch_search
 from tests.e2e.deterministic_landscape import CapturingToolGateway
 
@@ -160,6 +161,7 @@ def test_golden_queries_complete_workers_without_budget_caps(
     config.max_replan_count = 0
     config.direct_worker_invoke = True
     agent = GenerousBaselineAgent()
+    medium_profile = task_budget_profile("medium")
 
     for index, query in enumerate(GOLDEN_QUERIES, start=1):
         harness = AgentHarness(
@@ -194,11 +196,11 @@ def test_golden_queries_complete_workers_without_budget_caps(
 
         for event in completed:
             budget = dict((event.get("attributes") or {}).get("budget") or {})
-            assert budget["llm_calls_limit"] == 16
-            assert budget["token_limit"] == 80_000
+            assert budget["llm_calls_limit"] == medium_profile.max_llm_calls
+            assert budget["token_limit"] == medium_profile.token_ceiling
             assert budget["search_queries_used"] == 6
-            assert budget["search_queries_limit"] == 10
+            assert budget["search_queries_limit"] == medium_profile.max_search_queries
             assert budget["fetch_sources_used"] == 3
-            assert budget["fetch_sources_limit"] == 16
+            assert budget["fetch_sources_limit"] == medium_profile.max_fetch_sources
             assert budget["tool_invocations_used"] == 3
-            assert budget["tool_invocations_limit"] == 16
+            assert budget["tool_invocations_limit"] == medium_profile.max_tool_invocations

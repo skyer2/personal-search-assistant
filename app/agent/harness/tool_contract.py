@@ -50,6 +50,7 @@ class ToolOutputContract:
 
 CONTRACT_BY_TOOL: dict[str, ToolOutputContract] = {
     "internet_search": ToolOutputContract(max_result_tokens=900, snippet_chars=220, max_rows=5),
+    "batch_search": ToolOutputContract(max_result_tokens=1200, snippet_chars=200, max_rows=20),
     "fetch_url": ToolOutputContract(max_result_tokens=700, snippet_chars=280, max_rows=1),
     "execute_sql_query": ToolOutputContract(max_result_tokens=600, max_rows=15),
     "get_table_data": ToolOutputContract(max_result_tokens=500, max_rows=10),
@@ -60,6 +61,14 @@ CONTRACT_BY_TOOL: dict[str, ToolOutputContract] = {
 
 def contract_for(tool_name: str) -> ToolOutputContract:
     return CONTRACT_BY_TOOL.get(tool_name, ToolOutputContract())
+
+
+def _published_at(item: dict[str, Any]) -> str:
+    for key in ("published_at", "published_date", "datePublished", "date_published"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _as_text(raw: Any) -> str:
@@ -86,7 +95,8 @@ def compact_search_payload(
     session_id: str = "",
 ) -> dict[str, Any]:
     data = raw if isinstance(raw, dict) else {"results": [{"content": _as_text(raw)}]}
-    results = data.get("results") if isinstance(data.get("results"), list) else []
+    raw_results = data.get("results")
+    results = raw_results if isinstance(raw_results, list) else []
     cards: list[dict[str, Any]] = []
     artifact_ids: list[str] = []
     limit = max(1, contract.max_rows)
@@ -100,6 +110,7 @@ def compact_search_payload(
             item = {"content": str(item)}
         title = str(item.get("title") or "")
         url = str(item.get("url") or item.get("locator") or "")
+        published_at = _published_at(item)
         raw_body = str(
             item.get("raw_content") or item.get("content") or item.get("snippet") or ""
         )
@@ -113,6 +124,7 @@ def compact_search_payload(
             metadata={
                 "tool_name": tool_name,
                 "score": item.get("score"),
+                **({"published_at": published_at} if published_at else {}),
                 **({"candidates": structured_candidates} if structured_candidates else {}),
                 **({"task_id": worker_task_id} if worker_task_id else {}),
                 **({"step_index": step_index} if step_index >= 0 else {}),
@@ -132,6 +144,8 @@ def compact_search_payload(
         }
         if item.get("doc_id") is not None:
             card["doc_id"] = item.get("doc_id")
+        if published_at:
+            card["published_at"] = published_at
         cards.append(card)
     if not cards:
         artifact = store.put_from_tool_result(
@@ -155,6 +169,104 @@ def compact_search_payload(
     if data.get("provider"):
         payload["provider"] = data.get("provider")
     return payload
+
+
+def compact_batch_search_payload(
+    raw: Any,
+    *,
+    store: ArtifactStore,
+    contract: ToolOutputContract,
+    tool_name: str = "batch_search",
+    step_type: str = "research",
+    worker_task_id: str = "",
+    step_index: int = -1,
+    run_id: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    data = raw if isinstance(raw, dict) else {"results": [{"results": [_as_text(raw)]}]}
+    raw_query_rows = data.get("results")
+    query_rows = raw_query_rows if isinstance(raw_query_rows, list) else []
+    flattened: list[dict[str, Any]] = []
+    for query_row in query_rows:
+        if not isinstance(query_row, dict):
+            continue
+        query = str(query_row.get("query") or "")
+        for item in query_row.get("results") or []:
+            if not isinstance(item, dict):
+                item = {"content": str(item)}
+            flattened.append({**item, "query": query})
+
+    cards: list[dict[str, Any]] = []
+    artifact_ids: list[str] = []
+    limit = max(1, contract.max_rows)
+    for item in flattened[:limit]:
+        title = str(item.get("title") or "")
+        url = str(item.get("url") or item.get("locator") or "")
+        raw_body = str(item.get("raw_content") or item.get("content") or item.get("snippet") or "")
+        snippet = str(item.get("content") or item.get("snippet") or raw_body)[: contract.snippet_chars]
+        published_at = _published_at(item)
+        artifact = store.put(
+            raw_body or json.dumps(item, ensure_ascii=False),
+            kind=infer_kind(step_type, url),
+            locator=url or title or f"tool:{tool_name}",
+            title=title or url,
+            summary=snippet,
+            metadata={
+                "tool_name": tool_name,
+                "query": item.get("query"),
+                "score": item.get("score"),
+                **({"published_at": published_at} if published_at else {}),
+                **({"task_id": worker_task_id} if worker_task_id else {}),
+                **({"step_index": step_index} if step_index >= 0 else {}),
+                **({"run_id": run_id} if run_id else {}),
+                **({"session_id": session_id} if session_id else {}),
+            },
+            step_index=step_index,
+            step_type=step_type,
+        )
+        artifact_ids.append(artifact.artifact_id)
+        card = {
+            "query": item.get("query"),
+            "title": title or artifact.title,
+            "url": url,
+            "snippet": snippet,
+            "artifact_id": artifact.artifact_id,
+            "ref": artifact.ref(),
+        }
+        if published_at:
+            card["published_at"] = published_at
+        cards.append(card)
+
+    if not cards:
+        artifact = store.put_from_tool_result(
+            raw,
+            tool_name=tool_name,
+            step_type=step_type,
+            worker_task_id=worker_task_id,
+            step_index=step_index,
+            run_id=run_id,
+            session_id=session_id,
+        )
+        artifact_ids.append(artifact.artifact_id)
+        cards.append(artifact.compact_card(contract.snippet_chars))
+
+    providers = [
+        str(row.get("provider"))
+        for row in query_rows
+        if isinstance(row, dict) and row.get("provider")
+    ]
+    return {
+        "queries": [
+            str(row.get("query") or "")
+            for row in query_rows
+            if isinstance(row, dict) and str(row.get("query") or "").strip()
+        ],
+        "results": cards,
+        "artifact_ids": artifact_ids,
+        "truncated": len(flattened) > limit,
+        "provider": providers[0] if providers else "",
+        "hint": "需要原文时调用 read_artifact(artifact_id) 或带 query 检索片段。",
+    }
 
 
 def compact_generic_payload(
@@ -218,7 +330,7 @@ def apply_tool_output_contract(
     run_id: str = "",
     session_id: str = "",
 ) -> str:
-    store = store or get_artifact_store()
+    store = store if store is not None else get_artifact_store()
     contract = contract or contract_for(tool_name)
     worker_task_id = worker_task_id or get_current_worker_task_id()
     if step_index < 0:
@@ -227,18 +339,31 @@ def apply_tool_output_contract(
     session_id = session_id or get_current_worker_session_id()
     if not contract.artifact_ref:
         return raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-    if tool_name == "internet_search":
-        payload = compact_search_payload(
-            raw,
-            store=store,
-            contract=contract,
-            tool_name=tool_name,
-            step_type=step_type or "network_search",
-            worker_task_id=worker_task_id,
-            step_index=step_index,
-            run_id=run_id,
-            session_id=session_id,
-        )
+    if tool_name in {"internet_search", "batch_search"}:
+        if tool_name == "internet_search":
+            payload = compact_search_payload(
+                raw,
+                store=store,
+                contract=contract,
+                tool_name=tool_name,
+                step_type=step_type or "network_search",
+                worker_task_id=worker_task_id,
+                step_index=step_index,
+                run_id=run_id,
+                session_id=session_id,
+            )
+        else:
+            payload = compact_batch_search_payload(
+                raw,
+                store=store,
+                contract=contract,
+                tool_name=tool_name,
+                step_type=step_type or "research",
+                worker_task_id=worker_task_id,
+                step_index=step_index,
+                run_id=run_id,
+                session_id=session_id,
+            )
     else:
         payload = compact_generic_payload(
             raw,

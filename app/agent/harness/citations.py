@@ -162,8 +162,13 @@ class CitationManager:
             )
         )
 
-    def _admit(self, src: EvidenceSource) -> bool:
-        if (
+    def _admit(
+        self,
+        src: EvidenceSource,
+        *,
+        respect_step_limit: bool = True,
+    ) -> bool:
+        if respect_step_limit and (
             sum(1 for old in self.sources if old.step_index == src.step_index)
             >= self.max_sources_per_step
         ):
@@ -356,7 +361,11 @@ class CitationManager:
         return registered
 
     def bind_evidence_spans(
-        self, spans: list[Any], findings: list[Any] | None = None
+        self,
+        spans: list[Any],
+        findings: list[Any] | None = None,
+        *,
+        bypass_step_limit: bool = False,
     ) -> list[EvidenceSource]:
         """把 EvidenceStore span/finding 登记为可引用 source。"""
         registered: list[EvidenceSource] = []
@@ -404,7 +413,7 @@ class CitationManager:
                 start_offset=start,
                 end_offset=end,
             )
-            if not self._admit(src):
+            if not self._admit(src, respect_step_limit=not bypass_step_limit):
                 continue
             if src.bound_fact:
                 self.fact_bindings.append(
@@ -417,6 +426,77 @@ class CitationManager:
                     }
                 )
             registered.append(src)
+        return registered
+
+    def bind_evidence_records(
+        self,
+        evidence_records: list[dict[str, Any]],
+        findings: list[dict[str, Any]],
+    ) -> list[EvidenceSource]:
+        """Bind canonical evidence records onto citation sources."""
+        if not evidence_records:
+            return []
+
+        claim_by_evidence_id: dict[str, str] = {}
+        for finding in findings or []:
+            claim = str(finding.get("claim") or finding.get("summary") or "").strip()
+            for evidence_id in finding.get("evidence_ids") or []:
+                claim_by_evidence_id.setdefault(str(evidence_id), claim)
+
+        registered: list[EvidenceSource] = []
+        for row in evidence_records:
+            evidence_id = str(row.get("evidence_id") or "").strip()
+            locator = self._canonical_locator(str(row.get("locator") or ""))
+            if not evidence_id or not locator:
+                continue
+
+            existing = next(
+                (
+                    source
+                    for source in self.sources
+                    if source.evidence_id == evidence_id or source.locator == locator
+                ),
+                None,
+            )
+            if existing is not None:
+                if not existing.evidence_id:
+                    existing.evidence_id = evidence_id
+                existing.artifact_id = str(row.get("artifact_ref") or existing.artifact_id)
+                existing.bound_fact = (
+                    claim_by_evidence_id.get(evidence_id)
+                    or existing.bound_fact
+                    or str(row.get("excerpt_ref") or "")[:240]
+                )
+                if not any(
+                    binding.get("evidence_id") == evidence_id
+                    and binding.get("source_id") == existing.source_id
+                    for binding in self.fact_bindings
+                ):
+                    self.fact_bindings.append(
+                        {
+                            "fact": existing.bound_fact,
+                            "source_id": existing.source_id,
+                            "locator": existing.locator,
+                            "evidence_id": evidence_id,
+                            "artifact_id": existing.artifact_id,
+                        }
+                    )
+                registered.append(existing)
+                continue
+
+            registered.extend(
+                self.bind_evidence_spans(
+                    [
+                        {
+                            **row,
+                            "locator": locator,
+                            "text": row.get("excerpt_ref") or row.get("locator"),
+                        }
+                    ],
+                    findings,
+                    bypass_step_limit=True,
+                )
+            )
         return registered
 
     def build_lookup_block(
@@ -443,6 +523,82 @@ class CitationManager:
                 lines.append(f"      {excerpt}")
         return "\n".join(lines)
 
+    def inject_finding_citations(
+        self,
+        content: str,
+        findings: list[dict[str, Any]],
+        evidence_numbers: dict[str, int],
+    ) -> str:
+        """Project selected findings onto numeric report sentences as [n]."""
+        if not content.strip() or not findings:
+            return content
+
+        def tokens(value: str) -> set[str]:
+            output: set[str] = set()
+            for raw in re.findall(r"[A-Za-z0-9]+|[\u3400-\u9fff]+", str(value or "")):
+                if raw.isascii():
+                    output.add(raw.lower())
+                    continue
+                if len(raw) == 1:
+                    output.add(raw)
+                else:
+                    output.update(raw[index : index + 2] for index in range(len(raw) - 1))
+            return output
+
+        finding_tokens = [
+            (tokens(str(row.get("claim") or row.get("summary") or "")), row)
+            for row in findings
+            if isinstance(row, dict) and str(row.get("claim") or row.get("summary") or "")
+        ]
+        output_lines: list[str] = []
+        for line in content.splitlines():
+            stripped_line = line.strip()
+            if (
+                not stripped_line
+                or stripped_line.startswith(("#", ">", "```"))
+                or "参考文献" in stripped_line
+            ):
+                output_lines.append(line)
+                continue
+
+            projected_sentences: list[str] = []
+            for sentence in SENTENCE_SPLIT_PATTERN.split(line):
+                if not re.search(r"\d", sentence):
+                    projected_sentences.append(sentence)
+                    continue
+
+                sentence_tokens = tokens(sentence)
+                matches: list[tuple[float, dict[str, Any]]] = []
+                for claim_tokens, finding in finding_tokens:
+                    overlap = sentence_tokens & claim_tokens
+                    if len(overlap) < 3:
+                        continue
+                    denominator = max(1, min(len(sentence_tokens), len(claim_tokens)))
+                    score = len(overlap) / denominator
+                    if score >= 0.25:
+                        matches.append((score, finding))
+
+                numbers: list[int] = []
+                for _, finding in sorted(matches, key=lambda item: item[0], reverse=True):
+                    for evidence_id in finding.get("evidence_ids") or []:
+                        number = evidence_numbers.get(str(evidence_id))
+                        if number is not None and number not in numbers:
+                            numbers.append(number)
+                    if len(numbers) >= 3:
+                        break
+                if not numbers:
+                    projected_sentences.append(sentence)
+                    continue
+
+                marker = "".join(f"[{number}]" for number in numbers)
+                sentence_body = CITATION_MARKER_PATTERN.sub("", sentence).rstrip()
+                if sentence_body[-1:] in "。！？.!?":
+                    projected_sentences.append(sentence_body[:-1] + marker + sentence_body[-1:])
+                else:
+                    projected_sentences.append(sentence_body + marker)
+            output_lines.append(" ".join(projected_sentences))
+        return "\n".join(output_lines)
+
     def _extract_sql_hint(self, content: str) -> str:
         for line in content.splitlines():
             lower = line.lower()
@@ -453,6 +609,20 @@ class CitationManager:
     def source_number_map(self) -> dict[str, int]:
         """source_id → 引用编号 [1][2]…"""
         return {src.source_id: idx + 1 for idx, src in enumerate(self.sources)}
+
+    def evidence_number_map(self) -> dict[str, int]:
+        """Canonical evidence_id → stable citation number."""
+        source_numbers = self.source_number_map()
+        output: dict[str, int] = {}
+        for source in self.sources:
+            if source.evidence_id:
+                output[source.evidence_id] = source_numbers[source.source_id]
+        for binding in self.fact_bindings:
+            evidence_id = str(binding.get("evidence_id") or "")
+            source_number = source_numbers.get(str(binding.get("source_id") or ""))
+            if evidence_id and source_number is not None:
+                output.setdefault(evidence_id, source_number)
+        return output
 
     def build_references_block(self, *, source_ids: Iterable[str] | None = None) -> str:
         selected = (
@@ -619,6 +789,13 @@ class CitationManager:
         metrics = self.compute_metrics(final_content)
         if metrics["registered_sources"] == 0:
             return True, ""
+        valid_numbers = set(self.source_number_map().values())
+        cited_numbers = {
+            int(number)
+            for number in CITATION_MARKER_PATTERN.findall(final_content)
+        }
+        if cited_numbers - valid_numbers:
+            return False, "citation_invalid_number"
         if (
             "## 参考文献" not in final_content
             and metrics["citation_coverage_rate"] < min_coverage

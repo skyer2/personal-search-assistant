@@ -121,6 +121,168 @@ def test_soft_deadline_reserves_one_model_call(monkeypatch):
     assert WorkerExecutorV2._soft_deadline_delay(120) == 50.0
 
 
+def test_soft_deadline_reserves_structured_retry_model_call(monkeypatch):
+    monkeypatch.setenv("LLM_TIMEOUT_SEC", "180")
+    monkeypatch.setenv("LLM_WORKER_TIMEOUT_SEC", "60")
+
+    assert (
+        WorkerExecutorV2._soft_deadline_delay(190, reserve_model_calls=2)
+        == 60.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_timeout_after_soft_finalization_recovers_done(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.research.execution import worker_executor as worker_executor_module
+
+    store = _reset_store()
+    store.put(
+        "Company A traction is growing.",
+        kind="web",
+        locator="https://example.com/company-a",
+        title="Company A profile",
+        metadata={"run_id": "run-worker", "task_id": "t_timeout"},
+        step_index=2,
+        step_type="research",
+    )
+
+    class FakeBudgetManager:
+        def reserve_worker_lease(self, *args, **kwargs):
+            return "lease", ""
+
+        def release_worker_lease(self, *args, **kwargs):
+            return None
+
+    class FakeState:
+        plan = SimpleNamespace(steps=[_step()])
+
+    class FakeSession:
+        state = FakeState()
+        budget_manager = FakeBudgetManager()
+        ctx = SimpleNamespace()
+        active_wave_size = 1
+
+    class FakeHarness:
+        harness_config = SimpleNamespace(step_timeout_sec=10)
+
+        def _enrich_worker_result(self, _step, result, _state):
+            return result
+
+    async def invoke(*args, **kwargs):
+        kwargs["tool_usage"]["finalization_reason"] = "soft_budget_finalize"
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(
+        worker_executor_module,
+        "resolve_execute_target",
+        lambda *args, **kwargs: (object(), "direct"),
+    )
+    monkeypatch.setattr(WorkerExecutorV2, "_invoke_leaf", invoke)
+    monkeypatch.setattr(WorkerExecutorV2, "_timeout_for", lambda self, step: 0.01)
+
+    result = await WorkerExecutorV2(FakeHarness(), FakeSession()).execute(
+        ResearchTask(
+            task_id="t_timeout",
+            objective="collect evidence",
+            step_type="research",
+            step_index=0,
+        ),
+        ResearchContext(run_id="run-worker", query="collect evidence"),
+    )
+
+    assert result.ok is True
+    assert result.status == "done"
+    assert result.fail_reason == "worker_timeout"
+    assert result.metrics["stop_reason"] == "soft_budget_finalize"
+    assert result.evidence_refs
+
+
+@pytest.mark.asyncio
+async def test_transient_connection_error_retries_once_before_any_tool_work(monkeypatch):
+    from types import SimpleNamespace
+    import json
+
+    from app.agent.harness.state import StepResult
+    from app.research.execution import worker_executor as worker_executor_module
+
+    class APIConnectionError(Exception):
+        pass
+
+    class FakeBudgetManager:
+        def reserve_worker_lease(self, *args, **kwargs):
+            return "lease", ""
+
+        def release_worker_lease(self, *args, **kwargs):
+            return None
+
+    class FakeState:
+        plan = SimpleNamespace(steps=[_step()])
+
+    class FakeSession:
+        state = FakeState()
+        budget_manager = FakeBudgetManager()
+        ctx = SimpleNamespace()
+        active_wave_size = 1
+
+    class FakeHarness:
+        harness_config = SimpleNamespace(step_timeout_sec=10)
+
+        def _enrich_worker_result(self, _step, result, _state):
+            return result
+
+    calls = 0
+
+    async def invoke(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise APIConnectionError("Connection error.")
+        return StepResult(
+            step_type="research",
+            content=json.dumps(
+                {
+                    "ok": True,
+                    "summary": "recovered after transient connection error",
+                    "evidence_ids": ["art-web-1"],
+                    "findings": [
+                        {
+                            "claim": "Company A traction is growing.",
+                            "evidence_ids": ["art-web-1"],
+                        }
+                    ],
+                }
+            ),
+            metadata={},
+        )
+
+    monkeypatch.setattr(
+        worker_executor_module,
+        "resolve_execute_target",
+        lambda *args, **kwargs: (object(), "direct"),
+    )
+    monkeypatch.setattr(WorkerExecutorV2, "_invoke_leaf", invoke)
+    monkeypatch.setattr(WorkerExecutorV2, "_timeout_for", lambda self, step: 10)
+
+    result = await WorkerExecutorV2(FakeHarness(), FakeSession()).execute(
+        ResearchTask(
+            task_id="t_timeout",
+            objective="collect evidence",
+            step_type="research",
+            step_index=0,
+        ),
+        ResearchContext(run_id="run-worker", query="collect evidence"),
+    )
+
+    assert calls == 2
+    assert result.ok is True
+    assert result.status == "done"
+    assert result.fail_reason == ""
+    assert result.metadata["provider_retry_count"] == 1
+
+
 def test_worker_model_timeout_inherits_global_timeout(monkeypatch):
     monkeypatch.setenv("LLM_TIMEOUT_SEC", "180")
     monkeypatch.delenv("LLM_WORKER_TIMEOUT_SEC", raising=False)

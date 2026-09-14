@@ -99,11 +99,6 @@ def worker_row(task_id: str, step: PlanStep, ok: bool, result: StepResult | None
             "evidence_ids": list(payload.get("evidence_ids") or [])[:20],
             "artifact_ids": list(payload.get("artifact_ids") or [])[:20],
             "candidates": list(payload.get("candidates") or [])[:16],
-            "evidence_metadata": [
-                dict(item)
-                for item in payload.get("evidence_metadata") or []
-                if isinstance(item, dict)
-            ][:20],
             "stop_reason": str(payload.get("stop_reason") or ""),
         },
     }

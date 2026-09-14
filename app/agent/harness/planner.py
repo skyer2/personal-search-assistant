@@ -115,7 +115,7 @@ def understand_task(task_query: str, has_uploaded_files: bool = False) -> TaskIn
 
 
 def build_plan(intent: TaskIntent) -> ExecutionPlan:
-    from app.research.planning.policy import tools_for_sources
+    from app.research.workers.registry import worker_tools_for_step
 
     steps: list[PlanStep] = []
     if intent.needs_file_read:
@@ -123,7 +123,7 @@ def build_plan(intent: TaskIntent) -> ExecutionPlan:
             PlanStep(
                 step_type="file_read",
                 description="读取用户上传的附件内容",
-                allowed_tools=tools_for_sources(["file"]),
+                allowed_tools=worker_tools_for_step("file_read"),
             )
         )
     if intent.needs_network:
@@ -132,7 +132,7 @@ def build_plan(intent: TaskIntent) -> ExecutionPlan:
                 step_type="network_search",
                 description="检索互联网公开资料",
                 subagent="网络搜索助手",
-                allowed_tools=tools_for_sources(["web"]),
+                allowed_tools=worker_tools_for_step("network_search"),
             )
         )
     if intent.deliverable == "md":
@@ -251,8 +251,6 @@ def auto_resolve_clarification(intent: TaskIntent) -> TaskIntent:
 def apply_plan_edits(plan: ExecutionPlan, steps_payload: list[dict]) -> ExecutionPlan:
     new_steps: list[PlanStep] = []
     for item in steps_payload:
-        if not isinstance(item, dict):
-            continue
         step_type = str(item.get("step_type", "")).strip()
         if not step_type:
             continue

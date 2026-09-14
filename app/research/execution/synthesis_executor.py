@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,11 +18,17 @@ from langchain_core.messages import HumanMessage
 
 
 RETRYABLE_SYNTHESIS_FAILURES = frozenset(
-    {"provider_rate_limit", "provider_unavailable", "context_length_exceeded"}
+    {
+        "provider_rate_limit",
+        "provider_unavailable",
+        "context_length_exceeded",
+        "synthesis_timeout",
+    }
 )
 NON_RETRYABLE_SYNTHESIS_FAILURES = frozenset(
     {"provider_auth", "provider_bad_request", "run_token_cap", "run_llm_call_cap"}
 )
+_OUTPUT_TOKEN_LIMITS = {"normal": 3_000, "degraded": 1_800}
 
 
 def _failure_details(exc: Exception) -> tuple[str, str]:
@@ -176,8 +184,13 @@ class SynthesisExecutor:
         )
         gateway = LLMGateway(self.session.budget_manager)
         with gateway.execution_scope(phase="synthesis"):
+            output_token_limit = _OUTPUT_TOKEN_LIMITS.get(request.mode, 3_000)
+            invoke_target = model
+            bind = getattr(model, "bind", None)
+            if callable(bind):
+                invoke_target = bind(max_tokens=output_token_limit)
             response = await gateway.ainvoke(
-                model,
+                invoke_target,
                 [HumanMessage(content=self._prompt(request, context))],
                 config,
             )
@@ -195,11 +208,19 @@ class SynthesisExecutor:
             f"要求：{mode_instruction}",
             "硬性约束：只允许使用下方研究摘要和证据摘录；禁止联网、读取文件或发明新证据。",
             "冲突规则：resolved 只能采用指定 winner；expected_disagreement 必须说明口径差异；unresolved 只能披露不确定性，禁止自行选择任何一方。",
+            "引用规则：正文每个含数字、金额、日期或百分比的事实句末尾必须标注证据摘录行前缀给出的 [n]；禁止使用 E 编号、artifact 编号或自造编号。",
+            "交付规则：不要输出 JSON，也不要说明文件生成能力；PDF/Markdown 由运行时统一生成。",
+            "输出长度：normal 不超过2500字；degraded 不超过1500字。",
         ]
         evidence_lines: list[str] = []
         for digest in request.evidence_digests:
+            citation_label = (
+                f"[{digest.citation_number}]"
+                if digest.citation_number > 0
+                else "[未编号]"
+            )
             evidence_lines.append(
-                f"- {digest.evidence_id}｜{digest.title}｜{digest.locator}｜{digest.excerpt}"
+                f"- {citation_label}｜{digest.evidence_id}｜{digest.title}｜{digest.locator}｜{digest.excerpt}"
             )
         if not evidence_lines:
             evidence_lines.extend(f"- {item}" for item in request.evidence_refs[:80])
@@ -236,13 +257,57 @@ class SynthesisExecutor:
 
     def _response_content(self, response: Any) -> str:
         if isinstance(response, str):
-            return response
+            return self._clean_response_content(response)
         if isinstance(response, dict):
             content = response.get("content")
-            return str(content or "") if content is not None else ""
+            return self._clean_response_content(str(content or "")) if content is not None else ""
         if isinstance(response, list):
             return self._response_content(response[-1]) if response else ""
-        return str(getattr(response, "content", "") or "")
+        return self._clean_response_content(str(getattr(response, "content", "") or ""))
+
+    @staticmethod
+    def _clean_response_content(content: str) -> str:
+        cleaned = re.sub(
+            r"```json\s*.*?```",
+            "",
+            content.strip(),
+            flags=re.DOTALL,
+        )
+        decoder = json.JSONDecoder()
+        cursor = 0
+        while True:
+            start = cleaned.find("{", cursor)
+            if start < 0:
+                break
+            try:
+                payload, end = decoder.raw_decode(cleaned, start)
+            except json.JSONDecodeError:
+                cursor = start + 1
+                continue
+            if (
+                isinstance(payload, dict)
+                and "ok" in payload
+                and ("findings" in payload or "summary" in payload)
+            ):
+                cleaned = cleaned[:start] + cleaned[end:]
+                cursor = 0
+            else:
+                cursor = end
+        cleaned = "\n".join(
+            line
+            for line in cleaned.splitlines()
+            if not (
+                line.lstrip().startswith('{"ok":')
+                and line.rstrip().endswith("}")
+            )
+        )
+        cleaned = re.sub(
+            r"^说明：当前对话环境无法直接生成或附带PDF文件.*(?:\n|$)",
+            "",
+            cleaned,
+            flags=re.MULTILINE,
+        )
+        return cleaned.strip()
 
     def _timeout_sec(self, requested_timeout_sec: float | None = None) -> float:
         config = self.harness.harness_config

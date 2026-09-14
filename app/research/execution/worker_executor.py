@@ -47,12 +47,25 @@ class WorkerExecutorV2:
         return model_timeout_sec("LLM_WORKER_TIMEOUT_SEC")
 
     @staticmethod
-    def _soft_deadline_delay(timeout_sec: float) -> float:
+    def _soft_deadline_delay(
+        timeout_sec: float,
+        *,
+        reserve_model_calls: int = 1,
+    ) -> float:
         model_timeout = WorkerExecutorV2._model_timeout_sec()
+        reserved_sec = max(1, int(reserve_model_calls)) * model_timeout + 10.0
         return max(
             10.0,
-            min(float(timeout_sec) * 0.8, float(timeout_sec) - model_timeout - 10.0),
+            min(float(timeout_sec) * 0.8, float(timeout_sec) - reserved_sec),
         )
+
+    @staticmethod
+    def _is_transient_provider_connection_error(exc: Exception) -> bool:
+        error_type = type(exc).__name__
+        return error_type in {
+            "APIConnectionError",
+            "APIConnectionTimeoutError",
+        } or isinstance(exc, ConnectionError)
 
     async def execute(
         self,
@@ -253,20 +266,40 @@ class WorkerExecutorV2:
                 if simple_fact
                 else self._invoke_leaf
             )
-            result = await asyncio.wait_for(
-                invoke_leaf(
-                    task=task,
-                    context=context,
-                    step=step,
-                    step_index=step_index,
-                    execute_agent=execute_agent,
-                    dispatch_mode=dispatch_mode,
-                    tool_usage=tool_usage,
-                    timeout_sec=timeout_sec,
-                    **({} if simple_fact else {"worker_lease_id": lease_id}),
-                ),
-                timeout=timeout_sec,
-            )
+            result = None
+            for provider_attempt in range(2):
+                try:
+                    result = await asyncio.wait_for(
+                        invoke_leaf(
+                            task=task,
+                            context=context,
+                            step=step,
+                            step_index=step_index,
+                            execute_agent=execute_agent,
+                            dispatch_mode=dispatch_mode,
+                            tool_usage=tool_usage,
+                            timeout_sec=timeout_sec,
+                            **({} if simple_fact else {"worker_lease_id": lease_id}),
+                        ),
+                        timeout=timeout_sec,
+                    )
+                    break
+                except Exception as exc:
+                    no_work_completed = not tool_usage.get("tool_calls") and not tool_usage.get(
+                        "tools_invoked"
+                    )
+                    if (
+                        provider_attempt == 0
+                        and no_work_completed
+                        and self._is_transient_provider_connection_error(exc)
+                    ):
+                        tool_usage = {"tool_calls": 0, "tools_invoked": []}
+                        await asyncio.sleep(1)
+                        continue
+                    raise
+            if result is None:
+                raise RuntimeError("worker_invoke_returned_no_result")
+            result.metadata["provider_retry_count"] = provider_attempt
             result = self.harness._enrich_worker_result(step, result, self.session.state)
             payload = result.metadata.get("worker_payload")
             if not isinstance(payload, dict):
@@ -350,6 +383,9 @@ class WorkerExecutorV2:
                 metrics=self._worker_metrics(context, task, tool_usage),
                 queue_ms=queue_ms,
             )
+            worker_result.metadata["provider_retry_count"] = int(
+                result.metadata.get("provider_retry_count") or 0
+            )
             worker_result.metrics.update(
                 {
                     "final_ai_found": bool(result.metadata.get("final_ai_found")),
@@ -390,6 +426,7 @@ class WorkerExecutorV2:
             return recovered
         except asyncio.TimeoutError:
             worker_ok = False
+            finalization_reason = str(tool_usage.get("finalization_reason") or "")
             recovered = self._salvage_or_fail(
                 task,
                 context,
@@ -401,6 +438,7 @@ class WorkerExecutorV2:
                 status="failed",
                 ok=False,
                 queue_ms=queue_ms,
+                stop_reason=finalization_reason,
             )
             worker_ok = recovered.ok
             worker_result = recovered
@@ -596,7 +634,20 @@ class WorkerExecutorV2:
         tool_gateway = ToolGateway(
             **self._worker_budget_limits(step),
             soft_deadline_at=time.monotonic()
-            + WorkerExecutorV2._soft_deadline_delay(timeout_sec),
+            + WorkerExecutorV2._soft_deadline_delay(
+                timeout_sec,
+                reserve_model_calls=(
+                    2
+                    if bool(
+                        getattr(
+                            self.harness.harness_config,
+                            "structured_output_retry",
+                            True,
+                        )
+                    )
+                    else 1
+                ),
+            ),
         )
         messages: list[Any] = []
         tools_invoked: list[str] = []

@@ -109,6 +109,8 @@ Each call receives `max_output_tokens_per_call`; a small task cannot consume the
 
 The three retrieval resources are independent. `batch_search(N)` consumes `N` search queries and one logical tool invocation, but no fetch budget. `batch_fetch(N)` consumes `N` fetched sources and one logical tool invocation, but no search budget. A worker can therefore execute the intended `batch_search → batch_fetch → structured result` sequence without a search quota accidentally blocking all fetches.
 
+Tool authorization has one source. Worker profiles define the tool registry; planning, prompt context, runtime authorization, and worker-profile selection all consume `worker_tools_for_step()`. A research worker therefore sees the same batch search/fetch and JIT read tools that the runtime authorizes. Source constraints still remove web or file tools before the plan is emitted.
+
 ## Workers and Ingest
 
 Workers are bounded leaf researchers. They do not run a second deep-research loop and never judge global coverage. A worker stops normally with `local_evidence_sufficient`, `no_more_useful_evidence`, `soft_budget_finalize`, or `soft_deadline_finalize`.
@@ -116,6 +118,8 @@ Workers are bounded leaf researchers. They do not run a second deep-research loo
 Finalization is armed before an LLM request when projected usage would risk the token ceiling, when final LLM calls must be preserved, or when the wall clock must reserve one model call plus ten seconds. The token threshold is adaptive between 40% and 80%. The current request receives a Finalization Mode instruction, retrieval is disabled, and remaining capacity is preserved for the structured WorkerResult. Hard token, call, and timeout caps remain runaway-protection ceilings, not normal stop conditions. On a true timeout or hard budget stop, artifact-backed evidence is salvaged and the exact failure reason is preserved.
 
 Research workers deliver evidence-backed findings, not search logs. The final answer must come from a non-tool assistant message and contain JSON with `summary`, `findings`, `gaps`, `conflicts`, and `stop_reason`. Each finding requires `claim` plus verbatim `evidence_ids` or `artifact_ids`; invented IDs are rejected. A single Finalization-only retry can re-read existing artifacts/evidence but cannot search or fetch. Runtime ingestion resolves artifact and locator references to admitted canonical evidence IDs, emits accepted/rejected diagnostics, and allows deterministic compression only as a marked partial fallback when facts and admitted evidence both exist.
+
+Objective evidence metadata is runtime-owned. Search providers, fetch tools, and the tool output contract persist `published_at` on the artifact; ingestion reads that metadata when constructing `EvidenceRecord`. Workers do not guess publication dates. Coverage continues to use its existing freshness algorithm, but no longer loses provider-provided dates merely because the final Worker JSON omitted metadata.
 
 Each `researcher` result is ingested immediately with the same deterministic ingestion contract. The graph still waits for required workers at the fan-in boundary, but evidence, claims, and findings become available as each worker returns. `ingest_findings` then processes only WorkerResults that were not already ingested; replay never duplicates records. If partial-wave coverage already satisfies the Brief, only optional or speculative workers may be skipped. Required workers are never cancelled for latency.
 
@@ -143,11 +147,13 @@ Coverage is monotonic:
 
 ## Synthesis and Partial Delivery
 
-Synthesis reads a Brief-native context built from evidence digests, findings, claims, worker limitations, coverage gaps, and structured conflict resolutions. It does not read legacy coverage state and cannot search.
+Synthesis reads a deterministic Evidence Pack built from Brief criteria, evidence-backed findings, claims, evidence records, and structured conflict resolutions. The pack is criterion-balanced, deduplicated, quality-ranked, and bounded to 16K input tokens normally and 8K on compact retry, with a 30K hard maximum. It does not read legacy coverage state and cannot search.
+
+Canonical evidence IDs are bound to stable citation numbers during ingestion. Synthesis sees those numbers in its prompt; after generation, the runtime projects the selected evidence-backed findings onto numeric sentences and rejects unknown citation numbers. Internal worker JSON is removed from user-facing Markdown and PDF deliverables.
 
 Conflict reconciliation distinguishes `resolved`, `expected_disagreement`, and `unresolved`. An unresolved conflict bound to a required criterion is blocking. Synthesis must use the specified winner for resolved conflicts, explain scope/context for expected disagreement, disclose uncertainty for non-blocking unresolved conflicts, and force degraded mode for blocking unresolved conflicts. It must never choose a winner for an unresolved conflict.
 
-The synthesis model is invoked directly through the LLM gateway with `ainvoke`. A normal synthesis attempt uses the shared model timeout, defaulting to `LLM_TIMEOUT_SEC`. Only provider rate limiting, provider unavailability, and context-length failures may retry once in degraded mode. Timeout, auth, bad request, content filter, and budget failures do not retry. `HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC` and `HARNESS_SYNTHESIS_RETRY_TIMEOUT_SEC` override the defaults only when explicitly configured.
+The synthesis model is invoked directly through the LLM gateway with `ainvoke`. Production deployments can select a faster synthesis-only model with `LLM_SYNTHESIS_MODEL` and cap output with `LLM_SYNTHESIS_MAX_TOKENS`; the normal and compact prompts are additionally bounded to 3,000 and 1,800 output tokens. A normal synthesis attempt uses the shared model timeout, defaulting to `LLM_TIMEOUT_SEC`. Provider rate limiting, provider unavailability, context-length failures, and synthesis timeout may retry once with the smaller compact Evidence Pack. Auth, bad request, content filter, and budget failures do not retry. `LLM_SYNTHESIS_TIMEOUT_SEC`, `HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC`, and `HARNESS_SYNTHESIS_RETRY_TIMEOUT_SEC` override the defaults only when explicitly configured; the compact retry timeout is additionally capped at 90 seconds.
 
 If synthesis tokens are low or the provider fails while usable evidence exists, the runtime renders a deterministic user-readable partial result. Partial content:
 

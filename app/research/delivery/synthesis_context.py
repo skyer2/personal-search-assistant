@@ -15,6 +15,7 @@ class EvidenceDigest:
     locator: str
     excerpt: str
     supported_claims: tuple[str, ...] = ()
+    citation_number: int = 0
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class SynthesisContextBuilder:
                 item.locator[:240],
                 item.excerpt[:180],
                 item.supported_claims[:2],
+                item.citation_number,
             )
             for item in context.evidence_digests
         )

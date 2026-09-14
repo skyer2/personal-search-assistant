@@ -353,10 +353,10 @@ def _markdown_to_story(
         if bullet:
             flush_paragraph()
             while index < len(lines):
-                item = _parse_bullet(lines[index].strip())
-                if item is None:
+                bullet_item = _parse_bullet(lines[index].strip())
+                if bullet_item is None:
                     break
-                story.append(Paragraph(f"- {_format_inline(item)}", styles["list"]))
+                story.append(Paragraph(f"- {_format_inline(bullet_item)}", styles["list"]))
                 index += 1
             continue
 
@@ -509,9 +509,11 @@ def _build_code_block(text: str, styles: dict[str, ParagraphStyle]):
             continue
         for start in range(0, len(line), 92):
             wrapped_lines.append(line[start : start + 92])
-    escaped = html.escape("\n".join(wrapped_lines) or " ").replace(" ", "&nbsp;").replace("\n", "<br/>")
-    inner = Paragraph(escaped, styles["code"])
-    table = Table([[inner]], colWidths=[_CONTENT_WIDTH])
+    rows = [
+        [Paragraph(html.escape(line or " ").replace(" ", "&nbsp;"), styles["code"])]
+        for line in wrapped_lines or [" "]
+    ]
+    table = Table(rows, colWidths=[_CONTENT_WIDTH])
     table.setStyle(
         TableStyle(
             [

@@ -57,6 +57,31 @@ def _evidence_id(task_id: str, locator: str, index: int, requested: str = "") ->
     return f"evidence_{digest}"
 
 
+def _runtime_artifact_metadata(
+    artifact_ref: str,
+    locator: str,
+    evidence_ref: str = "",
+) -> dict[str, Any]:
+    """Resolve objective evidence metadata from runtime-owned artifact records."""
+    try:
+        from app.agent.harness.artifacts import get_artifact_store
+        from app.agent.harness.evidence_store import get_evidence_store
+
+        artifact_store = get_artifact_store()
+        artifact = artifact_store.get(artifact_ref) if artifact_ref else None
+        if artifact is None and evidence_ref:
+            span = get_evidence_store().get(evidence_ref)
+            artifact_id = str(getattr(span, "artifact_id", "") or "")
+            artifact = artifact_store.get(artifact_id) if artifact_id else None
+        if artifact is None and locator:
+            for item in artifact_store.iter_artifacts():
+                if item.locator == locator and item.metadata.get("published_at"):
+                    return dict(item.metadata)
+        return dict(artifact.metadata) if artifact is not None else {}
+    except Exception:
+        return {}
+
+
 def _prepare_evidence(rows: list[dict[str, Any]]) -> tuple[list[EvidenceRecord], list[dict[str, Any]]]:
     records: list[EvidenceRecord] = []
     prepared: list[dict[str, Any]] = []
@@ -72,23 +97,19 @@ def _prepare_evidence(rows: list[dict[str, Any]]) -> tuple[list[EvidenceRecord],
             locators = [f"evidence:{item}" for item in requested_ids]
         row_evidence: list[EvidenceRecord] = []
         source_quality = str(payload.get("source_quality") or "")
-        evidence_metadata = [
-            dict(item)
-            for item in payload.get("evidence_metadata") or []
-            if isinstance(item, dict)
-        ]
         for index, locator in enumerate(locators):
             requested = requested_ids[index] if index < len(requested_ids) else ""
-            metadata = next(
-                (
-                    item
-                    for item in evidence_metadata
-                    if str(item.get("evidence_id") or "") == requested
-                    or str(item.get("source") or item.get("locator") or "") == locator
-                ),
-                {},
-            )
             tier, authority = _authority(locator, source_quality)
+            artifact_ref = str(
+                payload.get("artifact_ref")
+                or (artifact_ids[index] if index < len(artifact_ids) else "")
+                or ""
+            )
+            runtime_metadata = _runtime_artifact_metadata(
+                artifact_ref,
+                locator,
+                requested,
+            )
             record = EvidenceRecord(
                 evidence_id=_evidence_id(task_id, locator, index, requested),
                 source_id=registrable_domain(locator) or locator,
@@ -96,23 +117,17 @@ def _prepare_evidence(rows: list[dict[str, Any]]) -> tuple[list[EvidenceRecord],
                 locator=locator,
                 retrieved_at=str(payload.get("retrieved_at") or _now()),
                 published_at=str(
-                    metadata.get("published_at")
-                    or payload.get("published_at")
+                    runtime_metadata.get("published_at")
                     or ""
                 ),
                 effective_at=str(
-                    metadata.get("effective_at")
-                    or payload.get("effective_at")
+                    runtime_metadata.get("effective_at")
                     or ""
                 ),
                 source_tier=tier,
                 authority_score=authority,
                 excerpt_ref=str(payload.get("excerpt_ref") or ""),
-                artifact_ref=str(
-                    payload.get("artifact_ref")
-                    or (artifact_ids[index] if index < len(artifact_ids) else "")
-                    or ""
-                ),
+                artifact_ref=artifact_ref,
                 language=str(payload.get("language") or ""),
                 task_id=task_id,
                 run_id=str(row.get("run_id") or ""),
