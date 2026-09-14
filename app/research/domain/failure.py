@@ -50,7 +50,14 @@ def classify_failure(code: str, *, message: str = "") -> FailureInfo:
         "provider_unavailable", "network_error",
     }:
         return failure_info(code, FailureClass.RECOVERABLE, message=message, retryable=True)
-    if normalized in {"coverage_gap", "evidence_conflict", "unsupported_claim", "quality_failed"}:
+    if normalized in {
+        "coverage_gap",
+        "evidence_conflict",
+        "unsupported_claim",
+        "quality_failed",
+        "no_accepted_findings",
+        "no_usable_evidence",
+    }:
         return failure_info(code, FailureClass.SEMANTIC, message=message)
     if normalized in {
         "run_token_cap", "research_phase_token_cap", "run_llm_call_cap", "tool_call_cap",

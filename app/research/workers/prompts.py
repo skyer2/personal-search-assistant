@@ -34,5 +34,7 @@ RESEARCH_TASK_SYSTEM_PROMPT = """
 - 收到 Finalization Mode 或预算软停止提示后，禁止再检索；立即只输出结构化 JSON，并填写 stop_reason。
 - 工具返回的是 snippet + artifact_id；需要原文时 read_artifact / read_evidence。
 - 禁止联网若允许工具里没有 internet_search / batch_search。
-- 完成后只输出结构化 JSON（summary/facts/sources/findings/evidence_ids），不要生成 todo-list。
+- 完成后只输出结构化 JSON（summary/findings/gaps/conflicts/stop_reason），不要生成 todo-list。
+- 你的交付物是 evidence-backed findings：每个 claim 至少绑定一个工具返回的真实 evidence_id 或 artifact_id；禁止自造 E1、E2、source1。
+- 没有可绑定证据时不得输出 supported finding；不要把 batch_search 原始结果或网页全文当作最终答案。
 """

@@ -20,6 +20,13 @@ from app.agent.harness.artifacts import Artifact, ArtifactStore, get_artifact_st
 _TOKEN_RE = re.compile(r"[\w\u3400-\u9fff]{2,}")
 
 
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class EvidenceSpan:
     evidence_id: str
@@ -51,7 +58,7 @@ class EvidenceSpan:
             source_kind=str(row.get("source_kind") or "text"),
             source_quality=str(row.get("source_quality") or "unknown"),
             timestamp=str(row.get("timestamp") or datetime.now().isoformat()),
-            step_index=int(row.get("step_index") if row.get("step_index") is not None else -1),
+            step_index=_safe_int(row.get("step_index"), -1),
             step_type=str(row.get("step_type") or ""),
             metadata=dict(row.get("metadata") or {}),
         )
@@ -247,38 +254,25 @@ class EvidenceStore:
         raw_findings = payload.get("findings") if isinstance(payload, dict) else None
         if isinstance(raw_findings, list) and raw_findings:
             for item in raw_findings[:20]:
-                if isinstance(item, str):
-                    finding, _ = self.bind_fact(
-                        item,
-                        artifact=primary,
-                        source_kind=_kind_from_step(step_type),
-                        step_index=step_index,
-                        step_type=step_type,
-                    )
-                    findings.append(finding)
-                    continue
                 if not isinstance(item, dict):
                     continue
                 claim = str(item.get("claim") or item.get("text") or "").strip()
                 if not claim:
                     continue
-                ids = [str(x) for x in (item.get("evidence_ids") or []) if x]
-                if not ids:
-                    finding, _ = self.bind_fact(
-                        claim,
-                        artifact=primary,
-                        locator=str(item.get("locator") or ""),
-                        source_kind=_kind_from_step(step_type),
-                        step_index=step_index,
-                        step_type=step_type,
-                        confidence=float(item.get("confidence") or 1.0),
-                    )
-                    findings.append(finding)
-                else:
+                evidence_refs = [
+                    str(value)
+                    for value in [
+                        *(item.get("evidence_ids") or []),
+                        item.get("evidence_id") or "",
+                    ]
+                    if str(value).strip()
+                ]
+                known_ids = [value for value in evidence_refs if self.get(value) is not None]
+                if known_ids:
                     findings.append(
                         self.add_finding(
                             claim,
-                            evidence_ids=ids,
+                            evidence_ids=known_ids,
                             confidence=float(item.get("confidence") or 1.0),
                             freshness=str(item.get("freshness") or ""),
                             source_quality=str(item.get("source_quality") or "unknown"),
@@ -286,6 +280,41 @@ class EvidenceStore:
                             claim_id=str(item.get("claim_id") or ""),
                         )
                     )
+                    continue
+
+                artifact_refs = [
+                    str(value)
+                    for value in [
+                        *(item.get("artifact_ids") or []),
+                        item.get("artifact_id") or "",
+                    ]
+                    if str(value).strip()
+                ]
+                locator_refs = [
+                    str(value)
+                    for value in [
+                        *(item.get("sources") or []),
+                        item.get("source") or "",
+                        item.get("locator") or "",
+                    ]
+                    if str(value).strip()
+                ]
+                artifact = self._artifact_for_refs(
+                    [*artifact_refs, *locator_refs], artifacts
+                )
+                locator_ref = locator_refs[0] if locator_refs else ""
+                if artifact is None and not locator_ref:
+                    continue
+                finding, _ = self.bind_fact(
+                    claim,
+                    artifact=artifact,
+                    locator=locator_ref,
+                    source_kind=_kind_from_step(step_type),
+                    step_index=step_index,
+                    step_type=step_type,
+                    confidence=float(item.get("confidence") or 1.0),
+                )
+                findings.append(finding)
             self._record_conflicts(payload)
             return findings
 
@@ -310,6 +339,21 @@ class EvidenceStore:
             findings.append(finding)
         self._record_conflicts(payload)
         return findings
+
+    @staticmethod
+    def _artifact_for_refs(
+        refs: list[str],
+        artifacts: list[Artifact],
+    ) -> Artifact | None:
+        for ref in refs:
+            for artifact in artifacts:
+                if ref in {
+                    artifact.artifact_id,
+                    artifact.locator,
+                    artifact.title,
+                }:
+                    return artifact
+        return None
 
     def _record_conflicts(self, payload: dict[str, Any]) -> None:
         for item in payload.get("conflicts") or []:

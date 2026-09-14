@@ -57,7 +57,7 @@ def test_structured_validation():
     step = PlanStep(step_type="network_search", description="s", subagent="网络搜索助手")
     prose = parse_worker_payload("这是一段散文，没有 JSON", step_type="network_search")
     ok, reason = validate_structured_worker_payload(prose, step, require_json=True)
-    assert not ok and reason == "invalid_structured_output"
+    assert not ok and reason == "invalid_structured_worker_result"
 
     structured = parse_worker_payload(
         json.dumps(
@@ -66,6 +66,12 @@ def test_structured_validation():
                 "summary": "行业增速15%",
                 "facts": ["2025年增速约15%"],
                 "sources": ["https://example.com"],
+                "findings": [
+                    {
+                        "claim": "2025年行业增速约15%",
+                        "evidence_ids": ["https://example.com"],
+                    }
+                ],
                 "worker": "网络搜索助手",
                 "step_type": "network_search",
             }

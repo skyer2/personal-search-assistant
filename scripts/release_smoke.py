@@ -24,7 +24,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.agent.harness.loop import AgentHarness
-from app.agent.harness.run_budget import BudgetReservationError
 from app.agent.harness.tool_contract import apply_tool_output_contract
 from app.agent.harness.token_counter import estimate_tokens
 from app.config.loader import get_harness_config, reload_harness_config
@@ -186,7 +185,31 @@ class SmokeLLMProvider:
             }
         }
         await asyncio.sleep(0.01)
-        raise BudgetReservationError("research_token_cap")
+        yield {
+            "worker": {
+                "messages": [
+                    AIMessage(
+                        content=json.dumps(
+                            {
+                                "ok": True,
+                                "summary": "Deterministic evidence supports a traceable finding.",
+                                "findings": [
+                                    {
+                                        "claim": "Deterministic evidence supports a traceable finding.",
+                                        "artifact_ids": [str(card.get("artifact_id") or "")],
+                                        "confidence": 0.9,
+                                    }
+                                ],
+                                "gaps": [],
+                                "conflicts": [],
+                                "stop_reason": "local_evidence_sufficient",
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                ]
+            }
+        }
 
     def with_structured_output(self, schema: dict[str, Any]) -> Any:
         provider = self

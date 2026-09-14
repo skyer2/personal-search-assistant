@@ -316,7 +316,14 @@ def test_worker_success_event_carries_budget_snapshot(monkeypatch):
         }
         return StepResult(
             step_type="network_search",
-            content=json.dumps({"ok": True, "summary": "found", "evidence_ids": ["ev-1"]}),
+            content=json.dumps(
+                {
+                    "ok": True,
+                    "summary": "found",
+                    "evidence_ids": ["ev-1"],
+                    "findings": [{"claim": "found", "evidence_ids": ["ev-1"]}],
+                }
+            ),
             metadata={},
         )
 

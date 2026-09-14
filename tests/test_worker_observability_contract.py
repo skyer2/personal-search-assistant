@@ -69,7 +69,7 @@ def test_worker_started_survives_start_span_failure(monkeypatch):
                 {
                     "ok": True,
                     "summary": "found",
-                    "findings": [],
+                    "findings": [{"claim": "found", "evidence_ids": ["ev-1"]}],
                     "evidence_ids": ["ev-1"],
                 }
             ),

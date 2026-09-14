@@ -102,8 +102,7 @@ class GenerousBaselineAgent:
         supplement = run_batch_search(["latest agent evidence", "company team evidence"], max_results=1)
         artifact_ids = [
             str(row.get("artifact_id") or "")
-            for result in fetched.get("results") or []
-            for row in result.get("results") or []
+            for row in fetched.get("results") or []
         ][:3]
         source_urls = [url for url in urls if url]
 
@@ -121,6 +120,20 @@ class GenerousBaselineAgent:
                                 "facts": [
                                     "The query has deterministic search and fetched evidence.",
                                     "Supplementary search confirmed the initial evidence direction.",
+                                ],
+                                "findings": [
+                                    {
+                                        "claim": "The query has deterministic search and fetched evidence.",
+                                        "evidence_ids": artifact_ids[:1],
+                                        "artifact_ids": artifact_ids[:1],
+                                        "confidence": 0.9,
+                                    },
+                                    {
+                                        "claim": "Supplementary search confirmed the initial evidence direction.",
+                                        "evidence_ids": artifact_ids[:1],
+                                        "artifact_ids": artifact_ids[:1],
+                                        "confidence": 0.85,
+                                    },
                                 ],
                                 "sources": source_urls,
                                 "evidence_ids": artifact_ids,

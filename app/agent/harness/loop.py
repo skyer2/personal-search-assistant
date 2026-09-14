@@ -63,6 +63,7 @@ from app.agent.harness.orchestration import (
     step_idempotency_key,
     task_query_fingerprint,
     validate_structured_worker_payload,
+    worker_payload_from_dict,
 )
 from app.agent.harness.worker_runtime import resolve_execute_target
 from app.agent.harness.step_budget import worker_retrieval_budget
@@ -654,18 +655,10 @@ class AgentHarness:
         payload_raw = (result.metadata or {}).get("worker_payload") or {}
         if not isinstance(payload_raw, dict):
             return False, "invalid_structured_output"
-        from app.agent.harness.orchestration import WorkerResultPayload
-
-        payload = WorkerResultPayload(
-            ok=bool(payload_raw.get("ok", True)),
-            summary=str(payload_raw.get("summary", "")),
-            facts=list(payload_raw.get("facts") or []),
-            sources=list(payload_raw.get("sources") or []),
-            findings=list(payload_raw.get("findings") or []),
-            confidence=float(payload_raw.get("confidence", 1.0) or 1.0),
-            error_code=str(payload_raw.get("error_code", "")),
-            worker=str(payload_raw.get("worker", "")),
-            step_type=str(payload_raw.get("step_type", step.step_type)),
+        payload = worker_payload_from_dict(
+            payload_raw,
+            step_type=step.step_type,
+            subagent=step.subagent or "",
         )
         return validate_structured_worker_payload(
             payload,
@@ -754,6 +747,7 @@ class AgentHarness:
             step_type=step.step_type,
             subagent=step.subagent or "",
         )
+        prevalidation_failed = result.metadata.get("structured_output_valid") is False
         if not (payload.facts or payload.sources or payload.findings):
             payload = salvage_payload_from_artifacts(
                 payload,
@@ -801,6 +795,7 @@ class AgentHarness:
         elif (
             (payload.facts or payload.sources or payload.findings)
             and not result.metadata.get("step_timeout")
+            and not prevalidation_failed
         ):
             payload.ok = True
             payload.error_code = ""
@@ -811,9 +806,14 @@ class AgentHarness:
             step,
             require_json=self.harness_config.require_structured_worker_output,
         )
-        if struct_ok:
+        if struct_ok and not prevalidation_failed:
             result.metadata.pop("invalid_structured_output", None)
         else:
+            if prevalidation_failed:
+                struct_reason = str(
+                    result.metadata.get("error_code")
+                    or "invalid_structured_worker_result"
+                )
             result.metadata["invalid_structured_output"] = True
             result.metadata["error_code"] = struct_reason
             payload.ok = False

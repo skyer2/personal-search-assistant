@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.research.claims.extract import extract_claims_from_worker_results
@@ -65,6 +66,7 @@ def _prepare_evidence(rows: list[dict[str, Any]]) -> tuple[list[EvidenceRecord],
         payload = dict(row.get("payload") or {})
         sources = list(payload.get("sources") or row.get("sources") or [])
         requested_ids = [str(item) for item in payload.get("evidence_ids") or [] if str(item).strip()]
+        artifact_ids = [str(item) for item in payload.get("artifact_ids") or [] if str(item).strip()]
         locators = [_source_locator(item) for item in sources if _source_locator(item).strip()]
         if not locators:
             locators = [f"evidence:{item}" for item in requested_ids]
@@ -106,7 +108,11 @@ def _prepare_evidence(rows: list[dict[str, Any]]) -> tuple[list[EvidenceRecord],
                 source_tier=tier,
                 authority_score=authority,
                 excerpt_ref=str(payload.get("excerpt_ref") or ""),
-                artifact_ref=str(payload.get("artifact_ref") or ""),
+                artifact_ref=str(
+                    payload.get("artifact_ref")
+                    or (artifact_ids[index] if index < len(artifact_ids) else "")
+                    or ""
+                ),
                 language=str(payload.get("language") or ""),
                 task_id=task_id,
                 run_id=str(row.get("run_id") or ""),
@@ -117,6 +123,73 @@ def _prepare_evidence(rows: list[dict[str, Any]]) -> tuple[list[EvidenceRecord],
         row["payload"] = payload
         prepared.append(row)
     return records, prepared
+
+
+@dataclass
+class ResolvedFinding:
+    claim: str
+    evidence_ids: list[str]
+    accepted: bool
+    reason: str
+    raw_refs: list[str] = field(default_factory=list)
+
+
+def _evidence_indexes(
+    admitted: list[EvidenceRecord],
+) -> tuple[dict[str, EvidenceRecord], dict[str, EvidenceRecord], dict[str, EvidenceRecord]]:
+    by_id: dict[str, EvidenceRecord] = {}
+    by_artifact: dict[str, EvidenceRecord] = {}
+    by_locator: dict[str, EvidenceRecord] = {}
+    for record in admitted:
+        by_id[record.evidence_id] = record
+        if record.artifact_ref:
+            by_artifact.setdefault(record.artifact_ref, record)
+        if record.locator:
+            by_locator.setdefault(record.locator, record)
+    return by_id, by_artifact, by_locator
+
+
+def _finding_refs(raw_finding: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("evidence_ids", "artifact_ids", "sources"):
+        values.extend(str(item) for item in raw_finding.get(key) or [] if str(item).strip())
+    for key in ("evidence_id", "artifact_id", "source", "locator"):
+        value = str(raw_finding.get(key) or "").strip()
+        if value:
+            values.append(value)
+    return list(dict.fromkeys(values))
+
+
+def resolve_finding_evidence_refs(
+    raw_finding: dict[str, Any],
+    admitted_evidence: list[EvidenceRecord],
+    *,
+    indexes: tuple[
+        dict[str, EvidenceRecord],
+        dict[str, EvidenceRecord],
+        dict[str, EvidenceRecord],
+    ]
+    | None = None,
+) -> ResolvedFinding:
+    """Resolve model refs to admitted canonical evidence IDs without inventing IDs."""
+    by_id, by_artifact, by_locator = indexes or _evidence_indexes(admitted_evidence)
+    claim = str(raw_finding.get("claim") or raw_finding.get("summary") or "").strip()
+    raw_refs = _finding_refs(raw_finding)
+    if not claim:
+        return ResolvedFinding(claim, [], False, "missing_claim", raw_refs)
+    if not raw_refs:
+        return ResolvedFinding(claim, [], False, "missing_evidence_refs", raw_refs)
+
+    evidence_ids: list[str] = []
+    for ref in raw_refs:
+        record = by_id.get(ref) or by_artifact.get(ref) or by_locator.get(ref)
+        if record is None:
+            continue
+        if record.evidence_id not in evidence_ids:
+            evidence_ids.append(record.evidence_id)
+    if not evidence_ids:
+        return ResolvedFinding(claim, [], False, "unresolved_evidence_refs", raw_refs)
+    return ResolvedFinding(claim, evidence_ids, True, "", raw_refs)
 
 
 def _task_metadata(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -203,76 +276,103 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
         claims_by_task.setdefault(claim.task_id, []).append(claim.claim_id)
 
     findings = []
+    finding_diagnostics: list[dict[str, Any]] = []
+    raw_finding_count = 0
+    accepted_finding_count = 0
+    rejected_finding_count = 0
+    unresolved_evidence_ref_count = 0
+    partial_fallback_finding_count = 0
+    evidence_indexes = _evidence_indexes(admission.admitted)
     for row in prepared_rows:
         payload = dict(row.get("payload") or {})
         meta = metadata.get(str(row.get("task_id") or ""), {})
+        row_task_id = str(row.get("task_id") or "")
+        row_admitted_ids = [
+            str(item)
+            for item in payload.get("evidence_ids") or []
+            if str(item) in admitted_ids
+        ]
         payload_findings = [
             dict(item)
             for item in payload.get("findings") or []
             if isinstance(item, dict)
         ]
-        if payload_findings:
-            for raw_finding in payload_findings:
-                evidence_ids = [
-                    str(item)
-                    for item in raw_finding.get("evidence_ids") or []
-                    if str(item) in admitted_ids
-                ]
-                if not evidence_ids:
-                    continue
-                claim = str(
-                    raw_finding.get("claim")
-                    or raw_finding.get("summary")
-                    or ""
-                ).strip()
-                findings.append(
+        raw_finding_count += len(payload_findings)
+        accepted_for_row: list[dict[str, Any]] = []
+        for raw_finding in payload_findings:
+            resolved = resolve_finding_evidence_refs(
+                raw_finding,
+                admission.admitted,
+                indexes=evidence_indexes,
+            )
+            if not resolved.accepted:
+                rejected_finding_count += 1
+                unresolved_evidence_ref_count += len(resolved.raw_refs)
+                finding_diagnostics.append(
                     {
-                        **raw_finding,
-                        "evidence_ids": evidence_ids[:12],
-                        "claims": [claim] if claim else [],
-                        "supported_criteria": list(
-                            dict.fromkeys(
-                                [
-                                    *(
-                                        str(item)
-                                        for item in raw_finding.get("supported_criteria") or []
-                                        if str(item).strip()
-                                    ),
-                                    *(
-                                        str(item)
-                                        for item in meta.get("target_criteria") or []
-                                        if str(item).strip()
-                                    ),
-                                ]
-                            )
-                        ),
-                        "target_gaps": list(
-                            dict.fromkeys(
-                                [
-                                    *(
-                                        str(item)
-                                        for item in raw_finding.get("target_gaps") or []
-                                        if str(item).strip()
-                                    ),
-                                    *(
-                                        str(item)
-                                        for item in meta.get("target_gaps") or []
-                                        if str(item).strip()
-                                    ),
-                                ]
-                            )
-                        ),
-                        "claim_ids": claims_by_task.get(str(row.get("task_id") or ""), []),
-                        "wave_id": current_wave,
+                        "task_id": row_task_id,
+                        "claim": resolved.claim,
+                        "status": "rejected",
+                        "reason": resolved.reason,
+                        "raw_refs": resolved.raw_refs[:12],
                     }
                 )
-            continue
-        findings.append(
-            compress_worker_result(
-                task_id=str(row.get("task_id") or ""),
+                continue
+            accepted_finding_count += 1
+            accepted_for_row.append(
+                {
+                    **raw_finding,
+                    "claim": resolved.claim,
+                    "evidence_ids": resolved.evidence_ids[:12],
+                    "status": "supported",
+                    "partial": False,
+                    "claims": [resolved.claim],
+                    "supported_criteria": list(
+                        dict.fromkeys(
+                            [
+                                *(
+                                    str(item)
+                                    for item in raw_finding.get("supported_criteria") or []
+                                    if str(item).strip()
+                                ),
+                                *(
+                                    str(item)
+                                    for item in meta.get("target_criteria") or []
+                                    if str(item).strip()
+                                ),
+                            ]
+                        )
+                    ),
+                    "target_gaps": list(
+                        dict.fromkeys(
+                            [
+                                *(
+                                    str(item)
+                                    for item in raw_finding.get("target_gaps") or []
+                                    if str(item).strip()
+                                ),
+                                *(
+                                    str(item)
+                                    for item in meta.get("target_gaps") or []
+                                    if str(item).strip()
+                                ),
+                            ]
+                        )
+                    ),
+                    "claim_ids": claims_by_task.get(row_task_id, []),
+                    "wave_id": current_wave,
+                }
+            )
+
+        facts = [str(item) for item in payload.get("facts") or payload.get("claims") or [] if str(item).strip()]
+        if accepted_for_row:
+            findings.extend(accepted_for_row)
+        elif facts and row_admitted_ids:
+            fallback = compress_worker_result(
+                task_id=row_task_id,
                 summary=str(row.get("summary") or payload.get("summary") or ""),
-                claims=payload.get("facts") or payload.get("claims") or [],
-                evidence_ids=payload.get("evidence_ids") or [],
+                claims=facts,
+                evidence_ids=row_admitted_ids,
                 source_ids=payload.get("sources") or [],
                 confidence=float(payload.get("confidence") or 0.0),
                 unresolved_questions=payload.get("unresolved_questions") or [],
@@ -280,9 +380,29 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
                 wave_id=current_wave,
                 supported_criteria=meta.get("target_criteria") or [],
                 target_gaps=meta.get("target_gaps") or [],
-                claim_ids=claims_by_task.get(str(row.get("task_id") or ""), []),
+                claim_ids=claims_by_task.get(row_task_id, []),
             ).to_dict()
-        )
+            fallback.update(
+                {
+                    "status": "partial",
+                    "partial": True,
+                    "claims": facts,
+                    "evidence_ids": row_admitted_ids[:12],
+                    "claim_ids": claims_by_task.get(row_task_id, []),
+                    "wave_id": current_wave,
+                }
+            )
+            findings.append(fallback)
+            partial_fallback_finding_count += 1
+            finding_diagnostics.append(
+                {
+                    "task_id": row_task_id,
+                    "status": "fallback",
+                    "reason": "no_accepted_findings_with_facts_and_admitted_evidence",
+                    "raw_finding_count": len(payload_findings),
+                    "evidence_ids": row_admitted_ids[:12],
+                }
+            )
 
     previous_evidence = {
         str(row.get("evidence_id"))
@@ -316,6 +436,7 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
         "claim_conflicts": [item.to_dict() for item in new_edges],
         "claim_resolutions": [item.to_dict() for item in new_resolutions],
         "findings": findings,
+        "finding_diagnostics": finding_diagnostics,
         "search_query_fingerprints": unique_queries,
         "research_value_signal": {
             "new_high_quality_evidence_count": sum(
@@ -323,8 +444,13 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
             ),
             "new_supported_claim_count": len(new_claims),
             "duplicate_search_ratio": round(max(0.0, min(1.0, duplicate_ratio)), 4),
+            "raw_finding_count": raw_finding_count,
+            "accepted_finding_count": accepted_finding_count,
+            "rejected_finding_count": rejected_finding_count,
+            "unresolved_evidence_ref_count": unresolved_evidence_ref_count,
+            "partial_fallback_finding_count": partial_fallback_finding_count,
         },
     }
 
 
-__all__ = ["ingest_new_worker_results"]
+__all__ = ["ingest_new_worker_results", "resolve_finding_evidence_refs"]

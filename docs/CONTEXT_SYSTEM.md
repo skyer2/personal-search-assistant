@@ -98,7 +98,7 @@ POST /api/task
 | 已完成步骤 | `build_prior_results_context` | 检索步：近 N 步摘要；写报告：digest |
 | 当前步骤 | `build_step_instruction` | 第几步、类型、只完成本步 |
 | 计划绑定 | `build_subagent_binding_instruction` | 只许调指定子 Agent |
-| 工人 JSON | `build_worker_output_instruction` | 检索步必须回传 facts/sources |
+| 工人 JSON | `build_worker_output_instruction` | 检索步必须回传 evidence-backed findings |
 | MCP 工具 | `build_tool_context` | **按 step_type 裁剪**，不是全量工具表 |
 | 资源 / 路径 | session 目录、上传文件 | 文件必须写到本 session 目录 |
 | 恢复提示 | `state.recovery_hints` | 校验失败后下一轮怎么改 |
@@ -194,10 +194,10 @@ compress(原文)            →  compressed_content 进 StepResult
 检索类子 Agent（搜网 / 库 / KB）被要求最终只回 JSON：
 
 ```json
-{"ok": true, "summary": "...", "facts": ["..."], "sources": ["URL或表名"], "confidence": 0.9, ...}
+{"ok": true, "summary": "...", "findings": [{"claim": "...", "evidence_ids": ["<exact runtime evidence id>"], "artifact_ids": ["<exact runtime artifact id>"], "confidence": 0.9}], "gaps": [], "conflicts": [], "stop_reason": "local_evidence_sufficient"}
 ```
 
-解析后放进 `result.metadata["worker_payload"]`。缺 JSON 时 **只补 JSON、禁止再搜**：`structured_retry` 把 `internet_search` / `fetch_url` 额度置 0，并尽量从最后一条 **AIMessage**（不是 ToolMessage）抽 JSON；仍没有则用已存 Artifact 卡片 salvage。不要整步 ReAct 重搜。
+解析后放进 `result.metadata["worker_payload"]`。缺最终 AI、缺 findings 或证据引用无效时 **只补 JSON、禁止再搜**：Finalization-only retry 把 `internet_search` / `fetch_url` / `batch_search` / `batch_fetch` 额度置 0，只允许 `read_artifact` / `read_evidence`，并从最后一条无 tool_calls 的 **AIMessage** 抽 JSON；ToolMessage / raw search JSON 不能成为最终答案。不要整步 ReAct 重搜。
 
 研究步 `allowed_tools` 必须包含 `read_artifact` / `read_evidence`（JIT 回读原文）。计划白名单漏了它们时，校验也会把这两个工具视为始终允许，避免 `unauthorized_tool` 空转。
 

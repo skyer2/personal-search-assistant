@@ -11,9 +11,13 @@ from typing import Any
 from app.config.timeouts import model_timeout_sec
 
 from app.agent.harness.orchestration import (
+    SUBAGENT_STEP_TYPES,
     SYNTHESIS_STEP_TYPES,
+    build_strict_json_retry_instruction,
     attach_structured_payload,
+    extract_final_ai_content,
     parse_worker_payload,
+    validate_structured_worker_payload,
 )
 from app.agent.harness.state import StepResult
 from app.agent.harness.run_budget import BudgetReservationError
@@ -60,10 +64,10 @@ class WorkerExecutorV2:
         step_index = int(task.step_index)
         plan = getattr(self.session.state, "plan", None)
         if plan is None or step_index >= len(plan.steps):
-            worker_result = self._result(
+            missing_step_result = self._result(
                 task, started, ok=False, status="failed", summary="missing_step"
             )
-            return worker_result
+            return missing_step_result
         step = plan.steps[step_index]
         if bool(step.metadata.get("optional")) and bool(getattr(self.session, "wave_early_stop", False)):
             try:
@@ -108,7 +112,7 @@ class WorkerExecutorV2:
                     recorder.end_span(span_key, status="skipped")
             except Exception:
                 pass
-            worker_result = self._result(
+            optional_skip_result = self._result(
                 task,
                 started,
                 ok=True,
@@ -117,7 +121,7 @@ class WorkerExecutorV2:
                 fail_reason="optional_wave_coverage_complete",
                 queue_ms=int((time.perf_counter() - queue_started) * 1000),
             )
-            return worker_result
+            return optional_skip_result
         worker_result: WorkerResult | None = None
         worker_ok: bool | None = None
         simple_fact = bool(step.metadata.get("simple_fact_fast_path"))
@@ -241,7 +245,7 @@ class WorkerExecutorV2:
         except Exception:
             recorder_span = ""
 
-        tool_usage = {"tool_calls": 0, "tools_invoked": []}
+        tool_usage: dict[str, Any] = {"tool_calls": 0, "tools_invoked": []}
         try:
             timeout_sec = self._timeout_for(step)
             invoke_leaf = (
@@ -273,6 +277,22 @@ class WorkerExecutorV2:
                 )
                 attach_structured_payload(result, structured)
                 payload = asdict(structured)
+            strict_valid = result.metadata.get("structured_output_valid")
+            strict_reason = str(result.metadata.get("error_code") or "")
+            if strict_valid is None:
+                strict_payload = parse_worker_payload(
+                    result.content,
+                    step_type=step.step_type,
+                    subagent=step.subagent or "",
+                )
+                strict_valid, strict_reason = validate_structured_worker_payload(
+                    strict_payload,
+                    step,
+                    require_json=True,
+                )
+                result.metadata["structured_output_valid"] = bool(strict_valid)
+                result.metadata["final_ai_found"] = bool(result.content.strip())
+                result.metadata["raw_finding_count"] = len(strict_payload.findings)
             citation_manager = getattr(self.session.ctx, "citation_manager", None)
             if citation_manager is not None:
                 registered = citation_manager.register_from_step(
@@ -300,14 +320,15 @@ class WorkerExecutorV2:
                 "soft_deadline_finalize",
                 "no_more_useful_evidence",
             }
-            ok = bool(payload.get("ok", True)) or (
-                normal_soft_stop
-                and bool(
-                    evidence_refs
-                    or payload.get("findings")
-                    or payload.get("facts")
-                    or payload.get("sources")
-                )
+            has_retrieval_result = bool(
+                evidence_refs
+                or payload.get("findings")
+                or payload.get("facts")
+                or payload.get("sources")
+            )
+            ok = bool(strict_valid) and (
+                bool(payload.get("ok", True))
+                or (normal_soft_stop and has_retrieval_result)
             )
             worker_ok = ok
             worker_result = self._result(
@@ -321,9 +342,26 @@ class WorkerExecutorV2:
                 facts=list(payload.get("facts") or []),
                 sources=list(payload.get("sources") or []),
                 raw=result,
-                fail_reason="" if ok else str(payload.get("error_code") or "worker_failed"),
+                fail_reason=(
+                    ""
+                    if ok
+                    else str(strict_reason or payload.get("error_code") or "worker_failed")
+                ),
                 metrics=self._worker_metrics(context, task, tool_usage),
                 queue_ms=queue_ms,
+            )
+            worker_result.metrics.update(
+                {
+                    "final_ai_found": bool(result.metadata.get("final_ai_found")),
+                    "structured_output_valid": bool(strict_valid),
+                    "finalization_retry_count": int(
+                        result.metadata.get("finalization_retry_count") or 0
+                    ),
+                    "raw_finding_count": int(
+                        result.metadata.get("raw_finding_count")
+                        or len(payload.get("findings") or [])
+                    ),
+                }
             )
             worker_result.metrics["stop_reason"] = str(
                 payload.get("stop_reason")
@@ -582,34 +620,89 @@ class WorkerExecutorV2:
                         {"messages": [{"role": "user", "content": user_message}]},
                         config,
                     ):
-                        for node_state in chunk.values():
-                            if not isinstance(node_state, dict):
-                                continue
-                            for message in list(node_state.get("messages") or []):
-                                messages.append(message)
-                                for tool_call in getattr(message, "tool_calls", None) or []:
-                                    call_name = str(tool_call.get("name") or "")
-                                    call_id = str(
-                                        tool_call.get("id")
-                                        or tool_call.get("tool_call_id")
-                                        or f"{call_name}:{len(tool_call_ids) + 1}"
-                                    )
-                                    identity = (call_id, call_name)
-                                    if identity in tool_call_ids:
-                                        continue
-                                    tool_call_ids.add(identity)
-                                    tools_invoked.append(call_name)
+                        self._collect_worker_stream_chunk(
+                            chunk,
+                            messages,
+                            tool_call_ids,
+                            tools_invoked,
+                        )
         finally:
             tool_usage["tool_calls"] = len(tool_call_ids)
             tool_usage["tools_invoked"] = tools_invoked
-            tool_usage["finalization_reason"] = retrieval_budget.finalization_reason
+            tool_usage["finalization_reason"] = (
+                retrieval_budget.finalization_reason
+                if retrieval_budget is not None
+                else ""
+            )
             if retrieval_budget is not None:
                 tool_usage["budget"] = retrieval_budget.snapshot()
-        content = ""
-        for message in reversed(messages):
-            content = str(getattr(message, "content", "") or "")
-            if content.strip():
-                break
+        content = extract_final_ai_content(messages)
+        structured_valid = True
+        structured_reason = ""
+        raw_finding_count = 0
+        retry_count = 0
+        if step.step_type in SUBAGENT_STEP_TYPES:
+            payload = parse_worker_payload(
+                content,
+                step_type=step.step_type,
+                subagent=step.subagent or "",
+            )
+            raw_finding_count = len(payload.findings)
+            structured_valid, structured_reason = validate_structured_worker_payload(
+                payload,
+                step,
+                require_json=True,
+            )
+            if not structured_valid:
+                retry_count = 1
+                finalize_gateway = ToolGateway(
+                    search_queries_remaining=0,
+                    fetch_sources_remaining=0,
+                    tool_invocations_remaining=0,
+                    soft_deadline_at=time.monotonic() + WorkerExecutorV2._model_timeout_sec(),
+                )
+                with finalize_gateway.execution_scope(
+                    worker_task_id=task.task_id,
+                    step_index=step_index,
+                    run_id=context.run_id,
+                    session_id=context.session_id,
+                    worker_lease_id=worker_lease_id,
+                ):
+                    with gateway.execution_scope(
+                        phase="execute",
+                        worker_task_id=task.task_id,
+                    ):
+                        async for chunk in gateway.astream(
+                            execute_agent,
+                            {
+                                "messages": [
+                                    *messages,
+                                    {
+                                        "role": "user",
+                                        "content": build_strict_json_retry_instruction(step),
+                                    },
+                                ]
+                            },
+                            config,
+                        ):
+                            self._collect_worker_stream_chunk(
+                                chunk,
+                                messages,
+                                tool_call_ids,
+                                tools_invoked,
+                            )
+                content = extract_final_ai_content(messages)
+                payload = parse_worker_payload(
+                    content,
+                    step_type=step.step_type,
+                    subagent=step.subagent or "",
+                )
+                raw_finding_count = len(payload.findings)
+                structured_valid, structured_reason = validate_structured_worker_payload(
+                    payload,
+                    step,
+                    require_json=True,
+                )
         return StepResult(
             step_type=step.step_type,
             content=content,
@@ -620,9 +713,47 @@ class WorkerExecutorV2:
                 "tools_invoked": tools_invoked,
                 "tool_calls": len(tool_call_ids),
                 "step_assistants_called": [step.subagent] if step.subagent else [],
+                "final_ai_found": bool(content.strip()),
+                "structured_output_valid": structured_valid,
+                "finalization_retry_count": retry_count,
+                "raw_finding_count": raw_finding_count,
+                "stop_reason": "",
                 "duration_ms": 0,
+                **(
+                    {
+                        "invalid_structured_output": True,
+                        "error_code": structured_reason,
+                    }
+                    if not structured_valid
+                    else {}
+                ),
             },
         )
+
+    @staticmethod
+    def _collect_worker_stream_chunk(
+        chunk: Any,
+        messages: list[Any],
+        tool_call_ids: set[tuple[str, str]],
+        tools_invoked: list[str],
+    ) -> None:
+        for node_state in chunk.values():
+            if not isinstance(node_state, dict):
+                continue
+            for message in list(node_state.get("messages") or []):
+                messages.append(message)
+                for tool_call in getattr(message, "tool_calls", None) or []:
+                    call_name = str(tool_call.get("name") or "")
+                    call_id = str(
+                        tool_call.get("id")
+                        or tool_call.get("tool_call_id")
+                        or f"{call_name}:{len(tool_call_ids) + 1}"
+                    )
+                    identity = (call_id, call_name)
+                    if identity in tool_call_ids:
+                        continue
+                    tool_call_ids.add(identity)
+                    tools_invoked.append(call_name)
 
     async def _invoke_simple_fact(
         self,

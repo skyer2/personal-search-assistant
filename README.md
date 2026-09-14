@@ -22,6 +22,7 @@ This project is not a search engine. Search is only an environment tool. The har
 - `RuntimePolicy` is the only budget, retry, safety, and terminal-state authority.
 - Task state is execution state only. All workers finishing does not imply coverage.
 - Coverage is judged from evidence-backed findings against Brief key questions, not task completion or report-quality criteria.
+- A research worker is complete only when its final AI JSON contains at least one accepted finding bound to admitted canonical evidence; raw tool output, summary-only, and facts-only results cannot be complete.
 - Supervisor consumes structured Coverage gaps by exact `gap_id` and `criterion_id`.
 - Workers soft-finalize before hard budget ceilings and report a normal stop reason.
 - Synthesis consumes semantic digests and structured conflict resolutions; it cannot change coverage or resolve an unresolved conflict.

@@ -35,6 +35,7 @@ FORBIDDEN_TOOLS_BY_STEP: dict[str, frozenset[str]] = {
 JSON_ONLY_FAIL_REASONS = frozenset(
     {
         "invalid_structured_output",
+        "invalid_structured_worker_result",
         "empty_worker_result",
         "unauthorized_tool",
         "worker_failed",
@@ -93,10 +94,7 @@ class WorkerResultPayload:
         if self.findings:
             claims = []
             for item in self.findings[:5]:
-                if isinstance(item, dict):
-                    claims.append(str(item.get("claim") or ""))
-                else:
-                    claims.append(str(item))
+                claims.append(str(item.get("claim") or ""))
             parts.append("主张: " + "; ".join(c for c in claims if c))
         elif self.facts:
             parts.append("要点: " + "; ".join(self.facts[:5]))
@@ -177,11 +175,17 @@ def parse_worker_payload(
     json_blob = _extract_json_object(text)
     if json_blob is not None:
         facts = [str(f) for f in json_blob.get("facts", []) if f][:10]
-        findings = _normalize_findings(json_blob.get("findings"), facts)
-        if findings and not facts:
-            facts = [
-                str(item.get("claim") or "") for item in findings if item.get("claim")
-            ][:10]
+        findings = _normalize_findings(json_blob.get("findings"))
+        artifact_ids = [
+            str(item) for item in json_blob.get("artifact_ids") or [] if str(item).strip()
+        ]
+        for finding in findings:
+            artifact_ids.extend(
+                str(item)
+                for item in finding.get("artifact_ids") or []
+                if str(item).strip()
+            )
+        artifact_ids = list(dict.fromkeys(artifact_ids))[:20]
         return WorkerResultPayload(
             ok=bool(json_blob.get("ok", True)),
             summary=str(json_blob.get("summary", text))[:4000],
@@ -202,9 +206,7 @@ def parse_worker_payload(
             evidence_ids=[str(x) for x in (json_blob.get("evidence_ids") or []) if x][
                 :20
             ],
-            artifact_ids=[str(x) for x in (json_blob.get("artifact_ids") or []) if x][
-                :20
-            ],
+            artifact_ids=artifact_ids,
             stop_reason=str(json_blob.get("stop_reason", "")),
             evidence_metadata=[
                 dict(item)
@@ -227,7 +229,7 @@ def attach_structured_payload(
     """将结构化载荷写入 StepResult.metadata。"""
     result.metadata["worker_payload"] = asdict(payload)
     result.metadata["structured_ok"] = payload.ok
-    result.metadata["structured_json"] = bool(payload.facts or payload.sources) or (
+    result.metadata["structured_json"] = (
         _extract_json_object((result.content or "").strip()) is not None
     )
     if payload.error_code:
@@ -241,30 +243,92 @@ def validate_structured_worker_payload(
     *,
     require_json: bool = True,
 ) -> tuple[bool, str]:
-    """【Phase 8】校验工人是否返回可用结构化载荷。"""
+    """Validate that research workers return evidence-backed findings."""
     if step.step_type not in SUBAGENT_STEP_TYPES:
         return True, ""
-    if not payload.ok:
-        return False, payload.error_code or "worker_failed"
     if not payload.summary.strip():
         return False, "empty_worker_result"
-    if not require_json:
-        return True, ""
-    if payload.facts or payload.sources or payload.findings:
-        return True, ""
-    return False, "invalid_structured_output"
+    _ = require_json
+    if not payload.findings:
+        return False, payload.error_code or "invalid_structured_worker_result"
+    for finding in payload.findings:
+        if not str(finding.get("claim") or "").strip():
+            return False, "invalid_structured_worker_result"
+        if not any(
+            str(item).strip()
+            for item in [
+                *(finding.get("evidence_ids") or []),
+                *(finding.get("artifact_ids") or []),
+            ]
+        ):
+            return False, "invalid_structured_worker_result"
+    return True, ""
 
 
 def build_strict_json_retry_instruction(step: PlanStep) -> str:
-    """结构化回传失败后的重试指令：禁止再搜，只补 JSON。"""
+    """Finalization-only retry contract: no retrieval, findings only."""
     worker = step.subagent or step.step_type
     return f"""
-    【重试 — 禁止再检索，只输出 JSON】
-    上次回传不符合结构化格式。禁止调用 internet_search / fetch_url，不要重新搜索或抓页。
+    【Finalization-only 重试 — 禁止再检索，只输出 JSON】
+    上次回传缺少最终 AI JSON 或缺少 evidence-backed findings。禁止调用 internet_search / fetch_url / batch_search / batch_fetch，不要重新搜索或抓页。
     已抓取的网页如需核对，只用 read_artifact / read_evidence。
+    evidence_ids / artifact_ids 必须逐字复制工具返回的真实 ID；禁止自造 E1、E2、source1 等编号。
+    每个 finding 必须有 claim，并至少绑定一个真实 evidence_ids 或 artifact_ids；没有可绑定证据时不要输出 supported finding。
     请仅输出 JSON，不要任何解释文字：
-    {{"ok":true,"summary":"...","facts":["..."],"sources":["..."],"confidence":0.9,"error_code":"","worker":"{worker}","step_type":"{step.step_type}"}}
+    {{"ok":true,"summary":"...","findings":[{{"claim":"...","evidence_ids":["<exact runtime evidence id>"],"artifact_ids":["<exact runtime artifact id>"],"confidence":0.9}}],"gaps":[],"conflicts":[],"stop_reason":"local_evidence_sufficient","error_code":"","worker":"{worker}","step_type":"{step.step_type}"}}
     """
+
+
+def extract_final_ai_content(messages: list[Any] | None) -> str:
+    """Return only the last non-empty assistant message without tool calls."""
+    for message in reversed(messages or []):
+        if not is_assistant_message(message):
+            continue
+        if getattr(message, "tool_calls", None):
+            continue
+        content = message_text(message).strip()
+        if content:
+            return content
+    return ""
+
+
+def worker_payload_from_dict(
+    raw: dict[str, Any] | None,
+    *,
+    step_type: str = "",
+    subagent: str = "",
+) -> WorkerResultPayload:
+    """Rebuild a typed worker payload without losing evidence/artifact fields."""
+    row = raw or {}
+    findings = _normalize_findings(row.get("findings"))
+    artifact_ids = [
+        str(item) for item in row.get("artifact_ids") or [] if str(item).strip()
+    ]
+    for finding in findings:
+        artifact_ids.extend(
+            str(item)
+            for item in finding.get("artifact_ids") or []
+            if str(item).strip()
+        )
+    artifact_ids = list(dict.fromkeys(artifact_ids))[:20]
+    return WorkerResultPayload(
+        ok=bool(row.get("ok", True)),
+        summary=str(row.get("summary") or ""),
+        facts=[str(item) for item in row.get("facts") or [] if str(item).strip()],
+        sources=[str(item) for item in row.get("sources") or [] if str(item).strip()],
+        confidence=float(row.get("confidence", 1.0) or 1.0),
+        error_code=str(row.get("error_code") or ""),
+        worker=str(row.get("worker") or subagent),
+        step_type=str(row.get("step_type") or step_type),
+        findings=findings,
+        gaps=[_normalize_gap(item) for item in row.get("gaps") or [] if item is not None][:8],
+        conflicts=[_conflict_text(item) for item in row.get("conflicts") or [] if item is not None][:8],
+        suggested_followups=[str(item) for item in row.get("suggested_followups") or [] if str(item).strip()][:6],
+        evidence_ids=[str(item) for item in row.get("evidence_ids") or [] if str(item).strip()][:20],
+        artifact_ids=artifact_ids,
+        stop_reason=str(row.get("stop_reason") or ""),
+        evidence_metadata=[dict(item) for item in row.get("evidence_metadata") or [] if isinstance(item, dict)][:20],
+    )
 
 
 SYNTHESIS_STEP_TYPES = frozenset({"generate_markdown", "summarize", "convert_pdf"})
@@ -404,31 +468,21 @@ def build_worker_output_instruction(step: PlanStep) -> str:
     """【修改点】要求子 Agent 回传结构化 JSON（监督者解析）。"""
     if step.step_type not in SUBAGENT_STEP_TYPES:
         return ""
-    worker = step.subagent or step.step_type
     return f"""
     【工人结构化回传 — 必须遵守】
-    完成本步后，你的最终回复必须是纯 JSON（不要 markdown 代码块），格式：
+    最终回复必须是纯 JSON，不要 markdown 代码块：
     {{
       "ok": true,
       "summary": "本步结论摘要",
-      "facts": ["关键事实1", "关键事实2"],
-      "sources": ["URL或表名或文件名"],
       "findings": [
-        {{"claim": "可核对的主张", "evidence_ids": ["E1"], "confidence": 0.8}}
+        {{"claim": "可核对的主张", "evidence_ids": ["<exact runtime evidence id>"], "artifact_ids": ["<exact runtime artifact id>"], "confidence": 0.8}}
       ],
       "gaps": ["尚未覆盖的问题"],
       "conflicts": ["来源冲突描述"],
-      "suggested_followups": [],
-      "evidence_ids": ["E1"],
-      "artifact_ids": ["art-web-1"],
-      "evidence_metadata": [{{"evidence_id":"E1","source":"URL","published_at":"2026-09-01"}}],
-      "stop_reason": "local_evidence_sufficient|soft_budget_finalize|soft_deadline_finalize|no_more_useful_evidence",
-      "confidence": 0.0到1.0,
-      "error_code": "",
-      "worker": "{worker}",
-      "step_type": "{step.step_type}"
+      "stop_reason": "local_evidence_sufficient"
     }}
-    主张必须绑定 evidence_ids；不要把网页全文贴回 JSON。
+    你的最终交付物是 findings，不是搜索记录。每个 finding 的 claim 必须可验证，且至少绑定一个工具返回的真实 evidence_ids 或 artifact_ids；不要把网页全文贴回 JSON。
+    evidence_ids / artifact_ids 必须逐字复制工具返回值；禁止自造 E1、E2、source1 等编号。没有可绑定证据时不得输出 supported finding。
     若失败：ok=false，并填写 error_code（如 search_empty / sql_empty / timeout）。
     """
 
@@ -449,7 +503,7 @@ class IdempotencyRegistry:
         return list(self._completed.keys())
 
 
-def _normalize_findings(raw: Any, facts: list[str]) -> list[dict[str, Any]]:
+def _normalize_findings(raw: Any) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     if isinstance(raw, list):
         for i, item in enumerate(raw[:20]):
@@ -459,23 +513,40 @@ def _normalize_findings(raw: Any, facts: list[str]) -> list[dict[str, Any]]:
                 )
             elif isinstance(item, dict) and (item.get("claim") or item.get("text")):
                 claim = str(item.get("claim") or item.get("text") or "").strip()
+                evidence_ids = [
+                    str(value)
+                    for value in [
+                        *(item.get("evidence_ids") or []),
+                        item.get("evidence_id") or "",
+                    ]
+                    if str(value).strip()
+                ]
+                artifact_ids = [
+                    str(value)
+                    for value in [
+                        *(item.get("artifact_ids") or []),
+                        item.get("artifact_id") or "",
+                    ]
+                    if str(value).strip()
+                ]
                 items.append(
                     {
                         "claim_id": str(item.get("claim_id") or f"C{i+1}"),
                         "claim": claim,
-                        "evidence_ids": [
-                            str(x) for x in (item.get("evidence_ids") or []) if x
-                        ],
-                        "confidence": float(item.get("confidence") or 1.0),
+                        "evidence_ids": evidence_ids,
+                        "artifact_ids": artifact_ids,
+                        "confidence": _safe_confidence(item.get("confidence")),
                         "source_quality": str(item.get("source_quality") or "unknown"),
                     }
                 )
-    if not items and facts:
-        items = [
-            {"claim_id": f"C{i+1}", "claim": fact, "evidence_ids": []}
-            for i, fact in enumerate(facts[:10])
-        ]
     return items
+
+
+def _safe_confidence(value: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(value or 1.0)))
+    except (TypeError, ValueError):
+        return 0.65
 
 
 def _conflict_text(item: Any) -> str:

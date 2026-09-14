@@ -106,7 +106,7 @@ Run latency 汇总包含 brief、supervisor、worker、coverage、synthesis、qu
 
 `budget.decided` 记录非拒绝型预算决策。当前用于 Worker Finalization Mode：`status=finalize`，`reason=soft_budget_finalize|soft_deadline_finalize`，并携带 worker token / LLM call 快照。它不是 denial，也不计入预算拒绝率。
 
-Worker 终态事件携带完整预算快照与 `stop_reason`：LLM calls、tokens、search queries、fetch sources、tool invocations 的 used/limit，以及 `local_evidence_sufficient` / `soft_budget_finalize` / `soft_deadline_finalize` / `no_more_useful_evidence` 等正常停止语义。`gen_ai.chat` 记录 phase、task、call index、token 估算、duration、TTFT 与 Worker 剩余额度。工具事件只记录 `args_meta`（参数名和列表条目数），不记录 query、URL、prompt 或网页正文。
+Worker 终态事件携带完整预算快照与 `stop_reason`：LLM calls、tokens、search queries、fetch sources、tool invocations 的 used/limit，以及 `local_evidence_sufficient` / `soft_budget_finalize` / `soft_deadline_finalize` / `no_more_useful_evidence` 等正常停止语义。Worker metrics 还暴露 `final_ai_found`、`structured_output_valid`、`finalization_retry_count`、`raw_finding_count`；Task transition 和 ingestion signal 暴露 `accepted_finding_count`、`rejected_finding_count`、`unresolved_evidence_ref_count`、`partial_fallback_finding_count` 与 admitted evidence 计数。`gen_ai.chat` 记录 phase、task、call index、token 估算、duration、TTFT 与 Worker 剩余额度。工具事件只记录 `args_meta`（参数名和列表条目数），不记录 query、URL、prompt 或网页正文。
 
 ## 看哪里
 

@@ -941,7 +941,10 @@ class ResearchGraphRunner:
         task_id = str(gstate.get("task_id") or f"s{step_index}")
         plan = session.state.plan
         if plan is None or step_index >= len(plan.steps):
-            failure = classify_failure("missing_step")
+            failure: dict[str, Any] = cast(
+                dict[str, Any],
+                classify_failure("missing_step"),
+            )
             return {
                 "phase": WorkflowPhase.EXECUTE.value,
                 "tasks": transition_task(gstate.get("tasks"), task_id, execution_status=TaskExecutionStatus.FAILED, result_status=ResultStatus.NONE, failure=failure, timestamp=_now()),
@@ -1003,7 +1006,12 @@ class ResearchGraphRunner:
         row["payload"] = {
             **(row.get("payload") or {}),
             "findings": normalized_findings,
-            "evidence_ids": result.evidence_refs,
+            "evidence_ids": list(
+                (row.get("payload") or {}).get("evidence_ids")
+                or result.evidence_refs
+                or []
+            ),
+            "artifact_ids": list((row.get("payload") or {}).get("artifact_ids") or []),
             "search_queries": list((row.get("payload") or {}).get("search_queries") or []),
         }
         row["task_metadata"] = dict(step.metadata or {})
@@ -1054,7 +1062,55 @@ class ResearchGraphRunner:
             )
             if judgement.sufficient:
                 session.wave_early_stop = True
-        execution_status, result_status, stop_reason, failure = worker_result_lifecycle(result)
+        ingested_findings = [
+            finding
+            for finding in ingest_update.get("findings") or []
+            if isinstance(finding, dict) and str(finding.get("task_id") or "") == task_id
+        ]
+        accepted_findings = [
+            finding
+            for finding in ingested_findings
+            if not bool(finding.get("partial"))
+            and list(finding.get("evidence_ids") or [])
+        ]
+        admitted_evidence_count = sum(
+            1
+            for evidence in ingest_update.get("evidence_records") or []
+            if isinstance(evidence, dict) and str(evidence.get("task_id") or "") == task_id
+        )
+        row["finding_acceptance"] = {
+            "raw_finding_count": int(result.metrics.get("raw_finding_count") or 0),
+            "accepted_finding_count": len(accepted_findings),
+            "partial_fallback_finding_count": sum(
+                1 for finding in ingested_findings if bool(finding.get("partial"))
+            ),
+            "admitted_evidence_count": admitted_evidence_count,
+            "diagnostics": [
+                item
+                for item in ingest_update.get("finding_diagnostics") or []
+                if isinstance(item, dict)
+                and str(item.get("task_id") or "") == task_id
+            ],
+        }
+        execution_status, result_status, stop_reason, lifecycle_failure = worker_result_lifecycle(result)
+        failure = lifecycle_failure
+        if step.step_type in {"research", "network_search"}:
+            if admitted_evidence_count == 0:
+                execution_status = TaskExecutionStatus.FAILED
+                result_status = ResultStatus.NONE
+                stop_reason = StopReason.NONE
+                failure = cast(dict[str, Any], classify_failure("no_usable_evidence"))
+            elif not accepted_findings or not result.ok:
+                execution_status = TaskExecutionStatus.STOPPED
+                result_status = ResultStatus.PARTIAL
+                failure = cast(
+                    dict[str, Any],
+                    classify_failure(
+                        "no_accepted_findings"
+                        if not accepted_findings
+                        else str(result.fail_reason or "worker_failed")
+                    ),
+                )
         tasks = transition_task(
             running,
             task_id,
@@ -1077,9 +1133,32 @@ class ResearchGraphRunner:
                 "result_status": result_status.value,
                 "failure": failure or {},
                 "evidence_refs": result.evidence_refs,
+                "raw_finding_count": int(result.metrics.get("raw_finding_count") or 0),
+                "accepted_finding_count": len(accepted_findings),
+                "partial_fallback_finding_count": sum(
+                    1 for finding in ingested_findings if bool(finding.get("partial"))
+                ),
+                "admitted_evidence_count": admitted_evidence_count,
                 "dispatch_wave_id": dispatch_wave_id,
             },
         )
+        for finding in ingested_findings:
+            _emit(
+                session,
+                "finding.compressed",
+                phase=WorkflowPhase.EXECUTE.value,
+                status="ok" if not bool(finding.get("partial")) else "partial",
+                task_id=task_id,
+                attributes={
+                    "finding_id": finding.get("finding_id"),
+                    "evidence_ids": finding.get("evidence_ids") or [],
+                    "claim_count": len(finding.get("claims") or []),
+                    "confidence": finding.get("confidence"),
+                    "partial": bool(finding.get("partial")),
+                    "limitations": finding.get("limitations") or [],
+                },
+                output_refs=[{"type": "finding", "id": str(finding.get("finding_id") or "")}],
+            )
         evidence_events = list(ingest_update.get("evidence_records") or [])
         if not evidence_events:
             evidence_events = [

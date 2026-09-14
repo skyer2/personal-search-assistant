@@ -166,6 +166,12 @@ async def test_structured_soft_finalization_payload_is_normal_worker_done(monkey
                     "ok": False,
                     "summary": "soft stop with evidence",
                     "evidence_ids": ["art-web-1"],
+                    "findings": [
+                        {
+                            "claim": "Company A traction is growing.",
+                            "evidence_ids": ["art-web-1"],
+                        }
+                    ],
                     "facts": ["Company A traction is growing."],
                     "sources": ["https://example.com/company-a"],
                     "error_code": "worker_token_cap",
@@ -277,8 +283,7 @@ async def test_partial_worker_result_maps_to_failed_partial_canonical_state(monk
     task = update["tasks"]["t_timeout"]
     assert task["execution_status"] == "stopped"
     assert task["result_status"] == "partial"
-    assert task["failure"]["code"] == "worker_timeout"
+    assert task["failure"]["code"] == "no_accepted_findings"
     assert task["stop_reason"] == "timeout"
-    assert task["failure"]["code"] == "worker_timeout"
     assert task["evidence_refs"] == ["art-web-1"]
     assert update["evidence_refs"] == ["art-web-1"]

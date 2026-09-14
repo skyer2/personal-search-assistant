@@ -38,8 +38,12 @@ class RecoveryManager:
         "worker_failed": "工人返回 ok=false，请根据 error_code 调整检索策略后重试。",
         "empty_worker_result": "工人未返回有效内容，请重新委派子 Agent 并确保结构化 JSON 回传。",
         "invalid_structured_output": (
-            "工人未返回含 facts/sources 的 JSON。禁止重新搜索或抓页，"
+            "工人未返回 evidence-backed findings JSON。禁止重新搜索或抓页，"
             "只根据已有工具结果输出结构化 JSON；需要原文时用 read_artifact。"
+        ),
+        "invalid_structured_worker_result": (
+            "工人未返回 evidence-backed findings JSON。禁止重新搜索或抓页，"
+            "只根据已有工具结果输出结构化 JSON；需要原文时用 read_artifact / read_evidence。"
         ),
     }
 

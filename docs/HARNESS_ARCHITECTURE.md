@@ -73,6 +73,8 @@ Workers own execution, not research completion. Each result is scoped to:
 
 Workers can return findings, facts, candidates, sources, evidence IDs, evidence publication metadata, confidence, and a normal stop reason. They cannot mutate coverage, mark research complete, or choose the next strategy.
 
+For `research` and `network_search`, a complete result requires a final assistant message without tool calls, valid JSON, at least one finding with a claim, and at least one verbatim runtime `evidence_ids` / `artifact_ids` reference. `ToolMessage`, raw search JSON, summary-only, and facts-only outputs are not final answers. One Finalization-only retry may read existing artifacts/evidence, but cannot search or fetch. Ingestion resolves accepted references to admitted canonical evidence IDs and records rejected references instead of silently dropping them.
+
 Worker leases split remaining research capacity by the actual approved wave size and enforce the shared `TaskBudgetProfile`: token ceiling, LLM/search-query/fetch-source/tool-invocation ceilings, and `max_output_tokens_per_call`. `batch_search(N)` and `batch_fetch(N)` each count as one logical tool invocation while consuming only their own resource type. Early fan-in does not cancel required workers; it can only skip optional workers after partial-wave Coverage is sufficient.
 
 `LLM_TIMEOUT_SEC` is the default model-call timeout for every LLM stage. `LLM_BRIEF_TIMEOUT_SEC`, `LLM_SUPERVISOR_TIMEOUT_SEC`, `LLM_WORKER_TIMEOUT_SEC`, `LLM_SYNTHESIS_TIMEOUT_SEC`, `HARNESS_STEP_TIMEOUT_SEC`, `HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC`, and `HARNESS_SYNTHESIS_RETRY_TIMEOUT_SEC` are explicit per-stage overrides. The worker wall timeout defaults to at least one model call plus ten seconds.
