@@ -454,8 +454,14 @@ class LangChainWorkerRuntime:
                         execution_ms=0,
                         duration_ms=duration_ms,
                     )
+                profile_step_timeout = getattr(session, "step_timeout_sec", None)
                 step_timeout = max(
-                    10, int(self.harness.harness_config.step_timeout_sec)
+                    10,
+                    int(
+                        profile_step_timeout()
+                        if callable(profile_step_timeout)
+                        else self.harness.harness_config.step_timeout_sec
+                    ),
                 )
                 max_retries = max(
                     0, int(getattr(self.harness.harness_config, "max_retries", 2) or 2)
@@ -524,6 +530,9 @@ class LangChainWorkerRuntime:
                             )
 
                             with bind_worker_budget_scope(task.task_id):
+                                profile_idle_timeout = getattr(
+                                    session, "worker_idle_timeout_sec", None
+                                )
                                 ok = await _run_worker_step_with_lease(
                                     self.harness._run_single_step(
                                         child,
@@ -542,13 +551,15 @@ class LangChainWorkerRuntime:
                                     idle_timeout_sec=max(
                                         0.05,
                                         float(
-                                            getattr(
+                                            profile_idle_timeout()
+                                            if callable(profile_idle_timeout)
+                                            else getattr(
                                                 self.harness.harness_config,
                                                 "worker_idle_timeout_sec",
                                                 75,
                                             )
                                             or 75
-                                        )
+                                        ),
                                     ),
                                 )
                             break

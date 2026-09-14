@@ -1,4 +1,4 @@
-export type SearchMode = "agent" | "direct";
+export type SearchMode = "agent" | "direct" | "deep_debug";
 
 export type ConnectionState = "connecting" | "connected" | "reconnecting" | "closed";
 

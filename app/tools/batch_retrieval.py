@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from langchain_core.tools import tool
 
@@ -27,6 +28,11 @@ _DEFAULT_FETCH_WORKERS = 4
 
 def _search_timeout_sec() -> float:
     return float(os.getenv("TAVILY_TIMEOUT_SEC", "20"))
+
+
+def _is_http_url(value: Any) -> bool:
+    parsed = urlparse(str(value or "").strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _fetch_timeout_sec() -> float:
@@ -53,10 +59,30 @@ def search_one(
         )
         if isinstance(raw, dict):
             out = dict(raw)
-            out.setdefault("ok", True)
+            results = [
+                item
+                for item in (out.get("results") or [])
+                if isinstance(item, dict) and _is_http_url(item.get("url"))
+            ]
             out["query"] = q
+            out["results"] = results
+            out["ok"] = bool(results)
+            if not results and not str(out.get("error") or "").strip():
+                out["error"] = "search_empty"
             return out
-        return {"ok": True, "query": q, "results": raw}
+        if isinstance(raw, list):
+            results = [
+                item
+                for item in raw
+                if isinstance(item, dict) and _is_http_url(item.get("url"))
+            ]
+            return {
+                "ok": bool(results),
+                "query": q,
+                "results": results,
+                **({} if results else {"error": "search_empty"}),
+            }
+        return {"ok": False, "error": "invalid_provider_response", "query": q, "results": []}
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:240], "query": q}
 
@@ -111,7 +137,7 @@ def run_batch_search(
     # Preserve query order
     by_q = {str(r.get("query") or ""): r for r in results}
     ordered = [by_q.get(q) or {"ok": False, "error": "missing", "query": q} for q in cleaned]
-    ok_count = sum(1 for r in ordered if r.get("ok"))
+    ok_count = sum(1 for r in ordered if bool(r.get("ok")) and bool(r.get("results")))
     return {
         "ok": ok_count > 0,
         "query_count": len(cleaned),

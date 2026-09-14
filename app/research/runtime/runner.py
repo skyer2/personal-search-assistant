@@ -76,6 +76,7 @@ class RunSession:
                 run_started=ctx.run_started,
             )
         self.budget_manager = ctx.budget_manager
+        self.search_mode = str(getattr(ctx, "search_mode", "agent") or "agent")
         self.result: Any = None
         self.worker_sem = asyncio.Semaphore(self._resolve_max_workers())
         self.active_wave_size = 1
@@ -88,6 +89,53 @@ class RunSession:
         if isinstance(budget, dict) and budget.get("max_parallel_workers") is not None:
             return max(1, min(hard, int(budget["max_parallel_workers"])))
         return hard
+
+    def _run_budget_value(self, key: str, default: int | float) -> int | float:
+        metadata = getattr(self.state, "metadata", None) or {}
+        budget = metadata.get("run_budget") if isinstance(metadata, dict) else None
+        if isinstance(budget, dict) and budget.get(key) is not None:
+            return type(default)(budget[key])
+        return default
+
+    def step_timeout_sec(self) -> int:
+        return int(
+            self._run_budget_value(
+                "step_timeout_sec",
+                getattr(self.harness.harness_config, "step_timeout_sec", 120),
+            )
+        )
+
+    def worker_idle_timeout_sec(self) -> float:
+        return float(
+            self._run_budget_value(
+                "worker_idle_timeout_sec",
+                getattr(self.harness.harness_config, "worker_idle_timeout_sec", 120),
+            )
+        )
+
+    def worker_llm_call_limit(self) -> int:
+        return int(
+            self._run_budget_value(
+                "max_llm_calls_per_worker",
+                getattr(self.harness.harness_config, "max_llm_calls_per_worker", 24),
+            )
+        )
+
+    def synthesis_timeout_sec(self) -> float:
+        return float(
+            self._run_budget_value(
+                "synthesis_step_timeout_sec",
+                getattr(self.harness.harness_config, "synthesis_step_timeout_sec", 60),
+            )
+        )
+
+    def synthesis_retry_timeout_sec(self) -> float:
+        return float(
+            self._run_budget_value(
+                "synthesis_retry_timeout_sec",
+                getattr(self.harness.harness_config, "synthesis_retry_timeout_sec", 30),
+            )
+        )
 
 
 def get_session(run_id: str) -> RunSession | None:
@@ -307,11 +355,17 @@ class ResearchGraphRunner:
         )
         profile = route_decision.mode
         budget_cfg = budget_for_mode(profile, getattr(self.harness.harness_config, "personal_search", None) or {})
-        harness_replan_limit = getattr(self.harness.harness_config, "max_replan_count", None)
-        if harness_replan_limit is not None:
+        run_budget = (
+            session.state.metadata.get("run_budget")
+            if isinstance(session.state.metadata, dict)
+            else None
+        )
+        if isinstance(run_budget, dict) and run_budget.get("max_replan_count") is not None:
+            budget_cfg["max_replan_count"] = max(0, int(run_budget["max_replan_count"]))
+        elif getattr(self.harness.harness_config, "max_replan_count", None) is not None:
             budget_cfg["max_replan_count"] = min(
                 int(budget_cfg["max_replan_count"]),
-                max(0, int(harness_replan_limit)),
+                max(0, int(self.harness.harness_config.max_replan_count)),
             )
         brief = await self._compile_initial_brief(session)
         from app.research.brief.models import FastPathEligibility
@@ -335,6 +389,8 @@ class ResearchGraphRunner:
         payload["brief"] = brief.to_dict()
         payload["fast_path"] = fast_path
         payload["budget"]["max_parallel_workers"] = session._resolve_max_workers()
+        payload["budget"]["max_tool_calls"] = int(budget_cfg["max_tool_calls"])
+        payload["budget"]["max_replan_count"] = int(budget_cfg["max_replan_count"])
         from app.agent.harness.usage_tracker import reset_current_budget_manager, set_current_budget_manager
 
         token = set_current_budget_manager(session.budget_manager)
@@ -562,8 +618,22 @@ class ResearchGraphRunner:
                             "source_hints": list(item.source_hints),
                             "novelty_reason": item.novelty_reason,
                             "estimated_effort": item.estimated_effort,
-                            "token_ceiling": (profile := task_budget_profile(item.estimated_effort)).token_ceiling,
-                            **task_budget_metadata(profile),
+                            "token_ceiling": (
+                                budget_profile := task_budget_profile(item.estimated_effort)
+                            ).token_ceiling,
+                            "max_llm_calls": (
+                                max(
+                                    budget_profile.max_llm_calls,
+                                    session.worker_llm_call_limit(),
+                                )
+                                if session.search_mode == "deep_debug"
+                                else budget_profile.max_llm_calls
+                            ),
+                            **{
+                                key: value
+                                for key, value in task_budget_metadata(budget_profile).items()
+                                if key != "max_llm_calls"
+                            },
                             "semantic_fingerprint": next(
                                 approved.fingerprint
                                 for approved in admission.approved
@@ -1231,12 +1301,7 @@ class ResearchGraphRunner:
             if manager is not None and callable(getattr(manager, "remaining_run_sec", None))
             else 0.0
         )
-        timeout_method = getattr(executor, "_timeout_sec", None)
-        synthesis_timeout_sec = (
-            float(timeout_method())
-            if callable(timeout_method)
-            else float(getattr(self.harness.harness_config, "synthesis_step_timeout_sec", 0) or 0)
-        )
+        synthesis_timeout_sec = session.synthesis_timeout_sec()
         return {
             "remaining_run_tokens": max(0, token_limit - used_tokens - reserved_tokens) if token_limit else 0,
             "remaining_run_sec": max(0.0, remaining_run_sec),
@@ -1557,11 +1622,7 @@ class ResearchGraphRunner:
                     "remaining_run_sec": float(
                         synthesis_metadata.get("remaining_run_sec") or 0.0
                     ),
-                    "retry_timeout_sec": getattr(
-                        self.harness.harness_config,
-                        "synthesis_retry_timeout_sec",
-                        30,
-                    ),
+                    "retry_timeout_sec": session.synthesis_retry_timeout_sec(),
                 },
             )
             mode = "degraded"
@@ -1600,16 +1661,7 @@ class ResearchGraphRunner:
                 token_budget=min(compact_pack.token_budget, max(0, remaining_synthesis_tokens)),
             )
             evidence_refs = list(compact_pack.evidence_refs)
-            retry_timeout_sec = min(
-                float(
-                    getattr(
-                        self.harness.harness_config,
-                        "synthesis_retry_timeout_sec",
-                        30,
-                    )
-                ),
-                90.0,
-            )
+            retry_timeout_sec = session.synthesis_retry_timeout_sec()
             result = await executor.execute(
                 request,
                 context,

@@ -175,7 +175,7 @@ def test_batch_search_does_not_consume_fetch_budget():
         with worker_retrieval_budget(
             search_queries=4, fetch_sources=8, tool_invocations=6
         ):
-            assert run_batch_search(["a", "b", "c", "d"])["ok"] is True
+            assert run_batch_search(["a", "b", "c", "d"])["ok"] is False
             budget = current_worker_retrieval_budget()
             assert budget is not None
             assert budget.search_queries_used == 4

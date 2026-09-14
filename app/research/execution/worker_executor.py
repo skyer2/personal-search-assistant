@@ -1031,7 +1031,15 @@ class WorkerExecutorV2:
 
     def _timeout_for(self, step: Any) -> float:
         config = self.harness.harness_config
-        timeout_sec = max(10, int(config.step_timeout_sec))
+        profile_timeout = getattr(self.session, "step_timeout_sec", None)
+        timeout_sec = max(
+            10,
+            int(
+                profile_timeout()
+                if callable(profile_timeout)
+                else getattr(config, "step_timeout_sec", 120)
+            ),
+        )
         timeout_sec = max(timeout_sec, int(self._model_timeout_sec()) + 30)
         if str(step.step_type) in SYNTHESIS_STEP_TYPES:
             synthesis_timeout = int(

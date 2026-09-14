@@ -50,6 +50,8 @@ A worker enters Finalization Mode adaptively: at no later than 80% and no earlie
 
 Tool authorization flows from one worker registry into Plan `allowed_tools`, prompt tool context, worker-profile selection, and runtime authorization. Research steps include `internet_search`, `fetch_url`, `batch_search`, `batch_fetch`, `read_file_content`, `read_artifact`, and `read_evidence`, unless a source constraint removes web or file tools.
 
+Search success is semantic, not transport-level. A query succeeds only when its provider row contains at least one result with a valid `http(s)` URL. Empty results, URL-less rows, and provider exceptions return `ok=false`; a batch succeeds only when at least one query has usable results and `ok_count` counts only those queries.
+
 Publication metadata is owned by tools and runtime. Search provider dates and fetched-page dates are persisted on artifacts and copied into `EvidenceRecord.published_at`; workers only bind claims to evidence IDs and never guess dates. Coverage freshness remains unchanged.
 
 ## Worker Finding Contract
@@ -72,7 +74,7 @@ admitted evidence == 0                            -> failed / no_usable_evidence
 
 Before synthesis, the runtime builds a deterministic Evidence Pack. Findings are grouped by Brief criterion, deduplicated, quality-ranked by primary source, source tier, freshness, confidence, and evidence count, then limited to six findings per criterion normally and three on compact retry. Resolved winners, expected disagreements, and blocking unresolved conflicts are preserved.
 
-The normal pack is capped at 16K input tokens and the compact retry at 8K, with a 30K hard maximum. A synthesis timeout now retries once with the smaller compact pack; the retry input cannot be identical to the first attempt. The compact retry timeout is capped at 90 seconds. If both attempts fail, deterministic partial delivery remains the final fallback.
+The normal pack is capped at 16K input tokens and the compact retry at 8K, with a 30K hard maximum. A synthesis timeout now retries once with the smaller compact pack; the retry input cannot be identical to the first attempt. The retry timeout follows the run profile (30 seconds in production, 120 seconds in `deep_debug`). If both attempts fail, deterministic partial delivery remains the final fallback.
 
 Ingestion binds canonical evidence records to the citation manager before synthesis. The synthesis prompt receives stable `[n]` citation numbers, and the runtime projects selected findings onto numeric report sentences after generation. Model-invented citation numbers are replaced, unknown numbers fail the quality gate, and internal worker JSON payloads are stripped before delivery.
 

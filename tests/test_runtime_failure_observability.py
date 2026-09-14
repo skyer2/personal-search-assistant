@@ -57,7 +57,9 @@ def test_batch_search_then_batch_fetch_share_worker_scope_but_not_resource_budge
         search = run_batch_search(["q1", "q2", "q3", "q4"])
         fetch = run_batch_fetch(["https://a.example", "https://b.example", "https://c.example"])
 
-    assert search["ok"] is True
+    assert search["ok"] is False
+    assert search["ok_count"] == 0
+    assert search["results"][0]["error"] == "search_empty"
     assert fetch["ok"] is True
     assert budget.search_queries_used == 4
     assert budget.fetch_sources_used == 3

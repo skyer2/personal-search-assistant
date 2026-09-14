@@ -32,7 +32,7 @@ from app.research.runtime.graph import finalize_node, route_after_quality
 from app.research.runtime.scheduler import research_only_plan
 
 
-def test_parallel_worker_leases_cannot_overcommit_research_pool() -> None:
+def test_parallel_worker_leases_admit_without_precomputed_reservations() -> None:
     manager = RunBudgetManager(
         token_limit=100,
         llm_call_limit=20,
@@ -49,8 +49,13 @@ def test_parallel_worker_leases_cannot_overcommit_research_pool() -> None:
     )
     lease_one, reason_one = manager.reserve_worker_lease("t1")
     lease_two, reason_two = manager.reserve_worker_lease("t2")
+    lease_three, lease_three_reason = manager.reserve_worker_lease(
+        "t3", token_ceiling=30
+    )
     assert lease_one and lease_two
     assert not reason_one and not reason_two
+    assert lease_three
+    assert not lease_three_reason
 
     call_one, call_one_reason = manager.reserve_llm_call(
         estimated_tokens=25, worker_task_id="t1", phase="execute"
@@ -63,7 +68,7 @@ def test_parallel_worker_leases_cannot_overcommit_research_pool() -> None:
     assert call_two
     manager.commit_llm_usage(call_two, 25)
     assert manager.snapshot().used_tokens == 50
-    assert manager.snapshot().reserved_tokens == 10
+    assert manager.snapshot().reserved_tokens == 0
 
     blocked, blocked_reason = manager.reserve_llm_call(
         estimated_tokens=10, worker_task_id="t2", phase="execute"
@@ -71,9 +76,18 @@ def test_parallel_worker_leases_cannot_overcommit_research_pool() -> None:
     assert not blocked
     assert blocked_reason == "worker_token_cap"
 
-    lease_three, lease_three_reason = manager.reserve_worker_lease("t3")
-    assert not lease_three
-    assert lease_three_reason == "research_phase_token_cap"
+    call_three, call_three_reason = manager.reserve_llm_call(
+        estimated_tokens=10, worker_task_id="t3", phase="execute"
+    )
+    assert call_three
+    assert not call_three_reason
+    manager.commit_llm_usage(call_three, 10)
+
+    call_four, call_four_reason = manager.reserve_llm_call(
+        estimated_tokens=1, worker_task_id="t3", phase="execute"
+    )
+    assert not call_four
+    assert call_four_reason == "research_phase_token_cap"
 
 
 def test_exact_token_exhaustion_reason_is_not_wall_deadline() -> None:

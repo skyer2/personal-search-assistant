@@ -314,11 +314,26 @@ class AgentHarness:
         state.metadata["run_started_monotonic"] = float(run_started)
         # Absolute deadline clock — create RunBudgetManager at run start (no origin drift)
         from app.agent.harness.run_budget import create_run_budget_manager
+        from app.research.routing.mode_router import (
+            canonicalize_mode,
+            run_budget_overrides_for_mode,
+        )
 
-        run_budget = (
-            dict(state.metadata["run_budget"])
+        profile = canonicalize_mode(mode)
+
+        run_budget: dict[str, Any] = (
+            {
+                **run_budget_overrides_for_mode(
+                    profile,
+                    self.harness_config.personal_search,
+                ),
+                **dict(state.metadata["run_budget"]),
+            }
             if isinstance(state.metadata.get("run_budget"), dict)
-            else {}
+            else run_budget_overrides_for_mode(
+                profile,
+                self.harness_config.personal_search,
+            )
         )
         budget_manager = create_run_budget_manager(
             self.harness_config,
@@ -330,8 +345,27 @@ class AgentHarness:
         run_budget["research_cap_tokens"] = snap.research_cap_tokens
         run_budget["synthesis_reserve_tokens"] = snap.synthesis_reserve_tokens
         run_budget["max_llm_calls"] = snap.llm_call_limit
+        run_budget.setdefault("max_replan_count", self.harness_config.max_replan_count)
+        run_budget.setdefault(
+            "max_llm_calls_per_worker", self.harness_config.max_llm_calls_per_worker
+        )
+        run_budget.setdefault(
+            "worker_idle_timeout_sec", self.harness_config.worker_idle_timeout_sec
+        )
+        run_budget.setdefault("step_timeout_sec", self.harness_config.step_timeout_sec)
+        run_budget.setdefault(
+            "synthesis_step_timeout_sec",
+            self.harness_config.synthesis_step_timeout_sec,
+        )
+        run_budget.setdefault(
+            "synthesis_retry_timeout_sec",
+            self.harness_config.synthesis_retry_timeout_sec,
+        )
+        run_budget.setdefault("profile", profile)
         run_budget["synthesis_reserve_sec"] = budget_manager.synthesis_reserve_sec
         run_budget["deadline_at_monotonic"] = budget_manager.deadline_at
+        if "max_parallel_workers" not in run_budget:
+            run_budget["max_parallel_workers"] = budget_manager.max_parallel_workers
         state.metadata["run_budget"] = run_budget
         state.metadata.setdefault(
             "latency",
@@ -429,7 +463,7 @@ class AgentHarness:
             identity_token=identity_token,
             run_started=run_started,
             policy_token=policy_token,
-            search_mode=mode or "agent",
+            search_mode=profile,
             original_query=task_query,
             budget_manager=budget_manager,
             run_dir=run_dir,

@@ -1,4 +1,4 @@
-"""Harness 能力清单：实验档 agent / direct，不是搜索产品。"""
+"""Harness capability contract for the explicit execution modes."""
 
 from __future__ import annotations
 
@@ -29,9 +29,17 @@ def harness_capabilities() -> dict[str, Any]:
             "coverage": "Brief-aligned sufficient / gap judgement over evidence-backed findings",
             "runtime_policy": "budget, retry, safety, and terminal semantics",
         },
-        "experiment_modes": ["agent", "direct"],
+        "experiment_modes": ["agent", "direct", "deep_debug"],
         "default_mode": "agent",
-        "environment_tools": ["internet_search", "fetch_url", "read_file_content"],
+        "environment_tools": [
+            "internet_search",
+            "fetch_url",
+            "batch_search",
+            "batch_fetch",
+            "read_file_content",
+            "read_artifact",
+            "read_evidence",
+        ],
         "enabled_sources": personal.get("enabled_sources", {"web": True, "file": True}),
         "identity": {"tenant_id": "local", "user_id": "me"},
         "loop": [

@@ -296,7 +296,7 @@ def test_worker_result_replay_is_idempotent():
     assert ingest_new_worker_results(state) == {}
 
 
-def test_actual_wave_size_splits_leases_by_approved_count():
+def test_worker_leases_do_not_reserve_unspent_token_ceilings():
     manager = RunBudgetManager(
         token_limit=100_000,
         llm_call_limit=100,
@@ -311,5 +311,6 @@ def test_actual_wave_size_splits_leases_by_approved_count():
     assert manager._worker_leases[second].token_ceiling == fair_share
     assert manager.snapshot().active_worker_leases == 2
     third, third_reason = manager.reserve_worker_lease("task_c", parallel_workers=2)
-    assert third == ""
-    assert third_reason == "research_phase_token_cap"
+    assert third
+    assert not third_reason
+    assert manager.snapshot().reserved_tokens == 0

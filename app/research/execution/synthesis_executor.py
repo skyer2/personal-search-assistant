@@ -311,13 +311,18 @@ class SynthesisExecutor:
 
     def _timeout_sec(self, requested_timeout_sec: float | None = None) -> float:
         config = self.harness.harness_config
+        profile_timeout = getattr(self.session, "synthesis_timeout_sec", None)
+        default_timeout_sec = (
+            profile_timeout()
+            if callable(profile_timeout)
+            else getattr(config, "synthesis_step_timeout_sec", 0) or 60
+        )
         timeout_sec = max(
             1,
             int(
                 requested_timeout_sec
                 if requested_timeout_sec is not None
-                else getattr(config, "synthesis_step_timeout_sec", 0)
-                or 60
+                else default_timeout_sec
             ),
         )
         remaining_method = getattr(self.session.budget_manager, "remaining_run_sec", None)

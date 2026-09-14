@@ -30,6 +30,8 @@ This project is not a search engine. Search is only an environment tool. The har
 - The final answer must pass coverage, conflict, citation, and grounding gates.
 - Semantic LLM calls go through one structured invocation boundary; workers cannot reinterpret user intent.
 - Worker budgets separate search queries, fetched sources, and logical tool invocations.
+- Search success requires at least one valid `http(s)` result; empty provider responses are failures.
+- Worker token ceilings are lifetime limits, while run reservations track only in-flight LLM estimates.
 - Chat is the primary answer surface. `FILES` lists only explicit user deliverables, never internal run artifacts.
 
 ## Execution Path
@@ -48,7 +50,7 @@ Other Research
   → finalize
 ```
 
-The production graph has eight nodes. `direct` is only an ablation baseline, not a product route.
+The production graph has eight nodes. `direct` is only an ablation baseline, not a product route. The optional `deep_debug` mode keeps that graph and the per-worker token ceilings, but raises run admission and stage timeouts for integration.
 
 ## Evaluation
 
@@ -71,7 +73,6 @@ Production fidelity, live scenarios, and BrowseComp-Plus are documented in [docs
 - [Observability contract](docs/OBSERVABILITY.md)
 - [Evaluation system](docs/EVALUATION.md)
 - [Deep Research convergence](docs/architecture/deep-research-convergence.md)
-- [Budget generous baseline result](docs/architecture/budget-generous-baseline-result.md)
 - [BrowseComp-Plus](docs/BROWSECOMP_PLUS_EVAL.md)
 - [Context and memory boundaries](docs/CONTEXT_SYSTEM.md)
 - [Deployment](docs/OPENEULER_BARE_METAL.md)

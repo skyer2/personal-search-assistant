@@ -161,7 +161,11 @@ class RunBudgetManager:
             llm_call_limit=int(rb.get("max_llm_calls") or getattr(config, "max_llm_calls_per_run", 30) or 30),
             tool_call_limit=int(rb.get("max_tool_calls") or getattr(config, "max_tool_calls", 40) or 40),
             deadline_sec=float(rb.get("max_run_sec") or getattr(config, "max_run_sec", 600) or 600),
-            max_llm_calls_per_worker=int(getattr(config, "max_llm_calls_per_worker", 8) or 8),
+            max_llm_calls_per_worker=int(
+                rb.get("max_llm_calls_per_worker")
+                or getattr(config, "max_llm_calls_per_worker", 8)
+                or 8
+            ),
             started_at=started_at,
             synthesis_reserve_sec=float(rb.get("synthesis_reserve_sec") or getattr(config, "synthesis_reserve_sec", 210) or 75),
             max_parallel_workers=int(rb.get("max_parallel_workers") or getattr(config, "max_parallel_workers", 3) or 3),
@@ -233,16 +237,11 @@ class RunBudgetManager:
     def note_tool_call(self) -> bool:
         return self.reserve_tool_calls(1)[0]
 
-    def _active_worker_ceiling_locked(self) -> int:
-        # Committed usage is already in ``_used_tokens``; reserve only each
-        # lease's unspent capacity to avoid double counting.
-        return sum(
-            max(0, lease.token_ceiling - lease.used_tokens)
-            for lease in self._worker_leases.values()
-        )
+    def _active_worker_reserved_tokens_locked(self) -> int:
+        return sum(max(0, lease.in_flight_tokens) for lease in self._worker_leases.values())
 
     def _effective_reserved_tokens_locked(self) -> int:
-        return self._reserved_nonworker_tokens + self._active_worker_ceiling_locked()
+        return self._reserved_nonworker_tokens + self._active_worker_reserved_tokens_locked()
 
     def reserve_worker_lease(
         self,
@@ -269,7 +268,7 @@ class RunBudgetManager:
                     task_id=str(task_id or ""),
                 )
                 return "", reason
-            active = self._active_worker_ceiling_locked()
+            active = self._active_worker_reserved_tokens_locked()
             if research_cap > 0:
                 remaining = research_cap - self._used_tokens - active
                 if remaining <= 0:
@@ -432,7 +431,9 @@ class RunBudgetManager:
                         limit=lease.token_ceiling,
                     )
                     return "", "worker_token_cap"
-                effective_after = self._used_tokens + self._effective_reserved_tokens_locked()
+                effective_after = (
+                    self._used_tokens + self._effective_reserved_tokens_locked() + total
+                )
             else:
                 effective_after = (
                     self._used_tokens + self._effective_reserved_tokens_locked() + total

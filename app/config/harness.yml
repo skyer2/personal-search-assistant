@@ -141,6 +141,21 @@ harness:
       parallel: false
       progress_eval: false
       compression: false
+    deep_debug:
+      max_tool_calls: 600
+      max_replan_count: 6
+      parallel: true
+      progress_eval: true
+      max_total_tokens: 1200000
+      max_run_sec: 3600
+      max_llm_calls_per_run: 240
+      max_llm_calls_per_worker: 32
+      synthesis_reserve_sec: 300
+      max_parallel_workers: 2
+      worker_idle_timeout_sec: 300
+      step_timeout_sec: 300
+      synthesis_step_timeout_sec: 300
+      synthesis_retry_timeout_sec: 120
 
   personal_search:
     default_mode: agent
@@ -161,6 +176,21 @@ harness:
         max_replan: 0
         parallel: false
         progress_eval: false
+      deep_debug:
+        max_tool_calls: 600
+        max_replan_count: 6
+        parallel: true
+        progress_eval: true
+        max_total_tokens: 1200000
+        max_run_sec: 3600
+        max_llm_calls_per_run: 240
+        max_llm_calls_per_worker: 32
+        synthesis_reserve_sec: 300
+        max_parallel_workers: 2
+        worker_idle_timeout_sec: 300
+        step_timeout_sec: 300
+        synthesis_step_timeout_sec: 300
+        synthesis_retry_timeout_sec: 120
 
   tools:
     fail_closed: true

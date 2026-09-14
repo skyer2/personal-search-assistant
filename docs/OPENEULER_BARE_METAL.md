@@ -651,7 +651,7 @@ HTTPS 则用 `https://` / `wss://`。改 IP 后必须重新 `pnpm build`。
 
 | 文档 | 用途 |
 |------|------|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | 研究什么、四层、agent/direct |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | 研究什么、四层、agent / direct / deep_debug |
 | [HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md) | StateGraph 运行时 |
 | [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md) | 上下文外置 |
 | **本文** | 裸机怎么装、怎么配、怎么验 |
