@@ -17,10 +17,13 @@ from typing import Iterator
 class BudgetBlock(str):
     """A denial message carrying machine-readable budget metadata."""
 
+    scope: str
     resource: str
     reason: str
     used: int
+    reserved: int
     limit: int
+    is_soft_finalization: bool
 
     def __new__(
         cls,
@@ -29,13 +32,19 @@ class BudgetBlock(str):
         resource: str,
         reason: str,
         used: int,
+        reserved: int = 0,
         limit: int,
     ) -> "BudgetBlock":
         value = super().__new__(cls, message)
+        value.scope = "worker"
         value.resource = resource
         value.reason = reason
         value.used = int(used or 0)
+        value.reserved = int(reserved or 0)
         value.limit = int(limit or 0)
+        value.is_soft_finalization = reason in {
+            "soft_deadline_finalize", "soft_budget_finalize"
+        }
         return value
 
 
@@ -49,6 +58,11 @@ class WorkerRetrievalBudget:
     tool_invocations_used: int = 0
     soft_deadline_at: float | None = None
     finalization_reason: str = ""
+    admitted_evidence_count: int = 0
+
+    @property
+    def retrieval_count(self) -> int:
+        return self.search_queries_used + self.fetch_sources_used
 
     def snapshot(self) -> dict[str, int]:
         return {
@@ -127,7 +141,7 @@ def remaining_tool_invocations() -> int | None:
     return max(0, budget.tool_invocations_limit - budget.tool_invocations_used)
 
 
-def _deny(*, resource: str, reason: str, used: int, limit: int) -> str:
+def _deny(*, resource: str, reason: str, used: int, limit: int) -> BudgetBlock:
     from app.agent.harness.budget_events import emit_budget_denied
     from app.agent.harness.usage_tracker import (
         get_current_budget_manager,
@@ -152,7 +166,7 @@ def _deny(*, resource: str, reason: str, used: int, limit: int) -> str:
     )
 
 
-def _soft_finalize(*, resource: str, reason: str, used: int, limit: int) -> str:
+def _soft_finalize(*, resource: str, reason: str, used: int, limit: int) -> BudgetBlock:
     from app.agent.harness.budget_events import emit_budget_decided
     from app.agent.harness.usage_tracker import (
         get_current_budget_manager,
@@ -183,7 +197,7 @@ def _soft_finalize(*, resource: str, reason: str, used: int, limit: int) -> str:
     )
 
 
-def _soft_finalization_block(resource: str) -> str | None:
+def _soft_finalization_block(resource: str) -> BudgetBlock | None:
     budget = _worker_budget.get()
     if budget is None:
         return None
@@ -199,15 +213,54 @@ def _soft_finalization_block(resource: str) -> str | None:
     return trigger_worker_soft_finalization_block(resource)
 
 
+def _existing_worker_evidence_count() -> int:
+    """Count already stored artifacts/spans belonging to the active worker."""
+    from app.agent.harness.usage_tracker import (
+        get_current_worker_run_id,
+        get_current_worker_task_id,
+    )
+
+    task_id = get_current_worker_task_id()
+    run_id = get_current_worker_run_id()
+    if not task_id or not run_id:
+        return 0
+    from app.agent.harness.artifacts import get_artifact_store
+    from app.agent.harness.evidence_store import get_evidence_store
+
+    artifacts = [
+        item for item in get_artifact_store().iter_artifacts()
+        if str(item.metadata.get("task_id") or "") == task_id
+        and str(item.metadata.get("run_id") or "") == run_id
+    ]
+    artifact_ids = {item.artifact_id for item in artifacts}
+    spans = [
+        span for span in get_evidence_store().spans.values()
+        if span.artifact_id in artifact_ids
+        or (
+            str(span.metadata.get("task_id") or "") == task_id
+            and str(span.metadata.get("run_id") or "") == run_id
+        )
+    ]
+    return len(artifacts) + len(spans)
+
+
 def trigger_worker_soft_finalization_block(
     resource: str = "token",
     *,
     projected_tokens: int = 0,
     projected_llm_calls: int = 0,
-) -> str | None:
+) -> BudgetBlock | None:
     """Evaluate and arm finalization before another retrieval or LLM round."""
     budget = _worker_budget.get()
     if budget is None or budget.finalization_reason:
+        return None
+
+    # Before the first admitted search/fetch, a soft stop cannot preempt
+    # retrieval. Hard worker/run caps and cancellation still apply at the
+    # resource reservation boundary.
+    if budget.retrieval_count == 0 and budget.admitted_evidence_count == 0:
+        budget.admitted_evidence_count = _existing_worker_evidence_count()
+    if budget.retrieval_count == 0 and budget.admitted_evidence_count == 0:
         return None
 
     if budget.soft_deadline_at is not None and time.monotonic() >= budget.soft_deadline_at:
@@ -308,7 +361,7 @@ def _reserve_run_tool_invocation() -> str | None:
     return reason or "tool_call_cap"
 
 
-def consume_search_queries_or_block(n: int, *, tool_name: str = "internet_search") -> str | None:
+def consume_search_queries_or_block(n: int, *, tool_name: str = "internet_search") -> BudgetBlock | None:
     """Consume search items and one logical tool invocation, or deny atomically."""
     _ = tool_name
     count = max(1, int(n or 1))
@@ -352,7 +405,7 @@ def consume_search_queries_or_block(n: int, *, tool_name: str = "internet_search
     return None
 
 
-def consume_fetch_sources_or_block(n: int, *, tool_name: str = "fetch_url") -> str | None:
+def consume_fetch_sources_or_block(n: int, *, tool_name: str = "fetch_url") -> BudgetBlock | None:
     """Consume fetch items and one logical tool invocation, or deny atomically."""
     _ = tool_name
     count = max(1, int(n or 1))
@@ -396,7 +449,7 @@ def consume_fetch_sources_or_block(n: int, *, tool_name: str = "fetch_url") -> s
     return None
 
 
-def consume_tool_invocations_or_block(n: int = 1) -> str | None:
+def consume_tool_invocations_or_block(n: int = 1) -> BudgetBlock | None:
     """Consume only logical invocations for tools without search/fetch semantics."""
     count = max(1, int(n or 1))
     budget = _worker_budget.get()

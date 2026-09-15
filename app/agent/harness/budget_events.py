@@ -49,6 +49,36 @@ def emit_budget_denied(
             }
             remaining_run_sec = max(0.0, float(getattr(snapshot, "remaining_run_sec", 0.0) or 0.0))
 
+        # Call sites which only know the stop reason still need to report the
+        # actual rejecting counter, rather than a misleading 0/0 placeholder.
+        if limit <= 0 and budget_manager is not None:
+            if scope == "worker" and resource == "token":
+                used = int(worker.get("tokens_used", 0) or 0)
+                limit = int(worker.get("token_limit", 0) or 0)
+            elif scope == "worker" and resource == "llm_call":
+                used = int(worker.get("llm_calls_used", 0) or 0)
+                limit = int(worker.get("llm_calls_limit", 0) or 0)
+            elif scope == "research_phase" and resource == "token":
+                used = int(run.get("used_tokens", 0) or 0)
+                reserved = int(run.get("reserved_tokens", 0) or 0)
+                limit = int(getattr(snapshot, "research_cap_tokens", 0) or 0)
+            elif scope == "run" and resource == "token":
+                used = int(run.get("used_tokens", 0) or 0)
+                reserved = int(run.get("reserved_tokens", 0) or 0)
+                limit = int(run.get("token_limit", 0) or 0)
+            elif scope == "run" and resource == "llm_call":
+                used = int(run.get("used_llm_calls", 0) or 0)
+                reserved = int(run.get("reserved_llm_calls", 0) or 0)
+                limit = int(run.get("llm_call_limit", 0) or 0)
+            elif scope == "run" and resource == "tool_call":
+                used = int(run.get("used_tool_calls", 0) or 0)
+                limit = int(run.get("tool_call_limit", 0) or 0)
+            elif resource == "time":
+                used = int(getattr(snapshot, "elapsed_sec", 0) or 0)
+                deadline = int(getattr(snapshot, "deadline_sec", 0) or 0)
+                reserve = int(getattr(snapshot, "synthesis_reserve_sec", 0) or 0)
+                limit = max(0, deadline - reserve) if scope == "research_phase" else deadline
+
         attributes = {
             "scope": scope,
             "resource": resource,

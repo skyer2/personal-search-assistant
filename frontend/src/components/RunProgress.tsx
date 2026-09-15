@@ -7,6 +7,7 @@ interface RunProgressProps {
   durationLabel: ReactNode;
   quality?: Record<string, unknown>;
   termination?: Record<string, unknown>;
+  synthesisDegraded?: boolean;
   progress: PhaseProgress;
   runStatus: RunStatus;
 }
@@ -16,6 +17,7 @@ export function RunProgress({
   progress,
   quality,
   termination,
+  synthesisDegraded = false,
   runStatus,
 }: RunProgressProps) {
   const paused = runStatus === "awaiting_approval";
@@ -49,7 +51,9 @@ export function RunProgress({
   const detail = paused
       ? "计时与进度已冻结，审批通过后才会继续"
       : runStatus === "completed"
-      ? "结果：已完成 · 语义阶段按真实事件投影。"
+      ? synthesisDegraded
+        ? "结果：已完成 · 合成经压缩重试恢复，本次交付已标记降级。"
+        : "结果：已完成 · 语义阶段按真实事件投影。"
       : runStatus === "partial"
         ? [
             "结果：部分可确认",
@@ -106,6 +110,9 @@ export function RunProgress({
               <span>
                 {PHASE_LABELS[phase]}
                 {item ? <small> · {formatPhaseStatus(phase, item.status)}</small> : null}
+                {synthesisDegraded && (phase === "synthesis" || phase === "delivery") ? (
+                  <small> · 降级恢复</small>
+                ) : null}
               </span>
             </li>
           );

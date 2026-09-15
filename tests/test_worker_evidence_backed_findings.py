@@ -73,6 +73,10 @@ def test_finalize_retry_instruction_forbids_all_retrieval_tools():
 
 @pytest.mark.asyncio
 async def test_worker_finalization_retry_recovers_structured_findings():
+    from app.research.workers.registry import FINALIZE_ONLY_WORKER_KEY, RETRIEVAL_TOOLS, finalize_only_tool_names
+
+    assert not (set(finalize_only_tool_names()) & RETRIEVAL_TOOLS)
+
     class FakeContextBuilder:
         def build_step_message(self, *args: Any, **kwargs: Any) -> str:
             return "research task"
@@ -86,12 +90,15 @@ async def test_worker_finalization_retry_recovers_structured_findings():
         )
         context_builder = FakeContextBuilder()
 
+        def __init__(self, finalize_agent: Any):
+            self.workers = {FINALIZE_ONLY_WORKER_KEY: finalize_agent}
+
     class FakeSession:
         state = SimpleNamespace(tool_calls_count=0, assistants_called=[])
         ctx = SimpleNamespace(relative_session_dir="output", uploaded_prompt="")
         budget_manager = RunBudgetManager(token_limit=100_000, llm_call_limit=100)
 
-    class RetryAgent:
+    class PrimaryAgent:
         def __init__(self):
             self.calls = 0
 
@@ -99,15 +106,20 @@ async def test_worker_finalization_retry_recovers_structured_findings():
             self.calls += 1
             last_message = list(payload.get("messages") or [])[-1]
             prompt = str(last_message.get("content") or "") if isinstance(last_message, dict) else ""
-            if self.calls == 1:
-                yield {
-                    "worker": {
-                        "messages": [
-                            AIMessage(content=json.dumps({"ok": True, "summary": "summary only"})),
-                        ]
-                    }
+            yield {
+                "worker": {
+                    "messages": [AIMessage(content=json.dumps({"ok": True, "summary": "summary only"}))]
                 }
-                return
+            }
+
+    class FinalizeAgent:
+        def __init__(self):
+            self.calls = 0
+
+        async def astream(self, payload: dict[str, Any], config: dict[str, Any] | None = None):
+            self.calls += 1
+            last_message = list(payload.get("messages") or [])[-1]
+            prompt = str(last_message.get("content") or "") if isinstance(last_message, dict) else ""
             assert "Finalization-only" in prompt
             yield {
                 "worker": {
@@ -135,8 +147,9 @@ async def test_worker_finalization_retry_recovers_structured_findings():
     step = PlanStep(step_type="research", description="research", objective="research")
     task = ResearchTask(task_id="task-retry", objective="research", step_type="research", step_index=0)
     context = ResearchContext(run_id="run-retry", query="research", session_id="session-retry")
-    agent = RetryAgent()
-    result = await WorkerExecutorV2(FakeHarness(), FakeSession())._invoke_leaf(
+    agent = PrimaryAgent()
+    finalize_agent = FinalizeAgent()
+    result = await WorkerExecutorV2(FakeHarness(finalize_agent), FakeSession())._invoke_leaf(
         task=task,
         context=context,
         step=step,
@@ -146,7 +159,9 @@ async def test_worker_finalization_retry_recovers_structured_findings():
         tool_usage={},
         timeout_sec=10,
     )
-    assert agent.calls == 2
+    assert agent.calls == 1
+    assert finalize_agent.calls == 1
+    assert not any(name in RETRIEVAL_TOOLS for name in result.metadata["tools_invoked"])
     assert result.metadata["final_ai_found"] is True
     assert result.metadata["structured_output_valid"] is True
     assert result.metadata["finalization_retry_count"] == 1

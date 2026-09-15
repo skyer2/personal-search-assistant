@@ -82,7 +82,7 @@ def test_timeout_with_evidence_is_failed_partial_and_keeps_failure():
     assert result.sources == ["https://example.com/deepseek"]
 
 
-def test_soft_finalization_with_evidence_is_normal_done():
+def test_soft_finalization_with_salvaged_evidence_is_partial():
     store = _reset_store()
     artifact = store.put(
         "Company A traction is growing.",
@@ -106,33 +106,32 @@ def test_soft_finalization_with_evidence_is_normal_done():
         stop_reason="soft_budget_finalize",
     )
 
-    assert result.ok is True
-    assert result.status == "done"
+    assert result.ok is False
+    assert result.status == "partial"
     assert result.fail_reason == "worker_token_cap"
-    assert result.metrics["stop_reason"] == "soft_budget_finalize"
+    assert result.metrics["stop_reason"] == "budget"
     assert result.evidence_refs == [artifact.artifact_id]
     assert result.findings
 
 
-def test_soft_deadline_reserves_one_model_call(monkeypatch):
+def test_soft_deadline_reserves_bounded_finishing_window(monkeypatch):
     monkeypatch.setenv("LLM_TIMEOUT_SEC", "180")
     monkeypatch.setenv("LLM_WORKER_TIMEOUT_SEC", "60")
 
-    assert WorkerExecutorV2._soft_deadline_delay(120) == 50.0
+    assert WorkerExecutorV2._soft_deadline_delay(120) == 96.0
+    assert WorkerExecutorV2._soft_deadline_delay(150) == 120.0
+    assert WorkerExecutorV2._soft_deadline_delay(300) == 255.0
 
 
-def test_soft_deadline_reserves_structured_retry_model_call(monkeypatch):
+def test_soft_deadline_does_not_reserve_full_model_timeout(monkeypatch):
     monkeypatch.setenv("LLM_TIMEOUT_SEC", "180")
     monkeypatch.setenv("LLM_WORKER_TIMEOUT_SEC", "60")
 
-    assert (
-        WorkerExecutorV2._soft_deadline_delay(190, reserve_model_calls=2)
-        == 60.0
-    )
+    assert WorkerExecutorV2._soft_deadline_delay(190) == 152.0
 
 
 @pytest.mark.asyncio
-async def test_timeout_after_soft_finalization_recovers_done(monkeypatch):
+async def test_timeout_after_soft_finalization_recovers_partial(monkeypatch):
     import asyncio
     from types import SimpleNamespace
 
@@ -193,10 +192,10 @@ async def test_timeout_after_soft_finalization_recovers_done(monkeypatch):
         ResearchContext(run_id="run-worker", query="collect evidence"),
     )
 
-    assert result.ok is True
-    assert result.status == "done"
+    assert result.ok is False
+    assert result.status == "partial"
     assert result.fail_reason == "worker_timeout"
-    assert result.metrics["stop_reason"] == "soft_budget_finalize"
+    assert result.metrics["stop_reason"] == "timeout"
     assert result.evidence_refs
 
 
@@ -291,7 +290,7 @@ def test_worker_model_timeout_inherits_global_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_structured_soft_finalization_payload_is_normal_worker_done(monkeypatch):
+async def test_structured_soft_finalization_payload_is_partial_worker(monkeypatch):
     from types import SimpleNamespace
     import json
 
@@ -359,10 +358,10 @@ async def test_structured_soft_finalization_payload_is_normal_worker_done(monkey
         ResearchContext(run_id="run-worker", query="collect evidence"),
     )
 
-    assert result.ok is True
-    assert result.status == "done"
-    assert result.fail_reason == ""
-    assert result.metrics["stop_reason"] == "soft_budget_finalize"
+    assert result.ok is False
+    assert result.status == "partial"
+    assert result.fail_reason == "soft_budget_finalize"
+    assert result.metrics["stop_reason"] == "budget"
 
 
 @pytest.mark.asyncio

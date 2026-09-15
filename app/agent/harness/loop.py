@@ -315,25 +315,24 @@ class AgentHarness:
         # Absolute deadline clock — create RunBudgetManager at run start (no origin drift)
         from app.agent.harness.run_budget import create_run_budget_manager
         from app.research.routing.mode_router import (
-            canonicalize_mode,
+            budget_for_mode,
+            route,
             run_budget_overrides_for_mode,
         )
 
-        profile = canonicalize_mode(mode)
+        route_decision = route(task_query, user_mode=mode)
+        profile = route_decision.mode
+        personal = self.harness_config.personal_search
+        budget_cfg = budget_for_mode(profile, personal)
 
         run_budget: dict[str, Any] = (
             {
-                **run_budget_overrides_for_mode(
-                    profile,
-                    self.harness_config.personal_search,
-                ),
+                **budget_cfg,
+                **run_budget_overrides_for_mode(profile, personal),
                 **dict(state.metadata["run_budget"]),
             }
             if isinstance(state.metadata.get("run_budget"), dict)
-            else run_budget_overrides_for_mode(
-                profile,
-                self.harness_config.personal_search,
-            )
+            else {**budget_cfg, **run_budget_overrides_for_mode(profile, personal)}
         )
         budget_manager = create_run_budget_manager(
             self.harness_config,
@@ -362,6 +361,7 @@ class AgentHarness:
             self.harness_config.synthesis_retry_timeout_sec,
         )
         run_budget.setdefault("profile", profile)
+        state.metadata["route_decision"] = route_decision.to_dict()
         run_budget["synthesis_reserve_sec"] = budget_manager.synthesis_reserve_sec
         run_budget["deadline_at_monotonic"] = budget_manager.deadline_at
         if "max_parallel_workers" not in run_budget:
@@ -2442,6 +2442,7 @@ class AgentHarness:
             status=persist_status if persist_status != "success" else "completed",
             run_id=str(state.run_id or ""),
             termination=termination,
+            synthesis_degraded=bool((state.metadata or {}).get("synthesis_degraded")),
         )
 
         duration = int((time.perf_counter() - phase_started) * 1000)
@@ -2539,6 +2540,14 @@ class AgentHarness:
                 "quality_attempted": bool(metadata.get("quality_attempted", termination.get("quality_attempted"))),
                 "synthesis_attempts": int(metadata.get("synthesis_attempts") or 0),
                 "synthesis_failed": bool(metadata.get("synthesis_failed")),
+                "synthesis_degraded": bool(metadata.get("synthesis_degraded")),
+                "synthesis_retry_count": int(metadata.get("synthesis_retry_count") or 0),
+                "successful_attempt": int(metadata.get("successful_attempt") or 0),
+                "first_attempt_reason": str(metadata.get("first_attempt_reason") or ""),
+                "first_attempt_duration_ms": int(metadata.get("first_attempt_duration_ms") or 0),
+                "normal_pack_tokens": int(metadata.get("normal_pack_tokens") or 0),
+                "successful_pack_tokens": int(metadata.get("successful_pack_tokens") or 0),
+                "synthesis_attempt_metrics": list(metadata.get("synthesis_attempt_metrics") or []),
                 "synthesis_fail_reason": str(metadata.get("synthesis_fail_reason") or ""),
                 "fallback_used": str(metadata.get("fallback_used") or ""),
                 "observability": obs_snapshot.to_dict(),

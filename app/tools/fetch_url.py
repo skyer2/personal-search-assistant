@@ -194,10 +194,12 @@ def fetch_url(url: str, max_chars: int = 8000) -> dict[str, Any]:
 def _denied(blocked: BudgetBlock) -> dict[str, Any]:
     return {
         "ok": False,
-        "error": "budget_denied",
+        "error": "finalization_requested" if blocked.is_soft_finalization else "budget_denied",
+        "scope": blocked.scope,
         "reason": blocked.reason,
         "resource": blocked.resource,
         "used": blocked.used,
+        "reserved": blocked.reserved,
         "limit": blocked.limit,
         "message": str(blocked),
     }

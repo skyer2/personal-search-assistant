@@ -29,7 +29,7 @@ model = wrap_model_with_budget(init_chat_model(
     api_key=_openai_api_key,
 ))
 
-# Research Worker 可用更快模型（Planner/Synthesis 仍用主模型）
+# Research Worker 可用更快模型，规划继续使用主模型。
 _worker_model_name = (
     os.getenv("LLM_WORKER_MODEL")
     or os.getenv("LLM_QWEN_PLUS")
@@ -66,10 +66,13 @@ if _compression_enabled:
     except Exception as exc:
         print(f"[LLM] compression_model init failed, will use truncate: {exc}")
 
-_synthesis_model_name = os.getenv("LLM_SYNTHESIS_MODEL") or os.getenv("LLM_QWEN_MAX")
+# Synthesis 默认复用已配置的快 Worker 模型；显式配置仍优先。
+_synthesis_model_name = os.getenv("LLM_SYNTHESIS_MODEL") or _worker_model_name
 _synthesis_max_tokens = int(os.getenv("LLM_SYNTHESIS_MAX_TOKENS", "3000"))
-synthesis_model = model
-if _synthesis_model_name and _synthesis_model_name != os.getenv("LLM_QWEN_MAX"):
+synthesis_model = worker_model if _synthesis_model_name == _worker_model_name else model
+if _synthesis_model_name and _synthesis_model_name not in {
+    os.getenv("LLM_QWEN_MAX"), _worker_model_name
+}:
     try:
         synthesis_model = wrap_model_with_budget(init_chat_model(
             model=_synthesis_model_name,

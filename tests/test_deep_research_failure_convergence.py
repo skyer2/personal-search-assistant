@@ -188,10 +188,10 @@ def test_worker_lifecycle_separates_tool_failure_from_worker_failure() -> None:
         evidence_count=3,
         terminal_reason="search_empty",
     )
-    assert recovered.execution_status.value == "succeeded"
-    assert recovered.result_status.value == "complete"
+    assert recovered.execution_status.value == "stopped"
+    assert recovered.result_status.value == "partial"
     assert recovered.stop_reason.value == "no_more_useful_evidence"
-    assert recovered.fail_reason == ""
+    assert recovered.fail_reason == "search_empty"
 
     empty = classify_worker_completion(
         structured_valid=True,

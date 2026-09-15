@@ -57,32 +57,18 @@ def search_one(
             max_results=max_results,
             include_raw_content=include_raw_content,
         )
-        if isinstance(raw, dict):
-            out = dict(raw)
-            results = [
-                item
-                for item in (out.get("results") or [])
-                if isinstance(item, dict) and _is_http_url(item.get("url"))
-            ]
-            out["query"] = q
-            out["results"] = results
-            out["ok"] = bool(results)
-            if not results and not str(out.get("error") or "").strip():
-                out["error"] = "search_empty"
-            return out
-        if isinstance(raw, list):
-            results = [
-                item
-                for item in raw
-                if isinstance(item, dict) and _is_http_url(item.get("url"))
-            ]
-            return {
-                "ok": bool(results),
-                "query": q,
-                "results": results,
-                **({} if results else {"error": "search_empty"}),
-            }
-        return {"ok": False, "error": "invalid_provider_response", "query": q, "results": []}
+        out = dict(raw)
+        results = [
+            item
+            for item in (out.get("results") or [])
+            if isinstance(item, dict) and _is_http_url(item.get("url"))
+        ]
+        out["query"] = q
+        out["results"] = results
+        out["ok"] = bool(results)
+        if not results and not str(out.get("error") or "").strip():
+            out["error"] = "search_empty"
+        return out
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:240], "query": q}
 
@@ -215,10 +201,12 @@ def batch_fetch(urls: list[str], max_chars: int = 8000) -> dict[str, Any]:
 def _denied(blocked: BudgetBlock) -> dict[str, Any]:
     return {
         "ok": False,
-        "error": "budget_denied",
+        "error": "finalization_requested" if blocked.is_soft_finalization else "budget_denied",
+        "scope": blocked.scope,
         "reason": blocked.reason,
         "resource": blocked.resource,
         "used": blocked.used,
+        "reserved": blocked.reserved,
         "limit": blocked.limit,
         "message": str(blocked),
         "results": [],

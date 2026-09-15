@@ -26,8 +26,8 @@ This project is not a search engine. Search is only an environment tool. The har
 - A research worker is complete only when its final AI JSON contains at least one accepted finding bound to admitted canonical evidence; raw tool output, summary-only, and facts-only results cannot be complete.
 - A single tool failure never discards admitted evidence: workers with evidence after timeout, budget stop, or `search_empty` become `partial`, and their evidence still reaches Coverage.
 - Supervisor consumes structured Coverage gaps by exact `gap_id` and `criterion_id`.
-- Workers soft-finalize before hard budget ceilings and report a normal stop reason.
-- Synthesis consumes a deterministic 8K/4K Evidence Pack with Runtime-resolved evidence digests and structured conflict resolutions; it cannot change coverage or resolve an unresolved conflict.
+- Workers reserve 20–45 seconds for soft finalization; first retrieval remains available when no evidence has yet been admitted. Tool errors and worker lifecycle are separate.
+- Synthesis consumes a deterministic 8K/4K Evidence Pack with Runtime-resolved evidence digests and structured conflict resolutions; it cannot change coverage or resolve an unresolved conflict. A successful compact retry is explicitly marked degraded, and primary-attempt timing is audited separately.
 - The final answer must pass coverage, conflict, citation, and grounding gates.
 - Semantic LLM calls go through one structured invocation boundary; workers cannot reinterpret user intent.
 - Worker budgets separate search queries, fetched sources, and logical tool invocations.
@@ -51,7 +51,7 @@ Other Research
   → finalize
 ```
 
-The production graph has eight nodes. `direct` is only an ablation baseline, not a product route. The optional `deep_debug` mode keeps that graph and the per-worker token ceilings, but raises run admission and stage timeouts for integration.
+The production graph has eight nodes. `direct` is only an ablation baseline, not a product route. The optional `deep_debug` mode keeps that graph and the per-worker token ceilings, but raises run admission and stage timeouts for integration. Routing resolves the profile before the actual run budget manager and session are created.
 
 ## Evaluation
 
@@ -66,6 +66,14 @@ The deterministic regression gate now has 60 cases:
 ```
 
 Production fidelity, live scenarios, and BrowseComp-Plus are documented in [docs/EVALUATION.md](docs/EVALUATION.md) and [docs/BROWSECOMP_PLUS_EVAL.md](docs/BROWSECOMP_PLUS_EVAL.md).
+
+Run the golden query against the local real `.env` providers three consecutive times:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\live_deep_research_e2e.py --runs 3 --mode deep_debug
+```
+
+The audit keeps answers and a compact report under `output/live_deep_research_e2e/`. It requires findings, admitted evidence, sufficient coverage, a passing Quality Gate, valid trace lineage, and at least two successful primary synthesis attempts. A recovered compact retry can pass the run only when the delivery is marked degraded.
 
 ## Documentation
 

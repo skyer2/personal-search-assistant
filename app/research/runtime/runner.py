@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -122,12 +123,21 @@ class RunSession:
         )
 
     def synthesis_timeout_sec(self) -> float:
-        return float(
+        profile_timeout = float(
             self._run_budget_value(
                 "synthesis_step_timeout_sec",
                 getattr(self.harness.harness_config, "synthesis_step_timeout_sec", 60),
             )
         )
+        explicit = (os.getenv("HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC") or "").strip()
+        if explicit:
+            try:
+                requested = float(explicit)
+                if requested > 0:
+                    profile_timeout = min(profile_timeout, requested)
+            except ValueError:
+                pass
+        return min(profile_timeout, 180.0)
 
     def synthesis_retry_timeout_sec(self) -> float:
         return float(
@@ -340,21 +350,112 @@ class ResearchGraphRunner:
 
         return compile_research_graph(checkpointer=checkpointer, runtime=self, profile=profile)
 
-    async def execute(self, ctx: Any, *, checkpointer: Any = None) -> Any:
-        from langgraph.types import Command
+    def _bootstrap_run(self, ctx: Any) -> tuple[str, dict[str, Any]]:
+        """Resolve the profile before a session can create its hard budget manager."""
+        from app.agent.harness.run_budget import create_run_budget_manager
+        from app.research.routing.mode_router import (
+            budget_for_mode,
+            canonicalize_mode,
+            route,
+            run_budget_overrides_for_mode,
+        )
 
-        from app.research.routing.mode_router import budget_for_mode, route
-
-        session = RunSession(self.harness, ctx)
-        bind_session(session)
-        session.state.metadata["workflow_authority"] = "research_state"
-        route_decision = route(
+        personal = getattr(self.harness.harness_config, "personal_search", None) or {}
+        decision = route(
             ctx.task_query,
             user_mode=getattr(ctx, "search_mode", "agent") or "agent",
             conversation_summary=str(getattr(ctx, "conversation_summary", "") or ""),
         )
-        profile = route_decision.mode
-        budget_cfg = budget_for_mode(profile, getattr(self.harness.harness_config, "personal_search", None) or {})
+        profile = decision.mode
+        metadata = ctx.state.metadata
+        previous = dict(metadata.get("run_budget") or {})
+        manager = ctx.budget_manager
+        previous_profile = canonicalize_mode(previous.get("profile")) if previous.get("profile") else None
+
+        desired_overrides = run_budget_overrides_for_mode(profile, personal)
+        manager_mismatch = bool(
+            manager is not None
+            and (
+                (previous_profile is not None and previous_profile != profile)
+                or (previous_profile is None and profile == "deep_debug")
+                or (
+                    profile == "deep_debug"
+                    and any(
+                        getattr(manager, field) != desired_overrides[key]
+                        for key, field in (
+                            ("max_total_tokens", "token_limit"),
+                            ("max_run_sec", "deadline_sec"),
+                            ("max_llm_calls", "llm_call_limit"),
+                            ("max_tool_calls", "tool_call_limit"),
+                            ("max_llm_calls_per_worker", "max_llm_calls_per_worker"),
+                            ("max_parallel_workers", "max_parallel_workers"),
+                            ("synthesis_reserve_sec", "synthesis_reserve_sec"),
+                        )
+                    )
+                )
+            )
+        )
+        if manager_mismatch:
+            snapshot = manager.snapshot()
+            has_usage = bool(
+                snapshot.used_tokens
+                or snapshot.llm_calls
+                or snapshot.tool_calls
+                or snapshot.reserved_tokens
+                or snapshot.reserved_llm_calls
+                or snapshot.active_worker_leases
+            )
+            if has_usage:
+                profile = previous_profile or "agent"
+                warning = (
+                    f"budget profile mutation blocked after usage: requested={decision.mode}, "
+                    f"active={profile}"
+                    if profile != decision.mode
+                    else f"budget limit mutation blocked after usage: profile={profile}"
+                )
+                logger.warning(warning)
+                metadata["budget_profile_warning"] = warning
+            else:
+                manager = None
+                previous = {}
+
+        budget_cfg = budget_for_mode(profile, personal)
+        overrides = run_budget_overrides_for_mode(profile, personal)
+        run_budget = {**budget_cfg, **overrides, **previous}
+        if manager is None:
+            manager = create_run_budget_manager(
+                self.harness.harness_config,
+                run_budget=run_budget,
+                run_started=getattr(ctx, "run_started", None),
+            )
+            ctx.budget_manager = manager
+
+        snapshot = manager.snapshot()
+        run_budget.update(
+            profile=profile,
+            max_total_tokens=snapshot.token_limit,
+            max_run_sec=manager.deadline_sec,
+            max_llm_calls=snapshot.llm_call_limit,
+            max_tool_calls=snapshot.tool_call_limit,
+            max_llm_calls_per_worker=manager.max_llm_calls_per_worker,
+            max_parallel_workers=manager.max_parallel_workers,
+            research_cap_tokens=snapshot.research_cap_tokens,
+            synthesis_reserve_tokens=snapshot.synthesis_reserve_tokens,
+            synthesis_reserve_sec=manager.synthesis_reserve_sec,
+            deadline_at_monotonic=manager.deadline_at,
+        )
+        metadata["run_budget"] = run_budget
+        metadata["route_decision"] = decision.to_dict()
+        ctx.search_mode = profile
+        return profile, budget_cfg
+
+    async def execute(self, ctx: Any, *, checkpointer: Any = None) -> Any:
+        from langgraph.types import Command
+
+        profile, budget_cfg = self._bootstrap_run(ctx)
+        session = RunSession(self.harness, ctx)
+        bind_session(session)
+        session.state.metadata["workflow_authority"] = "research_state"
         run_budget = (
             session.state.metadata.get("run_budget")
             if isinstance(session.state.metadata, dict)
@@ -362,7 +463,9 @@ class ResearchGraphRunner:
         )
         if isinstance(run_budget, dict) and run_budget.get("max_replan_count") is not None:
             budget_cfg["max_replan_count"] = max(0, int(run_budget["max_replan_count"]))
-        elif getattr(self.harness.harness_config, "max_replan_count", None) is not None:
+        # The ordinary agent profile is capped by the harness setting; the
+        # debug profile intentionally carries a larger, separate replan budget.
+        if profile == "agent" and getattr(self.harness.harness_config, "max_replan_count", None) is not None:
             budget_cfg["max_replan_count"] = min(
                 int(budget_cfg["max_replan_count"]),
                 max(0, int(self.harness.harness_config.max_replan_count)),
@@ -1326,6 +1429,11 @@ class ResearchGraphRunner:
             "synthesis_timeout_sec": synthesis_timeout_sec,
         }
 
+    @staticmethod
+    def _estimate_synthesis_input_tokens(executor: Any, request: Any, context: Any) -> int:
+        estimate = getattr(executor, "estimate_input_tokens", None)
+        return max(0, int(estimate(request, context))) if callable(estimate) else 0
+
     def _start_synthesis_span(
         self,
         session: RunSession,
@@ -1390,7 +1498,10 @@ class ResearchGraphRunner:
             NORMAL_SYNTHESIS_INPUT_TOKENS,
             build_evidence_pack,
         )
-        from app.research.delivery.synthesis_context import SynthesisContextBuilder
+        from app.research.delivery.synthesis_context import (
+            SynthesisContextBuilder,
+            validate_synthesis_digests,
+        )
         from app.research.runtime.atomic_fact import (
             AtomicFactAnswer,
             extract_atomic_fact_answer,
@@ -1574,6 +1685,8 @@ class ResearchGraphRunner:
             findings=list(evidence_pack.findings),
             worker_summaries=[],
             token_budget=evidence_pack.token_budget,
+            attempt=attempts_before + 1,
+            pack_tokens_estimated=evidence_pack.estimated_tokens,
         )
         remaining_synthesis_method = getattr(
             session.budget_manager, "remaining_for_synthesis_tokens", None
@@ -1596,11 +1709,11 @@ class ResearchGraphRunner:
             project_id=session.ctx.project_id,
             session_id=session.session_id,
         )
-        usable_digests = [digest for digest in digests if str(digest.excerpt or "").strip()]
-        digest_ready = bool(
-            evidence_pack.findings
-            and evidence_pack.evidence_refs
-            and usable_digests
+        digest_ready = validate_synthesis_digests(
+            evidence_pack.findings,
+            evidence_pack.evidence_refs,
+            digests,
+            evidence_records,
         )
         skip_llm_synthesis = bool(evidence_records) and remaining_synthesis_tokens < 1_000
         if skip_llm_synthesis:
@@ -1639,8 +1752,31 @@ class ResearchGraphRunner:
                 },
             )
         else:
+            span_key = self._start_synthesis_span(
+                session,
+                attempt=request.attempt,
+                mode=request.mode,
+                attributes={
+                    "pack_tokens_estimated": request.pack_tokens_estimated,
+                    "prompt_tokens_estimated": self._estimate_synthesis_input_tokens(executor, request, context),
+                },
+            )
             result = await executor.execute(request, context)
+            self._end_synthesis_span(
+                session, span_key, status="ok" if result.ok else "failed",
+                duration_ms=result.duration_ms,
+            )
         synthesis_metadata = dict(getattr(result, "metadata", {}) or {})
+        first_attempt_reason = str(result.fail_reason or "")
+        first_attempt_duration_ms = int(result.duration_ms or 0)
+        attempt_metrics = [{
+            **synthesis_metadata,
+            "attempt": request.attempt,
+            "pack_tokens_estimated": request.pack_tokens_estimated,
+            "duration_ms": first_attempt_duration_ms,
+            "fail_reason": first_attempt_reason,
+            "status": "ok" if result.ok else "failed",
+        }]
         retried = False
         retry_allowed = bool(
             not result.ok
@@ -1677,6 +1813,12 @@ class ResearchGraphRunner:
                     "estimated_input_tokens": int(
                         synthesis_metadata.get("estimated_input_tokens") or 0
                     ),
+                    "prompt_chars": int(synthesis_metadata.get("prompt_chars") or 0),
+                    "digest_chars": int(synthesis_metadata.get("digest_chars") or 0),
+                    "ttft_ms": synthesis_metadata.get("ttft_ms"),
+                    "actual_input_tokens": int(synthesis_metadata.get("actual_input_tokens") or 0),
+                    "actual_output_tokens": int(synthesis_metadata.get("actual_output_tokens") or 0),
+                    "finish_reason": str(synthesis_metadata.get("finish_reason") or ""),
                     "remaining_run_tokens": int(
                         synthesis_metadata.get("remaining_run_tokens") or 0
                     ),
@@ -1705,10 +1847,12 @@ class ResearchGraphRunner:
                 )
                 for digest in selected_digests(compact_pack, compact_pack=True)
             ]
-            compact_usable_digests = [
-                digest for digest in compact_digests if str(digest.excerpt or "").strip()
-            ]
-            if not (compact_pack.findings and compact_pack.evidence_refs and compact_usable_digests):
+            if not validate_synthesis_digests(
+                compact_pack.findings,
+                compact_pack.evidence_refs,
+                compact_digests,
+                evidence_records,
+            ):
                 result = SimpleNamespace(
                     ok=False,
                     status="stopped",
@@ -1736,15 +1880,44 @@ class ResearchGraphRunner:
                         compact_pack.token_budget,
                         max(0, remaining_synthesis_tokens),
                     ),
+                    attempt=attempts_before + 2,
+                    pack_tokens_estimated=compact_pack.estimated_tokens,
                 )
                 evidence_refs = list(compact_pack.evidence_refs)
                 retry_timeout_sec = session.synthesis_retry_timeout_sec()
+                span_key = self._start_synthesis_span(
+                    session,
+                    attempt=request.attempt,
+                    mode=request.mode,
+                    attributes={
+                        "pack_tokens_estimated": request.pack_tokens_estimated,
+                        "prompt_tokens_estimated": self._estimate_synthesis_input_tokens(executor, request, context),
+                    },
+                )
                 result = await executor.execute(
                     request,
                     context,
                     timeout_sec=retry_timeout_sec,
                 )
+                self._end_synthesis_span(
+                    session, span_key, status="ok" if result.ok else "failed",
+                    duration_ms=result.duration_ms,
+                )
+            synthesis_metadata = dict(getattr(result, "metadata", {}) or {})
+            attempt_metrics.append({
+                **synthesis_metadata,
+                "attempt": attempts_before + 2,
+                "pack_tokens_estimated": compact_pack.estimated_tokens,
+                "duration_ms": int(result.duration_ms or 0),
+                "fail_reason": str(result.fail_reason or ""),
+                "status": "ok" if result.ok else "failed",
+            })
         fallback = not result.ok or not str(result.summary or "").strip()
+        synthesis_degraded = retried or fallback or mode == "degraded"
+        successful_attempt = attempts_before + (2 if retried else 1) if not fallback else 0
+        successful_pack_tokens = (
+            compact_pack.token_budget if retried else evidence_pack.token_budget
+        ) if not fallback else 0
         if fallback:
             worker_failure_reasons = [
                 str(row.get("fail_reason") or "")
@@ -1785,6 +1958,14 @@ class ResearchGraphRunner:
                     "synthesis_mode": mode,
                     "synthesis_status": result.status,
                     "synthesis_failed": fallback,
+                    "synthesis_degraded": synthesis_degraded,
+                    "synthesis_retry_count": int(retried),
+                    "successful_attempt": successful_attempt,
+                    "first_attempt_reason": first_attempt_reason,
+                    "first_attempt_duration_ms": first_attempt_duration_ms,
+                    "normal_pack_tokens": evidence_pack.token_budget,
+                    "successful_pack_tokens": successful_pack_tokens,
+                    "synthesis_attempt_metrics": attempt_metrics,
                     "synthesis_fail_reason": result.fail_reason,
                     "fallback_used": "deterministic_partial" if fallback else "",
                     "synthesis_budget_low": skip_llm_synthesis,
@@ -1811,6 +1992,13 @@ class ResearchGraphRunner:
                     "estimated_input_tokens": int(
                         synthesis_metadata.get("estimated_input_tokens") or 0
                     ),
+                    "pack_tokens_estimated": int(synthesis_metadata.get("pack_tokens_estimated") or 0),
+                    "prompt_chars": int(synthesis_metadata.get("prompt_chars") or 0),
+                    "digest_chars": int(synthesis_metadata.get("digest_chars") or 0),
+                    "ttft_ms": synthesis_metadata.get("ttft_ms"),
+                    "actual_input_tokens": int(synthesis_metadata.get("actual_input_tokens") or 0),
+                    "actual_output_tokens": int(synthesis_metadata.get("actual_output_tokens") or 0),
+                    "finish_reason": str(synthesis_metadata.get("finish_reason") or ""),
                     "remaining_run_tokens": int(
                         synthesis_metadata.get("remaining_run_tokens") or 0
                     ),
@@ -1830,6 +2018,9 @@ class ResearchGraphRunner:
                 ),
                 "fail_reason": result.fail_reason,
                 "fallback_action": "deterministic_partial" if fallback else "",
+                "synthesis_degraded": synthesis_degraded,
+                "synthesis_retry_count": int(retried),
+                "successful_attempt": successful_attempt,
             },
         )
         note_stage_duration(
@@ -1844,6 +2035,7 @@ class ResearchGraphRunner:
                 "final_content": content,
                 "synthesis_attempts": attempts_before + (2 if retried else 1),
                 "synthesis_failed": fallback,
+                "synthesis_degraded": synthesis_degraded,
                 "quality_assessment": {},
             },
         )

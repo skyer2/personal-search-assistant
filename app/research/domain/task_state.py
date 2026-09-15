@@ -62,7 +62,6 @@ def classify_worker_completion(
     accepted_findings: int,
     evidence_count: int,
     terminal_reason: str,
-    normal_soft_stop: bool = False,
 ) -> WorkerLifecycle:
     """Classify a worker by admitted evidence and accepted findings, not one tool error."""
     terminal = str(terminal_reason or "").strip()
@@ -72,23 +71,13 @@ def classify_worker_completion(
         "",
         "local_evidence_sufficient",
         "no_more_useful_evidence",
-        "search_empty",
-    } or bool(normal_soft_stop)
+    }
 
     if has_evidence and has_accepted_findings and structured_valid and normal_stop:
         return WorkerLifecycle(
             TaskExecutionStatus.SUCCEEDED,
             ResultStatus.COMPLETE,
-            StopReason.NO_MORE_USEFUL_EVIDENCE
-            if terminal in {"no_more_useful_evidence", "search_empty"}
-            else StopReason(terminal)
-            if terminal
-            in {
-                "local_evidence_sufficient",
-                "soft_budget_finalize",
-                "soft_deadline_finalize",
-            }
-            else StopReason.NONE,
+            StopReason(terminal) if terminal else StopReason.NONE,
             "",
             {},
         )

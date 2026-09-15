@@ -211,6 +211,7 @@ class ToolMonitor:
         termination_reason: str = "",
         termination_stage: str = "",
         termination: Optional[dict[str, Any]] = None,
+        synthesis_degraded: bool = False,
     ) -> None:
         """报告任务最终结果（结构化终态，禁止 partial 冒充 completed）。"""
         lifecycle = dict(termination) if isinstance(termination, dict) else {}
@@ -242,6 +243,7 @@ class ToolMonitor:
                 "status": status,
                 "run_id": run_id,
                 "termination": lifecycle,
+                "synthesis_degraded": synthesis_degraded,
             },
         )
 

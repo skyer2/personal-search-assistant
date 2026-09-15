@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import re
 from typing import Any
 
 from app.agent.harness.token_counter import estimate_tokens, get_token_counter
@@ -329,4 +330,40 @@ class SynthesisContextBuilder:
         return context
 
 
-__all__ = ["EvidenceDigest", "SynthesisContext", "SynthesisContextBuilder"]
+def validate_synthesis_digests(
+    findings: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    evidence_refs: list[str] | tuple[str, ...],
+    digests: list[EvidenceDigest] | tuple[EvidenceDigest, ...],
+    evidence_records: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
+) -> bool:
+    """Require real excerpts, including support for every numeric or dated claim."""
+    if not findings or not evidence_refs:
+        return False
+    usable_ids = {
+        digest.evidence_id
+        for digest in digests
+        if str(digest.excerpt or "").strip()
+    }
+    if not usable_ids:
+        return False
+    for record in evidence_records:
+        evidence_id = str(record.get("evidence_id") or "")
+        artifact_ref = str(record.get("artifact_ref") or "")
+        if evidence_id in usable_ids and artifact_ref:
+            usable_ids.add(artifact_ref)
+    for finding in findings:
+        claim = str(finding.get("claim") or finding.get("summary") or "")
+        if not re.search(r"\d|[一二三四五六七八九十]+[年月日]", claim):
+            continue
+        refs = {str(item) for item in finding.get("evidence_ids") or []}
+        if not refs.intersection(usable_ids):
+            return False
+    return True
+
+
+__all__ = [
+    "EvidenceDigest",
+    "SynthesisContext",
+    "SynthesisContextBuilder",
+    "validate_synthesis_digests",
+]

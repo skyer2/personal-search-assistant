@@ -44,7 +44,7 @@ The legacy `missing` and `recommended_next_questions` fields are UI/eval project
 
 ## Worker Finalization
 
-A worker enters Finalization Mode adaptively: at no later than 80% and no earlier than 40% of its token ceiling, when the projected next calls would risk the ceiling, when the final LLM calls are needed, or when the wall clock must reserve one model call plus ten seconds. The instruction is injected before the current LLM request, retrieval is disabled, and the remaining capacity is reserved for a structured WorkerResult.
+A worker enters Finalization Mode adaptively: at no later than 80% and no earlier than 40% of its token ceiling, when the projected next calls would risk the ceiling, when final LLM calls are needed, or when its wall clock reaches the soft deadline. The deadline reserves 20–45 seconds for finalization instead of reserving a full worst-case timeout for each future model call: a 150-second worker soft-finalizes at 120 seconds, and a 300-second worker at 255 seconds. If no retrieval and no evidence have occurred, the first search/fetch remains available until the hard run deadline, hard budget, or cancellation stops it. Once evidence exists, soft finalization disables new retrieval and preserves capacity for a structured WorkerResult.
 
 ## Tool and Metadata Authorities
 
@@ -58,7 +58,7 @@ Publication metadata is owned by tools and runtime. Search provider dates and fe
 
 A research worker is complete only when its last non-empty assistant message without tool calls contains valid JSON with at least one finding. Every accepted finding has a non-empty `claim` and at least one `evidence_ids` or `artifact_ids` reference returned by the runtime or a tool. References must be copied verbatim; workers must not invent `E1`, `E2`, or `source1`.
 
-If the first final answer is missing, prose-only, summary-only, facts-only, or lacks evidence references, the executor performs one Finalization-only retry. The retry forbids `internet_search`, `fetch_url`, `batch_search`, and `batch_fetch`; it permits `read_artifact` and `read_evidence`.
+If the first final answer is missing, prose-only, summary-only, facts-only, or lacks evidence references, the executor performs one Finalization-only retry. Its model-visible capability contains only `read_artifact` and `read_evidence` (or no tools when compact context is sufficient). `internet_search`, `fetch_url`, `batch_search`, and `batch_fetch` are absent from the retry agent itself, so a retry cannot create an artificial 0/0 retrieval budget denial.
 
 Ingestion resolves references to admitted canonical evidence IDs in this order: exact evidence ID, artifact reference, locator/source. Rejected findings remain visible as diagnostics with `reason` and raw references. A deterministic compressed finding is allowed only as a `partial` fallback when both facts and admitted evidence exist; it is never treated as a model-produced complete finding.
 
@@ -79,7 +79,9 @@ A terminal tool result such as `search_empty`, `budget_denied`, fetch failure, o
 
 Before synthesis, the runtime builds a deterministic Evidence Pack. Findings are grouped by Brief criterion, deduplicated, quality-ranked by primary source, source tier, freshness, confidence, and evidence count, then limited to three findings per criterion normally and two on compact retry. Resolved winners, expected disagreements, and blocking unresolved conflicts are preserved.
 
-The normal pack is capped at 8K input tokens and the compact retry at 4K, with a 30K hard maximum. A synthesis timeout retries once with the strictly smaller compact pack; the retry input cannot be identical to the first attempt. The retry timeout follows the run profile (30 seconds in production, 120 seconds in `deep_debug`). If both attempts fail, deterministic partial delivery remains the final fallback.
+The normal pack is capped at 8K input tokens and the compact retry at 4K, with a 30K hard maximum. A synthesis timeout retries once with the strictly smaller compact pack; the retry input cannot be identical to the first attempt. Each attempt records its selected-pack size, full prompt size, digest size, model/provider, time to first token when available, wall time, actual token usage, finish reason, and failure reason. A compact retry that succeeds is a successful but explicitly degraded delivery (`synthesis_degraded=true`, retry count 1, successful attempt 2), not primary synthesis success. If both attempts fail, deterministic partial delivery remains the final fallback. The normal primary path targets under 120 seconds P95; Deep Debug permits under 180 seconds during integration.
+
+`deep_debug` resolves its 1.2M-token, 3600-second, 240-call, two-worker budget before constructing the actual BudgetManager. Its default primary synthesis timeout is 180 seconds; a lower explicit stage timeout in `.env` wins. The final delivered status exposes degraded recovery separately from Quality pass.
 
 Evidence Pack selection and digest resolution are separate contracts. The pack selects canonical evidence IDs; `SynthesisContextBuilder` resolves each ID through its `EvidenceRecord.artifact_ref` and citation aliases and reads the real artifact summary/content as the excerpt. Synthesis is not invoked when selected findings, evidence references, or non-empty digests are missing; the runtime returns a deterministic partial result with `synthesis_evidence_digest_missing`.
 
@@ -87,7 +89,7 @@ Ingestion binds canonical evidence records to the citation manager before synthe
 
 ## Timeout Contract
 
-`LLM_TIMEOUT_SEC` is the default model-call timeout for Brief, Supervisor, Worker, and Synthesis. Stage-specific variables such as `LLM_WORKER_TIMEOUT_SEC`, `LLM_SYNTHESIS_TIMEOUT_SEC`, `HARNESS_STEP_TIMEOUT_SEC`, `HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC`, and `HARNESS_SYNTHESIS_RETRY_TIMEOUT_SEC` override it only when explicitly configured. `LLM_SYNTHESIS_MODEL` and `LLM_SYNTHESIS_MAX_TOKENS` allow the final report to use a faster bounded model without changing planning or worker behavior. Without a worker-stage override, the worker wall timeout reserves one model call plus ten seconds. The shared resolution lives in `app/config/timeouts.py`; hard-coded 20/30/60-second stage ceilings are not valid.
+`LLM_TIMEOUT_SEC` is the default model-call timeout for Brief, Supervisor, Worker, and Synthesis. Stage-specific variables such as `LLM_WORKER_TIMEOUT_SEC`, `LLM_SYNTHESIS_TIMEOUT_SEC`, `HARNESS_STEP_TIMEOUT_SEC`, `HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC`, and `HARNESS_SYNTHESIS_RETRY_TIMEOUT_SEC` override it only when explicitly configured. `LLM_SYNTHESIS_MODEL` and `LLM_SYNTHESIS_MAX_TOKENS` allow the final report to use a faster bounded model without changing planning or worker behavior. The shared timeout resolution lives in `app/config/timeouts.py`; the worker soft deadline is a separate finalization boundary and must not prevent first retrieval.
 
 Normal stop reasons:
 

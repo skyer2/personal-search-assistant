@@ -199,6 +199,11 @@ function terminationFromEvents(events: MonitorMessage[]): Record<string, unknown
     : undefined;
 }
 
+function synthesisDegradedFromEvents(events: MonitorMessage[]): boolean {
+  const terminal = [...events].reverse().find((item) => item.event === "task_result");
+  return terminal?.data?.synthesis_degraded === true;
+}
+
 function ProcessDock({
   elapsedClock,
   events,
@@ -241,6 +246,7 @@ function ProcessDock({
           durationLabel={<ElapsedTimer clock={elapsedClock} />}
           quality={qualityFromEvents(events)}
           termination={terminationFromEvents(events)}
+          synthesisDegraded={synthesisDegradedFromEvents(events)}
           progress={phaseProgress}
           runStatus={runStatus}
         />

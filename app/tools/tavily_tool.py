@@ -47,10 +47,12 @@ def internet_search(
 def _denied(blocked: BudgetBlock) -> dict[str, object]:
     return {
         "ok": False,
-        "error": "budget_denied",
+        "error": "finalization_requested" if blocked.is_soft_finalization else "budget_denied",
+        "scope": blocked.scope,
         "reason": blocked.reason,
         "resource": blocked.resource,
         "used": blocked.used,
+        "reserved": blocked.reserved,
         "limit": blocked.limit,
         "message": str(blocked),
     }

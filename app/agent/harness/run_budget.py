@@ -261,9 +261,15 @@ class RunBudgetManager:
         with self._lock:
             reason = self._research_block_reason_locked()
             if reason:
+                resource = (
+                    "token" if reason.endswith("token_cap")
+                    else "llm_call" if reason.endswith("llm_call_cap")
+                    else "tool_call" if reason == "tool_call_cap"
+                    else "time"
+                )
                 self._emit_denied(
-                    scope="run" if reason.startswith("run_") else "research_phase",
-                    resource="token" if reason.endswith("token_cap") else "llm_call",
+                    scope="run" if reason.startswith("run_") or reason in {"tool_call_cap", "deadline_exceeded"} else "research_phase",
+                    resource=resource,
                     reason=reason,
                     task_id=str(task_id or ""),
                 )

@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+from langchain_core.messages import AIMessage
 from app.agent.harness.artifacts import ArtifactStore, reset_artifact_store, set_artifact_store
 from app.agent.harness.run_budget import RunBudgetManager
 from app.agent.harness.state import LoopState, PlanStep
@@ -19,6 +20,7 @@ from app.research.runtime.ingestion import ingest_new_worker_results
 from app.research.runtime.state import empty_research_state
 from app.research.runtime.task_identity import semantic_fingerprint
 from app.research.runtime.worker import ResearchContext, ResearchTask
+from app.research.routing.mode_router import budget_for_mode
 from app.research.supervisor.models import ResearchTaskRequest
 
 
@@ -34,6 +36,20 @@ class FakeHarness:
 class RaisingAgent:
     async def ainvoke(self, *args: Any, **kwargs: Any):
         raise RuntimeError("provider unavailable")
+
+
+class TimeoutThenAnswer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ainvoke(self, *args: Any, **kwargs: Any):
+        self.calls += 1
+        if self.calls == 1:
+            raise asyncio.TimeoutError()
+        return AIMessage(
+            content="Company A has recent funding evidence.",
+            usage_metadata={"input_tokens": 320, "output_tokens": 35, "total_tokens": 355},
+        )
 
 
 def _budget_manager() -> RunBudgetManager:
@@ -258,6 +274,10 @@ async def test_quality_gate_evaluates_final_delivery_not_worker_history(monkeypa
             "coverage_judgement": {"sufficient": True, "status": "sufficient"},
             "synthesis_failed": True,
             "synthesis_attempts": 2,
+            "synthesis_degraded": True,
+            "worker_results": [
+                {"task_id": "task_partial", "status": "partial", "fail_reason": "worker_timeout"}
+            ],
         }
     )
 
@@ -266,6 +286,50 @@ async def test_quality_gate_evaluates_final_delivery_not_worker_history(monkeypa
     assert update["quality_assessment"]["verdict"] == "pass"
     assert update["quality_assessment"]["issues"] == []
     assert update["quality_assessment"]["grounding"] is True
+
+
+async def test_primary_timeout_compact_retry_is_visible_and_grounded(monkeypatch):
+    harness = FakeHarness()
+    harness.synthesis_model = TimeoutThenAnswer()
+    session = _run_session(_budget_manager(), harness)
+    monkeypatch.setattr(runner_module, "get_session", lambda _run_id: session)
+    state = _synthesis_state()
+    state["coverage_judgement"] = {"sufficient": True, "status": "sufficient"}
+    state["control_decision"] = {"action": "synthesize"}
+
+    update = await runner_module.ResearchGraphRunner(harness).node_synthesize(state)
+    metadata = session.state.metadata
+    assert harness.synthesis_model.calls == 2
+    assert update["synthesis_failed"] is False
+    assert update["synthesis_degraded"] is True
+    assert metadata["synthesis_degraded"] is True
+    assert metadata["synthesis_retry_count"] == 1
+    assert metadata["successful_attempt"] == 2
+    assert metadata["first_attempt_reason"] == "synthesis_timeout"
+    assert metadata["normal_pack_tokens"] == 8_000
+    assert metadata["successful_pack_tokens"] == 4_000
+    assert [row["attempt"] for row in metadata["synthesis_attempt_metrics"]] == [1, 2]
+    assert metadata["synthesis_attempt_metrics"][0]["fail_reason"] == "synthesis_timeout"
+    assert metadata["synthesis_attempt_metrics"][1]["actual_output_tokens"] == 35
+
+    quality_state = {**state, **update}
+    quality = await runner_module.ResearchGraphRunner(harness).node_quality_gate(quality_state)
+    assert quality["quality_assessment"]["verdict"] == "pass"
+    assert quality["quality_assessment"]["grounding"] is True
+
+
+def test_deep_debug_primary_synthesis_timeout_honors_explicit_env(monkeypatch):
+    session = _run_session(_budget_manager())
+    session.state.metadata["run_budget"] = {"synthesis_step_timeout_sec": 300}
+    monkeypatch.delenv("HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC", raising=False)
+    assert session.synthesis_timeout_sec() == 180
+    monkeypatch.setenv("HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC", "120")
+    assert session.synthesis_timeout_sec() == 120
+    monkeypatch.setenv("HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC", "invalid")
+    assert session.synthesis_timeout_sec() == 180
+    assert budget_for_mode("deep_debug", {"experiment": {"deep_debug": {}}})[
+        "synthesis_step_timeout_sec"
+    ] == 180
 
 
 def test_no_evidence_terminates_as_failure_with_exact_reason():

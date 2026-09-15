@@ -154,7 +154,7 @@ harness:
       max_parallel_workers: 2
       worker_idle_timeout_sec: 300
       step_timeout_sec: 300
-      synthesis_step_timeout_sec: 300
+      synthesis_step_timeout_sec: 180
       synthesis_retry_timeout_sec: 120
 
   personal_search:
@@ -189,7 +189,7 @@ harness:
         max_parallel_workers: 2
         worker_idle_timeout_sec: 300
         step_timeout_sec: 300
-        synthesis_step_timeout_sec: 300
+        synthesis_step_timeout_sec: 180
         synthesis_retry_timeout_sec: 120
 
   tools:

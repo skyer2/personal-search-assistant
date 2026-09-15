@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from langchain_core.callbacks import BaseCallbackHandler
 from app.api.tracing import build_run_config
 from app.agent.harness.token_counter import estimate_tokens
 from app.research.execution.llm_gateway import LLMGateway
@@ -29,6 +30,18 @@ NON_RETRYABLE_SYNTHESIS_FAILURES = frozenset(
     {"provider_auth", "provider_bad_request", "run_token_cap", "run_llm_call_cap"}
 )
 _OUTPUT_TOKEN_LIMITS = {"normal": 3_000, "degraded": 1_800}
+
+
+class _FirstTokenCallback(BaseCallbackHandler):
+    """Measure TTFT when the provider emits token callbacks during ainvoke."""
+
+    def __init__(self) -> None:
+        self.started = time.perf_counter()
+        self.first_token_ms: int | None = None
+
+    def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+        if token and self.first_token_ms is None:
+            self.first_token_ms = int((time.perf_counter() - self.started) * 1000)
 
 
 def _failure_details(exc: Exception) -> tuple[str, str]:
@@ -78,6 +91,8 @@ class SynthesisRequest:
     findings: list[dict[str, Any]] = field(default_factory=list)
     worker_summaries: list[dict[str, Any]] = field(default_factory=list)
     token_budget: int = 40_000
+    attempt: int = 1
+    pack_tokens_estimated: int = 0
 
 
 class SynthesisExecutor:
@@ -95,6 +110,7 @@ class SynthesisExecutor:
         timeout_sec: float | None = None,
     ) -> WorkerResult:
         started = time.perf_counter()
+        self._last_ttft_ms: int | None = None
         if request.mode not in {"normal", "degraded"}:
             return self._result(
                 started,
@@ -113,9 +129,11 @@ class SynthesisExecutor:
                 evidence_refs=request.evidence_refs,
             )
 
+        prompt = self._prompt(request, context)
+        attempt_metadata = self._attempt_metadata(request, prompt, model)
         try:
             raw_response = await asyncio.wait_for(
-                self._invoke_raw(model=model, request=request, context=context),
+                self._invoke_raw(model=model, request=request, context=context, prompt=prompt),
                 timeout=self._timeout_sec(timeout_sec),
             )
         except asyncio.TimeoutError:
@@ -125,14 +143,14 @@ class SynthesisExecutor:
                 summary="synthesis_timeout",
                 fail_reason="synthesis_timeout",
                 evidence_refs=request.evidence_refs,
-                metadata=self._failure_metadata(
+                metadata={**attempt_metadata, **self._failure_metadata(
                     request,
                     context,
                     model,
                     error_type="asyncio.TimeoutError",
                     error_message="synthesis timeout",
                     error_category="timeout",
-                ),
+                ), "ttft_ms": self._last_ttft_ms},
             )
         except Exception as exc:
             fail_reason, error_category = _failure_details(exc)
@@ -142,17 +160,21 @@ class SynthesisExecutor:
                 summary=f"synthesis_failed:{fail_reason}",
                 fail_reason=fail_reason,
                 evidence_refs=request.evidence_refs,
-                metadata=self._failure_metadata(
+                metadata={**attempt_metadata, **self._failure_metadata(
                     request,
                     context,
                     model,
                     error_type=type(exc).__name__,
                     error_message=str(exc)[:500],
                     error_category=error_category,
-                ),
+                ), "ttft_ms": self._last_ttft_ms},
             )
 
-        response_analysis = self._analyze_response(raw_response, request, context, model)
+        response_analysis = {
+            **attempt_metadata,
+            **self._analyze_response(raw_response, request, context, model),
+        }
+        response_analysis["ttft_ms"] = self._last_ttft_ms
         content = response_analysis["cleaned_content"]
         if not content:
             return self._result(
@@ -192,6 +214,7 @@ class SynthesisExecutor:
         model: Any,
         request: SynthesisRequest,
         context: ResearchContext,
+        prompt: str | None = None,
     ) -> Any:
         config = build_run_config(
             f"{context.session_id}:synthesis:{context.run_id}",
@@ -201,6 +224,8 @@ class SynthesisExecutor:
                 "usage_session_id": context.session_id,
             },
         )
+        ttft_callback = _FirstTokenCallback()
+        config.setdefault("callbacks", []).append(ttft_callback)
         gateway = LLMGateway(self.session.budget_manager)
         with gateway.execution_scope(phase="synthesis"):
             output_token_limit = _OUTPUT_TOKEN_LIMITS.get(request.mode, 3_000)
@@ -208,12 +233,32 @@ class SynthesisExecutor:
             bind = getattr(model, "bind", None)
             if callable(bind):
                 invoke_target = bind(max_tokens=output_token_limit)
-            response = await gateway.ainvoke(
-                invoke_target,
-                [HumanMessage(content=self._prompt(request, context))],
-                config,
-            )
+            try:
+                response = await gateway.ainvoke(
+                    invoke_target,
+                    [HumanMessage(content=prompt if prompt is not None else self._prompt(request, context))],
+                    config,
+                )
+            finally:
+                self._last_ttft_ms = ttft_callback.first_token_ms
         return response
+
+    def _attempt_metadata(
+        self, request: SynthesisRequest, prompt: str, model: Any
+    ) -> dict[str, Any]:
+        return {
+            "attempt": request.attempt,
+            "pack_tokens_estimated": request.pack_tokens_estimated,
+            "prompt_chars": len(prompt),
+            "digest_chars": sum(len(digest.excerpt) for digest in request.evidence_digests),
+            "estimated_input_tokens": estimate_tokens(prompt),
+            "actual_input_tokens": 0,
+            "actual_output_tokens": 0,
+            "finish_reason": "",
+            "ttft_ms": self._last_ttft_ms,
+            "model": str(getattr(model, "model_name", None) or getattr(model, "model", None) or "unknown"),
+            "provider": "openai-compatible",
+        }
 
     def _prompt(self, request: SynthesisRequest, context: ResearchContext) -> str:
         mode_instruction = (
@@ -299,9 +344,9 @@ class SynthesisExecutor:
         content = getattr(response, "content", None)
         if content is not None:
             return self._extract_response_content(content)
-        text = getattr(response, "text", None)
-        if text is not None:
-            return str(text), True
+        response_text = getattr(response, "text", None)
+        if response_text is not None:
+            return str(response_text), True
         return "", False
 
     @staticmethod
@@ -517,6 +562,8 @@ class SynthesisExecutor:
         metadata: dict[str, Any] | None = None,
     ) -> WorkerResult:
         duration_ms = int((time.perf_counter() - started) * 1000)
+        result_metadata = dict(metadata or {})
+        result_metadata["duration_ms"] = duration_ms
         return WorkerResult(
             ok=ok,
             task_id="synthesis",
@@ -524,7 +571,7 @@ class SynthesisExecutor:
             summary=summary,
             evidence_refs=list(dict.fromkeys(evidence_refs or [])),
             fail_reason=fail_reason,
-            metadata=dict(metadata or {}),
+            metadata=result_metadata,
             duration_ms=duration_ms,
             execution_ms=duration_ms,
         )

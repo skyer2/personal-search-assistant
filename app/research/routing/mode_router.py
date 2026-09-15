@@ -151,7 +151,7 @@ def budget_for_mode(
             ),
             "step_timeout_sec": int(deep_debug.get("step_timeout_sec", 300)),
             "synthesis_step_timeout_sec": int(
-                deep_debug.get("synthesis_step_timeout_sec", 300)
+                deep_debug.get("synthesis_step_timeout_sec", 180)
             ),
             "synthesis_retry_timeout_sec": int(
                 deep_debug.get("synthesis_retry_timeout_sec", 120)

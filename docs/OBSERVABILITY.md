@@ -99,7 +99,7 @@ Run latency 汇总包含 brief、supervisor、worker、coverage、synthesis、qu
 |---|---|
 | `scope` | `worker` / `research` / `run` |
 | `resource` / `reason` | 被拒绝资源与稳定原因码 |
-| `used` / `limit` | 当前资源计数 |
+| `used` / `reserved` / `limit` | 当前资源计数、在途预留量和硬上限 |
 | `worker_*` / `run_*` | Worker lease 与 Run 级 token / LLM / tool 快照 |
 
 `semantic.fallback` 记录 Brief / Supervisor 结构化输出降级，不吞异常：`error_type`、`error_message`、`error_category`、`model`、`schema`、`fallback` 全部保留。Run metadata 同时聚合 `control_plane`，用于显示控制面是否 degraded。
@@ -174,7 +174,9 @@ Worker 终态事件携带完整预算快照与 `stop_reason`：LLM calls、token
 | `finish_reason` | Provider finish reason |
 | `actual_input_tokens` / `actual_output_tokens` | Provider usage 口径 |
 
-Run metadata 同步暴露 `synthesis_attempts`、`synthesis_failed`、`synthesis_fail_reason`、`fallback_used`。这用于区分“模型临时失败但已部分交付”和“没有可信证据导致失败”。空输出进一步区分为 `provider_empty_content`、`content_removed_by_cleaner` 与 `unsupported_response_shape`；仅含 JSON summary 的响应会降级恢复 summary，混合 Markdown 与 JSON 的旧清理行为保持不变。
+每次尝试还记录完整 prompt 字符数和估算 token、digest 字符数、模型与 provider、TTFT（提供方可用时）、实际输入/输出 token 和 finish reason。Run metadata 同步暴露 `synthesis_attempts`、`synthesis_failed`、`synthesis_degraded`、`synthesis_retry_count`、`successful_attempt`、首次失败原因/耗时、正常与成功 Evidence Pack token 数。一次 compact retry 成功仍可通过 Quality，但 Delivery 必须显示 degraded；它不能计入 primary synthesis 性能成功。空输出进一步区分为 `provider_empty_content`、`content_removed_by_cleaner` 与 `unsupported_response_shape`；仅含 JSON summary 的响应会降级恢复 summary，混合 Markdown 与 JSON 的旧清理行为保持不变。
+
+终端 `task_result` 事件透出 `synthesis_degraded`，过程框在合成和交付阶段显示“降级恢复”，即使最终 status 是 `completed` 且 Quality pass，也不会把 retry 成功误显示为正常主路径成功。
 
 ## 隐私
 

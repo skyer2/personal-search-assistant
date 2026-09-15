@@ -107,7 +107,17 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 
 `release_smoke.py` 还固定执行 3 次主研究查询、两个开放研究查询和 1 个原子事实查询。主查询必须 3 次均为非空 `partial` 或 `success`；原子事实必须命中快路径并回答受证据支持的年份，同时 Trace Integrity 通过。
 
-`test_budget_generous_baseline_full_stack.py` 固定执行 Budget 宽松基线的两个 Golden Query，走真实 `batch_search → batch_fetch → 补搜索 → structured result` 适配器，并断言 Worker 全部完成、无 budget cap、Trace Integrity 通过、终端事件携带完整 used / limit 与 stop reason 快照。
+`test_budget_generous_baseline_full_stack.py` 固定执行 Budget 宽松基线的两个 Golden Query，走真实 `batch_search → batch_fetch → 补搜索 → structured result` 适配器，并断言证据链和 Coverage 可用、无预算硬上限异常、Trace Integrity 通过、终端事件携带完整 used / reserved / limit 与 stop reason 快照。单个 Worker 的 `partial` 可以继续向 Coverage 贡献证据；最终质量按 Delivery 和 grounding 判断。
+
+### 真实 `.env` Golden Deep Research E2E
+
+入口：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\live_deep_research_e2e.py --runs 3 --mode deep_debug
+```
+
+这个入口连续向真实模型与搜索提供方提交“2026 年 9 月 Agent 热点及未来 1–2 年方向”查询，逐次保存最终回答与可审计指标到 `output/live_deep_research_e2e/`。每次必须有 Evidence-backed Findings、已接纳 Evidence、`Coverage sufficient`、Quality pass、有效 Trace、一个 root span、零孤儿/环、非空回答和零人为 0/0 budget denial。三次中至少两次必须在 primary 8K synthesis 上成功，未依赖 compact retry；重试恢复的成功必须标记 `synthesis_degraded=true`。单次 fallback 成功仅证明恢复路径有效。
 
 ### L4 BrowseComp-Plus
 

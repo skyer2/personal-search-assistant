@@ -22,6 +22,17 @@ class UnsupportedTaskType(KeyError):
 
 
 DIRECT_STEP_TYPES = frozenset(STEP_KINDS)
+FINALIZE_ONLY_WORKER_KEY = "research_finalize_only"
+RETRIEVAL_TOOLS = frozenset({
+    "internet_search", "batch_search", "fetch_url", "batch_fetch"
+})
+FINALIZE_ONLY_SYSTEM_PROMPT = """你是研搜工人的收尾阶段，只修复当前步骤的结构化结果。
+- 禁止新检索、抓取、委派和规划；只依据已有上下文和登记证据。
+- 如需核对原文，只能使用 read_artifact 或 read_evidence。
+- 每个 supported finding 必须绑定真实 evidence_id 或 artifact_id。
+- 没有可绑定证据时不要编造 finding。
+- 只输出严格 JSON，包含 ok、summary、findings、evidence_ids、stop_reason。
+"""
 
 
 @dataclass
@@ -77,6 +88,31 @@ def worker_tools_for_step(
         "convert_pdf": ["convert_md_to_pdf", "generate_markdown", "read_file_content", *CONTEXT_TOOLS],
     }
     return list(dict.fromkeys(extras.get(step_type, tools)))
+
+
+def finalize_only_tool_names() -> list[str]:
+    """The worker repair capability may inspect evidence but cannot retrieve."""
+    return ["read_artifact", "read_evidence"]
+
+
+def resolve_finalize_only_worker(harness: Any) -> Any | None:
+    """Resolve a read-only repair capability, even for a custom worker map."""
+    workers = getattr(harness, "workers", None) or {}
+    existing = workers.get(FINALIZE_ONLY_WORKER_KEY)
+    if existing is not None:
+        return existing
+    model = getattr(harness, "control_agent", None) or getattr(harness, "synthesis_model", None)
+    if model is None:
+        return None
+    from app.research.workers.factory import create_research_worker
+
+    # A no-tool instance is safe when no registry-built read-only graph exists.
+    agent = create_research_worker(
+        model=model, tools=[], system_prompt=FINALIZE_ONLY_SYSTEM_PROMPT
+    )
+    if isinstance(getattr(harness, "workers", None), dict):
+        harness.workers[FINALIZE_ONLY_WORKER_KEY] = agent
+    return agent
 
 
 def resolve_execute_target(
@@ -184,6 +220,16 @@ def build_worker_registry(
 
     net_tools = [internet_search, fetch_url, batch_search, batch_fetch]
     context_tools = [read_artifact, read_evidence]
+    assert not (set(finalize_only_tool_names()) & RETRIEVAL_TOOLS)
+    registry.register(
+        FINALIZE_ONLY_WORKER_KEY,
+        _maybe_deep(
+            FINALIZE_ONLY_WORKER_KEY,
+            context_tools,
+            FINALIZE_ONLY_SYSTEM_PROMPT,
+            llm=research_model,
+        ),
+    )
 
     def _contract(tools: list[Any], step_type: str) -> list[Any]:
         wrapped: list[Any] = []

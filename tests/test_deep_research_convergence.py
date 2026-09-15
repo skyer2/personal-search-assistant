@@ -195,19 +195,77 @@ def test_supervisor_consumes_exact_coverage_gap() -> None:
     assert "primary_source" in task.missing_evidence_types
 
 
-def test_soft_deadline_blocks_retrieval_without_hard_denial() -> None:
+def test_soft_deadline_allows_first_retrieval_then_blocks_new_search() -> None:
     with worker_retrieval_budget(
         search_queries=10,
         fetch_sources=10,
         tool_invocations=10,
         soft_deadline_at=time.monotonic() - 0.001,
     ) as budget:
+        first = consume_search_queries_or_block(1)
         blocked = consume_search_queries_or_block(1)
 
+    assert first is None
     assert blocked == FINALIZE_JSON_MESSAGE
     assert getattr(blocked, "reason") == "soft_deadline_finalize"
+    assert budget.search_queries_used == 1
+    assert budget.tool_invocations_used == 1
+
+
+def test_existing_worker_artifact_allows_soft_finalization_before_search() -> None:
+    from app.agent.harness.artifacts import ArtifactStore, set_artifact_store
+    from app.agent.harness.usage_tracker import bind_worker_execution_scope
+
+    store = ArtifactStore()
+    set_artifact_store(store)
+    store.put(
+        "Previously collected evidence.",
+        kind="web",
+        locator="https://example.com/source",
+        metadata={"run_id": "run-existing", "task_id": "task-existing"},
+    )
+    with worker_retrieval_budget(
+        search_queries=10,
+        fetch_sources=10,
+        tool_invocations=10,
+        soft_deadline_at=time.monotonic() - 0.001,
+    ) as budget:
+        with bind_worker_execution_scope(
+            "task-existing", step_index=0, run_id="run-existing", session_id="session-existing"
+        ):
+            blocked = consume_search_queries_or_block(1)
+
+    assert getattr(blocked, "reason") == "soft_deadline_finalize"
+    assert budget.admitted_evidence_count >= 1
     assert budget.search_queries_used == 0
-    assert budget.tool_invocations_used == 0
+
+
+def test_soft_finalization_tool_result_is_not_budget_denied() -> None:
+    from app.agent.harness.step_budget import BudgetBlock
+    from app.tools.tavily_tool import _denied as search_result
+    from app.tools.fetch_url import _denied as fetch_result
+    from app.tools.batch_retrieval import _denied as batch_result
+
+    soft = BudgetBlock(
+        FINALIZE_JSON_MESSAGE,
+        resource="search_query",
+        reason="soft_deadline_finalize",
+        used=1,
+        limit=10,
+    )
+    hard = BudgetBlock(
+        STOP_JSON_MESSAGE,
+        resource="search_query",
+        reason="search_query_cap",
+        used=10,
+        limit=10,
+    )
+    for serialize in (search_result, fetch_result, batch_result):
+        assert serialize(soft)["error"] == "finalization_requested"
+        hard_result = serialize(hard)
+        assert hard_result["error"] == "budget_denied"
+        assert hard_result["scope"] == "worker"
+        assert hard_result["reserved"] == 0
 
 
 def test_committed_llm_usage_arms_soft_token_finalization() -> None:
@@ -230,6 +288,7 @@ def test_committed_llm_usage_arms_soft_token_finalization() -> None:
         bind_budget_manager(LeaseManager()),
         bind_worker_budget_scope("task-soft-finalize"),
     ):
+        budget.admitted_evidence_count = 1
         reason = arm_worker_soft_finalization()
         blocked = consume_search_queries_or_block(1)
 
@@ -259,6 +318,7 @@ def test_projected_llm_call_reserves_finalization_capacity() -> None:
         bind_budget_manager(LeaseManager()),
         bind_worker_budget_scope("task-dynamic-reserve"),
     ):
+        budget.admitted_evidence_count = 1
         reason = arm_worker_soft_finalization(
             projected_tokens=20_000,
             projected_llm_calls=1,
@@ -308,6 +368,7 @@ def test_budgeted_model_call_injects_finalization_instruction() -> None:
         bind_budget_manager(LeaseManager()),
         bind_worker_budget_scope("task-finalize-prompt"),
     ):
+        budget.admitted_evidence_count = 1
         result = asyncio.run(wrapped.ainvoke(original_prompt))
 
     assert result == "ok"

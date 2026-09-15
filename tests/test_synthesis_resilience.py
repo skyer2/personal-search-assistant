@@ -11,7 +11,11 @@ from app.agent.harness.artifacts import reset_artifact_store, set_artifact_store
 from app.agent.harness.run_budget import RunBudgetManager
 from app.agent.harness.token_counter import estimate_tokens
 from app.research.delivery.partial_renderer import render_partial_delivery
-from app.research.delivery.synthesis_context import EvidenceDigest, SynthesisContextBuilder
+from app.research.delivery.synthesis_context import (
+    EvidenceDigest,
+    SynthesisContextBuilder,
+    validate_synthesis_digests,
+)
 from app.research.execution.synthesis_executor import SynthesisExecutor, SynthesisRequest
 from app.research.runtime.worker import ResearchContext
 
@@ -141,6 +145,29 @@ def test_synthesis_digest_resolves_canonical_evidence_id_to_artifact_summary(tmp
         reset_artifact_store()
 
 
+def test_numeric_claim_requires_its_own_nonempty_digest():
+    findings = [{"claim": "2026 年增长 20%。", "evidence_ids": ["ev-2"]}]
+    records = [{"evidence_id": "ev-2", "artifact_ref": "art-2"}]
+    assert not validate_synthesis_digests(
+        findings,
+        ["ev-1", "ev-2"],
+        [EvidenceDigest("ev-1", "Source", "https://one.example", "unrelated")],
+        records,
+    )
+    assert validate_synthesis_digests(
+        findings,
+        ["ev-2"],
+        [EvidenceDigest("ev-2", "Source", "https://two.example", "20% growth")],
+        records,
+    )
+    assert validate_synthesis_digests(
+        [{"claim": "2026 年增长 20%。", "evidence_ids": ["art-2"]}],
+        ["ev-2"],
+        [EvidenceDigest("ev-2", "Source", "https://two.example", "20% growth")],
+        records,
+    )
+
+
 def test_synthesis_prompt_is_token_bounded():
     executor = SynthesisExecutor(FakeHarness(), FakeSession())
     prompt = executor._prompt(_request(token_budget=1_000), _context())
@@ -241,6 +268,35 @@ def test_synthesis_response_diagnostics_and_content_shapes():
             assert result.metadata["actual_output_tokens"] >= 0
         else:
             assert result.fail_reason == expected_content
+
+
+def test_synthesis_attempt_metrics_include_full_prompt_and_usage():
+    harness = FakeHarness()
+    harness.synthesis_model = StaticModel(AIMessage(
+        content="Grounded result.",
+        usage_metadata={"input_tokens": 450, "output_tokens": 50, "total_tokens": 500},
+    ))
+    request = SynthesisRequest(
+        mode="normal",
+        evidence_refs=["ev-1"],
+        evidence_digests=[EvidenceDigest("ev-1", "Source", "https://example.com", "real excerpt")],
+        research_summary="Finding with cited evidence.",
+        attempt=2,
+        pack_tokens_estimated=4_000,
+        token_budget=4_000,
+    )
+    executor = SynthesisExecutor(harness, FakeSession())
+    result = asyncio.run(executor.execute(request, _context()))
+    assert result.ok
+    assert result.metadata["attempt"] == 2
+    assert result.metadata["pack_tokens_estimated"] == 4_000
+    assert result.metadata["prompt_chars"] == len(executor._prompt(request, _context()))
+    assert result.metadata["digest_chars"] == len("real excerpt")
+    assert result.metadata["estimated_input_tokens"] == estimate_tokens(executor._prompt(request, _context()))
+    assert result.metadata["actual_input_tokens"] == 450
+    assert result.metadata["actual_output_tokens"] == 50
+    assert result.metadata["duration_ms"] >= 0
+    assert "ttft_ms" in result.metadata
 
 
 def test_partial_renderer_discloses_limitations_and_never_claims_success():

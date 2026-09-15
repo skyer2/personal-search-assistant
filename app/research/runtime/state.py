@@ -104,6 +104,7 @@ class ResearchState(TypedDict):
     control_decision: dict[str, Any]
     synthesis_attempts: int
     synthesis_failed: bool
+    synthesis_degraded: bool
     candidate_set: Annotated[dict[str, Any], merge_dicts]
     semantic_stall: int
 
@@ -218,6 +219,7 @@ def empty_research_state(
         "control_decision": {},
         "synthesis_attempts": 0,
         "synthesis_failed": False,
+        "synthesis_degraded": False,
         "candidate_set": {},
         "semantic_stall": 0,
     }

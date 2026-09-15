@@ -26,6 +26,7 @@ from app.api.tracing import build_run_config
 from app.research.execution.llm_gateway import LLMGateway
 from app.research.execution.tool_gateway import ToolGateway
 from app.research.domain.task_state import classify_worker_completion
+from app.research.workers.registry import resolve_finalize_only_worker
 from app.research.runtime.worker import (
     ResearchContext,
     ResearchTask,
@@ -48,17 +49,11 @@ class WorkerExecutorV2:
         return model_timeout_sec("LLM_WORKER_TIMEOUT_SEC")
 
     @staticmethod
-    def _soft_deadline_delay(
-        timeout_sec: float,
-        *,
-        reserve_model_calls: int = 1,
-    ) -> float:
-        model_timeout = WorkerExecutorV2._model_timeout_sec()
-        reserved_sec = max(1, int(reserve_model_calls)) * model_timeout + 10.0
-        return max(
-            10.0,
-            min(float(timeout_sec) * 0.8, float(timeout_sec) - reserved_sec),
-        )
+    def _soft_deadline_delay(timeout_sec: float) -> float:
+        """Reserve a bounded finishing window without preempting first retrieval."""
+        timeout = max(0.0, float(timeout_sec))
+        finalize_reserve = min(45.0, max(20.0, timeout * 0.2))
+        return max(30.0, timeout - finalize_reserve)
 
     @staticmethod
     def _is_transient_provider_connection_error(exc: Exception) -> bool:
@@ -348,30 +343,27 @@ class WorkerExecutorV2:
             evidence_refs = list(payload.get("evidence_ids") or []) + list(
                 payload.get("artifact_ids") or []
             )
-            normal_soft_stop = str(tool_usage.get("finalization_reason") or "") in {
-                "local_evidence_sufficient",
-                "soft_budget_finalize",
-                "soft_deadline_finalize",
-                "no_more_useful_evidence",
-            }
             accepted_findings = sum(
                 1
                 for finding in payload.get("findings") or []
                 if isinstance(finding, dict)
                 and any(str(item).strip() for item in finding.get("evidence_ids") or [])
             )
-            terminal_reason = str(
-                payload.get("stop_reason")
-                or tool_usage.get("finalization_reason")
+            last_tool_error = str(
+                result.metadata.get("last_tool_error")
                 or payload.get("error_code")
-                or ("search_empty" if not payload.get("ok", True) else "")
+                or ""
             )
+            terminal_reason = str(payload.get("stop_reason") or tool_usage.get("finalization_reason") or "")
+            if not terminal_reason and (not strict_valid or not evidence_refs):
+                terminal_reason = str(payload.get("error_code") or "")
+            if not terminal_reason and not payload.get("ok", True) and not accepted_findings:
+                terminal_reason = "search_empty"
             lifecycle = classify_worker_completion(
                 structured_valid=bool(strict_valid),
                 accepted_findings=accepted_findings,
                 evidence_count=len(set(evidence_refs)),
                 terminal_reason=terminal_reason,
-                normal_soft_stop=normal_soft_stop,
             )
             worker_ok = lifecycle.execution_status.value == "succeeded"
             worker_status: WorkerResultStatus = (
@@ -416,7 +408,7 @@ class WorkerExecutorV2:
                     "admitted_evidence_count": len(set(evidence_refs)),
                     "execution_status": lifecycle.execution_status.value,
                     "result_status": lifecycle.result_status.value,
-                    "last_tool_error": str(result.metadata.get("last_tool_error") or ""),
+                    "last_tool_error": last_tool_error,
                 }
             )
             worker_result.metrics["stop_reason"] = lifecycle.stop_reason.value
@@ -651,20 +643,7 @@ class WorkerExecutorV2:
         tool_gateway = ToolGateway(
             **self._worker_budget_limits(step),
             soft_deadline_at=time.monotonic()
-            + WorkerExecutorV2._soft_deadline_delay(
-                timeout_sec,
-                reserve_model_calls=(
-                    2
-                    if bool(
-                        getattr(
-                            self.harness.harness_config,
-                            "structured_output_retry",
-                            True,
-                        )
-                    )
-                    else 1
-                ),
-            ),
+            + WorkerExecutorV2._soft_deadline_delay(timeout_sec),
         )
         messages: list[Any] = []
         tools_invoked: list[str] = []
@@ -722,55 +701,49 @@ class WorkerExecutorV2:
                 require_json=True,
             )
             if not structured_valid:
-                retry_count = 1
-                finalize_gateway = ToolGateway(
-                    search_queries_remaining=0,
-                    fetch_sources_remaining=0,
-                    tool_invocations_remaining=0,
-                    soft_deadline_at=time.monotonic() + WorkerExecutorV2._model_timeout_sec(),
-                )
-                with finalize_gateway.execution_scope(
-                    worker_task_id=task.task_id,
-                    step_index=step_index,
-                    run_id=context.run_id,
-                    session_id=context.session_id,
-                    worker_lease_id=worker_lease_id,
-                ):
+                finalize_agent = resolve_finalize_only_worker(self.harness)
+                if finalize_agent is not None:
+                    retry_count = 1
+                    # The finalize-only agent has no retrieval capability. Retain
+                    # only the user request and compact existing output so old tool
+                    # call history cannot induce a fresh search.
+                    tool_context = "\n".join(
+                        str(getattr(message, "content", "") or "")[:1200]
+                        for message in messages
+                        if getattr(message, "type", "") == "tool"
+                    )[-10000:]
+                    repair_messages = [
+                        {"role": "user", "content": user_message},
+                        {
+                            "role": "assistant",
+                            "content": f"已有工具证据：\n{tool_context}\n原始输出：\n{content[-4000:]}",
+                        },
+                        {"role": "user", "content": build_strict_json_retry_instruction(step)},
+                    ]
                     with gateway.execution_scope(
                         phase="execute",
                         worker_task_id=task.task_id,
                     ):
                         async for chunk in gateway.astream(
-                            execute_agent,
-                            {
-                                "messages": [
-                                    *messages,
-                                    {
-                                        "role": "user",
-                                        "content": build_strict_json_retry_instruction(step),
-                                    },
-                                ]
-                            },
+                            finalize_agent,
+                            {"messages": repair_messages},
                             config,
                         ):
                             self._collect_worker_stream_chunk(
-                                chunk,
-                                messages,
-                                tool_call_ids,
-                                tools_invoked,
+                                chunk, messages, tool_call_ids, tools_invoked
                             )
-                content = extract_final_ai_content(messages)
-                payload = parse_worker_payload(
-                    content,
-                    step_type=step.step_type,
-                    subagent=step.subagent or "",
-                )
-                raw_finding_count = len(payload.findings)
-                structured_valid, structured_reason = validate_structured_worker_payload(
-                    payload,
-                    step,
-                    require_json=True,
-                )
+                    content = extract_final_ai_content(messages)
+                    payload = parse_worker_payload(
+                        content,
+                        step_type=step.step_type,
+                        subagent=step.subagent or "",
+                    )
+                    raw_finding_count = len(payload.findings)
+                    structured_valid, structured_reason = validate_structured_worker_payload(
+                        payload, step, require_json=True
+                    )
+                else:
+                    structured_reason = "finalize_only_worker_unavailable"
         return StepResult(
             step_type=step.step_type,
             content=content,
@@ -1234,25 +1207,10 @@ class WorkerExecutorV2:
             },
         )
         lifecycle = classify_worker_completion(
-            structured_valid=bool(
-                stop_reason
-                in {
-                    "local_evidence_sufficient",
-                    "soft_budget_finalize",
-                    "soft_deadline_finalize",
-                    "no_more_useful_evidence",
-                }
-            ),
+            structured_valid=False,
             accepted_findings=len(findings),
             evidence_count=len(set(evidence_refs or sources)),
-            terminal_reason=stop_reason or fail_reason,
-            normal_soft_stop=stop_reason
-            in {
-                "local_evidence_sufficient",
-                "soft_budget_finalize",
-                "soft_deadline_finalize",
-                "no_more_useful_evidence",
-            },
+            terminal_reason=fail_reason or stop_reason,
         )
         result = self._result(
             task,
@@ -1262,7 +1220,7 @@ class WorkerExecutorV2:
                 "done"
                 if lifecycle.execution_status.value == "succeeded"
                 else "partial"
-                if evidence_refs
+                if lifecycle.result_status.value == "partial"
                 else status
             ),
             summary=payload["summary"],
@@ -1272,7 +1230,7 @@ class WorkerExecutorV2:
             sources=sources,
                 candidates=candidates,
                 raw=raw,
-                fail_reason=fail_reason,
+                fail_reason=lifecycle.fail_reason,
                 metrics=self._worker_metrics(
                     context,
                     task,
