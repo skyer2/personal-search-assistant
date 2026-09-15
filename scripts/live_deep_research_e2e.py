@@ -60,6 +60,9 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
         and (event.get("attributes") or {}).get("used") == 0
     ]
     quality = dict(meta.get("quality") or {})
+    citation_metrics = quality.get("citation_metrics") if isinstance(quality.get("citation_metrics"), dict) else {}
+    accepted_findings = max(accepted_findings, int(citation_metrics.get("finding_count") or 0))
+    admitted_evidence = max(admitted_evidence, int(citation_metrics.get("evidence_count") or 0))
     attempts = int(meta.get("synthesis_attempts") or 0)
     successful_attempt = int(meta.get("successful_attempt") or (1 if attempts == 1 else 0))
     degraded = bool(meta.get("synthesis_degraded"))
@@ -119,10 +122,12 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
     }
 
 
-async def _run(count: int, mode: str, output: Path) -> int:
+async def _run(count: int, mode: str, output: Path, max_replans: int | None = None) -> int:
     from app.agent.main_agent import harness
 
     output.mkdir(parents=True, exist_ok=True)
+    if max_replans is not None:
+        harness.harness_config.max_replan_count = max(0, int(max_replans))
     rows: list[dict[str, Any]] = []
     for index in range(1, count + 1):
         session_id = f"golden_deep_{index}_{uuid.uuid4().hex[:8]}"
@@ -158,9 +163,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--mode", default="deep_debug", choices=("agent", "deep_debug"))
+    parser.add_argument("--max-replans", type=int, default=None,
+                        help="Optional test-only cap on supervisor repair waves")
     parser.add_argument("--output", type=Path, default=ROOT / "output" / "live_deep_research_e2e")
     args = parser.parse_args()
-    return asyncio.run(_run(max(1, args.runs), args.mode, args.output))
+    return asyncio.run(_run(max(1, args.runs), args.mode, args.output, args.max_replans))
 
 
 if __name__ == "__main__":

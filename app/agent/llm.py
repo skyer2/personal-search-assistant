@@ -66,11 +66,13 @@ if _compression_enabled:
     except Exception as exc:
         print(f"[LLM] compression_model init failed, will use truncate: {exc}")
 
-# Synthesis 默认复用已配置的快 Worker 模型；显式配置仍优先。
-_synthesis_model_name = os.getenv("LLM_SYNTHESIS_MODEL") or _worker_model_name
+# Synthesis 默认复用已配置的快 Worker 模型；显式配置即使与 Worker
+# 同名也必须创建独立实例，以确保 synthesis timeout/max_tokens 真正生效。
+_explicit_synthesis_model = (os.getenv("LLM_SYNTHESIS_MODEL") or "").strip()
+_synthesis_model_name = _explicit_synthesis_model or _worker_model_name
 _synthesis_max_tokens = int(os.getenv("LLM_SYNTHESIS_MAX_TOKENS", "3000"))
 synthesis_model = worker_model if _synthesis_model_name == _worker_model_name else model
-if _synthesis_model_name and _synthesis_model_name not in {
+if _explicit_synthesis_model or _synthesis_model_name not in {
     os.getenv("LLM_QWEN_MAX"), _worker_model_name
 }:
     try:

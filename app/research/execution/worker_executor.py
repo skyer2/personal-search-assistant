@@ -340,9 +340,20 @@ class WorkerExecutorV2:
                     list(payload.get("facts") or []),
                     list(payload.get("sources") or []),
                 )
+            # Findings are the canonical structured contract and commonly carry
+            # their evidence/artifact references inline. Fold those references
+            # into the worker-level set before lifecycle classification so a
+            # valid fast-path finding is not mistaken for an evidence-free
+            # failure.
             evidence_refs = list(payload.get("evidence_ids") or []) + list(
                 payload.get("artifact_ids") or []
             )
+            for finding in payload.get("findings") or []:
+                if not isinstance(finding, dict):
+                    continue
+                evidence_refs.extend(str(item) for item in finding.get("evidence_ids") or [])
+                evidence_refs.extend(str(item) for item in finding.get("artifact_ids") or [])
+            evidence_refs = list(dict.fromkeys(item for item in evidence_refs if str(item).strip()))
             accepted_findings = sum(
                 1
                 for finding in payload.get("findings") or []

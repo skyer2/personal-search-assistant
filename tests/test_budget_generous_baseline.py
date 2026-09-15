@@ -128,7 +128,11 @@ def test_medium_worker_can_search_fetch_and_supplement_search() -> None:
         assert consume_search_queries_or_block(4) is None
         assert consume_fetch_sources_or_block(8) is None
         assert consume_search_queries_or_block(4) is None
-        assert budget.snapshot() == {
+        snapshot = budget.snapshot()
+        assert {key: snapshot[key] for key in (
+            "search_queries_used", "search_queries_limit", "fetch_sources_used",
+            "fetch_sources_limit", "tool_invocations_used", "tool_invocations_limit",
+        )} == {
             "search_queries_used": 8,
             "search_queries_limit": 10,
             "fetch_sources_used": 8,

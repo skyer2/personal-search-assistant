@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import re
 import time
 from typing import Any, TypeVar
 
@@ -93,13 +96,34 @@ class StructuredLLMGateway:
             raise ValueError("structured model unavailable")
         if timeout_sec <= 0:
             raise ValueError("structured model timeout must be positive")
-        structured_model = model.with_structured_output(TypeAdapter(schema).json_schema())
         config = build_run_config(phase, metadata={"phase": phase})
+        # A number of OpenAI-compatible gateways accept ordinary chat but do
+        # not implement tool/structured-output requests. Their native wrapper
+        # can wait for a provider-side timeout before our fallback runs. Use a
+        # fast JSON prompt + local schema validation by default for custom base
+        # URLs; native structured output remains opt-in for compatible APIs.
+        base_url = (os.getenv("OPENAI_BASE_URL") or "").strip()
+        native = os.getenv("HARNESS_STRUCTURED_OUTPUT_NATIVE", "").lower() in {"1", "true", "yes", "on"}
+        # Test doubles and provider wrappers may expose only
+        # ``with_structured_output``; keep that contract when ordinary
+        # ``ainvoke`` is unavailable.
+        use_native = native or not base_url or not callable(getattr(model, "ainvoke", None))
+        if use_native:
+            structured_model = model.with_structured_output(TypeAdapter(schema).json_schema())
+            value = await asyncio.wait_for(
+                self.gateway.ainvoke(structured_model, prompt, config),
+                timeout=timeout_sec,
+            )
+            return self._coerce(value, schema)
+
+        json_prompt = (
+            f"{prompt}\n\n只输出一个合法 JSON 对象，不要 Markdown 代码块，不要解释。"
+        )
         value = await asyncio.wait_for(
-            self.gateway.ainvoke(structured_model, prompt, config),
+            self.gateway.ainvoke(model, json_prompt, config),
             timeout=timeout_sec,
         )
-        return self._coerce(value, schema)
+        return self._coerce_json_text(value, schema)
 
     @staticmethod
     def _coerce(value: Any, schema: type[T]) -> T:
@@ -113,6 +137,29 @@ class StructuredLLMGateway:
             if callable(model_validate):
                 return model_validate(value)
         raise TypeError("structured model returned an unsupported value")
+
+    @classmethod
+    def _coerce_json_text(cls, value: Any, schema: type[T]) -> T:
+        if isinstance(value, dict):
+            return cls._coerce(value, schema)
+        raw = value if isinstance(value, str) else getattr(value, "content", None)
+        if isinstance(raw, list):
+            raw = "".join(
+                str(item.get("text") or "")
+                for item in raw
+                if isinstance(item, dict) and item.get("type") in {None, "text"}
+            )
+        text = str(raw or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+            if not match:
+                raise TypeError("structured model returned no JSON object")
+            decoded = json.loads(match.group(0))
+        return cls._coerce(decoded, schema)
 
 
 __all__ = [

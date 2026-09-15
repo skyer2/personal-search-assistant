@@ -465,7 +465,7 @@ class ResearchGraphRunner:
             budget_cfg["max_replan_count"] = max(0, int(run_budget["max_replan_count"]))
         # The ordinary agent profile is capped by the harness setting; the
         # debug profile intentionally carries a larger, separate replan budget.
-        if profile == "agent" and getattr(self.harness.harness_config, "max_replan_count", None) is not None:
+        if getattr(self.harness.harness_config, "max_replan_count", None) is not None:
             budget_cfg["max_replan_count"] = min(
                 int(budget_cfg["max_replan_count"]),
                 max(0, int(self.harness.harness_config.max_replan_count)),
