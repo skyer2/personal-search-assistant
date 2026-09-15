@@ -81,6 +81,7 @@ def _synthesis_state() -> dict[str, Any]:
                     "source_kind": "web",
                     "locator": "https://example.com/company-a",
                     "authority_score": 0.8,
+                    "excerpt_ref": "Company A has recent funding evidence.",
                 }
             ],
             "claims": [
@@ -243,6 +244,28 @@ async def test_synthesis_failure_with_evidence_returns_user_readable_partial(mon
     assert session.state.metadata["synthesis_fail_reason"] == "provider_unavailable"
     assert "Company A has recent funding evidence." in update["final_content"]
     assert "evidence_company_a" not in update["final_content"]
+
+
+async def test_quality_gate_evaluates_final_delivery_not_worker_history(monkeypatch):
+    harness = FakeHarness()
+    session = _run_session(_budget_manager(), harness)
+    monkeypatch.setattr(runner_module, "get_session", lambda _run_id: session)
+    state = _synthesis_state()
+    state.update(
+        {
+            "phase": "synthesis",
+            "final_content": "Company A has recent funding evidence.",
+            "coverage_judgement": {"sufficient": True, "status": "sufficient"},
+            "synthesis_failed": True,
+            "synthesis_attempts": 2,
+        }
+    )
+
+    update = await runner_module.ResearchGraphRunner(harness).node_quality_gate(state)
+
+    assert update["quality_assessment"]["verdict"] == "pass"
+    assert update["quality_assessment"]["issues"] == []
+    assert update["quality_assessment"]["grounding"] is True
 
 
 def test_no_evidence_terminates_as_failure_with_exact_reason():

@@ -227,6 +227,9 @@ def _coalesce_worker_row(
         "conflicts": attrs.get("conflicts") or [],
         "confidence": attrs.get("confidence"),
         "tool_calls": attrs.get("tool_calls"),
+        "accepted_finding_count": (attrs.get("metrics") or {}).get("accepted_finding_count"),
+        "admitted_evidence_count": (attrs.get("metrics") or {}).get("admitted_evidence_count"),
+        "last_tool_error": (attrs.get("metrics") or {}).get("last_tool_error"),
         "brief_id": attrs.get("brief_id"),
         "plan_id": attrs.get("plan_id"),
         "step_type": attrs.get("step_type"),
@@ -264,6 +267,9 @@ def _coalesce_worker_row(
             existing[list_field] = incoming[list_field]
     if incoming.get("step_type"):
         existing["step_type"] = incoming["step_type"]
+    for field in ("accepted_finding_count", "admitted_evidence_count", "last_tool_error"):
+        if incoming.get(field) not in (None, "", {}, []):
+            existing[field] = incoming[field]
 
 
 def summarize_trace(
@@ -282,6 +288,7 @@ def summarize_trace(
     supervisor_decisions: list[dict[str, Any]] = []
     plans: list[dict[str, Any]] = []
     workers_by_key: dict[tuple[str, int, int], dict[str, Any]] = {}
+    budget_denials: list[tuple[tuple[str, int, int] | None, dict[str, Any]]] = []
     findings: list[dict[str, Any]] = []
     coverage_judgements: list[dict[str, Any]] = []
     progress: list[dict[str, Any]] = []
@@ -386,6 +393,28 @@ def summarize_trace(
             )
         elif event_type.startswith("worker."):
             _coalesce_worker_row(workers_by_key, event, attrs, event_type)
+        elif event_type == "budget.denied":
+            task_id = str(event.get("task_id") or attrs.get("task_id") or "")
+            attempt = event.get("attempt", attrs.get("attempt"))
+            plan_version = event.get("plan_version", attrs.get("plan_version"))
+            key = (
+                _worker_attempt_key(event, attrs)
+                if task_id and attempt is not None and plan_version is not None
+                else None
+            )
+            budget_denials.append(
+                (
+                    key,
+                    {
+                        "budget_scope": attrs.get("scope"),
+                        "budget_resource": attrs.get("resource"),
+                        "budget_reason": attrs.get("reason"),
+                        "budget_used": attrs.get("used"),
+                        "budget_limit": attrs.get("limit"),
+                        "task_id": task_id or None,
+                    },
+                )
+            )
         elif event_type == "finding.compressed":
             findings.append(
                 {
@@ -562,6 +591,24 @@ def summarize_trace(
                         row[field] = attrs.get(field)
 
     workers = list(workers_by_key.values())
+    for key, denial in budget_denials:
+        targets = (
+            [workers_by_key[key]]
+            if key is not None and key in workers_by_key
+            else [
+                row
+                for row in workers
+                if str(row.get("task_id") or "") == str(denial.get("task_id") or "")
+            ]
+        )
+        for row in targets:
+            row.update(
+                {
+                    field: value
+                    for field, value in denial.items()
+                    if value not in (None, "")
+                }
+            )
     failure_counts: dict[str, int] = {}
     for row in failures:
         stage = str(row.get("origin_stage") or row.get("stage") or "runtime")

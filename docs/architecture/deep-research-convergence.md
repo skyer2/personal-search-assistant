@@ -65,16 +65,23 @@ Ingestion resolves references to admitted canonical evidence IDs in this order: 
 Task completion is decided after ingestion:
 
 ```text
-accepted finding >= 1 and admitted evidence >= 1 -> complete
-admitted evidence >= 1 and accepted finding == 0 -> partial / no_accepted_findings
-admitted evidence == 0                            -> failed / no_usable_evidence
+accepted finding >= 1 + admitted evidence >= 1 + valid structure + normal stop
+  -> complete
+admitted evidence >= 1 but structure, findings, budget, timeout, or search stopped early
+  -> stopped / partial; evidence and findings remain eligible for ingestion
+admitted evidence == 0 and accepted finding == 0
+  -> failed / no_usable_evidence (or the specific blocking reason)
 ```
+
+A terminal tool result such as `search_empty`, `budget_denied`, fetch failure, or provider timeout describes only that action. It never discards already admitted evidence. If evidence exists after an abnormal stop, the worker is partial and its evidence still reaches Coverage.
 
 ## Evidence Pack and Synthesis Retry
 
-Before synthesis, the runtime builds a deterministic Evidence Pack. Findings are grouped by Brief criterion, deduplicated, quality-ranked by primary source, source tier, freshness, confidence, and evidence count, then limited to six findings per criterion normally and three on compact retry. Resolved winners, expected disagreements, and blocking unresolved conflicts are preserved.
+Before synthesis, the runtime builds a deterministic Evidence Pack. Findings are grouped by Brief criterion, deduplicated, quality-ranked by primary source, source tier, freshness, confidence, and evidence count, then limited to three findings per criterion normally and two on compact retry. Resolved winners, expected disagreements, and blocking unresolved conflicts are preserved.
 
-The normal pack is capped at 16K input tokens and the compact retry at 8K, with a 30K hard maximum. A synthesis timeout now retries once with the smaller compact pack; the retry input cannot be identical to the first attempt. The retry timeout follows the run profile (30 seconds in production, 120 seconds in `deep_debug`). If both attempts fail, deterministic partial delivery remains the final fallback.
+The normal pack is capped at 8K input tokens and the compact retry at 4K, with a 30K hard maximum. A synthesis timeout retries once with the strictly smaller compact pack; the retry input cannot be identical to the first attempt. The retry timeout follows the run profile (30 seconds in production, 120 seconds in `deep_debug`). If both attempts fail, deterministic partial delivery remains the final fallback.
+
+Evidence Pack selection and digest resolution are separate contracts. The pack selects canonical evidence IDs; `SynthesisContextBuilder` resolves each ID through its `EvidenceRecord.artifact_ref` and citation aliases and reads the real artifact summary/content as the excerpt. Synthesis is not invoked when selected findings, evidence references, or non-empty digests are missing; the runtime returns a deterministic partial result with `synthesis_evidence_digest_missing`.
 
 Ingestion binds canonical evidence records to the citation manager before synthesis. The synthesis prompt receives stable `[n]` citation numbers, and the runtime projects selected findings onto numeric report sentences after generation. Model-invented citation numbers are replaced, unknown numbers fail the quality gate, and internal worker JSON payloads are stripped before delivery.
 

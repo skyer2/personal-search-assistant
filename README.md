@@ -24,9 +24,10 @@ This project is not a search engine. Search is only an environment tool. The har
 - Task state is execution state only. All workers finishing does not imply coverage.
 - Coverage is judged from evidence-backed findings against Brief key questions, not task completion or report-quality criteria.
 - A research worker is complete only when its final AI JSON contains at least one accepted finding bound to admitted canonical evidence; raw tool output, summary-only, and facts-only results cannot be complete.
+- A single tool failure never discards admitted evidence: workers with evidence after timeout, budget stop, or `search_empty` become `partial`, and their evidence still reaches Coverage.
 - Supervisor consumes structured Coverage gaps by exact `gap_id` and `criterion_id`.
 - Workers soft-finalize before hard budget ceilings and report a normal stop reason.
-- Synthesis consumes a deterministic compact Evidence Pack and structured conflict resolutions; it cannot change coverage or resolve an unresolved conflict.
+- Synthesis consumes a deterministic 8K/4K Evidence Pack with Runtime-resolved evidence digests and structured conflict resolutions; it cannot change coverage or resolve an unresolved conflict.
 - The final answer must pass coverage, conflict, citation, and grounding gates.
 - Semantic LLM calls go through one structured invocation boundary; workers cannot reinterpret user intent.
 - Worker budgets separate search queries, fetched sources, and logical tool invocations.

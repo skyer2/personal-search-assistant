@@ -106,7 +106,7 @@ Run latency 汇总包含 brief、supervisor、worker、coverage、synthesis、qu
 
 `budget.decided` 记录非拒绝型预算决策。当前用于 Worker Finalization Mode：`status=finalize`，`reason=soft_budget_finalize|soft_deadline_finalize`，并携带 worker token / LLM call 快照。它不是 denial，也不计入预算拒绝率。
 
-Worker 终态事件携带完整预算快照与 `stop_reason`：LLM calls、tokens、search queries、fetch sources、tool invocations 的 used/limit，以及 `local_evidence_sufficient` / `soft_budget_finalize` / `soft_deadline_finalize` / `no_more_useful_evidence` 等正常停止语义。Worker metrics 还暴露 `final_ai_found`、`structured_output_valid`、`finalization_retry_count`、`raw_finding_count`；Task transition 和 ingestion signal 暴露 `accepted_finding_count`、`rejected_finding_count`、`unresolved_evidence_ref_count`、`partial_fallback_finding_count` 与 admitted evidence 计数。`gen_ai.chat` 记录 phase、task、call index、token 估算、duration、TTFT 与 Worker 剩余额度。工具事件只记录 `args_meta`（参数名和列表条目数），不记录 query、URL、prompt 或网页正文。
+Worker 终态事件携带完整预算快照与 `stop_reason`：LLM calls、tokens、search queries、fetch sources、tool invocations 的 used/limit，以及 `local_evidence_sufficient` / `soft_budget_finalize` / `soft_deadline_finalize` / `no_more_useful_evidence` 等正常停止语义。Worker metrics 还暴露 `final_ai_found`、`structured_output_valid`、`finalization_retry_count`、`raw_finding_count`、`accepted_finding_count`、`admitted_evidence_count` 与 `last_tool_error`；Task transition 和 ingestion signal 暴露 `accepted_finding_count`、`rejected_finding_count`、`unresolved_evidence_ref_count`、`partial_fallback_finding_count` 与 admitted evidence 计数。Trace 汇总会把同任务的 `budget.denied` 合并到 Worker 行，展示 scope、resource、reason、used/limit 与 last tool error。`gen_ai.chat` 记录 phase、task、call index、token 估算、duration、TTFT 与 Worker 剩余额度。工具事件只记录 `args_meta`（参数名和列表条目数），不记录 query、URL、prompt 或网页正文。
 
 ## 看哪里
 
@@ -169,8 +169,12 @@ Worker 终态事件携带完整预算快照与 `stop_reason`：LLM calls、token
 | `fail_reason` | provider / context / budget / empty 等失败分类 |
 | `fallback_action` | `compact_retry`、`deterministic_partial` 或空 |
 | `content_chars` | 最终 / 兜底内容长度 |
+| `raw_response_type` | Provider 原始响应类型（例如 `AIMessage`、`str`、`dict`） |
+| `raw_content_chars` / `cleaned_content_chars` | 原始与清理后的内容长度 |
+| `finish_reason` | Provider finish reason |
+| `actual_input_tokens` / `actual_output_tokens` | Provider usage 口径 |
 
-Run metadata 同步暴露 `synthesis_attempts`、`synthesis_failed`、`synthesis_fail_reason`、`fallback_used`。这用于区分“模型临时失败但已部分交付”和“没有可信证据导致失败”。
+Run metadata 同步暴露 `synthesis_attempts`、`synthesis_failed`、`synthesis_fail_reason`、`fallback_used`。这用于区分“模型临时失败但已部分交付”和“没有可信证据导致失败”。空输出进一步区分为 `provider_empty_content`、`content_removed_by_cleaner` 与 `unsupported_response_shape`；仅含 JSON summary 的响应会降级恢复 summary，混合 Markdown 与 JSON 的旧清理行为保持不变。
 
 ## 隐私
 

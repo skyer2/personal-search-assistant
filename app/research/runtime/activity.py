@@ -27,6 +27,7 @@ class WorkerActivityTracker:
     tools_completed: int = 0
     artifacts_written: int = 0
     findings_emitted: int = 0
+    last_tool_error: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _operations: dict[str, OperationState] = field(default_factory=dict, repr=False)
     _next_operation: int = 0
@@ -82,6 +83,14 @@ class WorkerActivityTracker:
             self.last_progress_at = time.perf_counter()
             self._record("FINDING_EMITTED", "finding")
 
+    def record_tool_error(self, tool: str, error: str) -> None:
+        with self._lock:
+            self.last_tool_error = {
+                "tool": str(tool),
+                "error": str(error)[:500],
+            }
+            self._record("TOOL_ERROR", tool, "", error=str(error)[:500])
+
     def has_in_flight_operations(self) -> bool:
         with self._lock:
             return bool(self._operations)
@@ -103,6 +112,7 @@ class WorkerActivityTracker:
                 "tools_completed": self.tools_completed,
                 "artifacts_written": self.artifacts_written,
                 "findings_emitted": self.findings_emitted,
+                "last_tool_error": dict(self.last_tool_error),
             }
 
     def _record(self, event: str, operation: str, operation_id: str = "", **details: Any) -> None:

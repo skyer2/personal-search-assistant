@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, TypedDict
 
 from app.research.domain.contracts import StopReason
+from app.research.domain.failure import classify_failure
 
 
 class TaskExecutionStatus(StrEnum):
@@ -43,6 +45,86 @@ class TaskExecutionState(TypedDict):
     skip_reason: str
     evidence_refs: list[str]
     artifact_refs: list[str]
+
+
+@dataclass(frozen=True)
+class WorkerLifecycle:
+    execution_status: TaskExecutionStatus
+    result_status: ResultStatus
+    stop_reason: StopReason
+    fail_reason: str
+    failure: dict[str, Any]
+
+
+def classify_worker_completion(
+    *,
+    structured_valid: bool,
+    accepted_findings: int,
+    evidence_count: int,
+    terminal_reason: str,
+    normal_soft_stop: bool = False,
+) -> WorkerLifecycle:
+    """Classify a worker by admitted evidence and accepted findings, not one tool error."""
+    terminal = str(terminal_reason or "").strip()
+    has_evidence = evidence_count > 0
+    has_accepted_findings = accepted_findings > 0
+    normal_stop = terminal in {
+        "",
+        "local_evidence_sufficient",
+        "no_more_useful_evidence",
+        "search_empty",
+    } or bool(normal_soft_stop)
+
+    if has_evidence and has_accepted_findings and structured_valid and normal_stop:
+        return WorkerLifecycle(
+            TaskExecutionStatus.SUCCEEDED,
+            ResultStatus.COMPLETE,
+            StopReason.NO_MORE_USEFUL_EVIDENCE
+            if terminal in {"no_more_useful_evidence", "search_empty"}
+            else StopReason(terminal)
+            if terminal
+            in {
+                "local_evidence_sufficient",
+                "soft_budget_finalize",
+                "soft_deadline_finalize",
+            }
+            else StopReason.NONE,
+            "",
+            {},
+        )
+
+    if has_evidence:
+        fail_reason = terminal or "partial_worker_result"
+        if "timeout" in fail_reason.lower():
+            stop_reason = StopReason.TIMEOUT
+        elif "budget" in fail_reason.lower() or "token_cap" in fail_reason.lower() or "deadline" in fail_reason.lower():
+            stop_reason = StopReason.BUDGET
+        elif terminal == "search_empty":
+            stop_reason = StopReason.NO_MORE_USEFUL_EVIDENCE
+        else:
+            stop_reason = StopReason.NONE
+        return WorkerLifecycle(
+            TaskExecutionStatus.STOPPED,
+            ResultStatus.PARTIAL,
+            stop_reason,
+            fail_reason,
+            dict(classify_failure(fail_reason)),
+        )
+
+    fail_reason = terminal or "no_usable_evidence"
+    if "timeout" in fail_reason.lower():
+        stop_reason = StopReason.TIMEOUT
+    elif "budget" in fail_reason.lower() or "token_cap" in fail_reason.lower() or "deadline" in fail_reason.lower():
+        stop_reason = StopReason.BUDGET
+    else:
+        stop_reason = StopReason.NONE
+    return WorkerLifecycle(
+        TaskExecutionStatus.FAILED,
+        ResultStatus.NONE,
+        stop_reason,
+        fail_reason,
+        dict(classify_failure(fail_reason)),
+    )
 
 
 def new_task_state(task_id: str) -> TaskExecutionState:
@@ -189,8 +271,6 @@ def transition_task(
 
 def worker_result_lifecycle(result: Any) -> tuple[TaskExecutionStatus, ResultStatus, StopReason, dict[str, Any]]:
     """Map an executor result onto orthogonal execution and result statuses."""
-    from app.research.domain.failure import classify_failure
-
     ok = bool(getattr(result, "ok", False))
     status = str(getattr(result, "status", "") or "").lower()
     fail_reason = str(getattr(result, "fail_reason", "") or status or "unknown_failure")
@@ -219,6 +299,8 @@ def worker_result_lifecycle(result: Any) -> tuple[TaskExecutionStatus, ResultSta
     if "budget" in lowered or "token_cap" in lowered or "deadline" in lowered:
         if has_partial_result:
             return TaskExecutionStatus.STOPPED, ResultStatus.PARTIAL, StopReason.BUDGET, failure
+        return TaskExecutionStatus.FAILED, ResultStatus.NONE, StopReason.BUDGET, failure
+    if status == "blocked" and not has_partial_result:
         return TaskExecutionStatus.FAILED, ResultStatus.NONE, StopReason.BUDGET, failure
     if status == "blocked" or "policy" in lowered or "resource" in lowered or "source_restricted" in lowered:
         return (
@@ -283,6 +365,7 @@ def retry_task(tasks: Any, task_id: str) -> dict[str, TaskExecutionState]:
 
 __all__ = [
     "ResultStatus",
+    "WorkerLifecycle",
     "TaskExecutionState",
     "TaskExecutionStatus",
     "TaskReadiness",
@@ -294,6 +377,7 @@ __all__ = [
     "supersede_task",
     "task_execution_projection",
     "task_readiness",
+    "classify_worker_completion",
     "transition_task",
     "worker_result_lifecycle",
 ]

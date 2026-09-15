@@ -12,8 +12,8 @@ from app.agent.harness.token_counter import estimate_tokens
 
 
 HARD_MAX_SYNTHESIS_INPUT_TOKENS = 30_000
-NORMAL_SYNTHESIS_INPUT_TOKENS = 16_000
-COMPACT_SYNTHESIS_INPUT_TOKENS = 8_000
+NORMAL_SYNTHESIS_INPUT_TOKENS = 8_000
+COMPACT_SYNTHESIS_INPUT_TOKENS = 4_000
 
 
 @dataclass(frozen=True)
@@ -305,7 +305,7 @@ def build_evidence_pack(
         )
         grouped.setdefault(criterion or "unbound", []).append(finding)
 
-    max_per_criterion = 3 if compact else 6
+    max_per_criterion = 2 if compact else 3
     selected: list[dict[str, Any]] = []
     for rows in grouped.values():
         rows.sort(

@@ -51,6 +51,7 @@ class SynthesisContextBuilder:
     def __init__(self, harness: Any, session: Any):
         self.harness = harness
         self.session = session
+        self._evidence_records: dict[str, dict[str, Any]] = {}
 
     def build(
         self,
@@ -62,6 +63,11 @@ class SynthesisContextBuilder:
     ) -> SynthesisContext:
         refs = self._evidence_refs(gstate)
         findings = self._findings(gstate, refs)
+        self._evidence_records = {
+            str(row.get("evidence_id") or ""): dict(row)
+            for row in gstate.get("evidence_records") or []
+            if isinstance(row, dict) and str(row.get("evidence_id") or "").strip()
+        }
         base_budget = int(get_token_counter().budget_for_stage("synthesis", fallback=40_000))
         context = SynthesisContext(
             evidence_refs=tuple(refs),
@@ -187,16 +193,25 @@ class SynthesisContextBuilder:
         for finding in findings:
             claim = str(finding.get("claim") or finding.get("summary") or "").strip()
             for evidence_id in finding.get("evidence_ids") or []:
-                values = claims.setdefault(str(evidence_id), [])
-                if claim and claim not in values:
-                    values.append(claim)
+                record = self._evidence_records.get(str(evidence_id))
+                aliases = [str(evidence_id)]
+                if record is not None:
+                    artifact_ref = str(record.get("artifact_ref") or "")
+                    if artifact_ref:
+                        aliases.append(artifact_ref)
+                for alias in aliases:
+                    values = claims.setdefault(alias, [])
+                    if claim and claim not in values:
+                        values.append(claim)
 
         by_id: dict[str, EvidenceDigest] = {}
         by_locator: dict[str, str] = {}
         for evidence_id in refs:
-            digest = self._artifact_digest(evidence_id, claims.get(evidence_id, []), compact)
-            if digest is None:
-                digest = self._citation_digest(evidence_id, claims.get(evidence_id, []), compact)
+            digest = self.resolve_digest_by_evidence_id(
+                evidence_id,
+                claims.get(evidence_id, []),
+                compact=compact,
+            )
             if digest is None:
                 continue
             locator = digest.locator.casefold()
@@ -216,6 +231,48 @@ class SynthesisContextBuilder:
             if locator:
                 by_locator[locator] = evidence_id
         return list(by_id.values())
+
+    def resolve_digest_by_evidence_id(
+        self,
+        evidence_id: str,
+        claims: list[str] | None = None,
+        *,
+        compact: bool = False,
+    ) -> EvidenceDigest | None:
+        """Resolve a canonical evidence ID through artifact and citation aliases."""
+        supported_claims = list(claims or [])
+        record = self._evidence_records.get(evidence_id)
+        if record is not None:
+            artifact_ref = str(record.get("artifact_ref") or "")
+            digest = (
+                self._artifact_digest(artifact_ref, supported_claims, compact)
+                if artifact_ref
+                else None
+            )
+            if digest is not None:
+                return replace(
+                    digest,
+                    evidence_id=evidence_id,
+                    title=str(record.get("source_id") or digest.title or evidence_id),
+                    locator=str(record.get("locator") or digest.locator),
+                )
+            digest = self._citation_digest(evidence_id, supported_claims, compact)
+            if digest is not None:
+                return replace(digest, evidence_id=evidence_id)
+            excerpt = str(record.get("excerpt_ref") or "").strip()
+            if excerpt:
+                return EvidenceDigest(
+                    evidence_id,
+                    str(record.get("source_id") or evidence_id),
+                    str(record.get("locator") or ""),
+                    excerpt[:240 if compact else 500],
+                    tuple(supported_claims[:3 if compact else 6]),
+                )
+            return None
+        digest = self._artifact_digest(evidence_id, supported_claims, compact)
+        if digest is not None:
+            return digest
+        return self._citation_digest(evidence_id, supported_claims, compact)
 
     def _artifact_digest(
         self,
@@ -250,7 +307,8 @@ class SynthesisContextBuilder:
         for source in sources:
             source_id = str(getattr(source, "source_id", "") or "")
             artifact_id = str(getattr(source, "artifact_id", "") or "")
-            if evidence_id not in {source_id, artifact_id}:
+            source_evidence_id = str(getattr(source, "evidence_id", "") or "")
+            if evidence_id not in {source_id, artifact_id, source_evidence_id}:
                 continue
             locator = str(getattr(source, "locator", "") or source_id)
             return EvidenceDigest(

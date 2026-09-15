@@ -54,7 +54,17 @@ class ToolGateway:
 
     def call(self, callback: Any, *args: Any, **kwargs: Any) -> Any:
         """Invoke a tool that performs its own resource authorization."""
-        return callback(*args, **kwargs)
+        result = callback(*args, **kwargs)
+        if isinstance(result, dict) and result.get("error"):
+            from app.research.runtime.activity import get_current_worker_activity
+
+            tracker = get_current_worker_activity()
+            if tracker is not None:
+                tracker.record_tool_error(
+                    "simple_fact_search",
+                    str(result.get("reason") or result.get("error") or "tool_error"),
+                )
+        return result
 
 
 __all__ = ["ToolGateway"]

@@ -66,7 +66,13 @@ async def _run_worker_step_with_lease(
             delay = min(1.0, max(0.05, min(remaining_wall, remaining_idle)))
             done, _pending = await asyncio.wait({task}, timeout=delay)
             if done:
-                return task.result()
+                worker_result = task.result()
+                if isinstance(getattr(worker_result, "metadata", None), dict):
+                    worker_result.metadata.setdefault(
+                        "last_tool_error",
+                        tracker.snapshot().get("last_tool_error") or {},
+                    )
+                return worker_result
             now = time.perf_counter()
             current_signature = signature()
             current_in_flight = tracker.has_in_flight_operations()

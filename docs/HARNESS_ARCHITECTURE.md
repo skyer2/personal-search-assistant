@@ -71,9 +71,11 @@ Workers own execution, not research completion. Each result is scoped to:
 - one dispatch wave;
 - its own raw payload and evidence IDs.
 
-Workers can return findings, facts, candidates, sources, evidence IDs, evidence publication metadata, confidence, and a normal stop reason. They cannot mutate coverage, mark research complete, or choose the next strategy.
+Workers can return findings, facts, candidates, sources, evidence IDs, confidence, and a normal stop reason. Publication dates and source metadata are owned by tools and runtime. Workers cannot mutate coverage, mark research complete, or choose the next strategy.
 
 For `research` and `network_search`, a complete result requires a final assistant message without tool calls, valid JSON, at least one finding with a claim, and at least one verbatim runtime `evidence_ids` / `artifact_ids` reference. `ToolMessage`, raw search JSON, summary-only, and facts-only outputs are not final answers. One Finalization-only retry may read existing artifacts/evidence, but cannot search or fetch. Ingestion resolves accepted references to admitted canonical evidence IDs and records rejected references instead of silently dropping them.
+
+The executor then classifies the attempt as `succeeded/complete`, `stopped/partial`, or `failed/none`. A single `search_empty`, budget denial, fetch failure, or provider timeout is a tool/action diagnostic, not enough by itself to fail the worker. Evidence plus accepted findings and a normal stop completes; evidence with an abnormal stop remains partial and ingestible; no evidence and no accepted findings is required for terminal failure. `last_tool_error`, `fail_reason`, and `stop_reason` are reported separately.
 
 `worker_tools_for_step()` is the single tool-authority bridge. It is consumed by Plan builders, prompt tool context, worker-profile selection, and runtime authorization. Research plans never carry hand-written legacy names such as `web_search` or `fetch`; source constraints are projected through the same registry before a step is emitted.
 

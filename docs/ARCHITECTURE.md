@@ -123,6 +123,8 @@ Finalization is armed before an LLM request when projected usage would risk the 
 
 Research workers deliver evidence-backed findings, not search logs. The final answer must come from a non-tool assistant message and contain JSON with `summary`, `findings`, `gaps`, `conflicts`, and `stop_reason`. Each finding requires `claim` plus verbatim `evidence_ids` or `artifact_ids`; invented IDs are rejected. A single Finalization-only retry can re-read existing artifacts/evidence but cannot search or fetch. Runtime ingestion resolves artifact and locator references to admitted canonical evidence IDs, emits accepted/rejected diagnostics, and allows deterministic compression only as a marked partial fallback when facts and admitted evidence both exist.
 
+Worker lifecycle is classified after finalization from structured validity, accepted findings, admitted evidence, and the terminal reason. A local tool failure is not a worker failure: evidence plus accepted findings and a normal stop is complete; evidence with an abnormal stop is stopped/partial and remains ingestible; only zero evidence and zero accepted findings can become a terminal worker failure. `last_tool_error`, `fail_reason`, and `stop_reason` are separate diagnostics.
+
 Objective evidence metadata is runtime-owned. Search providers, fetch tools, and the tool output contract persist `published_at` on the artifact; ingestion reads that metadata when constructing `EvidenceRecord`. Workers do not guess publication dates. Coverage continues to use its existing freshness algorithm, but no longer loses provider-provided dates merely because the final Worker JSON omitted metadata.
 
 Each `researcher` result is ingested immediately with the same deterministic ingestion contract. The graph still waits for required workers at the fan-in boundary, but evidence, claims, and findings become available as each worker returns. `ingest_findings` then processes only WorkerResults that were not already ingested; replay never duplicates records. If partial-wave coverage already satisfies the Brief, only optional or speculative workers may be skipped. Required workers are never cancelled for latency.
@@ -151,7 +153,7 @@ Coverage is monotonic:
 
 ## Synthesis and Partial Delivery
 
-Synthesis reads a deterministic Evidence Pack built from Brief criteria, evidence-backed findings, claims, evidence records, and structured conflict resolutions. The pack is criterion-balanced, deduplicated, quality-ranked, and bounded to 16K input tokens normally and 8K on compact retry, with a 30K hard maximum. It does not read legacy coverage state and cannot search.
+Synthesis reads a deterministic Evidence Pack built from Brief criteria, evidence-backed findings, claims, evidence records, and structured conflict resolutions. The pack is criterion-balanced, deduplicated, quality-ranked, and bounded to 8K input tokens normally and 4K on compact retry, with a 30K hard maximum. It does not read legacy coverage state and cannot search. Selected evidence must resolve to a non-empty Runtime-owned digest; otherwise synthesis is skipped and deterministic partial delivery reports `synthesis_evidence_digest_missing`.
 
 Canonical evidence IDs are bound to stable citation numbers during ingestion. Synthesis sees those numbers in its prompt; after generation, the runtime projects the selected evidence-backed findings onto numeric sentences and rejects unknown citation numbers. Internal worker JSON is removed from user-facing Markdown and PDF deliverables.
 

@@ -48,6 +48,14 @@ class BoundingModel:
         return AIMessage(content="synthesis result")
 
 
+class StaticModel:
+    def __init__(self, response: Any):
+        self.response = response
+
+    async def ainvoke(self, *args: Any, **kwargs: Any):
+        return self.response
+
+
 class FakeSession:
     budget_manager = RunBudgetManager(token_limit=100_000, llm_call_limit=10)
     ctx = SimpleNamespace(citation_manager=None)
@@ -92,6 +100,43 @@ def test_synthesis_context_deduplicates_and_uses_artifact_digest(tmp_path: Path)
         assert len(context.findings) == 1
         assert len(context.worker_summaries) == 1
         assert context.evidence_digests[0].locator == "https://example.com/deepseek"
+    finally:
+        reset_artifact_store()
+
+
+def test_synthesis_digest_resolves_canonical_evidence_id_to_artifact_summary(tmp_path: Path):
+    store = ArtifactStore(session_dir=tmp_path)
+    set_artifact_store(store)
+    try:
+        artifact = store.put(
+            "abc",
+            kind="web",
+            locator="https://example.com/fact",
+            title="Fact source",
+        )
+        gstate = {
+            "evidence_refs": ["evidence-1"],
+            "evidence_records": [
+                {
+                    "evidence_id": "evidence-1",
+                    "source_id": "example.com",
+                    "locator": "https://example.com/fact",
+                    "artifact_ref": artifact.artifact_id,
+                }
+            ],
+            "findings": [
+                {
+                    "claim": "The artifact summary is abc.",
+                    "evidence_ids": ["evidence-1"],
+                }
+            ],
+        }
+        builder = SynthesisContextBuilder(FakeHarness(), FakeSession())
+        context = builder.build(gstate)
+
+        assert context.evidence_digests[0].evidence_id == "evidence-1"
+        assert context.evidence_digests[0].excerpt == "abc"
+        assert builder.resolve_digest_by_evidence_id("evidence-1").excerpt == "abc"
     finally:
         reset_artifact_store()
 
@@ -141,7 +186,7 @@ def _run_failure(message: str):
     )
 
 
-def test_empty_synthesis_is_retryable_taxonomy():
+def test_empty_synthesis_reports_provider_empty_content():
     harness = FakeHarness()
     harness.synthesis_model = FailingModel(None)
     result = asyncio.run(
@@ -149,7 +194,53 @@ def test_empty_synthesis_is_retryable_taxonomy():
             SynthesisRequest(mode="degraded", evidence_refs=["ev"]), _context()
         )
     )
-    assert result.fail_reason == "empty_content"
+    assert result.fail_reason == "provider_empty_content"
+    assert result.metadata["raw_response_type"] == "str"
+    assert result.metadata["raw_content_chars"] == 0
+    assert result.metadata["cleaned_content_chars"] == 0
+
+
+def test_synthesis_response_diagnostics_and_content_shapes():
+    cases = [
+        (
+            AIMessage(
+                content=[{"type": "text", "text": "block report"}],
+                usage_metadata={
+                    "input_tokens": 120,
+                    "output_tokens": 30,
+                    "total_tokens": 150,
+                },
+            ),
+            True,
+            "block report",
+            "AIMessage",
+        ),
+        (
+            '{"ok": true, "summary": "recovered summary", "findings": []}',
+            True,
+            "recovered summary",
+            "str",
+        ),
+        ('{"ok": true, "findings": []}', False, "content_removed_by_cleaner", "str"),
+        ({"unexpected": True}, False, "unsupported_response_shape", "dict"),
+    ]
+    for response, expected_ok, expected_content, expected_type in cases:
+        harness = FakeHarness()
+        harness.synthesis_model = StaticModel(response)
+        result = asyncio.run(
+            SynthesisExecutor(harness, FakeSession()).execute(
+                SynthesisRequest(mode="degraded", evidence_refs=["ev"]),
+                _context(),
+            )
+        )
+        assert result.ok is expected_ok
+        assert result.metadata["raw_response_type"] == expected_type
+        if expected_ok:
+            assert expected_content in result.summary
+            assert result.metadata["actual_input_tokens"] >= 0
+            assert result.metadata["actual_output_tokens"] >= 0
+        else:
+            assert result.fail_reason == expected_content
 
 
 def test_partial_renderer_discloses_limitations_and_never_claims_success():

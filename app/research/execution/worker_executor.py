@@ -25,6 +25,7 @@ from app.agent.harness.worker_runtime import resolve_execute_target
 from app.api.tracing import build_run_config
 from app.research.execution.llm_gateway import LLMGateway
 from app.research.execution.tool_gateway import ToolGateway
+from app.research.domain.task_state import classify_worker_completion
 from app.research.runtime.worker import (
     ResearchContext,
     ResearchTask,
@@ -353,33 +354,47 @@ class WorkerExecutorV2:
                 "soft_deadline_finalize",
                 "no_more_useful_evidence",
             }
-            has_retrieval_result = bool(
-                evidence_refs
-                or payload.get("findings")
-                or payload.get("facts")
-                or payload.get("sources")
+            accepted_findings = sum(
+                1
+                for finding in payload.get("findings") or []
+                if isinstance(finding, dict)
+                and any(str(item).strip() for item in finding.get("evidence_ids") or [])
             )
-            ok = bool(strict_valid) and (
-                bool(payload.get("ok", True))
-                or (normal_soft_stop and has_retrieval_result)
+            terminal_reason = str(
+                payload.get("stop_reason")
+                or tool_usage.get("finalization_reason")
+                or payload.get("error_code")
+                or ("search_empty" if not payload.get("ok", True) else "")
             )
-            worker_ok = ok
+            lifecycle = classify_worker_completion(
+                structured_valid=bool(strict_valid),
+                accepted_findings=accepted_findings,
+                evidence_count=len(set(evidence_refs)),
+                terminal_reason=terminal_reason,
+                normal_soft_stop=normal_soft_stop,
+            )
+            worker_ok = lifecycle.execution_status.value == "succeeded"
+            worker_status: WorkerResultStatus = (
+                "done"
+                if worker_ok
+                else "partial"
+                if lifecycle.result_status.value == "partial"
+                else "blocked"
+                if lifecycle.stop_reason.value == "budget"
+                else "failed"
+            )
             worker_result = self._result(
                 task,
                 started,
-                ok=ok,
-                status="done" if ok else "failed",
+                ok=worker_ok,
+                status=worker_status,
                 summary=str(payload.get("summary") or result.content)[:4000],
                 findings=list(payload.get("findings") or []),
                 evidence_refs=list(dict.fromkeys(evidence_refs)),
                 facts=list(payload.get("facts") or []),
                 sources=list(payload.get("sources") or []),
                 raw=result,
-                fail_reason=(
-                    ""
-                    if ok
-                    else str(strict_reason or payload.get("error_code") or "worker_failed")
-                ),
+                fail_reason=lifecycle.fail_reason,
                 metrics=self._worker_metrics(context, task, tool_usage),
                 queue_ms=queue_ms,
             )
@@ -397,13 +412,15 @@ class WorkerExecutorV2:
                         result.metadata.get("raw_finding_count")
                         or len(payload.get("findings") or [])
                     ),
+                    "accepted_finding_count": accepted_findings,
+                    "admitted_evidence_count": len(set(evidence_refs)),
+                    "execution_status": lifecycle.execution_status.value,
+                    "result_status": lifecycle.result_status.value,
+                    "last_tool_error": str(result.metadata.get("last_tool_error") or ""),
                 }
             )
-            worker_result.metrics["stop_reason"] = str(
-                payload.get("stop_reason")
-                or tool_usage.get("finalization_reason")
-                or ("local_evidence_sufficient" if ok else "")
-            )
+            worker_result.metrics["stop_reason"] = lifecycle.stop_reason.value
+            worker_result.metrics["fail_reason"] = lifecycle.fail_reason
             return worker_result
         except BudgetReservationError as exc:
             worker_ok = False
@@ -1216,19 +1233,38 @@ class WorkerExecutorV2:
                 "structured_ok": False,
             },
         )
-        normal_soft_stop = stop_reason in {
-            "local_evidence_sufficient",
-            "soft_budget_finalize",
-            "soft_deadline_finalize",
-            "no_more_useful_evidence",
-        } and bool(
-            findings or evidence_refs or sources or facts or candidates
+        lifecycle = classify_worker_completion(
+            structured_valid=bool(
+                stop_reason
+                in {
+                    "local_evidence_sufficient",
+                    "soft_budget_finalize",
+                    "soft_deadline_finalize",
+                    "no_more_useful_evidence",
+                }
+            ),
+            accepted_findings=len(findings),
+            evidence_count=len(set(evidence_refs or sources)),
+            terminal_reason=stop_reason or fail_reason,
+            normal_soft_stop=stop_reason
+            in {
+                "local_evidence_sufficient",
+                "soft_budget_finalize",
+                "soft_deadline_finalize",
+                "no_more_useful_evidence",
+            },
         )
         result = self._result(
             task,
             started,
-            ok=normal_soft_stop,
-            status="done" if normal_soft_stop else "partial",
+            ok=lifecycle.execution_status.value == "succeeded",
+            status=(
+                "done"
+                if lifecycle.execution_status.value == "succeeded"
+                else "partial"
+                if evidence_refs
+                else status
+            ),
             summary=payload["summary"],
             findings=findings,
             evidence_refs=evidence_refs,
@@ -1246,7 +1282,17 @@ class WorkerExecutorV2:
                 ),
                 queue_ms=queue_ms,
             )
-        result.metrics["stop_reason"] = stop_reason
+        result.metrics.update(
+            {
+                "stop_reason": lifecycle.stop_reason.value,
+                "fail_reason": lifecycle.fail_reason,
+                "execution_status": lifecycle.execution_status.value,
+                "result_status": lifecycle.result_status.value,
+                "accepted_finding_count": len(findings),
+                "admitted_evidence_count": len(set(evidence_refs or sources)),
+                "last_tool_error": cause,
+            }
+        )
         return result
 
     def _result(

@@ -313,7 +313,7 @@ def test_l3_empty_content_falls_back_to_partial_delivery(tmp_path: Path, monkeyp
     _assert_common_invariants(result, summary)
     assert provider.synthesis_calls == 1
     assert all(
-        event["attributes"]["fail_reason"] == "empty_content"
+        event["attributes"]["fail_reason"] == "provider_empty_content"
         for event in events
         if event["type"] == "synthesis.failed"
     )

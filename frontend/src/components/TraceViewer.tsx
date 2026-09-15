@@ -536,6 +536,48 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                         width: 180,
                         key: "fail_reason",
                         render: (value: unknown) => <div className="table-wrap-cell">{asText(value, "")}</div>
+                      },
+                      {
+                        title: "Budget",
+                        dataIndex: "budget_scope",
+                        width: 180,
+                        key: "budget",
+                        render: (_value: unknown, row: Record<string, unknown>) => {
+                          const scope = asText(row.budget_scope, "");
+                          if (!scope) return <div className="table-wrap-cell">—</div>;
+                          return (
+                            <div className="table-wrap-cell">
+                              {scope} / {asText(row.budget_resource, "")}
+                              <br />
+                              {asText(row.budget_reason, "")}
+                            </div>
+                          );
+                        }
+                      },
+                      {
+                        title: "Used / Limit",
+                        dataIndex: "budget_used",
+                        width: 120,
+                        key: "budget_used",
+                        render: (_value: unknown, row: Record<string, unknown>) => (
+                          <div className="table-wrap-cell">
+                            {row.budget_used == null ? "—" : `${asText(row.budget_used)} / ${asText(row.budget_limit, "?")}`}
+                          </div>
+                        )
+                      },
+                      {
+                        title: "Last Tool Error",
+                        dataIndex: "last_tool_error",
+                        width: 180,
+                        key: "last_tool_error",
+                        render: (value: unknown) => {
+                          if (!value) return <div className="table-wrap-cell">—</div>;
+                          if (typeof value === "object") {
+                            const row = value as { tool?: unknown; error?: unknown };
+                            return <div className="table-wrap-cell">{`${asText(row.tool, "")}: ${asText(row.error, "")}`}</div>;
+                          }
+                          return <div className="table-wrap-cell">{asText(value, "")}</div>;
+                        }
                       }
                     ]}
                   />

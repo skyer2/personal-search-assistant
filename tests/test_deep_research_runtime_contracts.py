@@ -296,8 +296,10 @@ def test_evidence_pack_is_criterion_balanced_and_compact_retry_shrinks() -> None
         COMPACT_SYNTHESIS_INPUT_TOKENS,
         compact=True,
     )
-    assert len(normal.findings) == 12
-    assert len(compact.findings) == 6
+    assert len(normal.findings) == 6
+    assert len(compact.findings) == 4
+    assert NORMAL_SYNTHESIS_INPUT_TOKENS == 8_000
+    assert COMPACT_SYNTHESIS_INPUT_TOKENS == 4_000
     assert compact.estimated_tokens < normal.estimated_tokens
     assert {row["edge_id"] for row in normal.conflict_resolutions} == {"resolved", "expected"}
     assert normal.findings[0]["claim"] == "candidate_pool finding 0"

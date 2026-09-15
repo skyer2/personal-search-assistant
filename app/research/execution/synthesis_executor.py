@@ -114,8 +114,8 @@ class SynthesisExecutor:
             )
 
         try:
-            content = await asyncio.wait_for(
-                self._invoke(model=model, request=request, context=context),
+            raw_response = await asyncio.wait_for(
+                self._invoke_raw(model=model, request=request, context=context),
                 timeout=self._timeout_sec(timeout_sec),
             )
         except asyncio.TimeoutError:
@@ -152,19 +152,23 @@ class SynthesisExecutor:
                 ),
             )
 
-        if not content.strip():
+        response_analysis = self._analyze_response(raw_response, request, context, model)
+        content = response_analysis["cleaned_content"]
+        if not content:
             return self._result(
                 started,
                 ok=False,
                 summary="synthesis_empty_content",
-                fail_reason="empty_content",
+                fail_reason=str(response_analysis["fail_reason"]),
                 evidence_refs=request.evidence_refs,
+                metadata=response_analysis,
             )
         return self._result(
             started,
             ok=True,
             summary=content[:4000],
             evidence_refs=request.evidence_refs,
+            metadata=response_analysis,
         )
 
     async def _invoke(
@@ -174,6 +178,21 @@ class SynthesisExecutor:
         request: SynthesisRequest,
         context: ResearchContext,
     ) -> str:
+        return self._response_content(
+            await self._invoke_raw(
+                model=model,
+                request=request,
+                context=context,
+            )
+        )
+
+    async def _invoke_raw(
+        self,
+        *,
+        model: Any,
+        request: SynthesisRequest,
+        context: ResearchContext,
+    ) -> Any:
         config = build_run_config(
             f"{context.session_id}:synthesis:{context.run_id}",
             metadata={
@@ -194,7 +213,7 @@ class SynthesisExecutor:
                 [HumanMessage(content=self._prompt(request, context))],
                 config,
             )
-        return self._response_content(response)
+        return response
 
     def _prompt(self, request: SynthesisRequest, context: ResearchContext) -> str:
         mode_instruction = (
@@ -255,22 +274,137 @@ class SynthesisExecutor:
     def estimate_input_tokens(self, request: SynthesisRequest, context: ResearchContext) -> int:
         return estimate_tokens(self._prompt(request, context))
 
-    def _response_content(self, response: Any) -> str:
+    def _extract_response_content(self, response: Any) -> tuple[str, bool]:
         if isinstance(response, str):
-            return self._clean_response_content(response)
+            return response, True
         if isinstance(response, dict):
-            content = response.get("content")
-            return self._clean_response_content(str(content or "")) if content is not None else ""
+            if "content" in response:
+                return self._extract_response_content(response.get("content"))
+            if "text" in response:
+                return str(response.get("text") or ""), True
+            if "summary" in response:
+                return str(response.get("summary") or ""), True
+            return "", False
         if isinstance(response, list):
-            return self._response_content(response[-1]) if response else ""
-        return self._clean_response_content(str(getattr(response, "content", "") or ""))
+            if not response:
+                return "", True
+            texts: list[str] = []
+            supported = True
+            for item in response:
+                text, item_supported = self._extract_response_content(item)
+                supported = supported and item_supported
+                if text:
+                    texts.append(text)
+            return "\n".join(texts), supported
+        content = getattr(response, "content", None)
+        if content is not None:
+            return self._extract_response_content(content)
+        text = getattr(response, "text", None)
+        if text is not None:
+            return str(text), True
+        return "", False
+
+    @staticmethod
+    def _finish_reason(response: Any) -> str:
+        metadata = getattr(response, "response_metadata", None)
+        if isinstance(metadata, dict) and metadata.get("finish_reason"):
+            return str(metadata.get("finish_reason"))
+        metadata = getattr(response, "metadata", None)
+        if isinstance(metadata, dict) and metadata.get("finish_reason"):
+            return str(metadata.get("finish_reason"))
+        return str(getattr(response, "finish_reason", "") or "")
+
+    @staticmethod
+    def _usage(response: Any) -> tuple[int, int]:
+        usage = getattr(response, "usage_metadata", None)
+        if isinstance(usage, dict):
+            return int(usage.get("input_tokens") or 0), int(
+                usage.get("output_tokens") or 0
+            )
+        usage = getattr(response, "usage", None)
+        if isinstance(usage, dict):
+            return int(usage.get("prompt_tokens") or 0), int(
+                usage.get("completion_tokens") or 0
+            )
+        metadata = getattr(response, "response_metadata", None)
+        token_usage = metadata.get("token_usage") if isinstance(metadata, dict) else None
+        if isinstance(token_usage, dict):
+            return int(token_usage.get("prompt_tokens") or 0), int(
+                token_usage.get("completion_tokens") or 0
+            )
+        return 0, 0
+
+    def _analyze_response(
+        self,
+        response: Any,
+        request: SynthesisRequest,
+        context: ResearchContext,
+        model: Any,
+    ) -> dict[str, Any]:
+        raw_content, supported = self._extract_response_content(response)
+        cleaned_content = self._clean_response_content(raw_content)
+        if not supported:
+            fail_reason = "unsupported_response_shape"
+        elif not raw_content.strip():
+            fail_reason = "provider_empty_content"
+        elif not cleaned_content.strip():
+            fail_reason = "content_removed_by_cleaner"
+        else:
+            fail_reason = ""
+        actual_input_tokens, actual_output_tokens = self._usage(response)
+        return {
+            "raw_response_type": type(response).__name__,
+            "raw_content_chars": len(raw_content),
+            "cleaned_content": cleaned_content,
+            "cleaned_content_chars": len(cleaned_content),
+            "response_supported": supported,
+            "fail_reason": fail_reason,
+            "finish_reason": self._finish_reason(response),
+            "estimated_input_tokens": self.estimate_input_tokens(request, context),
+            "actual_input_tokens": actual_input_tokens,
+            "actual_output_tokens": actual_output_tokens,
+            "model": str(
+                getattr(response, "model_name", None)
+                or getattr(model, "model_name", None)
+                or getattr(model, "model", None)
+                or "unknown"
+            ),
+            "provider": "openai-compatible",
+        }
+
+    def _response_content(self, response: Any) -> str:
+        raw_content, _supported = self._extract_response_content(response)
+        return self._clean_response_content(raw_content)
 
     @staticmethod
     def _clean_response_content(content: str) -> str:
+        original = content.strip()
+        recovered_summaries: list[str] = []
+
+        def collect_summary(payload: Any) -> None:
+            if isinstance(payload, dict) and "ok" in payload:
+                summary = str(payload.get("summary") or "").strip()
+                if summary and summary not in recovered_summaries:
+                    recovered_summaries.append(summary)
+
+        decoder = json.JSONDecoder()
+        cursor = 0
+        while True:
+            start = original.find("{", cursor)
+            if start < 0:
+                break
+            try:
+                payload, end = decoder.raw_decode(original, start)
+            except json.JSONDecodeError:
+                cursor = start + 1
+                continue
+            collect_summary(payload)
+            cursor = end
+
         cleaned = re.sub(
             r"```json\s*.*?```",
             "",
-            content.strip(),
+            original,
             flags=re.DOTALL,
         )
         decoder = json.JSONDecoder()
@@ -289,6 +423,7 @@ class SynthesisExecutor:
                 and "ok" in payload
                 and ("findings" in payload or "summary" in payload)
             ):
+                collect_summary(payload)
                 cleaned = cleaned[:start] + cleaned[end:]
                 cursor = 0
             else:
@@ -307,7 +442,10 @@ class SynthesisExecutor:
             cleaned,
             flags=re.MULTILINE,
         )
-        return cleaned.strip()
+        cleaned = cleaned.strip()
+        if not cleaned and recovered_summaries:
+            return recovered_summaries[0]
+        return cleaned
 
     def _timeout_sec(self, requested_timeout_sec: float | None = None) -> float:
         config = self.harness.harness_config

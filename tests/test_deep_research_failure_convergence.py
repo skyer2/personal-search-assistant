@@ -4,6 +4,7 @@ from typing import Any
 from unittest.mock import patch
 
 from app.agent.harness.run_budget import RunBudgetManager, create_run_budget_manager
+from app.agent.harness.loop import AgentHarness
 from app.agent.harness.step_budget import worker_retrieval_budget
 from app.config.loader import reload_harness_config
 from app.research.control.runtime_policy import decide_control
@@ -15,7 +16,9 @@ from app.research.routing.mode_router import (
     run_budget_overrides_for_mode,
 )
 from app.research.runtime.ingestion import ingest_new_worker_results
+from app.research.domain.task_state import classify_worker_completion
 from app.research.runtime.state import empty_research_state
+from app.observability import get_recorder
 from app.tools.batch_retrieval import run_batch_search
 
 
@@ -146,6 +149,80 @@ def test_deep_debug_is_explicit_profile_without_changing_production_defaults() -
     assert manager.llm_call_limit == 240
     assert manager.max_llm_calls_per_worker == 32
     assert manager.max_parallel_workers == 2
+
+
+def test_deep_debug_bootstrap_uses_real_run_budget_manager(tmp_path) -> None:
+    config = reload_harness_config()
+    harness = AgentHarness(
+        agent=object(),
+        project_root=tmp_path,
+        harness_config=config,
+    )
+    context = harness._bootstrap_run(
+        "deep debug budget",
+        "deep-debug-budget",
+        mode="deep_debug",
+    )
+    try:
+        manager = context.budget_manager
+        assert manager is not None
+        assert manager.token_limit == 1_200_000
+        assert manager.deadline_sec == 3_600
+        assert manager.llm_call_limit == 240
+        assert manager.max_llm_calls_per_worker == 32
+        assert manager.max_parallel_workers == 2
+        assert context.state.metadata["run_budget"]["profile"] == "deep_debug"
+    finally:
+        harness._teardown_run(context)
+        get_recorder().finish_run(
+            status="stopped",
+            duration_ms=0,
+            metadata={},
+        )
+
+
+def test_worker_lifecycle_separates_tool_failure_from_worker_failure() -> None:
+    recovered = classify_worker_completion(
+        structured_valid=True,
+        accepted_findings=2,
+        evidence_count=3,
+        terminal_reason="search_empty",
+    )
+    assert recovered.execution_status.value == "succeeded"
+    assert recovered.result_status.value == "complete"
+    assert recovered.stop_reason.value == "no_more_useful_evidence"
+    assert recovered.fail_reason == ""
+
+    empty = classify_worker_completion(
+        structured_valid=True,
+        accepted_findings=0,
+        evidence_count=0,
+        terminal_reason="search_empty",
+    )
+    assert empty.execution_status.value == "failed"
+    assert empty.result_status.value == "none"
+    assert empty.fail_reason == "search_empty"
+
+    budget_after_evidence = classify_worker_completion(
+        structured_valid=True,
+        accepted_findings=1,
+        evidence_count=2,
+        terminal_reason="worker_token_cap",
+    )
+    assert budget_after_evidence.execution_status.value == "stopped"
+    assert budget_after_evidence.result_status.value == "partial"
+    assert budget_after_evidence.stop_reason.value == "budget"
+    assert budget_after_evidence.fail_reason == "worker_token_cap"
+
+    budget_before_retrieval = classify_worker_completion(
+        structured_valid=False,
+        accepted_findings=0,
+        evidence_count=0,
+        terminal_reason="run_token_cap",
+    )
+    assert budget_before_retrieval.execution_status.value == "failed"
+    assert budget_before_retrieval.result_status.value == "none"
+    assert budget_before_retrieval.stop_reason.value == "budget"
 
 
 def test_one_failed_worker_does_not_discard_usable_worker_evidence() -> None:

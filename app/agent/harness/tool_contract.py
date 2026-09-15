@@ -480,6 +480,12 @@ def wrap_tool_with_contract(
                 isinstance(raw, dict)
                 and raw.get("error") == "budget_denied"
             ):
+                tracker = get_current_worker_activity()
+                if tracker is not None:
+                    tracker.record_tool_error(
+                        name,
+                        str(raw.get("reason") or "budget_denied"),
+                    )
                 if recorder.is_active:
                     recorder.finish_tool(
                         name,
@@ -533,6 +539,9 @@ def wrap_tool_with_contract(
                 )
             return output
         except Exception as exc:
+            tracker = get_current_worker_activity()
+            if tracker is not None:
+                tracker.record_tool_error(name, f"{type(exc).__name__}: {exc}")
             if recorder.is_active:
                 recorder.finish_tool(
                     name,

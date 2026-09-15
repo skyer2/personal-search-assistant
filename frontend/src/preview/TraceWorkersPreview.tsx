@@ -11,7 +11,13 @@ const workers = [
     plan_version: 2,
     objective:
       "汇总 METR 时间视野倍增、FutureSearch 对 AI R&D uplift 的中位预测，以及 Anthropic 刹车踏板公开表态。需要完整可读，不能被单元格截断。",
-    fail_reason: ""
+    fail_reason: "",
+    budget_scope: "",
+    budget_resource: "",
+    budget_reason: "",
+    budget_used: null,
+    budget_limit: null,
+    last_tool_error: ""
   },
   {
     key: "w-2",
@@ -21,7 +27,13 @@ const workers = [
     attempt: 2,
     plan_version: 2,
     objective: "核对 Guidelight 五大实验室控制实践评分，并列出 containment plan 得 0 分的条目。",
-    fail_reason: "deadline_exceeded：预算用尽，未完成全部来源交叉验证"
+    fail_reason: "deadline_exceeded：预算用尽，未完成全部来源交叉验证",
+    budget_scope: "run",
+    budget_resource: "token",
+    budget_reason: "run_token_cap",
+    budget_used: 118000,
+    budget_limit: 120000,
+    last_tool_error: { tool: "batch_search", error: "run_token_cap" }
   }
 ];
 
@@ -67,6 +79,40 @@ export function TraceWorkersPreview() {
               width: 180,
               key: "fail_reason",
               render: (value: unknown) => <div className="table-wrap-cell">{String(value || "")}</div>
+            },
+            {
+              title: "Budget",
+              dataIndex: "budget_scope",
+              width: 180,
+              key: "budget",
+              render: (_value: unknown, row: Record<string, unknown>) => (
+                <div className="table-wrap-cell">
+                  {row.budget_scope ? `${String(row.budget_scope)} / ${String(row.budget_resource || "")}` : "—"}
+                </div>
+              )
+            },
+            {
+              title: "Used / Limit",
+              dataIndex: "budget_used",
+              width: 120,
+              key: "budget_used",
+              render: (value: unknown, row: Record<string, unknown>) => (
+                <div className="table-wrap-cell">{value == null ? "—" : `${String(value)} / ${String(row.budget_limit ?? "?")}`}</div>
+              )
+            },
+            {
+              title: "Last Tool Error",
+              dataIndex: "last_tool_error",
+              width: 180,
+              key: "last_tool_error",
+              render: (value: unknown) => {
+                if (!value) return <div className="table-wrap-cell">—</div>;
+                if (typeof value === "object") {
+                  const row = value as { tool?: unknown; error?: unknown };
+                  return <div className="table-wrap-cell">{`${String(row.tool || "")}: ${String(row.error || "")}`}</div>;
+                }
+                return <div className="table-wrap-cell">{String(value)}</div>;
+              }
             }
           ]}
         />
