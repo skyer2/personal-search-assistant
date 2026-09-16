@@ -168,26 +168,8 @@ def test_lightweight_integrity_does_not_require_unbuilt_span_tree():
 def test_summary_projection_keeps_lightweight_trace_integrity_neutral():
     from app.observability.journal import summarize_trace
 
-    events = [
-        {
-            "type": "run.started",
-            "span_id": "root",
-            "run_id": "r1",
-            "session_id": "s1",
-            "seq": 1,
-            "attributes": {"search_mode": "agent"},
-        },
-        {
-            "type": "run.completed",
-            "span_id": "root",
-            "run_id": "r1",
-            "session_id": "s1",
-            "seq": 2,
-            "status": "partial",
-        },
-    ]
-    summary = summarize_trace(events, include_lineage=False, include_tree_integrity=False)
-    assert "missing_root_span" not in summary["trace_integrity"]["issues"]
+    summary = summarize_trace(_events("partial"), include_lineage=False, include_tree_integrity=False)
+    assert summary["trace_integrity"]["passed"] is True
     assert summary["trace_integrity"]["span_tree"]["valid"] is None
 
 
