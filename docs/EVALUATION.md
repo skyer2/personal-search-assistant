@@ -147,6 +147,9 @@ Agent、Kubernetes、记忆、评测、安全、市场、研究综述和职业�
 发布判定只使用 Completion Contract：必须是 `success`、回答完整、引用和证据有效，
 且 trace 无 root/orphan/cycle 问题。`partial`、fallback 或单次成功不能替代三次一致通过。
 
+运行中断后可使用相同参数加 `--no-clean` 续跑；已完成的 case/attempt 会跳过，原始失败
+记录不会被覆盖。
+
 ### L4 BrowseComp-Plus
 
 公开坐标系。Retrieval 与 Agent 分开算，离线 surrogate 不冒充官方 Accuracy。详见 [BROWSECOMP_PLUS_EVAL.md](./BROWSECOMP_PLUS_EVAL.md)。
