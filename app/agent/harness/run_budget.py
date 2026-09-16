@@ -126,6 +126,7 @@ class RunBudgetManager:
         started_at: float | None = None,
         synthesis_reserve_sec: float = 210.0,
         max_parallel_workers: int = 3,
+        stage_reserves: dict[str, float] | None = None,
     ) -> None:
         self.token_limit = max(0, int(token_limit or 0))
         self.llm_call_limit = max(0, int(llm_call_limit or 0))
@@ -135,6 +136,13 @@ class RunBudgetManager:
         self.max_llm_calls_per_worker = max(1, int(max_llm_calls_per_worker or 8))
         self.synthesis_reserve_sec = max(0.0, float(synthesis_reserve_sec or 0))
         self.max_parallel_workers = max(1, int(max_parallel_workers or 3))
+        self.stage_reserves = {
+            "research": 0.60,
+            "repair": 0.15,
+            "report": 0.15,
+            "verification": 0.10,
+            **(stage_reserves or {}),
+        }
         self._lock = threading.RLock()
         self._started = float(started_at) if started_at is not None else time.perf_counter()
         self.deadline_at = self._started + self.deadline_sec if self.deadline_sec > 0 else None
@@ -169,7 +177,20 @@ class RunBudgetManager:
             started_at=started_at,
             synthesis_reserve_sec=float(rb.get("synthesis_reserve_sec") or getattr(config, "synthesis_reserve_sec", 210) or 75),
             max_parallel_workers=int(rb.get("max_parallel_workers") or getattr(config, "max_parallel_workers", 3) or 3),
+            stage_reserves=rb.get("stage_reserves") if isinstance(rb.get("stage_reserves"), dict) else None,
         )
+
+    def stage_reserve_tokens(self, stage: str) -> int:
+        """Deterministic token reserve for a named phase."""
+        share = float(self.stage_reserves.get(str(stage), 0.0) or 0.0)
+        return max(0, int(self.token_limit * max(0.0, min(1.0, share))))
+
+    def reserve(self, stage: str) -> dict[str, Any]:
+        """Return a diagnostic reservation without spending capacity."""
+        reserved = self.stage_reserve_tokens(stage)
+        with self._lock:
+            available = max(0, reserved - self._used_tokens)
+        return {"stage": str(stage), "reserved_tokens": reserved, "available_tokens": available}
 
     def sync_from_usage(self, *, session_id: str = "", tool_calls: int = 0) -> None:
         """Reconcile real LLM usage; this is not an authorization path."""

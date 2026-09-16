@@ -61,7 +61,7 @@ def _plan_from_tasks(
     from app.research.workers.registry import worker_tools_for_step
     from app.research.runtime.task_budget import task_budget_metadata, task_budget_profile
 
-    steps = [
+    raw_steps = [
         PlanStep(
             step_type="research",
             description=item.objective,
@@ -79,6 +79,8 @@ def _plan_from_tasks(
                 "missing_evidence_types": list(item.missing_evidence_types),
                 "blocking_conflict_ids": list(item.blocking_conflict_ids),
                 "expected_evidence": list(item.expected_evidence),
+                "coverage_keys": list(item.target_criteria),
+                "estimated_queries": max(1, min(10, len(item.target_criteria) or 1)),
                 "source_hints": list(item.source_hints),
                 "required": True,
                 "optional": False,
@@ -89,6 +91,11 @@ def _plan_from_tasks(
         for item in tasks
         if str(item.objective).strip()
     ]
+    from app.research.planning.bounded import split_task
+
+    steps: list[PlanStep] = []
+    for step in raw_steps:
+        steps.extend(split_task(step))
     return ExecutionPlan(
         steps=steps,
         summary="Supervisor research action",

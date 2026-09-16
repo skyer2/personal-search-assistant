@@ -117,7 +117,9 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 .\.venv\Scripts\python.exe scripts\live_deep_research_e2e.py --runs 3 --mode deep_debug
 ```
 
-这个入口连续向真实模型与搜索提供方提交“2026 年 9 月 Agent 热点及未来 1–2 年方向”查询，逐次保存最终回答与可审计指标到 `output/live_deep_research_e2e/`。每次必须有 Evidence-backed Findings、已接纳 Evidence、`Coverage sufficient`、Answerability/Answer Completeness、Quality pass、有效 Trace、一个 root span、零孤儿/环、非空回答和零人为 0/0 budget denial。三次中至少两次必须在 primary 8K synthesis 上成功，未依赖 compact retry；compact 或 deterministic recovery 成功必须标记 `synthesis_degraded=true`，并以 `degraded_success` 语义呈现完成状态。单次 fallback 成功仅证明恢复路径有效。
+真实评测以 Completion Contract 为准：每个 key question 都有直接回答和可解析证据绑定，引用与 Trace 完整，最终业务状态只能是 `success`、`partial`、`failed` 或 `cancelled`。compact 或 deterministic recovery 只写入 `synthesis_degraded` 等诊断字段，完整回答仍计为 `success`；`partial` 不计通过。盲测套件使用独立查询集和重复运行，单次 fallback 只能证明恢复路径，不代表 primary 性能达标。
+
+本轮十题校准集可通过 `scripts/live_deep_research_suite.py` 顺序执行。脚本每题使用独立 session，清理并重建 `output/live_deep_research_suite/`，保存 `answer_01.md` 至 `answer_10.md` 和 `report.json`；它不会把 Coverage 标签当作终态，最终以 Completion Contract、Quality 和 Trace 完整性联合审计。十题校准结果不等同于 SDD 要求的 20 题 × 3 次盲测发布门槛。
 
 ### L4 BrowseComp-Plus
 

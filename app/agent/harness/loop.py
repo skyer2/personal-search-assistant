@@ -2263,13 +2263,17 @@ class AgentHarness:
             raise RuntimeError("terminal outcome missing from LoopState metadata")
         termination = dict(raw_termination)
         outcome = str(termination.get("outcome") or "")
-        if outcome not in {"success", "degraded_success", "partial", "failed", "cancelled"}:
+        # Normalize snapshots written by pre-v1 runtimes.  Degraded delivery
+        # is a diagnostic flag; it is never a business outcome.
+        if outcome == "degraded_success":
+            outcome = "success"
+            termination["outcome"] = outcome
+        if outcome not in {"success", "partial", "failed", "cancelled"}:
             raise RuntimeError(f"invalid terminal outcome: {outcome}")
-        if success != (outcome in {"success", "degraded_success"}):
+        if success != (outcome == "success"):
             raise RuntimeError("finalize success flag conflicts with TerminalPolicy outcome")
         termination["status"] = {
             "success": "completed",
-            "degraded_success": "completed",
             "partial": "partial",
             "failed": "failed",
             "cancelled": "interrupted",
@@ -2329,7 +2333,6 @@ class AgentHarness:
                 unresolved_questions=gaps,
                 status={
                     "success": "completed",
-                    "degraded_success": "completed",
                     "partial": "partial",
                     "failed": "failed",
                     "cancelled": "interrupted",
@@ -2787,7 +2790,6 @@ def _project_run_complete(run_id: str, *, result: str, status: str, error: str =
 
         mapped = {
             "success": STATUS_COMPLETED,
-            "degraded_success": STATUS_COMPLETED,
             "completed": STATUS_COMPLETED,
             "partial": STATUS_PARTIAL,
             "interrupted": STATUS_INTERRUPTED,

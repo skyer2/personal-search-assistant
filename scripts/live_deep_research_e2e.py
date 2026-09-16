@@ -124,7 +124,7 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
         ],
         "answer_chars": len(str(result.content or "")),
         "checks": checks,
-        "passed": result.status in {"success", "degraded_success"} and all(checks.values()),
+        "passed": result.status == "success" and all(checks.values()),
     }
 
 

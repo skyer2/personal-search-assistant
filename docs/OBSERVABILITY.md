@@ -174,7 +174,7 @@ Worker 终态事件携带完整预算快照与 `stop_reason`：LLM calls、token
 | `finish_reason` | Provider finish reason |
 | `actual_input_tokens` / `actual_output_tokens` | Provider usage 口径 |
 
-每次尝试还记录完整 prompt 字符数和估算 token、digest 字符数、模型与 provider、TTFT（提供方可用时）、实际输入/输出 token 和 finish reason。Run metadata 同步暴露 `synthesis_attempts`、`synthesis_failed`、`synthesis_degraded`、`synthesis_retry_count`、`successful_attempt`、首次失败原因/耗时、正常与成功 Evidence Pack token 数，并记录 `answerability`、`answer_complete`、`answer_contract`。`answerability.assessed`、`answer_recovery.started/completed` 和 `answer_completeness.assessed` 事件分别记录回答门禁、确定性恢复和最终完整性。一次 compact retry 成功仍可通过 Quality，但 Delivery 必须显示 degraded；它不能计入 primary synthesis 性能成功。两次模型尝试都失败时，只要证据足以回答，Answer Compiler 生成 `degraded_success`；只有不可回答时才输出 evidence-oriented partial。空输出进一步区分为 `provider_empty_content`、`content_removed_by_cleaner` 与 `unsupported_response_shape`；仅含 JSON summary 的响应会降级恢复 summary，混合 Markdown 与 JSON 的旧清理行为保持不变。
+每次尝试还记录完整 prompt 字符数和估算 token、digest 字符数、模型与 provider、TTFT（提供方可用时）、实际输入/输出 token 和 finish reason。Run metadata 同步暴露 `synthesis_attempts`、`synthesis_failed`、`synthesis_degraded`、`synthesis_retry_count`、`successful_attempt`、首次失败原因/耗时、正常与成功 Evidence Pack token 数，并记录 `answerability`、`answer_complete`、`answer_contract` 和 `completion_contract`。compact retry 与确定性 Answer Compiler 都是可见诊断；只要 Completion Contract 通过，Delivery 状态就是 `success`。空输出进一步区分为 `provider_empty_content`、`content_removed_by_cleaner` 与 `unsupported_response_shape`；仅含 JSON summary 的响应会降级恢复 summary，混合 Markdown 与 JSON 的旧清理行为保持不变。
 
 终端 `task_result` 事件透出 `synthesis_degraded`，过程框在合成和交付阶段显示“降级恢复”，即使最终 status 是 `completed` 且 Quality pass，也不会把 retry 成功误显示为正常主路径成功。
 

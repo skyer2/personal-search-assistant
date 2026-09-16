@@ -37,10 +37,31 @@ def _config_hash() -> str:
         return "unknown"
 
 
+def _git_branch() -> str:
+    try:
+        return subprocess.check_output(["git", "branch", "--show-current"], cwd=ROOT, text=True, timeout=2).strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def _git_dirty() -> bool:
+    try:
+        return bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True, timeout=2).strip())
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
 @router.get("/api/meta")
 async def api_meta():
     return {
         "git_sha": _git_sha(),
+        "branch": _git_branch(),
+        "dirty": _git_dirty(),
+        "build_time": os.getenv("BUILD_TIME", STARTED_AT),
+        "backend_pid": os.getpid(),
+        "schema_version": API_SCHEMA,
+        "prompt_version": os.getenv("PROMPT_VERSION", "research-prompt.v1"),
+        "eval_version": os.getenv("EVAL_VERSION", "blind-eval.v1"),
         "api_schema": API_SCHEMA,
         "event_schema": EVENT_SCHEMA,
         "config_hash": _config_hash(),

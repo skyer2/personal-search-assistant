@@ -25,6 +25,7 @@ class BudgetState(TypedDict):
     synthesis_reserve_sec: float
     max_parallel_workers: int
     max_replan_count: int
+    max_research_waves: int
     max_task_attempts: int
     max_semantic_stall_cycles: int
     max_active_tasks: int
@@ -138,7 +139,7 @@ def empty_research_state(
     tenant_id: str = "",
     project_id: str = "",
     max_tool_calls: int = 80,
-    max_replan_count: int = 3,
+    max_replan_count: int = 1,
     search_mode: str = "agent",
 ) -> ResearchState:
     return {
@@ -185,6 +186,7 @@ def empty_research_state(
             "synthesis_reserve_sec": 180.0,
             "max_parallel_workers": 3,
             "max_replan_count": max_replan_count,
+            "max_research_waves": 2,
             "max_task_attempts": 2,
             "max_semantic_stall_cycles": 2,
             "max_active_tasks": 3,

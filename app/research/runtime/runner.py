@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -350,6 +351,22 @@ class ResearchGraphRunner:
 
         return compile_research_graph(checkpointer=checkpointer, runtime=self, profile=profile)
 
+    @staticmethod
+    def _runtime_fingerprint() -> dict[str, Any]:
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        def git(*args: str) -> str:
+            try:
+                return subprocess.check_output(["git", *args], cwd=root, text=True, timeout=2).strip()
+            except (OSError, subprocess.SubprocessError):
+                return "unknown"
+        return {
+            "git_sha": git("rev-parse", "HEAD"),
+            "branch": git("branch", "--show-current"),
+            "dirty": bool(git("status", "--porcelain")),
+            "prompt_version": os.getenv("PROMPT_VERSION", "research-prompt.v1"),
+            "eval_version": os.getenv("EVAL_VERSION", "blind-eval.v1"),
+        }
+
     def _bootstrap_run(self, ctx: Any) -> tuple[str, dict[str, Any]]:
         """Resolve the profile before a session can create its hard budget manager."""
         from app.agent.harness.run_budget import create_run_budget_manager
@@ -368,6 +385,7 @@ class ResearchGraphRunner:
         )
         profile = decision.mode
         metadata = ctx.state.metadata
+        metadata["runtime_fingerprint"] = self._runtime_fingerprint()
         previous = dict(metadata.get("run_budget") or {})
         manager = ctx.budget_manager
         previous_profile = canonicalize_mode(previous.get("profile")) if previous.get("profile") else None
@@ -422,6 +440,10 @@ class ResearchGraphRunner:
         budget_cfg = budget_for_mode(profile, personal)
         overrides = run_budget_overrides_for_mode(profile, personal)
         run_budget = {**budget_cfg, **overrides, **previous}
+        # v1 bounds research to one repair wave (two waves total), regardless
+        # of legacy deep-debug settings.
+        run_budget["max_replan_count"] = min(1, max(0, int(run_budget.get("max_replan_count", 1) or 0)))
+        run_budget["max_research_waves"] = 2
         if manager is None:
             manager = create_run_budget_manager(
                 self.harness.harness_config,
@@ -443,6 +465,7 @@ class ResearchGraphRunner:
             synthesis_reserve_tokens=snapshot.synthesis_reserve_tokens,
             synthesis_reserve_sec=manager.synthesis_reserve_sec,
             deadline_at_monotonic=manager.deadline_at,
+            max_research_waves=2,
         )
         metadata["run_budget"] = run_budget
         metadata["route_decision"] = decision.to_dict()
@@ -718,6 +741,8 @@ class ResearchGraphRunner:
                             "blocking_conflict_ids": list(item.blocking_conflict_ids),
                             "objective": item.objective,
                             "expected_evidence": list(item.expected_evidence),
+                            "coverage_keys": list(item.target_criteria),
+                            "estimated_queries": max(1, min(10, len(item.target_criteria) or 1)),
                             "source_hints": list(item.source_hints),
                             "novelty_reason": item.novelty_reason,
                             "estimated_effort": item.estimated_effort,
@@ -748,14 +773,24 @@ class ResearchGraphRunner:
                     )
                     for item in approved_requests
                 ]
+                from app.research.planning.bounded import split_task
+                bounded_steps: list[PlanStep] = []
+                for step in steps:
+                    bounded_steps.extend(split_task(step))
+                steps = bounded_steps
                 plan = ExecutionPlan(
                     steps=steps,
                     summary="Budget-approved Supervisor research action",
                     plan_version=int(state.get("plan_version") or 1) + (1 if state.get("plan") else 0),
                     planning_mode="supervisor_action",
                 )
+                expanded_ids = [step.resolved_task_id(index) for index, step in enumerate(plan.steps)]
+                payload["dispatch_admission"] = {
+                    **dict(payload.get("dispatch_admission") or {}),
+                    "approved_task_ids": expanded_ids,
+                }
                 session.state.plan = plan
-                session.active_wave_size = len(approved_requests)
+                session.active_wave_size = len(steps)
                 payload.update(
                     {
                         "plan": plan.to_dict(),
@@ -2172,6 +2207,8 @@ class ResearchGraphRunner:
         )
 
     async def node_quality_gate(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.domain.completion import evaluate_completion
+        from app.research.coverage.gap_check import gap_check
         session = _require_session(gstate)
         quality_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
@@ -2183,6 +2220,7 @@ class ResearchGraphRunner:
             issues.append("no_content")
         answerability = gstate.get("answerability")
         answerable = bool(answerability.get("answerable")) if isinstance(answerability, dict) and answerability else False
+        gap_result = gap_check(brief=gstate.get("brief") or {}, answerability=answerability if isinstance(answerability, dict) else {})
         answer_complete = bool(gstate.get("answer_complete"))
         if not bool(judgement.get("sufficient")) and not (answerable and answer_complete):
             issues.append("coverage_gap")
@@ -2192,10 +2230,7 @@ class ResearchGraphRunner:
             issues.append("synthesis_failed")
         if isinstance(answerability, dict) and answerability and not bool(answerability.get("answerable")):
             issues.append("answerability_gap")
-        if isinstance(gstate.get("answer_contract"), dict) and gstate.get("answer_contract"):
-            completeness = dict((gstate.get("answer_contract") or {}).get("completeness") or {})
-            if completeness and not bool(completeness.get("complete")):
-                issues.append("answer_incomplete")
+        answer_contract = dict(gstate.get("answer_contract") or {})
         citation_valid = True
         citation_reason = ""
         manager = session.ctx.citation_manager
@@ -2203,6 +2238,34 @@ class ResearchGraphRunner:
             citation_valid, citation_reason = manager.validate_citations(content)
             if not citation_valid:
                 issues.append(citation_reason or "citation_validation_failed")
+        # Provider reports created before the v1 answer schema are upgraded at
+        # the runtime boundary so the Completion Contract remains authoritative.
+        if not answer_contract and answerable and content:
+            statuses = answerability.get("question_status") if isinstance(answerability, dict) else []
+            answers = []
+            for index, status in enumerate(statuses or [], 1):
+                answers.append({
+                    "question_id": str(status.get("question_id") or f"q{index}"),
+                    "direct_answer": content,
+                    "evidence_refs": list(status.get("supporting_evidence") or []),
+                    "finding_refs": list(status.get("supporting_findings") or []),
+                    "confidence": 0.7,
+                })
+            answer_contract = {"objective": str((gstate.get("brief") or {}).get("objective") or ""), "answers": answers}
+        completion = evaluate_completion(
+            brief=gstate.get("brief") or {},
+            answer_contract=answer_contract,
+            evidence_records=evidence_records,
+            final_content=content,
+            citation_valid=citation_valid,
+        )
+        if completion.passed:
+            issues = [item for item in issues if item not in {"coverage_gap", "answer_incomplete"}]
+            answer_complete = True
+        if isinstance(answer_contract, dict) and answer_contract:
+            completeness = dict(answer_contract.get("completeness") or {})
+            if completeness and not bool(completeness.get("complete")):
+                issues.append("answer_incomplete")
         blocking = bool(issues)
         degradation_issues = [
             item for item in ("coverage_gap", "synthesis_failed", "answerability_gap") if item in issues
@@ -2210,7 +2273,14 @@ class ResearchGraphRunner:
         repairable = (
             not bool(gstate.get("fast_path"))
             and bool(content)
-            and not citation_valid
+            and (
+                not citation_valid
+                or (
+                    bool(evidence_records)
+                    and bool(answer_contract)
+                    and not bool((answer_contract.get("completeness") or {}).get("complete"))
+                )
+            )
             and int(gstate.get("synthesis_attempts") or 0) < 2
         )
         verdict = (
@@ -2224,7 +2294,7 @@ class ResearchGraphRunner:
             "verdict": verdict,
             "issues": issues,
             "repairable": repairable,
-            "suggested_action": "repair" if repairable else "",
+            "suggested_action": "repair_report" if repairable and answer_contract else "repair" if repairable else "",
             "grounding": bool(content and evidence_records and citation_valid),
             "citation_metrics": {
                 "evidence_count": len(evidence_records),
@@ -2232,6 +2302,8 @@ class ResearchGraphRunner:
                 "citation_valid": citation_valid,
             },
             "answer_complete": bool(gstate.get("answer_complete")),
+            "completion_contract": completion.to_dict(),
+            "gap_check": gap_result.to_dict(),
             "synthesis_mode": str(
                 (gstate.get("synthesis_mode") or session.state.metadata.get("synthesis_mode") or "")
             ),
@@ -2248,7 +2320,11 @@ class ResearchGraphRunner:
             ),
             "reason_codes": issues or ["quality_pass"],
         }
-        update = transition_update(gstate, WorkflowPhase.QUALITY, {"quality_assessment": assessment})
+        update = transition_update(gstate, WorkflowPhase.QUALITY, {
+            "quality_assessment": assessment,
+            "answer_contract": answer_contract,
+            "answer_complete": bool(answer_complete or completion.passed),
+        })
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
                 {
@@ -2258,6 +2334,7 @@ class ResearchGraphRunner:
                     "control_decision": decision,
                     "quality_rejection": verdict == "fail",
                     "partial_delivery": verdict == "partial",
+                    "gap_check": gap_result.to_dict(),
                 }
             )
         _emit(
@@ -2322,7 +2399,7 @@ class ResearchGraphRunner:
         result = await self.harness._phase_finalize(
             session.state,
             session.ctx.session_dir,
-            success=outcome in {"success", "degraded_success"},
+            success=outcome == "success",
             started_at=session.ctx.run_started,
             deliverable_dir=session.ctx.deliverable_dir,
         )
