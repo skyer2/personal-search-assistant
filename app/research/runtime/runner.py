@@ -1983,7 +1983,12 @@ class ResearchGraphRunner:
         answer_complete = False
         answer_contract: dict[str, Any] = {}
         recovery_mode = ""
-        if fallback and answerability.answerable and bool(judgement.get("sufficient")):
+        # Answerability is deliberately independent from the Coverage label.
+        # A conservative coverage judge may leave a gap (for example, a
+        # missing criterion binding) even though every user question has
+        # grounded findings and evidence. In that case recovery must still
+        # produce a direct answer instead of an evidence dump.
+        if fallback and answerability.answerable:
             recovered = compile_deterministic_answer(
                 objective=brief.objective or str(gstate.get("task_query") or ""),
                 brief=brief,
@@ -2052,7 +2057,7 @@ class ResearchGraphRunner:
             # Provider synthesis is a free-form report today; a non-empty,
             # grounded result under sufficient coverage satisfies the delivery
             # contract while structured recovery carries the full answer model.
-            answer_complete = bool(content.strip() and judgement.get("sufficient"))
+            answer_complete = bool(content.strip() and answerability.answerable)
         content = scrub_internal_ids(content)
         manager = session.ctx.citation_manager
         if manager is not None and content:
@@ -2174,13 +2179,15 @@ class ResearchGraphRunner:
         issues: list[str] = []
         if not content:
             issues.append("no_content")
-        if not bool(judgement.get("sufficient")):
+        answerability = gstate.get("answerability")
+        answerable = bool(answerability.get("answerable")) if isinstance(answerability, dict) and answerability else False
+        answer_complete = bool(gstate.get("answer_complete"))
+        if not bool(judgement.get("sufficient")) and not (answerable and answer_complete):
             issues.append("coverage_gap")
         if not evidence_records:
             issues.append("no_usable_evidence")
         if bool(gstate.get("synthesis_failed")) and (not content or not evidence_records):
             issues.append("synthesis_failed")
-        answerability = gstate.get("answerability")
         if isinstance(answerability, dict) and answerability and not bool(answerability.get("answerable")):
             issues.append("answerability_gap")
         if isinstance(gstate.get("answer_contract"), dict) and gstate.get("answer_contract"):
