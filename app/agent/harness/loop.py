@@ -2263,12 +2263,13 @@ class AgentHarness:
             raise RuntimeError("terminal outcome missing from LoopState metadata")
         termination = dict(raw_termination)
         outcome = str(termination.get("outcome") or "")
-        if outcome not in {"success", "partial", "failed", "cancelled"}:
+        if outcome not in {"success", "degraded_success", "partial", "failed", "cancelled"}:
             raise RuntimeError(f"invalid terminal outcome: {outcome}")
-        if success != (outcome == "success"):
+        if success != (outcome in {"success", "degraded_success"}):
             raise RuntimeError("finalize success flag conflicts with TerminalPolicy outcome")
         termination["status"] = {
             "success": "completed",
+            "degraded_success": "completed",
             "partial": "partial",
             "failed": "failed",
             "cancelled": "interrupted",
@@ -2328,6 +2329,7 @@ class AgentHarness:
                 unresolved_questions=gaps,
                 status={
                     "success": "completed",
+                    "degraded_success": "completed",
                     "partial": "partial",
                     "failed": "failed",
                     "cancelled": "interrupted",
