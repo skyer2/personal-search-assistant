@@ -150,12 +150,24 @@ async def run_eval(
     harness.harness_config.max_replan_count = 1
     harness.harness_config.planner_max_research_tasks = max(1, int(max_research_tasks))
     rows: list[dict[str, Any]] = []
+    if not clean and (output / "report.json").exists():
+        try:
+            existing = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            rows = list(existing.get("runs") or [])
+        except (OSError, ValueError):
+            rows = []
+    completed_keys = {
+        (int(row.get("case") or 0), int(row.get("attempt") or 0))
+        for row in rows
+    }
     first_case = max(1, int(start_case))
     last_case = min(len(QUERIES), int(end_case))
     for case, query in enumerate(QUERIES, 1):
         if case < first_case or case > last_case:
             continue
         for attempt in range(1, repeat + 1):
+            if (case, attempt) in completed_keys:
+                continue
             session_id = f"blind20_{case:02d}_{attempt}_{uuid.uuid4().hex[:8]}"
             started = time.perf_counter()
             try:
