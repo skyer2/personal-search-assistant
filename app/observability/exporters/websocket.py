@@ -65,6 +65,10 @@ def monitor_payload(event: AgentEvent) -> dict[str, Any] | None:
         ),
         EventType.HITL_INTERRUPT: ("hitl_interrupt", "等待人工审批"),
         EventType.RUN_FAILED: ("error", str(attrs.get("error") or "任务失败")),
+        # Keep the synchronous root span visible to the live UI trace.  Without
+        # this event the browser only sees child spans and reports a false
+        # ``missing_root_span`` even though the recorder created one.
+        EventType.RUN_STARTED: ("run", "任务开始"),
         EventType.RUN_COMPLETED: ("task_result", "任务执行完成"),
         EventType.PLAN_CREATED: ("plan", "[plan] created"),
         EventType.BRIEF_COMPILED: ("brief", "[brief] compiled"),
