@@ -1615,7 +1615,6 @@ class ResearchGraphRunner:
         mode = (
             "degraded"
             if compact
-            or decision.get("action") == "deliver_partial"
             or has_blocking_conflict
             else "normal"
         )
@@ -1974,7 +1973,10 @@ class ResearchGraphRunner:
                 "status": "ok" if result.ok else "failed",
             })
         fallback = not result.ok or not str(result.summary or "").strip()
-        synthesis_degraded = retried or fallback or mode == "degraded"
+        # A coverage label or a partial worker does not degrade synthesis by
+        # itself. Degraded delivery means a retry/recovery was needed (or a
+        # blocking conflict forced degraded mode).
+        synthesis_degraded = retried or fallback or has_blocking_conflict
         successful_attempt = attempts_before + (2 if retried else 1) if not fallback else 0
         successful_pack_tokens = (
             compact_pack.token_budget if retried else evidence_pack.token_budget
