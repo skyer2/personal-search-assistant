@@ -2787,6 +2787,7 @@ def _project_run_complete(run_id: str, *, result: str, status: str, error: str =
 
         mapped = {
             "success": STATUS_COMPLETED,
+            "degraded_success": STATUS_COMPLETED,
             "completed": STATUS_COMPLETED,
             "partial": STATUS_PARTIAL,
             "interrupted": STATUS_INTERRUPTED,

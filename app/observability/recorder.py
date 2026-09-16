@@ -154,7 +154,7 @@ class AgentTelemetry:
         error: str = "",
     ) -> None:
         ctx = current_context()
-        event_type = EventType.RUN_COMPLETED if status in {"success", "partial", "ok"} else EventType.RUN_FAILED
+        event_type = EventType.RUN_COMPLETED if status in {"success", "degraded_success", "partial", "ok"} else EventType.RUN_FAILED
         raw_termination = (metadata or {}).get("termination")
         termination = (
             dict(raw_termination)
