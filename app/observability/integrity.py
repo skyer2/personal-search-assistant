@@ -404,7 +404,10 @@ def check_trace_integrity(
             issues.append("span_tree_no_root")
         if cycle_count > 0:
             issues.append(f"span_tree_cycles:{cycle_count}")
-    if is_agent_mode and is_terminal and not is_simple_fact_fast_path:
+    # Lightweight summary projections intentionally skip span-tree construction.
+    # They must not report a missing root for a tree that was never requested;
+    # the full tree endpoint performs the authoritative root/orphan/cycle check.
+    if include_tree and is_agent_mode and is_terminal and not is_simple_fact_fast_path:
         if span_count < 1:
             issues.append("missing_root_span")
         elif root_count < 1:

@@ -361,7 +361,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     type={integrity.passed ? "success" : "error"}
                   />
                 ) : null}
-                {integrity?.span_tree ? (
+                {integrity?.span_tree && integrity.span_tree.valid !== null && integrity.span_tree.valid !== undefined ? (
                   <Typography.Paragraph type="secondary">
                     Span tree: {integrity.span_tree.span_count} spans / {integrity.span_tree.root_count} roots / {integrity.span_tree.cycle_count} cycles
                     {integrity.span_tree.valid ? " ✓" : " ✗"}

@@ -141,6 +141,30 @@ def test_integrity_rejects_zero_root_span():
     assert "missing_root_span" in result["issues"]
 
 
+def test_lightweight_integrity_does_not_require_unbuilt_span_tree():
+    events = [
+        {
+            "type": "run.started",
+            "span_id": "root",
+            "run_id": "r1",
+            "session_id": "s1",
+            "seq": 1,
+            "attributes": {"search_mode": "agent"},
+        },
+        {
+            "type": "run.completed",
+            "span_id": "root",
+            "run_id": "r1",
+            "session_id": "s1",
+            "seq": 2,
+            "status": "partial",
+        },
+    ]
+    result = check_trace_integrity(events, run_status="partial", include_tree=False)
+    assert "missing_root_span" not in result["issues"]
+    assert result["span_tree"]["valid"] is None
+
+
 def test_worker_span_restore_keeps_run_root_taskless():
     telemetry = AgentTelemetry()
     telemetry._ws_enabled = False

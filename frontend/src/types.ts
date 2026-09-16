@@ -321,7 +321,7 @@ export interface TraceSummary {
       span_count?: number;
       root_count?: number;
       cycle_count?: number;
-      valid?: boolean;
+      valid?: boolean | null;
     };
   };
 }
