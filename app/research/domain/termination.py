@@ -28,8 +28,6 @@ def decide_terminal_outcome(state: dict[str, Any]) -> FinalOutcome:
         isinstance(state.get(key), dict) and state.get(key)
         for key in ("planning_failure", "internal_error")
     ) or str(state.get("stop_reason") or "") in {"timeout", "budget"}
-    if typed_failure and bool(str(state.get("final_content") or "").strip()) and usable_evidence:
-        return FinalOutcome.PARTIAL
     # Completion Contract is the sole terminal authority.  Quality, coverage
     # and synthesis degradation remain diagnostics only.
     quality: dict[str, Any] = cast(dict[str, Any], state.get("quality_assessment")) if isinstance(state.get("quality_assessment"), dict) else {}
@@ -73,6 +71,8 @@ def decide_terminal_outcome(state: dict[str, Any]) -> FinalOutcome:
     if completion.passed:
         return FinalOutcome.SUCCESS
     if completion.outcome == "partial":
+        return FinalOutcome.PARTIAL
+    if typed_failure and bool(str(state.get("final_content") or "").strip()) and usable_evidence:
         return FinalOutcome.PARTIAL
     return FinalOutcome.FAILED
 
