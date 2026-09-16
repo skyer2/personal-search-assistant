@@ -246,7 +246,7 @@ async def test_low_synthesis_budget_skips_llm_and_renders_partial(monkeypatch):
     assert "evidence_company_a" not in update["final_content"]
 
 
-async def test_synthesis_failure_with_evidence_returns_user_readable_partial(monkeypatch):
+async def test_synthesis_failure_with_grounded_answer_uses_deterministic_recovery(monkeypatch):
     manager = _budget_manager()
     harness = FakeHarness()
     harness.synthesis_model = RaisingAgent()
@@ -256,7 +256,8 @@ async def test_synthesis_failure_with_evidence_returns_user_readable_partial(mon
     update = await runner_module.ResearchGraphRunner(harness).node_synthesize(_synthesis_state())
     assert update["final_content"].strip()
     assert update["synthesis_failed"] is True
-    assert session.state.metadata["fallback_used"] == "deterministic_partial"
+    assert session.state.metadata["fallback_used"] == "deterministic_recovery"
+    assert session.state.metadata["answer_complete"] is True
     assert session.state.metadata["synthesis_fail_reason"] == "provider_unavailable"
     assert "Company A has recent funding evidence." in update["final_content"]
     assert "evidence_company_a" not in update["final_content"]
