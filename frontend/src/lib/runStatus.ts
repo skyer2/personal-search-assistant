@@ -121,6 +121,9 @@ export function deriveRunStatus(input: {
   if (["partial", "degraded"].includes(terminalStatus)) {
     return "partial";
   }
+  if (terminalStatus === "degraded_success") {
+    return "completed";
+  }
   if (["cancelled", "canceled", "interrupted"].includes(terminalStatus)) {
     return "interrupted";
   }

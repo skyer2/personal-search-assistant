@@ -262,9 +262,9 @@ class SynthesisExecutor:
 
     def _prompt(self, request: SynthesisRequest, context: ResearchContext) -> str:
         mode_instruction = (
-            "基于完整证据输出可靠结论。"
+            "先直接回答每个用户问题，再给出关键判断、综合理由和对应证据。允许基于多条证据作出有边界的 inference/forecast，并明确区分 fact、inference、forecast 和 attributed opinion。"
             if request.mode == "normal"
-            else "基于现有证据输出降级结论，明确说明覆盖不足和无法确认的部分，不得补写未证实内容。"
+            else "先直接回答每个用户问题，再给出简洁判断和证据。允许基于现有证据作出有边界的 inference/forecast，明确说明覆盖不足和无法确认的部分，不得补写未证实内容；不得搜索、抓取或重新规划。"
         )
         lines = [
             f"任务：{context.query}",
@@ -302,7 +302,7 @@ class SynthesisExecutor:
             ("覆盖限制：", [f"- {item}" for item in request.limitations[:20]]),
             ("未解决冲突：", [f"- {item}" for item in request.unresolved_conflicts[:20]]),
             ("冲突处理契约：", conflict_lines),
-            ("输出要求：", ["直接输出面向用户的报告正文；引用证据对应的原始来源；不要输出 JSON。"]),
+            ("输出要求：", ["直接输出面向用户的报告正文；开头必须回答问题，不能以‘已有以下信息’或证据清单开头；随后解释判断依据，最后给证据和限制；引用证据对应的原始来源；不要输出 JSON。"]),
         )
         budget = max(1_000, request.token_budget)
         for header, section_lines in sections:

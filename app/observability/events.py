@@ -44,6 +44,10 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "control.decided",
     "task.transitioned",
     "synthesis.started",
+    "synthesis.primary.started",
+    "synthesis.primary.failed",
+    "synthesis.compact.started",
+    "synthesis.compact.failed",
     "synthesis.completed",
     "synthesis.failed",
     "recovery.decided",
@@ -52,6 +56,10 @@ EVENT_VOCABULARY: tuple[str, ...] = (
     "supervisor.decided",
     "finding.compressed",
     "recovery.completed",
+    "answerability.assessed",
+    "answer_recovery.started",
+    "answer_recovery.completed",
+    "answer_completeness.assessed",
     "context.built",
     "context.compressed",
     "checkpoint.saved",
@@ -105,6 +113,10 @@ class EventType:
     CONTROL_DECIDED = "control.decided"
     TASK_TRANSITIONED = "task.transitioned"
     SYNTHESIS_STARTED = "synthesis.started"
+    SYNTHESIS_PRIMARY_STARTED = "synthesis.primary.started"
+    SYNTHESIS_PRIMARY_FAILED = "synthesis.primary.failed"
+    SYNTHESIS_COMPACT_STARTED = "synthesis.compact.started"
+    SYNTHESIS_COMPACT_FAILED = "synthesis.compact.failed"
     SYNTHESIS_COMPLETED = "synthesis.completed"
     SYNTHESIS_FAILED = "synthesis.failed"
     RECOVERY_DECIDED = "recovery.decided"
@@ -113,6 +125,10 @@ class EventType:
     SUPERVISOR_DECIDED = "supervisor.decided"
     FINDING_COMPRESSED = "finding.compressed"
     RECOVERY_COMPLETED = "recovery.completed"
+    ANSWERABILITY_ASSESSED = "answerability.assessed"
+    ANSWER_RECOVERY_STARTED = "answer_recovery.started"
+    ANSWER_RECOVERY_COMPLETED = "answer_recovery.completed"
+    ANSWER_COMPLETENESS_ASSESSED = "answer_completeness.assessed"
     CONTEXT_BUILT = "context.built"
     CONTEXT_COMPRESSED = "context.compressed"
     CHECKPOINT_SAVED = "checkpoint.saved"

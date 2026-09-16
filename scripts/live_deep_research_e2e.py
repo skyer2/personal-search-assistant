@@ -66,6 +66,8 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
     attempts = int(meta.get("synthesis_attempts") or 0)
     successful_attempt = int(meta.get("successful_attempt") or (1 if attempts == 1 else 0))
     degraded = bool(meta.get("synthesis_degraded"))
+    answer_complete = bool(meta.get("answer_complete"))
+    answerability = dict(meta.get("answerability") or {})
     root_count = sum(
         root.get("name") == "research.run" for root in tree.get("roots") or []
     )
@@ -79,6 +81,8 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
         "no_orphan_or_cycle": tree.get("orphan_count") == 0 and tree.get("cycle_count") == 0,
         "no_artificial_zero_budget": not denied_zero_budget,
         "answer_present": bool(str(result.content or "").strip()),
+        "answerability": bool(answerability.get("answerable")) if answerability else True,
+        "answer_complete": answer_complete or not answerability,
         "retry_marked_degraded": attempts <= 1 or degraded,
     }
     return {
@@ -98,6 +102,8 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
         "synthesis_attempts": attempts,
         "successful_attempt": successful_attempt,
         "synthesis_degraded": degraded,
+        "answerability": answerability,
+        "answer_complete": answer_complete,
         "synthesis_retry_count": int(meta.get("synthesis_retry_count") or 0),
         "first_attempt_reason": str(meta.get("first_attempt_reason") or ""),
         "synthesis_events": [
@@ -118,7 +124,7 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
         ],
         "answer_chars": len(str(result.content or "")),
         "checks": checks,
-        "passed": result.status == "success" and all(checks.values()),
+        "passed": result.status in {"success", "degraded_success"} and all(checks.values()),
     }
 
 

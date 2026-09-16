@@ -33,6 +33,7 @@ class RuntimeStatus(StrEnum):
 
 class OutcomeStatus(StrEnum):
     SUCCESS = "success"
+    DEGRADED_SUCCESS = "degraded_success"
     PARTIAL = "partial"
     FAILED = "failed"
     CANCELLED = "cancelled"

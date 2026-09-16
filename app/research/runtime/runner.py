@@ -1502,6 +1502,12 @@ class ResearchGraphRunner:
             SynthesisContextBuilder,
             validate_synthesis_digests,
         )
+        from app.research.delivery.answer_contract import (
+            assess_answerability,
+            assess_answer_completeness,
+            compile_deterministic_answer,
+            render_final_answer,
+        )
         from app.research.runtime.atomic_fact import (
             AtomicFactAnswer,
             extract_atomic_fact_answer,
@@ -1614,6 +1620,27 @@ class ResearchGraphRunner:
             else "normal"
         )
         brief = StructuredResearchBrief.from_dict(gstate.get("brief"))
+        answerability = assess_answerability(
+            brief=brief,
+            findings=[row for row in gstate.get("findings") or [] if isinstance(row, dict)],
+            evidence_records=evidence_records,
+            coverage=judgement,
+            conflicts=conflict_resolutions,
+        )
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata["answerability"] = answerability.to_dict()
+        _emit(
+            session,
+            "answerability.assessed",
+            phase=WorkflowPhase.SYNTHESIS.value,
+            status="answerable" if answerability.answerable else "unanswerable",
+            attributes={
+                "question_count": len(answerability.question_status),
+                "answered_count": sum(1 for item in answerability.question_status if item.answerable),
+                "answerable": answerability.answerable,
+                "reason": answerability.reason,
+            },
+        )
         synthesis_context_builder = SynthesisContextBuilder(self.harness, session)
         synthesis_context = synthesis_context_builder.build(
             gstate,
@@ -1715,6 +1742,18 @@ class ResearchGraphRunner:
             digests,
             evidence_records,
         )
+        _emit(
+            session,
+            "synthesis.compact.started" if compact else "synthesis.primary.started",
+            phase=WorkflowPhase.SYNTHESIS.value,
+            status="start",
+            attempt=request.attempt,
+            attributes={
+                "mode": request.mode,
+                "pack_tokens_estimated": request.pack_tokens_estimated,
+                "evidence_count": len(request.evidence_refs),
+            },
+        )
         skip_llm_synthesis = bool(evidence_records) and remaining_synthesis_tokens < 1_000
         if skip_llm_synthesis:
             content = render_partial_delivery(
@@ -1777,6 +1816,16 @@ class ResearchGraphRunner:
             "fail_reason": first_attempt_reason,
             "status": "ok" if result.ok else "failed",
         }]
+        if not result.ok:
+            _emit(
+                session,
+                "synthesis.primary.failed" if not compact else "synthesis.compact.failed",
+                phase=WorkflowPhase.SYNTHESIS.value,
+                status="failed",
+                attempt=request.attempt,
+                duration_ms=first_attempt_duration_ms,
+                attributes={"reason": first_attempt_reason, "retry": "compact" if not compact else "none"},
+            )
         retried = False
         retry_allowed = bool(
             not result.ok
@@ -1903,6 +1952,18 @@ class ResearchGraphRunner:
                     session, span_key, status="ok" if result.ok else "failed",
                     duration_ms=result.duration_ms,
                 )
+                _emit(
+                    session,
+                    "synthesis.compact.failed" if not result.ok else "synthesis.completed",
+                    phase=WorkflowPhase.SYNTHESIS.value,
+                    status="failed" if not result.ok else "ok",
+                    attempt=request.attempt,
+                    duration_ms=result.duration_ms,
+                    attributes={
+                        "reason": str(result.fail_reason or ""),
+                        "pack_tokens_estimated": request.pack_tokens_estimated,
+                    },
+                )
             synthesis_metadata = dict(getattr(result, "metadata", {}) or {})
             attempt_metrics.append({
                 **synthesis_metadata,
@@ -1918,6 +1979,57 @@ class ResearchGraphRunner:
         successful_pack_tokens = (
             compact_pack.token_budget if retried else evidence_pack.token_budget
         ) if not fallback else 0
+        synthesis_failed = fallback
+        answer_complete = False
+        answer_contract: dict[str, Any] = {}
+        recovery_mode = ""
+        if fallback and answerability.answerable and bool(judgement.get("sufficient")):
+            recovered = compile_deterministic_answer(
+                objective=brief.objective or str(gstate.get("task_query") or ""),
+                brief=brief,
+                findings=[row for row in gstate.get("findings") or [] if isinstance(row, dict)],
+                answerability=answerability,
+                synthesis_degraded=True,
+            )
+            completeness = assess_answer_completeness(recovered, brief)
+            answer_complete = completeness.complete
+            answer_contract = {
+                "final_answer": recovered.to_dict(),
+                "completeness": completeness.to_dict(),
+            }
+            _emit(
+                session,
+                "answer_recovery.started",
+                phase=WorkflowPhase.SYNTHESIS.value,
+                status="start",
+                attributes={"mode": "deterministic_recovery"},
+            )
+            if answer_complete:
+                recovery_mode = "deterministic_recovery"
+                content = render_final_answer(recovered, citation_numbers=citation_numbers)
+                fallback = False
+                _emit(
+                    session,
+                    "answer_recovery.completed",
+                    phase=WorkflowPhase.SYNTHESIS.value,
+                    status="ok",
+                    attributes={"mode": recovery_mode, "answer_complete": True},
+                )
+            else:
+                _emit(
+                    session,
+                    "answer_recovery.completed",
+                    phase=WorkflowPhase.SYNTHESIS.value,
+                    status="failed",
+                    attributes={"mode": "deterministic_recovery", "answer_complete": False},
+                )
+            _emit(
+                session,
+                "answer_completeness.assessed",
+                phase=WorkflowPhase.SYNTHESIS.value,
+                status="pass" if completeness.complete else "fail",
+                attributes=completeness.to_dict(),
+            )
         if fallback:
             worker_failure_reasons = [
                 str(row.get("fail_reason") or "")
@@ -1936,7 +2048,11 @@ class ResearchGraphRunner:
                 synthesis_failure_reason=str(result.fail_reason or "synthesis_failed"),
             )
         else:
-            content = result.summary
+            content = content if recovery_mode else result.summary
+            # Provider synthesis is a free-form report today; a non-empty,
+            # grounded result under sufficient coverage satisfies the delivery
+            # contract while structured recovery carries the full answer model.
+            answer_complete = bool(content.strip() and judgement.get("sufficient"))
         content = scrub_internal_ids(content)
         manager = session.ctx.citation_manager
         if manager is not None and content:
@@ -1955,9 +2071,9 @@ class ResearchGraphRunner:
                 {
                     "synthesis_attempted": True,
                     "synthesis_attempts": attempts_before + (2 if retried else 1),
-                    "synthesis_mode": mode,
+                    "synthesis_mode": recovery_mode or mode,
                     "synthesis_status": result.status,
-                    "synthesis_failed": fallback,
+                    "synthesis_failed": synthesis_failed,
                     "synthesis_degraded": synthesis_degraded,
                     "synthesis_retry_count": int(retried),
                     "successful_attempt": successful_attempt,
@@ -1967,7 +2083,10 @@ class ResearchGraphRunner:
                     "successful_pack_tokens": successful_pack_tokens,
                     "synthesis_attempt_metrics": attempt_metrics,
                     "synthesis_fail_reason": result.fail_reason,
-                    "fallback_used": "deterministic_partial" if fallback else "",
+                    "fallback_used": "deterministic_partial" if fallback else recovery_mode,
+                    "answerability": answerability.to_dict(),
+                    "answer_complete": answer_complete,
+                    "answer_contract": answer_contract,
                     "synthesis_budget_low": skip_llm_synthesis,
                 }
             )
@@ -2017,10 +2136,12 @@ class ResearchGraphRunner:
                     (compact_pack if retried else evidence_pack).estimated_tokens
                 ),
                 "fail_reason": result.fail_reason,
-                "fallback_action": "deterministic_partial" if fallback else "",
+                "fallback_action": recovery_mode or ("deterministic_partial" if fallback else ""),
                 "synthesis_degraded": synthesis_degraded,
                 "synthesis_retry_count": int(retried),
                 "successful_attempt": successful_attempt,
+                "answer_complete": answer_complete,
+                "synthesis_mode": recovery_mode or mode,
             },
         )
         note_stage_duration(
@@ -2034,8 +2155,11 @@ class ResearchGraphRunner:
             {
                 "final_content": content,
                 "synthesis_attempts": attempts_before + (2 if retried else 1),
-                "synthesis_failed": fallback,
+                "synthesis_failed": synthesis_failed,
                 "synthesis_degraded": synthesis_degraded,
+                "answerability": answerability.to_dict(),
+                "answer_complete": answer_complete,
+                "answer_contract": answer_contract,
                 "quality_assessment": {},
             },
         )
@@ -2056,6 +2180,13 @@ class ResearchGraphRunner:
             issues.append("no_usable_evidence")
         if bool(gstate.get("synthesis_failed")) and (not content or not evidence_records):
             issues.append("synthesis_failed")
+        answerability = gstate.get("answerability")
+        if isinstance(answerability, dict) and answerability and not bool(answerability.get("answerable")):
+            issues.append("answerability_gap")
+        if isinstance(gstate.get("answer_contract"), dict) and gstate.get("answer_contract"):
+            completeness = dict((gstate.get("answer_contract") or {}).get("completeness") or {})
+            if completeness and not bool(completeness.get("complete")):
+                issues.append("answer_incomplete")
         citation_valid = True
         citation_reason = ""
         manager = session.ctx.citation_manager
@@ -2065,7 +2196,7 @@ class ResearchGraphRunner:
                 issues.append(citation_reason or "citation_validation_failed")
         blocking = bool(issues)
         degradation_issues = [
-            item for item in ("coverage_gap", "synthesis_failed") if item in issues
+            item for item in ("coverage_gap", "synthesis_failed", "answerability_gap") if item in issues
         ]
         repairable = (
             not bool(gstate.get("fast_path"))
@@ -2091,6 +2222,10 @@ class ResearchGraphRunner:
                 "finding_count": len(gstate.get("findings") or []),
                 "citation_valid": citation_valid,
             },
+            "answer_complete": bool(gstate.get("answer_complete")),
+            "synthesis_mode": str(
+                (gstate.get("synthesis_mode") or session.state.metadata.get("synthesis_mode") or "")
+            ),
         }
         decision = {
             "action": (
@@ -2178,7 +2313,7 @@ class ResearchGraphRunner:
         result = await self.harness._phase_finalize(
             session.state,
             session.ctx.session_dir,
-            success=outcome == "success",
+            success=outcome in {"success", "degraded_success"},
             started_at=session.ctx.run_started,
             deliverable_dir=session.ctx.deliverable_dir,
         )

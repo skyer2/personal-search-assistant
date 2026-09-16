@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+ClaimType = Literal["fact", "inference", "forecast", "attributed_opinion"]
+
 ConflictKind = Literal[
     "expected_disagreement",
     "unresolved_conflict",
@@ -33,6 +35,7 @@ class ClaimRecord:
     source_quality: str = "unknown"
     authority_score: float = 0.0
     normalized_key: str = ""
+    claim_type: ClaimType = "fact"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -64,6 +67,7 @@ class ClaimRecord:
             source_quality=str(row.get("source_quality") or "unknown"),
             authority_score=float(row.get("authority_score") or 0.0),
             normalized_key=str(row.get("normalized_key") or ""),
+            claim_type=str(row.get("claim_type") or "fact"),  # type: ignore[arg-type]
         )
 
 

@@ -220,7 +220,7 @@ class ToolMonitor:
                 "reason": termination_reason,
                 "stage": termination_stage,
             }
-        if status == "completed":
+        if status in {"completed", "degraded_success"}:
             result_message = "任务执行完成"
         elif status == "partial":
             reason = str(lifecycle.get("reason") or "")

@@ -311,7 +311,7 @@ class HarnessResult:
     """Harness 执行完成后的返回结构。"""
 
     session_id: str
-    status: Literal["success", "partial", "failed", "cancelled"]
+    status: Literal["success", "degraded_success", "partial", "failed", "cancelled"]
     content: str
     trace: list[PhaseEvent]
     artifacts: list[str] = field(default_factory=list)

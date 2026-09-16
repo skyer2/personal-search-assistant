@@ -105,6 +105,9 @@ class ResearchState(TypedDict):
     synthesis_attempts: int
     synthesis_failed: bool
     synthesis_degraded: bool
+    answerability: dict[str, Any]
+    answer_complete: bool
+    answer_contract: dict[str, Any]
     candidate_set: Annotated[dict[str, Any], merge_dicts]
     semantic_stall: int
 
@@ -220,6 +223,9 @@ def empty_research_state(
         "synthesis_attempts": 0,
         "synthesis_failed": False,
         "synthesis_degraded": False,
+        "answerability": {},
+        "answer_complete": False,
+        "answer_contract": {},
         "candidate_set": {},
         "semantic_stall": 0,
     }

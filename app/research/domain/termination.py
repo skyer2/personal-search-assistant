@@ -8,6 +8,7 @@ from typing import Any
 
 class FinalOutcome(StrEnum):
     SUCCESS = "success"
+    DEGRADED_SUCCESS = "degraded_success"
     PARTIAL = "partial"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -32,12 +33,13 @@ def decide_terminal_outcome(state: dict[str, Any]) -> FinalOutcome:
         return FinalOutcome.FAILED
     verdict = str(quality.get("verdict") or "")
     if verdict == "pass":
-        decision = state.get("control_decision")
-        degraded_delivery = bool(state.get("synthesis_failed")) or (
-            isinstance(decision, dict) and str(decision.get("action") or "") == "deliver_partial"
+        degraded_delivery = bool(state.get("synthesis_degraded"))
+        answer_complete = bool(state.get("answer_complete")) or bool(
+            isinstance(state.get("answer_contract"), dict)
+            and (state.get("answer_contract") or {}).get("completeness", {}).get("complete")
         )
-        if degraded_delivery and bool(str(state.get("final_content") or "").strip()) and usable_evidence:
-            return FinalOutcome.PARTIAL
+        if degraded_delivery and answer_complete and bool(str(state.get("final_content") or "").strip()) and usable_evidence:
+            return FinalOutcome.DEGRADED_SUCCESS
         return FinalOutcome.SUCCESS
     if verdict == "partial" and bool(str(state.get("final_content") or "").strip()) and usable_evidence:
         return FinalOutcome.PARTIAL

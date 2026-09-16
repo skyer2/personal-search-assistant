@@ -117,7 +117,7 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 .\.venv\Scripts\python.exe scripts\live_deep_research_e2e.py --runs 3 --mode deep_debug
 ```
 
-这个入口连续向真实模型与搜索提供方提交“2026 年 9 月 Agent 热点及未来 1–2 年方向”查询，逐次保存最终回答与可审计指标到 `output/live_deep_research_e2e/`。每次必须有 Evidence-backed Findings、已接纳 Evidence、`Coverage sufficient`、Quality pass、有效 Trace、一个 root span、零孤儿/环、非空回答和零人为 0/0 budget denial。三次中至少两次必须在 primary 8K synthesis 上成功，未依赖 compact retry；重试恢复的成功必须标记 `synthesis_degraded=true`。单次 fallback 成功仅证明恢复路径有效。
+这个入口连续向真实模型与搜索提供方提交“2026 年 9 月 Agent 热点及未来 1–2 年方向”查询，逐次保存最终回答与可审计指标到 `output/live_deep_research_e2e/`。每次必须有 Evidence-backed Findings、已接纳 Evidence、`Coverage sufficient`、Answerability/Answer Completeness、Quality pass、有效 Trace、一个 root span、零孤儿/环、非空回答和零人为 0/0 budget denial。三次中至少两次必须在 primary 8K synthesis 上成功，未依赖 compact retry；compact 或 deterministic recovery 成功必须标记 `synthesis_degraded=true`，并以 `degraded_success` 语义呈现完成状态。单次 fallback 成功仅证明恢复路径有效。
 
 ### L4 BrowseComp-Plus
 
