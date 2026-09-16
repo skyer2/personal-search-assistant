@@ -56,3 +56,34 @@ def test_projection_store_pages_by_run(tmp_path: Path) -> None:
         )
     assert [row["seq"] for row in store.events("run-a", limit=2)] == [4, 5]
     assert [row["seq"] for row in store.events("run-a", after_seq=2, limit=2)] == [3, 4]
+
+
+def test_summary_projection_invalidates_old_contract_cache(monkeypatch) -> None:
+    from app.observability import replay
+    from app.observability import projection_store
+    from tests.test_observability_integrity import _events
+
+    events = [AgentEvent.from_dict(item) for item in _events("partial")]
+    writes: list[dict] = []
+
+    class Store:
+        def get_projection(self, run_id: str, kind: str):
+            return {
+                "run_id": run_id,
+                "kind": kind,
+                "event_count": len(events),
+                "projection_version": "trace-summary-v1",
+                "summary": {"trace_integrity": {"passed": False, "issues": ["missing_root_span"]}},
+            }
+
+        def put_projection(self, run_id: str, kind: str, payload: dict) -> None:
+            writes.append(payload)
+
+    monkeypatch.setattr(projection_store, "get_projection_store", lambda: Store())
+    monkeypatch.setattr(replay, "load_events", lambda session_id, run_id=None: events)
+
+    payload = replay.load_summary_projection("session", run_id="run")
+
+    assert payload["projection_version"] == replay.SUMMARY_PROJECTION_VERSION
+    assert payload["summary"]["trace_integrity"]["passed"] is True
+    assert len(writes) == 1
