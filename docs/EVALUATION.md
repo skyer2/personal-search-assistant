@@ -121,6 +121,32 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 
 本轮十题校准集可通过 `scripts/live_deep_research_suite.py` 顺序执行。脚本每题使用独立 session，清理并重建 `output/live_deep_research_suite/`，保存 `answer_01.md` 至 `answer_10.md` 和 `report.json`；它不会把 Coverage 标签当作终态，最终以 Completion Contract、Quality 和 Trace 完整性联合审计。十题校准结果不等同于 SDD 要求的 20 题 × 3 次盲测发布门槛。
 
+### Blind 20 × 3 Live Eval
+
+`scripts/live_blind_eval.py` 使用独立的 20 题查询集，每题连续运行 3 次，默认走
+`agent` 模式和本地真实 `.env` provider。查询覆盖热点、框架比较、协议、Coding
+Agent、Kubernetes、记忆、评测、安全、市场、研究综述和职业决策等类型；它不复用十题
+校准集，也不把 `partial` 计为通过。
+
+```powershell
+.\.venv\Scripts\python.exe scripts\live_blind_eval.py --mode agent --repeat 3 --output output\blind20x3
+```
+
+单次运行默认硬上限 900 秒，可用 `--run-timeout-sec` 调整；超时会保留为
+`live_run_timeout` 失败样本，避免评测进程无限等待。真实 provider 压测建议顺序运行，
+不要把多个分片并发到同一个账号，否则限流和队列延迟会污染稳定性结论。
+
+每次运行都会写入 `answer_<case>_<attempt>.md` 和 `report.json`。报告包含：
+
+- `complete_success`、`pass_at_1`、`pass_hat_3`；
+- `success`、`partial`、`failed`；
+- evidence/citation/trace integrity 通过率；
+- P50/P95 latency；
+- 每个案例和每次 attempt 的终态、回答长度、证据数、合成降级和 trace 诊断。
+
+发布判定只使用 Completion Contract：必须是 `success`、回答完整、引用和证据有效，
+且 trace 无 root/orphan/cycle 问题。`partial`、fallback 或单次成功不能替代三次一致通过。
+
 ### L4 BrowseComp-Plus
 
 公开坐标系。Retrieval 与 Agent 分开算，离线 surrogate 不冒充官方 Accuracy。详见 [BROWSECOMP_PLUS_EVAL.md](./BROWSECOMP_PLUS_EVAL.md)。
