@@ -67,6 +67,12 @@ def _answer_rows(answer_contract: Any) -> list[dict[str, Any]]:
     if not isinstance(answer_contract, dict):
         return []
     raw = answer_contract.get("answers") or answer_contract.get("question_answers") or []
+    # Deterministic recovery in pre-v1.1 snapshots nested the typed answer
+    # under ``final_answer``.  Accept that persisted shape so a provider-empty
+    # synthesis cannot turn already grounded evidence into a false failure.
+    if not raw and isinstance(answer_contract.get("final_answer"), dict):
+        nested = answer_contract["final_answer"]
+        raw = nested.get("answers") or nested.get("question_answers") or []
     return [item for item in raw if isinstance(item, dict)]
 
 
@@ -102,7 +108,10 @@ def evaluate_completion(
     records = [row for row in (evidence_records or []) if isinstance(row, dict)]
     valid_ids = _record_ids(records)
     rows = _answer_rows(answer_contract)
-    questions = _questions(brief, str((answer_contract or {}).get("objective") or ""))
+    contract_objective = str((answer_contract or {}).get("objective") or "")
+    if not contract_objective and isinstance((answer_contract or {}).get("final_answer"), dict):
+        contract_objective = str((answer_contract or {})["final_answer"].get("objective") or "")
+    questions = _questions(brief, contract_objective)
     results: list[QuestionCompletion] = []
     blocking = list(unresolved_blocking or [])
     for index, question in enumerate(questions, 1):

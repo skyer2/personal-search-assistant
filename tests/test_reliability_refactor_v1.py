@@ -34,6 +34,26 @@ def test_completion_contract_success_is_independent_of_synthesis_mode():
     assert result.outcome == "success"
 
 
+def test_completion_contract_accepts_nested_deterministic_recovery_answer():
+    result = evaluate_completion(
+        brief={"key_questions": ["Q1", "Q2"]},
+        answer_contract={
+            "final_answer": {
+                "objective": "Q1 and Q2",
+                "answers": [
+                    {"question_id": "q1", "direct_answer": "answer one", "evidence_refs": ["e1"]},
+                    {"question_id": "q2", "direct_answer": "answer two", "evidence_refs": ["e2"]},
+                ],
+            },
+            "completeness": {"complete": True},
+        },
+        evidence_records=[{"evidence_id": "e1"}, {"evidence_id": "e2"}],
+        final_content="grounded answer",
+    )
+    assert result.passed
+    assert result.outcome == "success"
+
+
 def test_bounded_planner_rejects_and_splits_large_worker():
     task = SimpleNamespace(
         task_id="t1",
