@@ -18,19 +18,7 @@ import { Empty, Tag } from "antd";
 import { PHASE_LABELS, buildPhaseTimeline, type PhaseTone } from "../lib/phaseProgress";
 import type { RunStatus } from "../lib/runStatus";
 import type { MonitorMessage } from "../types";
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "--:--:--";
-  }
-  return date.toLocaleTimeString("zh-CN", {
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  });
-}
+import { formatDurationSeconds, formatObservabilityTime } from "../lib/observabilityFormat";
 
 function EventIcon({ event, phase }: { event: string; phase?: string }) {
   if (event === "hitl_interrupt") {
@@ -120,8 +108,8 @@ function HarnessPhaseTimeline({
                   <Tag color={tag.color}>{tag.label}</Tag>
                 </div>
                 <div className="phase-step-meta">
-                  <time dateTime={item.timestamp}>{formatTime(item.timestamp)}</time>
-                  {item.durationMs !== undefined ? <span>{item.durationMs}ms</span> : null}
+                  <time dateTime={item.timestamp}>{formatObservabilityTime(item.timestamp)}</time>
+                  {item.durationMs !== undefined ? <span>{formatDurationSeconds(item.durationMs)}</span> : null}
                   {item.stepHint ? <span>{item.stepHint}</span> : null}
                 </div>
               </div>
@@ -185,7 +173,7 @@ export function EventStream({ compact = false, events, runStatus = "idle" }: Eve
                   <div className="event-body">
                     <div className="event-meta">
                       <span>{event.event === "phase" ? `phase:${phase}` : event.event}</span>
-                      <time dateTime={event.timestamp}>{formatTime(event.timestamp)}</time>
+                      <time dateTime={event.timestamp}>{formatObservabilityTime(event.timestamp)}</time>
                     </div>
                     <p>{event.message}</p>
                   </div>

@@ -86,6 +86,7 @@ Trace Viewer 的 `Understanding` 面板展示 Brief 与拓扑；`Supervisor / Co
 - `SOURCES` 面板展示当前 Run 实际发生的 search query、已采纳 evidence、上传文件、数据库 / KB 来源和来源质量分层，不展示静态能力清单。
 - Trace Viewer 中 `Evidence` 是证据源登记表，`Lineage` 是结论溯源，`Span Tree` 是执行因果与耗时；三者不能合并成一个“证据链”概念。
 - 打开 `Span Tree` 时同时加载事件索引，选中 span 后可直接查看 `Related Events`，不需要先进入 JSONL 页签。
+- Trace、Supervisor、Worker、Synthesis、JSONL 和实时阶段时间线中的时间统一显示为浏览器本地时区的 `YYYY-MM-DD HH:mm:ss`；时长统一由 API 的 `duration_ms` 转换为秒（最多保留三位小数）。原始 JSONL/API 字段仍保持 ISO-8601 与毫秒，便于机器处理和回放。
 
 ## Latency Breakdown
 

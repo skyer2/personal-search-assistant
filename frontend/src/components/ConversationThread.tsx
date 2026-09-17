@@ -21,6 +21,7 @@ import {
   type ElapsedClockState
 } from "../lib/elapsedClock";
 import { computePhaseProgress } from "../lib/phaseProgress";
+import { formatObservabilityTime } from "../lib/observabilityFormat";
 import { type RunStatus } from "../lib/runStatus";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ResizeHandle } from "./ResizeHandle";
@@ -73,18 +74,6 @@ const TASK_EXAMPLES = [
     icon: <FileTextOutlined aria-hidden />,
   },
 ];
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "--:--";
-  }
-  return date.toLocaleTimeString("zh-CN", {
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 function EventIcon({ event }: { event: string }) {
   if (event === "assistant_call") {
@@ -169,7 +158,7 @@ function ThinkingTimeline({
             <div className="thinking-event-meta">
               <span>{event.event}</span>
               <time dateTime={event.timestamp}>
-                {formatTime(event.timestamp)}
+                {formatObservabilityTime(event.timestamp)}
               </time>
             </div>
             <p>{event.message}</p>
@@ -524,7 +513,7 @@ export function ConversationThread({
                 <div className="message-meta">
                   <span>你</span>
                   <time dateTime={turn.timestamp}>
-                    {formatTime(turn.timestamp)}
+                    {formatObservabilityTime(turn.timestamp)}
                   </time>
                 </div>
                 <p>{turn.content}</p>

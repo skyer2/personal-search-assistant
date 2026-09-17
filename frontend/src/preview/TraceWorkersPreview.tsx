@@ -1,5 +1,6 @@
 import { Card, Tag, Typography } from "antd";
 import { ResizableTable } from "../components/ResizableTable";
+import { formatDurationSeconds } from "../lib/observabilityFormat";
 
 const workers = [
   {
@@ -57,7 +58,7 @@ export function TraceWorkersPreview() {
               key: "status",
               render: (status: unknown) => <Tag color={status === "ok" ? "green" : "red"}>{String(status)}</Tag>
             },
-            { title: "ms", dataIndex: "duration_ms", width: 100, key: "duration_ms" },
+            { title: "s", dataIndex: "duration_ms", width: 100, key: "duration_ms", render: (value: unknown) => formatDurationSeconds(value) },
             { title: "Attempt", dataIndex: "attempt", width: 90, key: "attempt" },
             {
               title: "Plan",

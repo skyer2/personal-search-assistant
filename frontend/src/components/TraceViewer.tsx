@@ -12,6 +12,7 @@ import {
   fetchSessionTraces
 } from "../lib/api";
 import type { EvidenceSource, JsonlTraceEvent, SessionTraceItem, TraceSpanNode, TraceSummary, TraceTree } from "../types";
+import { formatDurationSeconds, formatObservabilityTime } from "../lib/observabilityFormat";
 import { ResizableTable } from "./ResizableTable";
 
 interface TraceViewerProps {
@@ -125,7 +126,7 @@ function SpanTree({
             <strong>{node.children?.length ? `${expanded.has(node.span_id) ? "▾" : "▸"} ${node.name}` : node.name}</strong>
             {node.task_id ? <Tag>{node.task_id}</Tag> : null}
             {node.status ? <Tag color={node.status === "failed" || node.status === "error" ? "red" : "blue"}>{node.status}</Tag> : null}
-            {typeof node.duration_ms === "number" ? <span>{node.duration_ms}ms</span> : null}
+            {node.duration_ms != null ? <span>{formatDurationSeconds(node.duration_ms)}</span> : null}
             {typeof node.plan_version === "number" ? <span>plan v{node.plan_version}</span> : null}
           </button>
           {node.children?.length && expanded.has(node.span_id) ? (
@@ -493,7 +494,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                         key: "status",
                         render: (status: unknown) => <Tag color={statusColor(status)}>{asText(status)}</Tag>
                       },
-                      { title: "ms", dataIndex: "duration_ms", width: 100, key: "duration_ms" },
+                      { title: "s", dataIndex: "duration_ms", width: 100, key: "duration_ms", render: (value: unknown) => formatDurationSeconds(value) },
                       { title: "Attempt", dataIndex: "attempt", width: 90, key: "attempt" },
                       {
                         title: "Execution",
@@ -651,7 +652,13 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                         key: "plan_version",
                         render: (version: unknown) => (version == null || version === "" ? "-" : `v${version}`)
                       },
-                      { title: "Time", dataIndex: "timestamp", width: 220, key: "timestamp", render: (value: unknown) => asText(value, "-") }
+                      {
+                        title: "Time (local)",
+                        dataIndex: "timestamp",
+                        width: 180,
+                        key: "timestamp",
+                        render: (value: unknown) => <time dateTime={asText(value, "")}>{formatObservabilityTime(value)}</time>
+                      }
                     ]}
                   />
                 )}
@@ -825,7 +832,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       { title: "Type", dataIndex: "type", width: 160, key: "type" },
                       { title: "Mode", dataIndex: "mode", width: 110, key: "mode" },
                       { title: "Attempt", dataIndex: "attempt", width: 90, key: "attempt" },
-                      { title: "Duration", dataIndex: "duration_ms", width: 100, key: "duration_ms", render: (value: unknown) => (value == null ? "-" : `${asText(value)} ms`) },
+                      { title: "Duration (s)", dataIndex: "duration_ms", width: 120, key: "duration_ms", render: (value: unknown) => formatDurationSeconds(value) },
                       { title: "Input Tokens", dataIndex: "input_tokens_estimated", width: 130, key: "input_tokens_estimated" },
                       {
                         title: "Evidence",
@@ -990,7 +997,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       {selectedSpan.task_id ? ` · ${selectedSpan.task_id}` : ""}
                     </Typography.Paragraph>
                     <Typography.Paragraph type="secondary">
-                      status={asText(selectedSpan.status)} · ms={asText(selectedSpan.duration_ms)} · plan=
+                      status={asText(selectedSpan.status)} · duration={formatDurationSeconds(selectedSpan.duration_ms)} · plan=
                       {asText(selectedSpan.plan_version)}
                     </Typography.Paragraph>
                     <Typography.Text strong>Related events</Typography.Text>
@@ -1067,7 +1074,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                             const cell = row.variants?.[variant] || {};
                             return (
                               <div className="table-wrap-cell">
-                                acc {String(cell.accuracy ?? "-")} · cite {String(cell.citation ?? "-")} · {String(cell.latency_ms ?? "-")}ms
+                                acc {String(cell.accuracy ?? "-")} · cite {String(cell.citation ?? "-")} · {formatDurationSeconds(cell.latency_ms)}
                               </div>
                             );
                           }
@@ -1107,7 +1114,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                         key: "passed",
                         render: (value: unknown) => (value == null ? "-" : String(value))
                       },
-                      { title: "ms", dataIndex: "latency_ms", width: 100, key: "latency_ms", render: (value: unknown) => asText(value) }
+                      { title: "s", dataIndex: "latency_ms", width: 100, key: "latency_ms", render: (value: unknown) => formatDurationSeconds(value) }
                     ]}
                   />
                 )}
@@ -1145,13 +1152,13 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       key: "step",
                       render: (_, row) => (typeof row.step_index === "number" ? row.step_index + 1 : "-")
                     },
-                    { title: "ms", dataIndex: "duration_ms", width: 90, key: "duration_ms" },
+                    { title: "s", dataIndex: "duration_ms", width: 90, key: "duration_ms", render: (value: unknown) => formatDurationSeconds(value) },
                     {
-                      title: "Time",
+                      title: "Time (local)",
                       dataIndex: "timestamp",
-                      width: 220,
+                      width: 180,
                       key: "timestamp",
-                      render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
+                      render: (value: unknown) => <time dateTime={asText(value, "")}>{formatObservabilityTime(value)}</time>
                     }
                   ]}
                 />
