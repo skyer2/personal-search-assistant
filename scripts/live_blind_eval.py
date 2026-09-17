@@ -63,6 +63,9 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
     if not isinstance(completion, dict):
         completion = {}
     integrity = trace.get("trace_integrity") or {}
+    termination = metadata.get("termination") if isinstance(metadata.get("termination"), dict) else {}
+    answerability = metadata.get("answerability") if isinstance(metadata.get("answerability"), dict) else {}
+    synthesis_metrics = metadata.get("synthesis_attempt_metrics") if isinstance(metadata.get("synthesis_attempt_metrics"), list) else []
     citation_metrics = quality.get("citation_metrics") if isinstance(quality.get("citation_metrics"), dict) else {}
     answer_complete = bool(metadata.get("answer_complete"))
     quality_pass = str(quality.get("verdict") or "") == "pass"
@@ -90,8 +93,17 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
         "quality_verdict": str(quality.get("verdict") or ""),
         "answer_complete": answer_complete,
         "completion_passed": completion.get("passed") is True,
+        "completion_failure_reason": completion.get("failure_reason"),
+        "completion_unresolved_blocking": completion.get("unresolved_blocking") or [],
         "citation_valid": completion.get("citation_valid") is True,
         "evidence_valid": completion.get("evidence_valid") is True,
+        "answerability_reason": answerability.get("reason"),
+        "answerability_questions": answerability.get("question_status") or [],
+        "termination": termination,
+        "quality_issues": quality.get("issues") or [],
+        "synthesis_fail_reason": metadata.get("synthesis_fail_reason"),
+        "fallback_used": metadata.get("fallback_used"),
+        "synthesis_attempt_metrics": synthesis_metrics,
         "synthesis_degraded": bool(metadata.get("synthesis_degraded")),
         "synthesis_attempts": int(metadata.get("synthesis_attempts") or 0),
         "trace_integrity": integrity,
@@ -193,8 +205,17 @@ async def run_eval(
                     "quality_verdict": "",
                     "answer_complete": False,
                     "completion_passed": False,
+                    "completion_failure_reason": "live_run_timeout",
+                    "completion_unresolved_blocking": [],
                     "citation_valid": False,
                     "evidence_valid": False,
+                    "answerability_reason": "",
+                    "answerability_questions": [],
+                    "termination": {},
+                    "quality_issues": [],
+                    "synthesis_fail_reason": "",
+                    "fallback_used": "",
+                    "synthesis_attempt_metrics": [],
                     "synthesis_degraded": False,
                     "synthesis_attempts": 0,
                     "trace_integrity": {"passed": False, "issues": ["run_did_not_complete"]},
