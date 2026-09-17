@@ -66,6 +66,9 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
     termination = metadata.get("termination") if isinstance(metadata.get("termination"), dict) else {}
     answerability = metadata.get("answerability") if isinstance(metadata.get("answerability"), dict) else {}
     synthesis_metrics = metadata.get("synthesis_attempt_metrics") if isinstance(metadata.get("synthesis_attempt_metrics"), list) else []
+    stage_latency = metadata.get("latency") if isinstance(metadata.get("latency"), dict) else {}
+    usage = metadata.get("usage") if isinstance(metadata.get("usage"), dict) else {}
+    workers = trace.get("workers") or []
     citation_metrics = quality.get("citation_metrics") if isinstance(quality.get("citation_metrics"), dict) else {}
     answer_complete = bool(metadata.get("answer_complete"))
     quality_pass = str(quality.get("verdict") or "") == "pass"
@@ -87,6 +90,13 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
         "run_id": run_id,
         "status": str(result.status),
         "duration_sec": round(duration_sec, 2),
+        "stage_latency": stage_latency,
+        "usage": usage,
+        "worker_durations_ms": [
+            int(row.get("duration_ms") or 0)
+            for row in workers
+            if row.get("duration_ms") is not None
+        ],
         "answer_chars": len(str(result.content or "")),
         "findings": int(citation_metrics.get("finding_count") or len(metadata.get("findings") or [])),
         "evidence": int(citation_metrics.get("evidence_count") or 0),
