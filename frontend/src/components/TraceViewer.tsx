@@ -301,12 +301,16 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
         ["Total", latency.total_ms],
         ["Time to first evidence", latency.time_to_first_evidence_ms],
         ["Time to enough evidence", latency.time_to_enough_evidence_ms],
+        ["Intent router", latency.intent_router_ms ?? latency.stage_ms?.intent_router],
         ["Understanding", latency.understand_ms],
+        ["Brief + plan", latency.brief_plan_ms ?? latency.stage_ms?.brief_plan],
         ["Topology", latency.topology_ms],
         ["Planning", latency.planning_ms],
+        ["Plan validation", latency.plan_validate_ms ?? latency.stage_ms?.plan_validate],
         ["Research wall", latency.research_wall_ms],
         ["Parallel saved", latency.research_parallel_saved_ms],
         ["Gap check", latency.gap_check_ms],
+        ["Gap precheck", latency.gap_precheck_ms ?? latency.stage_ms?.gap_precheck],
         ["Supervisor", Array.isArray(latency.supervisor_ms) ? latency.supervisor_ms.reduce((sum, value) => sum + Number(value || 0), 0) : undefined],
         ["Synthesis", latency.synthesis_ms],
         ["Quality gate", latency.quality_blocking_ms],
@@ -317,6 +321,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
         ["Tools", latency.tool_ms],
         ["Storage", latency.storage_ms],
         ["Telemetry", latency.telemetry_ms],
+        ["Control-plane ratio", latency.control_plane_ratio == null ? undefined : `${(Number(latency.control_plane_ratio) * 100).toFixed(1)}%`],
         ["Worker LLM share", latency.worker_llm_ratio == null ? undefined : `${(Number(latency.worker_llm_ratio) * 100).toFixed(1)}%`],
         ["Worker tool share", latency.worker_tool_ratio == null ? undefined : `${(Number(latency.worker_tool_ratio) * 100).toFixed(1)}%`],
         ["Worker idle share", latency.worker_idle_ratio == null ? undefined : `${(Number(latency.worker_idle_ratio) * 100).toFixed(1)}%`]
@@ -324,7 +329,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
         key: `${String(label)}-${index}`,
         metric: String(label),
         value,
-        ratio: String(label).startsWith("Worker ")
+        ratio: String(label).startsWith("Worker ") || String(label) === "Control-plane ratio"
       }))
     : [];
 

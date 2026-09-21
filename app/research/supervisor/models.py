@@ -60,8 +60,11 @@ class SupervisorAction:
     source: str = "deterministic_fallback"
 
     def to_dict(self) -> dict[str, Any]:
+        semantic_action = "TARGETED_RESEARCH" if self.action == "CONDUCT_RESEARCH" else "SYNTHESIZE"
         return {
             "action": self.action,
+            "semantic_action": semantic_action,
+            "runtime_action": self.action,
             "reason": self.reason,
             "research_tasks": [item.to_dict() for item in self.research_tasks],
             "source": self.source,

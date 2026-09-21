@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import time
 import re
+import os
 from dataclasses import replace
 from typing import Any
 
@@ -167,9 +168,12 @@ def compile_structured_brief(
 
 
 def _merge_llm_brief(fallback: StructuredResearchBrief, patch: dict[str, Any]) -> StructuredResearchBrief:
-    source = patch.get("source_requirements") if isinstance(patch.get("source_requirements"), dict) else {}
-    freshness = patch.get("freshness_requirements") if isinstance(patch.get("freshness_requirements"), dict) else {}
-    deliverable = patch.get("deliverable") if isinstance(patch.get("deliverable"), dict) else {}
+    source_raw = patch.get("source_requirements")
+    freshness_raw = patch.get("freshness_requirements")
+    deliverable_raw = patch.get("deliverable")
+    source: dict[str, Any] = source_raw if isinstance(source_raw, dict) else {}
+    freshness: dict[str, Any] = freshness_raw if isinstance(freshness_raw, dict) else {}
+    deliverable: dict[str, Any] = deliverable_raw if isinstance(deliverable_raw, dict) else {}
     brief = StructuredResearchBrief(
         brief_id=fallback.brief_id, version=fallback.version,
         objective=str(patch.get("objective") or fallback.objective),
@@ -217,7 +221,13 @@ async def compile_structured_brief_with_llm(
                 schema=StructuredResearchBrief,
                 prompt=prompt,
                 phase="brief",
-                timeout_sec=model_timeout_sec("LLM_BRIEF_TIMEOUT_SEC"),
+                # Planning is control-plane work.  A slow provider must fall
+                # back to the deterministic brief/plan instead of consuming
+                # the research wall budget.
+                timeout_sec=min(
+                    model_timeout_sec("LLM_BRIEF_TIMEOUT_SEC"),
+                    max(1.0, float(os.getenv("LLM_PLANNER_TIMEOUT_SEC", "30") or 30)),
+                ),
             )
     except Exception as exc:
         emit_semantic_fallback(

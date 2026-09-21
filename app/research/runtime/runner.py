@@ -370,6 +370,7 @@ class ResearchGraphRunner:
 
     def _bootstrap_run(self, ctx: Any) -> tuple[str, dict[str, Any]]:
         """Resolve the profile before a session can create its hard budget manager."""
+        bootstrap_started = time.perf_counter()
         from app.agent.harness.run_budget import create_run_budget_manager
         from app.research.routing.mode_router import (
             budget_for_mode,
@@ -386,6 +387,13 @@ class ResearchGraphRunner:
         )
         profile = decision.mode
         metadata = ctx.state.metadata
+        from app.research.routing.intent_router import route_intent
+
+        intent_route = route_intent(
+            ctx.task_query,
+            attachments=list(getattr(ctx, "attachments", None) or []),
+        )
+        metadata["intent_router"] = intent_route.to_dict()
         metadata["runtime_fingerprint"] = self._runtime_fingerprint()
         previous = dict(metadata.get("run_budget") or {})
         manager = ctx.budget_manager
@@ -470,6 +478,14 @@ class ResearchGraphRunner:
         )
         metadata["run_budget"] = run_budget
         metadata["route_decision"] = decision.to_dict()
+        try:
+            note_stage_duration(
+                ctx.state,
+                "intent_router",
+                int((time.perf_counter() - bootstrap_started) * 1000),
+            )
+        except Exception:
+            logger.debug("intent router timing unavailable", exc_info=True)
         ctx.search_mode = profile
         return profile, budget_cfg
 
@@ -514,6 +530,7 @@ class ResearchGraphRunner:
             search_mode=profile,
         )
         payload["brief"] = brief.to_dict()
+        payload["intent"] = dict(session.state.metadata.get("intent_router") or {})
         payload["fast_path"] = fast_path
         payload["budget"]["max_parallel_workers"] = session._resolve_max_workers()
         payload["budget"]["max_tool_calls"] = int(budget_cfg["max_tool_calls"])
@@ -612,6 +629,8 @@ class ResearchGraphRunner:
         )
         parse_started = time.perf_counter()
         update = brief_node(cast(ResearchState, state))
+        plan_build_ms = int((time.perf_counter() - parse_started) * 1000)
+        note_stage_duration(session.state, "brief_plan", plan_build_ms)
         brief = StructuredResearchBrief.from_dict(update.get("brief"))
         note_substep_duration(
             session.state,
@@ -640,6 +659,29 @@ class ResearchGraphRunner:
                 "plan",
                 int((time.perf_counter() - topology_started) * 1000),
             )
+        else:
+            # The initial research wave is now produced from the brief in a
+            # deterministic pass.  Supervisor is reserved for an actionable
+            # repair after gap precheck.
+            note_stage_duration(
+                session.state,
+                "plan",
+                int((time.perf_counter() - topology_started) * 1000),
+            )
+        plan_validation = update.get("plan_validation") or []
+        note_stage_duration(
+            session.state,
+            "plan_validate",
+            int((time.perf_counter() - topology_started) * 1000),
+        )
+        if isinstance(session.state.metadata, dict):
+            session.state.metadata["plan_validation"] = {
+                "passed": not bool(plan_validation),
+                "issues": list(plan_validation),
+                "source": "deterministic",
+            }
+            if isinstance(update.get("brief_plan"), dict):
+                session.state.metadata["brief_plan"] = dict(update["brief_plan"])
         sync_execution_projection(session.state, {**gstate, **update})
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
@@ -659,6 +701,8 @@ class ResearchGraphRunner:
                         "supervisor_fallback_count": 0,
                         "fallback_rate": 0.0,
                         "control_plane_degraded": brief.compiler_source != "structured_llm",
+                        "plan_source": "brief_and_plan",
+                        "plan_validation_passed": not bool(plan_validation),
                     },
                 }
             )
@@ -689,6 +733,26 @@ class ResearchGraphRunner:
             },
             input_refs=[{"type": "brief", "id": brief.brief_id}],
         )
+        if isinstance(update.get("plan"), dict):
+            from app.agent.harness.state import ExecutionPlan
+
+            initial_plan = ExecutionPlan.from_dict(update["plan"])
+            _emit(
+                session,
+                "plan.created",
+                phase=WorkflowPhase.BRIEF.value,
+                status="ok" if not plan_validation else "warning",
+                plan_version=initial_plan.plan_version,
+                attributes={
+                    **plan_event_attributes(
+                        initial_plan,
+                        brief.to_dict(),
+                        run_id=session.run_id,
+                        planner_source="brief_and_plan",
+                    ),
+                    "validation_issues": list(plan_validation),
+                },
+            )
         note_stage_duration(
             session.state,
             "brief",
@@ -709,6 +773,7 @@ class ResearchGraphRunner:
     async def node_supervisor(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.brief.models import StructuredResearchBrief
         from app.research.coverage.judge import CoverageJudgement
+        from app.research.control.gap_precheck import precheck_gap
         from app.research.runtime.admission import admit_dispatch
         from app.research.supervisor.agent import SupervisorAgent
         from app.research.supervisor.models import ResearchTaskRequest
@@ -729,6 +794,13 @@ class ResearchGraphRunner:
         }
         raw_value_signal = state.get("research_value_signal")
         value_signal = raw_value_signal if isinstance(raw_value_signal, dict) else {}
+        gap_started = time.perf_counter()
+        gap_precheck = precheck_gap(state, max_waves=2, max_repairs=1)
+        note_stage_duration(
+            session.state,
+            "gap_precheck",
+            int((time.perf_counter() - gap_started) * 1000),
+        )
         note_substep_duration(
             session.state,
             "supervisor",
@@ -751,14 +823,27 @@ class ResearchGraphRunner:
         )
         supervisor = SupervisorAgent(getattr(self.harness, "control_agent", None), session.budget_manager)
         llm_started = time.perf_counter()
-        action = await supervisor.decide(
-            brief,
-            findings,
-            judgement,
-            budget,
-            previous_fingerprints=previous_fingerprints,
-            duplicate_search_ratio=float(value_signal.get("duplicate_search_ratio") or 0.0),
-        )
+        if gap_precheck.action == "SYNTHESIZE":
+            # The runtime has enough information to decide that no further
+            # research is legal or useful.  Do not spend a model call asking
+            # the Supervisor to repeat that deterministic decision.
+            from app.research.supervisor.models import SupervisorAction
+
+            action = SupervisorAction(
+                "COMPLETE",
+                f"gap_precheck:{gap_precheck.reason}",
+                (),
+                "deterministic_gap_precheck",
+            )
+        else:
+            action = await supervisor.decide(
+                brief,
+                findings,
+                judgement,
+                budget,
+                previous_fingerprints=previous_fingerprints,
+                duplicate_search_ratio=float(value_signal.get("duplicate_search_ratio") or 0.0),
+            )
         note_substep_duration(
             session.state,
             "supervisor",
@@ -790,7 +875,10 @@ class ResearchGraphRunner:
                     ],
                     action.source,
                 ],
+                "semantic_action": gap_precheck.action,
+                "gap_precheck": gap_precheck.to_dict(),
             },
+            "gap_precheck": gap_precheck.to_dict(),
         }
         raw_iteration_limit = state.get("budget", {}).get("max_replan_count")
         iteration_limit = 3 if raw_iteration_limit is None else max(0, int(raw_iteration_limit))
@@ -925,6 +1013,16 @@ class ResearchGraphRunner:
             else:
                 session.active_wave_size = 1
         decision = decide_control({**state, **payload})
+        # A run with salvageable evidence but no repair budget is a partial
+        # delivery.  Preserve that distinction even though the semantic
+        # Supervisor action is COMPLETE.
+        if (
+            gap_precheck.action == "SYNTHESIZE"
+            and gap_precheck.reason in {"repair_budget_unavailable", "max_research_waves", "repair_limit"}
+            and not bool((state.get("coverage_judgement") or {}).get("sufficient"))
+            and bool(state.get("evidence_records"))
+        ):
+            decision = type(decision)("deliver_partial", (gap_precheck.reason, "usable_evidence"), ())
         if action.action == "CONDUCT_RESEARCH":
             raw_admission = payload.get("dispatch_admission")
             admission_payload = raw_admission if isinstance(raw_admission, dict) else {}
@@ -952,6 +1050,9 @@ class ResearchGraphRunner:
             "reason_codes": list(decision.reason_codes),
             "task_ids": list(decision.task_ids),
             "policy_version": "runtime-policy.v1",
+            "semantic_action": gap_precheck.action,
+            "runtime_action": decision.action,
+            "override_reason": "" if gap_precheck.action == "TARGETED_RESEARCH" else gap_precheck.reason,
         }
         note_substep_duration(
             session.state,
@@ -1001,6 +1102,9 @@ class ResearchGraphRunner:
                 "source": action.source,
                 "runtime_action": decision.action,
                 "runtime_reasons": list(decision.reason_codes),
+                "semantic_action": gap_precheck.action,
+                "override_reason": "" if gap_precheck.action == "TARGETED_RESEARCH" else gap_precheck.reason,
+                "supervisor_calls_avoided": gap_precheck.supervisor_calls_avoided,
             },
             output_refs=[{"type": "supervisor_action", "id": payload["supervisor"]["last_action"]}],
         )
@@ -2316,6 +2420,44 @@ class ResearchGraphRunner:
                 citation_numbers,
             )
             content = manager.build_cited_report(content)
+            # A provider can return a non-empty report whose citations do not
+            # bind to the current evidence pack.  Treat that as a report
+            # defect, not as a terminal delivery failure: compile a bounded
+            # evidence-first answer locally and send it through the same
+            # citation builder before Quality Gate.
+            try:
+                cited_ok, _ = manager.validate_citations(content)
+            except Exception:
+                cited_ok = True
+            if not cited_ok and answerability.answerable:
+                recovered = compile_deterministic_answer(
+                    objective=brief.objective or str(gstate.get("task_query") or ""),
+                    brief=brief,
+                    findings=[row for row in gstate.get("findings") or [] if isinstance(row, dict)],
+                    answerability=answerability,
+                    synthesis_degraded=True,
+                )
+                completeness = assess_answer_completeness(recovered, brief)
+                if completeness.complete:
+                    recovery_mode = "deterministic_recovery"
+                    answer_contract = {
+                        "final_answer": recovered.to_dict(),
+                        "completeness": completeness.to_dict(),
+                    }
+                    content = manager.build_cited_report(
+                        render_final_answer(recovered, citation_numbers=citation_numbers)
+                    )
+                    fallback = False
+                    synthesis_failed = False
+                    answer_complete = True
+                    synthesis_degraded = True
+                    _emit(
+                        session,
+                        "answer_recovery.completed",
+                        phase=WorkflowPhase.SYNTHESIS.value,
+                        status="ok",
+                        attributes={"mode": "deterministic_recovery", "reason": "citation_coverage_low"},
+                    )
         note_substep_duration(
             session.state,
             "synthesis",
@@ -2423,6 +2565,7 @@ class ResearchGraphRunner:
         )
 
     async def node_quality_gate(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.delivery.insights import insight_density
         from app.research.domain.completion import evaluate_completion
         from app.research.coverage.gap_check import gap_check
         session = _require_session(gstate)
@@ -2447,6 +2590,12 @@ class ResearchGraphRunner:
         if isinstance(answerability, dict) and answerability and not bool(answerability.get("answerable")):
             issues.append("answerability_gap")
         answer_contract = dict(gstate.get("answer_contract") or {})
+        brief_intent = str((gstate.get("brief") or {}).get("user_intent") or "")
+        insight = insight_density(
+            content=content,
+            findings=[row for row in gstate.get("findings") or [] if isinstance(row, dict)],
+            analytical=brief_intent in {"comparison", "trend_forecast", "conflict_analysis", "recommendation", "structured_report", "explanation"},
+        )
         citation_valid = True
         citation_reason = ""
         manager = session.ctx.citation_manager
@@ -2532,6 +2681,7 @@ class ResearchGraphRunner:
             "synthesis_mode": str(
                 (gstate.get("synthesis_mode") or session.state.metadata.get("synthesis_mode") or "")
             ),
+            "insight_density": insight,
         }
         decision = {
             "action": (

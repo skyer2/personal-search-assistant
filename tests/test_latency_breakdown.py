@@ -164,6 +164,19 @@ def test_critical_path_reconstructs_workers_from_compatibility_arrays() -> None:
     assert len(summary["worker_metrics"]) == 2
 
 
+def test_latency_summary_exposes_control_plane_ratio() -> None:
+    state = SimpleNamespace(metadata={"run_started_monotonic": time.perf_counter() - 1.0})
+    note_stage_duration(state, "intent_router", 10)
+    note_stage_duration(state, "brief", 100)
+    note_stage_duration(state, "plan", 5)
+    note_stage_duration(state, "gap_precheck", 2)
+    note_stage_duration(state, "supervisor", 3)
+    note_stage_duration(state, "quality", 4)
+    summary = critical_path_summary(state.metadata)
+    assert summary["control_plane_ms"] == 124
+    assert 0 < summary["control_plane_ratio"] < 1
+
+
 def test_supervisor_terminal_budget_decision_skips_provider() -> None:
     class _NeverModel:
         async def ainvoke(self, *args, **kwargs):

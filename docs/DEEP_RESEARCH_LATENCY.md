@@ -114,3 +114,15 @@ conditions and the answer still passed grounding, quality and completion
 checks; primary synthesis again timed out, so the acceptance result remained
 `passed=false`. The persisted trace is therefore a provider-stability
 diagnostic, not a release-pass result.
+
+After the v2 control-plane changes, the real `.env` acceptance run on
+2026-09-22 completed in 363.96 s. Brief was capped at 30.004 s, research
+critical path was 123.344 s, deterministic Gap Precheck avoided the second
+Supervisor model call (`supervisor=8 ms`), synthesis took 210.061 s across a
+primary failure and one recovery attempt, and Quality/Delivery took 4/7 ms.
+The run delivered 17 findings and 18 evidence records with Completion,
+grounding, citation, quality and trace all passing. The evaluator marked the
+run `passed=true`; the overall acceptance gate remained false because this
+single run used degraded synthesis and did not establish primary-synthesis
+stability. The dominant remaining bottleneck is provider generation, not
+finalize or the control plane.

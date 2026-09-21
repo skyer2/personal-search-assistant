@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any
 
@@ -283,7 +284,10 @@ class SupervisorAgent:
                     schema=SupervisorAction,
                     prompt=prompt,
                     phase="supervisor",
-                    timeout_sec=model_timeout_sec("LLM_SUPERVISOR_TIMEOUT_SEC"),
+                    timeout_sec=min(
+                        model_timeout_sec("LLM_SUPERVISOR_TIMEOUT_SEC"),
+                        max(1.0, float(os.getenv("LLM_COMPACT_SUPERVISOR_TIMEOUT_SEC", "15") or 15)),
+                    ),
                 )
         except Exception as exc:
             emit_semantic_fallback(

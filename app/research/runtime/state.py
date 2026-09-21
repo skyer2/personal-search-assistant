@@ -50,6 +50,7 @@ class ResearchState(TypedDict):
     search_cards: list[dict[str, Any]]
 
     brief: dict[str, Any]
+    brief_plan: dict[str, Any]
     fast_path: bool
     supervisor: dict[str, Any]
     supervisor_action: dict[str, Any]
@@ -65,6 +66,7 @@ class ResearchState(TypedDict):
     intent: dict[str, Any] | None
     plan: dict[str, Any] | None
     plan_version: int
+    plan_validation: list[dict[str, Any]]
     tasks: Annotated[dict[str, dict[str, Any]], merge_dicts]
     worker_results: Annotated[list[dict[str, Any]], operator.add]
     findings: Annotated[list[dict[str, Any]], merge_findings]
@@ -157,6 +159,7 @@ def empty_research_state(
         "resolved_query": task_query,
         "search_cards": [],
         "brief": {},
+        "brief_plan": {},
         "fast_path": False,
         "supervisor": {"iteration": 0, "last_action": "", "reasoning_summary": ""},
         "supervisor_action": {},
@@ -170,6 +173,7 @@ def empty_research_state(
         "intent": None,
         "plan": None,
         "plan_version": 1,
+        "plan_validation": [],
         "tasks": {},
         "worker_results": [],
         "findings": [],

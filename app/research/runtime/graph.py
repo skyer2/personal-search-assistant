@@ -22,6 +22,7 @@ from app.research.delivery.synthesis_context import EvidenceDigest
 from app.research.runtime.ingestion import ingest_new_worker_results
 from app.research.runtime.task_identity import execution_task_id, semantic_fingerprint
 from app.research.routing.mode_router import canonicalize_mode
+from app.research.planning.brief_plan import build_brief_and_plan, execution_plan_from_brief, validate_brief_plan
 from app.research.runtime.state import ResearchState
 from app.research.supervisor.agent import SupervisorAgent
 from app.research.supervisor.models import ResearchTaskRequest, SupervisorAction
@@ -140,33 +141,46 @@ def brief_node(state: ResearchState) -> dict[str, Any]:
         )
         plan.steps[0].step_type = "network_search"
         plan.steps[0].metadata.update({"simple_fact_fast_path": True, "task_kind": "lookup"})
-        payload.update({"plan": plan.to_dict(), "tasks": initialize_tasks(plan)})
+        payload.update({"plan": plan.to_dict(), "tasks": initialize_tasks(plan), "plan_validation": validate_brief_plan(plan), "brief_plan": build_brief_and_plan(brief, plan_version=plan.plan_version).to_dict(), "dispatch_wave_id": 1})
+    else:
+        # The first research wave is deterministic and is derived from the
+        # already compiled brief.  This removes the old Brief -> Supervisor ->
+        # Plan round trip; the Supervisor is reserved for an actionable repair.
+        plan = execution_plan_from_brief(
+            brief,
+            plan_version=int(state.get("plan_version") or 1),
+        )
+        payload.update({"plan": plan.to_dict(), "tasks": initialize_tasks(plan), "plan_validation": validate_brief_plan(plan), "brief_plan": build_brief_and_plan(brief, plan_version=plan.plan_version).to_dict(), "dispatch_wave_id": 1})
     return transition_update(state, WorkflowPhase.BRIEF, payload)
 
 
 def route_after_brief(state: ResearchState) -> Any:
     from langgraph.types import Send
 
-    if not bool(state.get("fast_path")):
+    plan_raw = state.get("plan") if isinstance(state.get("plan"), dict) else None
+    if not plan_raw:
         return "supervisor"
-    plan = ExecutionPlan.from_dict(state["plan"])
-    index = 0
-    step = plan.steps[index]
-    return Send(
-        "researcher",
-        {
-            **state,
-            "phase": WorkflowPhase.EXECUTE.value,
-            "task_id": step.resolved_task_id(index),
-            "step_index": index,
-            "step_type": step.step_type,
-            "description": step.description,
-            "subagent": step.subagent or "",
-            "task_query": state["task_query"],
-            "task_metadata": dict(step.metadata or {}),
-            "tasks": dict(state.get("tasks") or {}),
-        },
-    )
+    plan = ExecutionPlan.from_dict(plan_raw)
+    sends: list[Any] = []
+    for index, step in enumerate(plan.steps):
+        sends.append(
+            Send(
+                "researcher",
+                {
+                    **state,
+                    "phase": WorkflowPhase.EXECUTE.value,
+                    "task_id": step.resolved_task_id(index),
+                    "step_index": index,
+                    "step_type": step.step_type,
+                    "description": step.description,
+                    "subagent": step.subagent or "",
+                    "task_query": state["task_query"],
+                    "task_metadata": dict(step.metadata or {}),
+                    "tasks": dict(state.get("tasks") or {}),
+                },
+            )
+        )
+    return sends or "supervisor"
 
 
 def supervisor_node(state: ResearchState) -> dict[str, Any]:

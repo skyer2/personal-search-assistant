@@ -72,6 +72,29 @@ if _supervisor_model_name and _supervisor_model_name not in {
         print(f"[LLM] supervisor_model init failed, fallback to worker model: {exc}")
         supervisor_model = worker_model
 
+# Planner is intentionally kept separate as a named capability even though
+# the v2 initial plan is deterministic.  Deployments can opt into a future
+# merged Brief+Plan structured call without changing the worker model.
+_planner_model_name = os.getenv("LLM_PLANNER_MODEL") or _supervisor_model_name
+planner_model = supervisor_model
+if _planner_model_name and _planner_model_name not in {
+    _supervisor_model_name,
+    _worker_model_name,
+    os.getenv("LLM_QWEN_MAX"),
+}:
+    try:
+        planner_model = wrap_model_with_budget(init_chat_model(
+            model=_planner_model_name,
+            model_provider="openai",
+            timeout=model_timeout_sec("LLM_PLANNER_TIMEOUT_SEC"),
+            temperature=_supervisor_temperature,
+            base_url=_openai_base_url,
+            api_key=_openai_api_key,
+        ))
+    except Exception as exc:
+        print(f"[LLM] planner_model init failed, fallback to supervisor model: {exc}")
+        planner_model = supervisor_model
+
 _compression_model_name = os.getenv("LLM_COMPRESSION_MODEL", "qwen-turbo")
 _compression_enabled = os.getenv("HARNESS_LLM_COMPRESSION", "true").lower() != "false"
 

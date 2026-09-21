@@ -163,7 +163,11 @@ def note_stage_duration(state: Any, stage: str, duration_ms: int) -> None:
         "topology",
         "plan",
         "research",
+        "intent_router",
+        "brief_plan",
+        "plan_validate",
         "gap_check",
+        "gap_precheck",
         "brief",
         "synthesis",
         "quality",
@@ -421,19 +425,42 @@ def critical_path_summary(meta: dict[str, Any] | None) -> dict[str, Any]:
     total_ms = run_elapsed_ms(meta)
     if total_ms is None:
         total_ms = int(meta.get("total_latency_ms") or 0) or None
+    control_plane_stages = (
+        "intent_router",
+        "brief",
+        "topology",
+        "plan",
+        "plan_validate",
+        "gap_check",
+        "gap_precheck",
+        "supervisor",
+        "quality",
+    )
+    control_plane_ms = sum(
+        int(stage_ms.get(name) or 0)
+        for name in control_plane_stages
+        if name in stage_ms
+    )
+    control_plane_ratio = round(control_plane_ms / total_ms, 4) if total_ms else None
     return {
         "schema_version": "latency.v2",
         "total_ms": total_ms,
         "stages": derived_stages,
         "substeps": substeps,
         "stage_ms": stage_ms,
+        "control_plane_ms": control_plane_ms,
+        "control_plane_ratio": control_plane_ratio,
         # Stable SDD names; retain the legacy names below for existing UI and
         # evaluators.
         "understand_ms": stage_ms.get("understand", bucket.get("brief_ms")),
+        "intent_router_ms": stage_ms.get("intent_router"),
+        "brief_plan_ms": stage_ms.get("brief_plan"),
+        "plan_validate_ms": stage_ms.get("plan_validate"),
         "topology_ms": stage_ms.get("topology"),
         "planning_ms": stage_ms.get("plan", bucket.get("plan_ms")),
         "research_wall_ms": worker_wall or None,
         "gap_check_ms": stage_ms.get("gap_check", sum(int(x or 0) for x in bucket.get("coverage_ms") or [])),
+        "gap_precheck_ms": stage_ms.get("gap_precheck"),
         "quality_blocking_ms": stage_ms.get("quality", bucket.get("quality_ms")),
         "brief_ms": bucket.get("brief_ms"),
         "supervisor_ms": list(bucket.get("supervisor_ms") or []),
