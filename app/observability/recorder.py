@@ -20,7 +20,11 @@ from app.observability.context import (
 from app.observability.events import AgentEvent, EventType, new_id, span_identity, utc_now
 from app.observability.exporters.jsonl import JsonlExporter
 from app.observability.exporters.otel import end_span as otel_end_span
-from app.observability.exporters.otel import flush_otel, init_otel, start_span as otel_start_span
+from app.observability.exporters.otel import (
+    flush_otel_background,
+    init_otel,
+    start_span as otel_start_span,
+)
 from app.observability.exporters.websocket import WebSocketExporter
 from app.observability.failure import enrich_failure_attributes
 from app.observability.journal import RunJournal
@@ -245,7 +249,10 @@ class AgentTelemetry:
             self.metrics.inc("harness.runs.completed")
         else:
             self.metrics.inc("harness.runs.failed")
-        flush_otel()
+        # Exporters are post-run work.  Never block delivery on an unreachable
+        # OTLP/Langfuse endpoint; explicit shutdown/tests can still call the
+        # synchronous ``flush_otel`` helper.
+        flush_otel_background()
         reset_run(None)
 
     def start_span(

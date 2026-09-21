@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import os
+import threading
 from typing import Any
 
 from app.observability.context import current_context
@@ -15,6 +16,8 @@ from app.observability.exporters.genai import map_genai_attributes
 _tracer: Any = None
 _provider: Any = None
 _initialized = False
+_flush_lock = threading.Lock()
+_flush_inflight = False
 
 
 def _langfuse_otlp_endpoint() -> str:
@@ -46,10 +49,11 @@ def _langfuse_otlp_headers() -> dict[str, str]:
 
 
 def reset_for_tests() -> None:
-    global _tracer, _provider, _initialized
+    global _tracer, _provider, _initialized, _flush_inflight
     _tracer = None
     _provider = None
     _initialized = False
+    _flush_inflight = False
     try:
         from opentelemetry import trace
         from opentelemetry.util._once import Once
@@ -166,3 +170,28 @@ def flush_otel() -> None:
         _provider.force_flush(timeout_millis=2000)
     except Exception:
         pass
+
+
+def flush_otel_background() -> None:
+    """Fail-open OTLP flush.
+
+    ``TracerProvider.force_flush`` may wait on an unreachable collector.  It
+    therefore must not sit on the request/final-answer path.  A single daemon
+    worker coalesces concurrent flush requests; an explicit ``flush_otel``
+    call remains available for shutdown and tests.
+    """
+    global _flush_inflight
+    with _flush_lock:
+        if _flush_inflight or _provider is None:
+            return
+        _flush_inflight = True
+
+    def _run() -> None:
+        global _flush_inflight
+        try:
+            flush_otel()
+        finally:
+            with _flush_lock:
+                _flush_inflight = False
+
+    threading.Thread(target=_run, name="otel-flush", daemon=True).start()

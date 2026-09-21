@@ -148,6 +148,7 @@ class HarnessTracer:
         return
 
     def finish(self, result: dict[str, Any]) -> None:
-        from app.observability.exporters.otel import flush_otel
+        from app.observability.exporters.otel import flush_otel_background
 
-        flush_otel()
+        # Tracing export is post-run work and must not delay the final answer.
+        flush_otel_background()

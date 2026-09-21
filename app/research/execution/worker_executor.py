@@ -34,6 +34,11 @@ from app.research.runtime.worker import (
     WorkerResultStatus,
     salvage_worker_evidence,
 )
+from app.research.runtime.activity import (
+    WorkerActivityTracker,
+    reset_current_worker_activity,
+    set_current_worker_activity,
+)
 from app.observability.semantic_events import worker_event_attributes
 
 
@@ -255,6 +260,8 @@ class WorkerExecutorV2:
             recorder_span = ""
 
         tool_usage: dict[str, Any] = {"tool_calls": 0, "tools_invoked": []}
+        activity_tracker = WorkerActivityTracker(worker_id=task.task_id)
+        activity_token = set_current_worker_activity(activity_tracker)
         try:
             timeout_sec = self._timeout_for(step)
             invoke_leaf = (
@@ -483,6 +490,21 @@ class WorkerExecutorV2:
             return recovered
         finally:
             self._sync_tool_usage(tool_usage)
+            activity_metrics = activity_tracker.timing_summary()
+            if worker_result is not None:
+                wall_ms = int((time.perf_counter() - started) * 1000)
+                worker_result.metrics.update(
+                    {
+                        **activity_metrics,
+                        "idle_ms": max(
+                            0,
+                            wall_ms
+                            - int(activity_metrics.get("llm_ms") or 0)
+                            - int(activity_metrics.get("tool_ms") or 0)
+                        ),
+                    }
+                )
+            reset_current_worker_activity(activity_token)
             budget_snapshot = self._worker_budget_snapshot(lease_id, tool_usage)
             if worker_result is not None:
                 worker_result.metrics["budget"] = budget_snapshot
@@ -820,6 +842,8 @@ class WorkerExecutorV2:
         timeout_sec: float = 60.0,
     ) -> StepResult:
         """Run one authorized provider search without an LLM worker."""
+        from app.research.runtime.activity import tracked_worker_operation
+
         _ = (execute_agent, dispatch_mode)
         from app.agent.harness.citations import (
             EvidenceSource,
@@ -848,15 +872,16 @@ class WorkerExecutorV2:
                 session_id=context.session_id,
             ) as active_retrieval_budget:
                 retrieval_budget = active_retrieval_budget
-                first_response = tool_gateway.call(
-                    search_tool.invoke,
-                    {
-                        "query": context.query,
-                        "topic": "general",
-                        "max_results": 2,
-                        "include_raw_content": True,
-                    },
-                )
+                with tracked_worker_operation("tool.internet_search"):
+                    first_response = tool_gateway.call(
+                        search_tool.invoke,
+                        {
+                            "query": context.query,
+                            "topic": "general",
+                            "max_results": 2,
+                            "include_raw_content": True,
+                        },
+                    )
                 if isinstance(first_response, dict):
                     responses.append(first_response)
                 first_results = [
@@ -893,15 +918,16 @@ class WorkerExecutorV2:
                         else f"{normalized_query} official source"
                     )
                     queries.append(followup_query)
-                    second_response = tool_gateway.call(
-                        search_tool.invoke,
-                        {
-                            "query": followup_query,
-                            "topic": "general",
-                            "max_results": 5,
-                            "include_raw_content": True,
-                        },
-                    )
+                    with tracked_worker_operation("tool.internet_search"):
+                        second_response = tool_gateway.call(
+                            search_tool.invoke,
+                            {
+                                "query": followup_query,
+                                "topic": "general",
+                                "max_results": 5,
+                                "include_raw_content": True,
+                            },
+                        )
                     if isinstance(second_response, dict):
                         responses.append(second_response)
         finally:
@@ -1095,6 +1121,8 @@ class WorkerExecutorV2:
         tools_invoked = [str(item) for item in tool_usage.get("tools_invoked") or []]
         budget_usage = dict(tool_usage.get("budget") or {})
         llm_calls = 0
+        llm_ms = 0
+        ttft_ms = 0
         input_tokens = 0
         output_tokens = 0
         cache_hits = 0
@@ -1104,11 +1132,15 @@ class WorkerExecutorV2:
             records = get_usage_tracker().session_summary(context.session_id).get("records") or []
             for raw_record in records:
                 record = raw_record if isinstance(raw_record, dict) else {}
-                if str((record.get("extra") or {}).get("worker_task_id") or "") != task.task_id:
+                raw_extra = record.get("extra")
+                extra = raw_extra if isinstance(raw_extra, dict) else {}
+                if str(extra.get("worker_task_id") or "") != task.task_id:
                     continue
                 llm_calls += 1
                 input_tokens += int(record.get("prompt_tokens") or 0)
                 output_tokens += int(record.get("completion_tokens") or 0)
+                llm_ms += int(extra.get("duration_ms") or record.get("duration_ms") or 0)
+                ttft_ms += int(extra.get("ttft_ms") or record.get("ttft_ms") or 0)
                 if int(record.get("cache_read_tokens") or 0) > 0:
                     cache_hits += 1
         except Exception:
@@ -1127,6 +1159,8 @@ class WorkerExecutorV2:
                 artifact_count = 0
         return {
             "llm_calls": llm_calls,
+            "llm_ms": llm_ms,
+            "ttft_ms": ttft_ms,
             "search_calls": int(
                 budget_usage.get("search_queries_used")
                 or sum(

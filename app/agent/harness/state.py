@@ -23,6 +23,11 @@ class Phase(str, Enum):
     COMPRESS = "compress"
     VALIDATE = "validate"
     RECOVER = "recover"
+    # Delivery is the user-visible completion boundary.  Post-run work is
+    # deliberately represented separately so a slow exporter or evaluator
+    # cannot be mistaken for answer-generation latency.
+    DELIVERY = "delivery"
+    POST_RUN = "post_run"
     FINALIZE = "finalize"
     ABORT = "abort"
 

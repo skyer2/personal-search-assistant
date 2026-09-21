@@ -1,0 +1,197 @@
+# 一键干净部署脚本
+
+在部署机直接复制下面整个代码块执行。它会拉取 `origin/main`，拒绝代码工作区修改，清理旧部署遗留文件，启动前后端，并严格验证运行中的 Backend SHA、分支、配置哈希、PID 和 `dirty=false`；前端会先完成构建并校验内嵌 SHA。
+
+```bash
+cat >/tmp/redeploy-research-agent.sh <<'BASH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# One-command deployment for the single-process bare-metal installation.
+# The script deliberately refuses to deploy tracked local changes.  This keeps
+# the runtime fingerprint meaningful instead of silently hiding code in stash.
+
+ROOT="${HARNESS_ROOT:-/opt/research-agent-harness}"
+BRANCH="${HARNESS_BRANCH:-main}"
+API_PORT="${HARNESS_API_PORT:-8000}"
+FRONT_PORT="${HARNESS_FRONT_PORT:-5173}"
+RUNTIME_DIR="${HARNESS_RUNTIME_DIR:-/tmp/research-agent-harness}"
+LOG_DIR="$RUNTIME_DIR/logs"
+API_LOG="$LOG_DIR/api.out"
+FRONT_LOG="$LOG_DIR/frontend.out"
+API_PID_FILE="$RUNTIME_DIR/api.pid"
+FRONT_PID_FILE="$RUNTIME_DIR/frontend.pid"
+PYTHON="$ROOT/.venv/bin/python"
+
+mkdir -p "$RUNTIME_DIR" "$LOG_DIR"
+cd "$ROOT"
+
+die() {
+    echo "ERROR: $*" >&2
+    echo "Backend log: $API_LOG" >&2
+    echo "Frontend log: $FRONT_LOG" >&2
+    exit 1
+}
+
+on_error() {
+    code=$?
+    trap - ERR
+    echo "ERROR: redeploy failed (exit $code)" >&2
+    tail -80 "$API_LOG" 2>/dev/null || true
+    tail -80 "$FRONT_LOG" 2>/dev/null || true
+    exit "$code"
+}
+trap on_error ERR
+
+command -v git >/dev/null || die "git is required"
+command -v curl >/dev/null || die "curl is required"
+command -v pnpm >/dev/null || die "pnpm is required"
+[[ -x "$PYTHON" ]] || die "missing virtualenv interpreter: $PYTHON"
+git rev-parse --show-toplevel >/dev/null 2>&1 || die "$ROOT is not a git checkout"
+
+# These are leftovers from the old launcher.  Runtime state is now kept under
+# /tmp, so removing only these known names cannot delete source files.
+rm -rf "$ROOT/logs" "$ROOT/FETCH_HEAD" "$ROOT/nohup.out" "$ROOT/redeploy.sh"
+
+tracked_dirty="$(git status --porcelain --untracked-files=no)"
+[[ -z "$tracked_dirty" ]] || die "tracked changes exist; commit or revert them before deployment:\n$tracked_dirty"
+
+unknown_untracked="$(git ls-files --others --exclude-standard)"
+[[ -z "$unknown_untracked" ]] || die "untracked files exist; remove or explicitly ignore them before deployment:\n$unknown_untracked"
+
+git checkout "$BRANCH" >/dev/null 2>&1 || die "cannot checkout $BRANCH"
+git fetch origin "$BRANCH"
+remote_sha="$(git rev-parse "origin/$BRANCH")"
+local_sha="$(git rev-parse HEAD)"
+
+if [[ "$local_sha" != "$remote_sha" ]]; then
+    git merge-base --is-ancestor "$local_sha" "$remote_sha" || \
+        die "local $BRANCH diverged from origin/$BRANCH; resolve it manually"
+    git pull --ff-only origin "$BRANCH"
+fi
+
+GIT_SHA="$(git rev-parse HEAD)"
+[[ "$GIT_SHA" == "$remote_sha" ]] || die "checkout is not at origin/$BRANCH"
+[[ "$(git branch --show-current)" == "$BRANCH" ]] || die "wrong branch after checkout"
+
+final_dirty="$(git status --porcelain)"
+[[ -z "$final_dirty" ]] || die "working tree is not clean after update:\n$final_dirty"
+
+if command -v sha256sum >/dev/null; then
+    CONFIG_HASH="$(sha256sum "$ROOT/app/config/harness.yml" | awk '{print substr($1,1,16)}')"
+else
+    CONFIG_HASH="$(shasum -a 256 "$ROOT/app/config/harness.yml" | awk '{print substr($1,1,16)}')"
+fi
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+kill_pid_file() {
+    local file="$1" pid
+    [[ -f "$file" ]] || return 0
+    pid="$(cat "$file" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+        kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$file"
+}
+
+kill_port() {
+    local port="$1" pids
+    pids="$(ss -lntp 2>/dev/null | awk -v p=":$port" '$4 ~ p {match($0,/pid=[0-9]+/); if (RSTART) print substr($0,RSTART+4,RLENGTH-4)}' | sort -u)"
+    for pid in $pids; do
+        kill "$pid" 2>/dev/null || true
+    done
+    [[ -z "$pids" ]] || sleep 1
+    for pid in $pids; do
+        kill -9 "$pid" 2>/dev/null || true
+    done
+}
+
+kill_pid_file "$API_PID_FILE"
+kill_pid_file "$FRONT_PID_FILE"
+pkill -f '[u]vicorn.*app.api.server:app' 2>/dev/null || true
+pkill -f '[v]ite.*5173' 2>/dev/null || true
+pkill -f '[p]npm.*dev' 2>/dev/null || true
+sleep 1
+kill_port "$API_PORT"
+kill_port "$FRONT_PORT"
+
+set -a
+[[ -f "$ROOT/.env" ]] && source "$ROOT/.env"
+set +a
+export APP_GIT_SHA="$GIT_SHA"
+export BUILD_TIME
+export PROMPT_VERSION="${PROMPT_VERSION:-research-prompt.v1}"
+export EVAL_VERSION="${EVAL_VERSION:-blind-eval.v1}"
+export VITE_GIT_SHA="$GIT_SHA"
+export VITE_API_SCHEMA="${VITE_API_SCHEMA:-research-api.v3}"
+
+rm -f "$API_LOG" "$FRONT_LOG"
+nohup "$PYTHON" -m uvicorn app.api.server:app \
+    --app-dir "$ROOT" --host 0.0.0.0 --port "$API_PORT" \
+    >"$API_LOG" 2>&1 &
+API_PID=$!
+echo "$API_PID" > "$API_PID_FILE"
+
+for _ in $(seq 1 60); do
+    kill -0 "$API_PID" 2>/dev/null || die "backend exited during startup"
+    curl -fsS "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1 && break
+    sleep 0.5
+done
+curl -fsS "http://127.0.0.1:$API_PORT/health" >/dev/null || die "backend health check failed"
+
+META_FILE="$RUNTIME_DIR/meta.json"
+curl -fsS "http://127.0.0.1:$API_PORT/api/meta" > "$META_FILE"
+"$PYTHON" - "$META_FILE" "$GIT_SHA" "$CONFIG_HASH" "$API_PID" <<'PY'
+import json
+import os
+import sys
+
+path, expected_sha, expected_config, expected_pid = sys.argv[1:]
+meta = json.load(open(path, encoding="utf-8"))
+checks = {
+    "git_sha": meta.get("git_sha") == expected_sha,
+    "branch": meta.get("branch") == "main",
+    "dirty": meta.get("dirty") is False,
+    "config_hash": meta.get("config_hash") == expected_config,
+    "backend_pid": int(meta.get("backend_pid", -1)) == int(expected_pid),
+}
+failed = [name for name, ok in checks.items() if not ok]
+if failed:
+    raise SystemExit(f"runtime fingerprint mismatch: {failed}; meta={meta}")
+print("Backend fingerprint PASS:", meta["git_sha"])
+PY
+
+curl -fsS "http://127.0.0.1:$API_PORT/openapi.json" >/dev/null || die "backend OpenAPI check failed"
+
+(
+    cd "$ROOT/frontend"
+    pnpm install --frozen-lockfile
+    pnpm run build
+    grep -R -F "$GIT_SHA" dist/assets >/dev/null || \
+        die "frontend build does not contain VITE_GIT_SHA=$GIT_SHA"
+    nohup pnpm dev --host 0.0.0.0 --port "$FRONT_PORT" >"$FRONT_LOG" 2>&1 &
+    echo $! > "$FRONT_PID_FILE"
+)
+FRONT_PID="$(cat "$FRONT_PID_FILE")"
+
+for _ in $(seq 1 60); do
+    kill -0 "$FRONT_PID" 2>/dev/null || die "frontend exited during startup"
+    curl -fsS "http://127.0.0.1:$FRONT_PORT/" >/dev/null 2>&1 && break
+    sleep 0.5
+done
+curl -fsS "http://127.0.0.1:$FRONT_PORT/" >/dev/null || die "frontend health check failed"
+
+git status --porcelain | grep -q . && die "working tree became dirty during deployment" || true
+echo "DEPLOY PASS"
+echo "commit=$GIT_SHA"
+echo "branch=$BRANCH"
+echo "dirty=false"
+echo "backend=http://127.0.0.1:$API_PORT (pid=$API_PID)"
+echo "frontend=http://127.0.0.1:$FRONT_PORT (pid=$FRONT_PID)"
+echo "logs=$LOG_DIR"
+BASH
+chmod +x /tmp/redeploy-research-agent.sh
+/tmp/redeploy-research-agent.sh
+```
+
+成功时必须看到 `DEPLOY PASS`，并且 `commit` 等于 `origin/main`。失败时不要继续使用旧进程，先根据日志定位。

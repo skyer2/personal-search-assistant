@@ -115,6 +115,39 @@ class WorkerActivityTracker:
                 "last_tool_error": dict(self.last_tool_error),
             }
 
+    def timing_summary(self) -> dict[str, int]:
+        """Return completed operation time by stable worker category."""
+        with self._lock:
+            llm_ms = 0
+            tool_ms = 0
+            context_ms = 0
+            compression_ms = 0
+            for event in self.events:
+                if event.get("event") != "OPERATION_COMPLETED":
+                    continue
+                duration = int(event.get("duration_ms") or 0)
+                operation = str(event.get("operation") or "")
+                if operation.startswith("llm."):
+                    llm_ms += duration
+                elif operation.startswith("tool."):
+                    tool_ms += duration
+                elif operation.startswith("context."):
+                    context_ms += duration
+                elif operation.startswith("compression."):
+                    compression_ms += duration
+            return {
+                "llm_ms": llm_ms,
+                "tool_ms": tool_ms,
+                "context_ms": context_ms,
+                "compression_ms": compression_ms,
+                "tool_calls": sum(
+                    1
+                    for event in self.events
+                    if event.get("event") == "OPERATION_COMPLETED"
+                    and str(event.get("operation") or "").startswith("tool.")
+                ),
+            }
+
     def _record(self, event: str, operation: str, operation_id: str = "", **details: Any) -> None:
         self.events.append(
             {

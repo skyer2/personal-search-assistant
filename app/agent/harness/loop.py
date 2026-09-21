@@ -102,6 +102,13 @@ from app.api.context import (
 from app.api.monitor import monitor
 from app.api.tracing import HarnessTracer, build_run_config
 from app.config.loader import HarnessConfig, get_harness_config
+from app.research.runtime.latency import (
+    critical_path_summary,
+    note_substep_duration,
+    note_resource_totals,
+    note_stage_duration,
+)
+from app.research.runtime.background import schedule_post_run
 
 logger = logging.getLogger(__name__)
 
@@ -2251,6 +2258,10 @@ class AgentHarness:
     ) -> HarnessResult:
         phase_started = time.perf_counter()
         self._report_phase(Phase.FINALIZE, "start", state=state)
+        # Delivery has its own timing record; keeping the legacy FINALIZE span
+        # open preserves trace compatibility while the user-visible boundary
+        # is emitted below.
+        self._report_phase(Phase.DELIVERY, "start", state=state)
         state.phase = Phase.FINALIZE
         from app.agent.harness.usage_tracker import set_llm_phase
 
@@ -2295,13 +2306,23 @@ class AgentHarness:
 
         # Run 隔离：交付物只写/只读当前 runs/{run_id}/deliverables
         deliverable_root = Path(deliverable_dir) if deliverable_dir else Path(session_dir)
+        deliverable_started = time.perf_counter()
         written = (
             ensure_requested_deliverables(deliverable_root, state)
             if deliverables_allowed_for_outcome(outcome)
             else {}
         )
         artifacts = session_artifact_names(deliverable_root)
+        note_substep_duration(
+            state,
+            "delivery",
+            "artifact_write",
+            int((time.perf_counter() - deliverable_started) * 1000),
+            input_size=len(state.final_content or ""),
+            output_size=len(artifacts),
+        )
         # P1 RunSummary：结构化结论落盘，供后续 Run 显式继承
+        summary_started = time.perf_counter()
         try:
             from app.observability.events import utc_now
             from app.research.run_summary import RunSummary, save_run_summary
@@ -2346,6 +2367,20 @@ class AgentHarness:
                 )
         except Exception as exc:
             logger.debug("run summary save skipped: %s", exc)
+            note_substep_duration(
+                state,
+                "delivery",
+                "run_summary",
+                int((time.perf_counter() - summary_started) * 1000),
+                status="error",
+            )
+        else:
+            note_substep_duration(
+                state,
+                "delivery",
+                "run_summary",
+                int((time.perf_counter() - summary_started) * 1000),
+            )
         if abort_reason:
             pdf_path = written.get("pdf")
             md_path = written.get("md")
@@ -2373,60 +2408,6 @@ class AgentHarness:
             else:
                 state.final_content = note
 
-        saved = 0
-        policy = get_memory_policy()
-        should_remember = success or policy.remember_on_partial
-        identity = self._memory_identity(state)
-        if should_remember and state.final_content.strip():
-            provenance = provenance_from_step(
-                step_type="finalize",
-                content=state.final_content,
-                metadata={"evidence_sources": []},
-                run_id=state.run_id or state.session_id,
-            )
-            writes = await self.memory_extractor.extract_writes(
-                state.final_content,
-                max_facts=self.harness_config.memory_max_facts_per_remember,
-                task=state.intent.raw_query if state.intent else "",
-                topic=(state.intent.summary if state.intent else "")[:120],
-                session_id=state.session_id,
-                project_id=identity.project_id,
-                provenance=provenance,
-            )
-            saved = await self.memory.remember_writes(
-                writes,
-                user_id=identity.user_id,
-                identity=identity,
-            )
-        state.obs_memory_saved_count += saved
-        if saved:
-            monitor.report_phase(
-                "memory",
-                "done",
-                session_id=state.session_id,
-                count=saved,
-                source="remember",
-            )
-
-        if policy.consolidation_enabled:
-            try:
-                if getattr(policy, "consolidation_durable", True):
-                    self.memory.enqueue_consolidation(
-                        user_id=identity.user_id, identity=identity
-                    )
-                    if policy.consolidation_async:
-                        asyncio.create_task(self.memory.drain_jobs())
-                    else:
-                        await self.memory.drain_jobs()
-                elif policy.consolidation_async:
-                    asyncio.create_task(
-                        self.memory.consolidate(user_id=identity.user_id, identity=identity)
-                    )
-                else:
-                    await self.memory.consolidate(user_id=identity.user_id, identity=identity)
-            except Exception as exc:
-                print(f"[Memory] consolidation skipped: {exc}")
-
         if not state.final_content.strip():
             if abort_reason:
                 state.final_content = (
@@ -2436,12 +2417,21 @@ class AgentHarness:
                 state.final_content = "任务已结束，但没有可展示的正文。"
         persist_status = outcome
         # Persist-before-publish：先写 RunStore，再推 WS，刷新后才能 hydrate 出结果。
+        persist_started = time.perf_counter()
         _project_run_complete(
             state.run_id,
             result=state.final_content,
             status=persist_status,
             error=state.abort_message or abort_reason,
         )
+        note_substep_duration(
+            state,
+            "delivery",
+            "persist_result",
+            int((time.perf_counter() - persist_started) * 1000),
+            input_size=len(state.final_content or ""),
+        )
+        publish_started = time.perf_counter()
         monitor.report_task_result(
             state.final_content,
             status=persist_status if persist_status != "success" else "completed",
@@ -2449,6 +2439,66 @@ class AgentHarness:
             termination=termination,
             synthesis_degraded=bool((state.metadata or {}).get("synthesis_degraded")),
         )
+        note_substep_duration(
+            state,
+            "delivery",
+            "websocket_publish",
+            int((time.perf_counter() - publish_started) * 1000),
+        )
+        delivery_duration = int((time.perf_counter() - phase_started) * 1000)
+        note_stage_duration(state, "delivery", delivery_duration)
+        self._report_phase(
+            Phase.DELIVERY,
+            "done",
+            state=state,
+            duration_ms=delivery_duration,
+            result_status=outcome,
+            artifacts=artifacts,
+        )
+
+        # Memory extraction/consolidation is enrichment.  It is deliberately
+        # scheduled only after persist-before-publish so it cannot turn a
+        # successful answer into a seven-minute ``finalize`` wait.
+        policy = get_memory_policy()
+        identity = self._memory_identity(state)
+        post_run_enabled = bool(
+            policy.enabled
+            and (success or policy.remember_on_partial)
+            and state.final_content.strip()
+        ) or bool(policy.enabled and policy.consolidation_enabled)
+        if post_run_enabled:
+            metadata["post_run_status"] = "scheduled"
+            monitor.report_phase(
+                "post_run",
+                "scheduled",
+                session_id=state.session_id,
+                run_id=str(state.run_id or ""),
+            )
+            task = schedule_post_run(
+                self._post_run_memory(
+                    state,
+                    success=success,
+                    content=state.final_content,
+                    identity=identity,
+                    policy=policy,
+                ),
+                name="memory",
+                timeout_sec=float(getattr(self.harness_config, "post_run_timeout_sec", 10.0) or 10.0),
+            )
+            if task is None:
+                metadata["post_run_status"] = "skipped"
+        else:
+            metadata["post_run_status"] = "skipped"
+            note_substep_duration(state, "post_run", "memory_extract", 0, status="skipped")
+            note_stage_duration(state, "post_run", 0)
+            monitor.report_phase(
+                "post_run",
+                "done",
+                session_id=state.session_id,
+                run_id=str(state.run_id or ""),
+                duration_ms=0,
+                result_status=outcome,
+            )
 
         duration = int((time.perf_counter() - phase_started) * 1000)
         status = outcome
@@ -2471,16 +2521,49 @@ class AgentHarness:
             artifacts=artifacts,
         )
 
+        obs_started = time.perf_counter()
         obs_snapshot = build_observability_snapshot(state)
+        note_substep_duration(
+            state,
+            "delivery",
+            "quality_projection",
+            int((time.perf_counter() - obs_started) * 1000),
+        )
         from app.agent.harness.usage_tracker import get_usage_tracker
 
+        usage_started = time.perf_counter()
         usage_summary = get_usage_tracker().session_summary(state.session_id)
+        note_substep_duration(
+            state,
+            "delivery",
+            "usage_snapshot",
+            int((time.perf_counter() - usage_started) * 1000),
+        )
         try:
             state.obs_cache_read_tokens = int(
                 (usage_summary.get("total") or {}).get("cache_read_tokens") or 0
             )
         except (TypeError, ValueError):
             state.obs_cache_read_tokens = 0
+        records = [
+            row for row in (usage_summary.get("records") or []) if isinstance(row, dict)
+        ]
+        durations = [
+            int((row.get("extra") or {}).get("duration_ms") or 0)
+            for row in records
+        ]
+        ttfts = [
+            int((row.get("extra") or {}).get("ttft_ms") or 0)
+            for row in records
+            if int((row.get("extra") or {}).get("ttft_ms") or 0) > 0
+        ]
+        note_resource_totals(
+            state,
+            llm_ms=sum(durations),
+            ttft_ms=min(ttfts) if ttfts else None,
+            llm_calls=len(records),
+            tokens=int((usage_summary.get("total") or {}).get("total_tokens") or 0),
+        )
         result = HarnessResult(
             session_id=state.session_id,
             status=status,
@@ -2494,6 +2577,10 @@ class AgentHarness:
                 "search_mode": str((state.metadata or {}).get("search_mode") or ""),
                 "tool_calls_count": state.tool_calls_count,
                 "latency_ms": total_latency_ms,
+                "latency": critical_path_summary(metadata),
+                "delivery_ms": int((metadata.get("latency") or {}).get("delivery_ms") or 0),
+                "post_run_ms": int((metadata.get("latency") or {}).get("post_run_ms") or 0),
+                "post_run_status": str(metadata.get("post_run_status") or "skipped"),
                 "step_success_rate": round(step_success_rate, 3),
                 "avg_compression_ratio": round(avg_compression, 3),
                 "memory_recalled": state.memory_recalled,
@@ -2615,6 +2702,136 @@ class AgentHarness:
             "tool_calls": max(0, max_tools - int(state.tool_calls_count or 0)),
             "tokens": max(0, max_tokens - self._estimate_run_tokens(state)),
         }
+
+    async def _post_run_memory(
+        self,
+        state: LoopState,
+        *,
+        success: bool,
+        content: str,
+        identity: MemoryIdentity,
+        policy: Any,
+    ) -> None:
+        """Run optional memory work after the answer has been delivered.
+
+        Memory is enrichment, not part of the completion contract.  In
+        particular, disabled memory must not invoke an LLM and enabled memory
+        must not hold the user-visible delivery path open.
+        """
+        post_started = time.perf_counter()
+        metadata = state.metadata if isinstance(state.metadata, dict) else {}
+        should_remember = success or bool(policy.remember_on_partial)
+        try:
+            if policy.enabled and should_remember and content.strip():
+                extraction_started = time.perf_counter()
+                provenance = provenance_from_step(
+                    step_type="finalize",
+                    content=content,
+                    metadata={"evidence_sources": []},
+                    run_id=state.run_id or state.session_id,
+                )
+                writes = await self.memory_extractor.extract_writes(
+                    content,
+                    max_facts=self.harness_config.memory_max_facts_per_remember,
+                    task=state.intent.raw_query if state.intent else "",
+                    topic=(state.intent.summary if state.intent else "")[:120],
+                    session_id=state.session_id,
+                    project_id=identity.project_id,
+                    provenance=provenance,
+                )
+                note_substep_duration(
+                    state,
+                    "post_run",
+                    "memory_extract",
+                    int((time.perf_counter() - extraction_started) * 1000),
+                    input_size=len(content),
+                    output_size=len(writes),
+                    model=type(self.memory_extractor.model).__name__
+                    if self.memory_extractor.model is not None
+                    else "heuristic",
+                )
+                write_started = time.perf_counter()
+                saved = await self.memory.remember_writes(
+                    writes,
+                    user_id=identity.user_id,
+                    identity=identity,
+                )
+                note_substep_duration(
+                    state,
+                    "post_run",
+                    "memory_write",
+                    int((time.perf_counter() - write_started) * 1000),
+                    input_size=len(writes),
+                    output_size=int(saved or 0),
+                )
+                state.obs_memory_saved_count += int(saved or 0)
+            else:
+                # Make the reason visible in the latency breakdown.  This is
+                # useful when diagnosing a deployment whose environment
+                # accidentally turns memory on.
+                note_substep_duration(
+                    state,
+                    "post_run",
+                    "memory_extract",
+                    0,
+                    status="skipped",
+                )
+
+            if policy.enabled and policy.consolidation_enabled:
+                consolidation_started = time.perf_counter()
+                if getattr(policy, "consolidation_durable", True):
+                    self.memory.enqueue_consolidation(
+                        user_id=identity.user_id,
+                        identity=identity,
+                    )
+                    if policy.consolidation_async:
+                        asyncio.create_task(self.memory.drain_jobs())
+                    else:
+                        await self.memory.drain_jobs()
+                elif policy.consolidation_async:
+                    asyncio.create_task(
+                        self.memory.consolidate(
+                            user_id=identity.user_id,
+                            identity=identity,
+                        )
+                    )
+                else:
+                    await self.memory.consolidate(
+                        user_id=identity.user_id,
+                        identity=identity,
+                    )
+                note_substep_duration(
+                    state,
+                    "post_run",
+                    "memory_consolidation",
+                    int((time.perf_counter() - consolidation_started) * 1000),
+                )
+        except asyncio.CancelledError:
+            metadata["post_run_status"] = "cancelled"
+            raise
+        except Exception as exc:
+            # Post-run failures are diagnostic only and never change the run
+            # outcome after the answer has been persisted.
+            metadata["post_run_status"] = "failed"
+            metadata.setdefault("post_run_errors", []).append(str(exc))
+            logger.warning("post-run memory work skipped: %s", exc)
+        finally:
+            post_duration = int((time.perf_counter() - post_started) * 1000)
+            note_stage_duration(
+                state,
+                "post_run",
+                post_duration,
+            )
+            if metadata.get("post_run_status") == "scheduled":
+                metadata["post_run_status"] = "completed"
+            monitor.report_phase(
+                "post_run",
+                "done",
+                session_id=state.session_id,
+                run_id=str(state.run_id or ""),
+                duration_ms=post_duration,
+                result_status=str((metadata.get("termination") or {}).get("outcome") or ""),
+            )
 
     def _report_phase(
         self,

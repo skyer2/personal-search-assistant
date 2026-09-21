@@ -60,6 +60,16 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
         and (event.get("attributes") or {}).get("used") == 0
     ]
     quality = dict(meta.get("quality") or {})
+    completion_contract = quality.get("completion_contract") if isinstance(quality.get("completion_contract"), dict) else {}
+    gap_check = quality.get("gap_check") if isinstance(quality.get("gap_check"), dict) else {}
+    # Coverage events are diagnostics.  The release gate follows the final
+    # delivery contract so a stale/intermediate gap event cannot reject a
+    # complete grounded answer.
+    delivery_coverage = bool(
+        completion_contract.get("passed")
+        or gap_check.get("enough_to_answer")
+        or (quality.get("verdict") == "pass" and meta.get("answer_complete"))
+    )
     citation_metrics = quality.get("citation_metrics") if isinstance(quality.get("citation_metrics"), dict) else {}
     accepted_findings = max(accepted_findings, int(citation_metrics.get("finding_count") or 0))
     admitted_evidence = max(admitted_evidence, int(citation_metrics.get("evidence_count") or 0))
@@ -74,7 +84,8 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
     checks = {
         "findings": accepted_findings > 0,
         "evidence": admitted_evidence > 0 or evidence_events > 0,
-        "coverage_sufficient": coverage_sufficient,
+        "coverage_sufficient": delivery_coverage,
+        "coverage_event_sufficient": coverage_sufficient,
         "quality_pass": quality.get("verdict") == "pass",
         "trace_pass": (trace.get("trace_integrity") or {}).get("passed") is True,
         "one_root": root_count == 1,
@@ -93,7 +104,8 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
         "accepted_findings": accepted_findings,
         "admitted_evidence": admitted_evidence,
         "evidence_events": evidence_events,
-        "coverage_sufficient": coverage_sufficient,
+        "coverage_sufficient": delivery_coverage,
+        "coverage_event_sufficient": coverage_sufficient,
         "quality": quality,
         "trace_integrity": trace.get("trace_integrity") or {},
         "root_count": root_count,

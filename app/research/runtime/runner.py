@@ -39,6 +39,7 @@ from app.research.runtime.reducers import merge_findings, merge_records, merge_s
 from app.research.runtime.latency import (
     critical_path_summary,
     note_final_answer,
+    note_substep_duration,
     note_stage_duration,
     note_worker_durations,
 )
@@ -553,13 +554,40 @@ class ResearchGraphRunner:
     async def _compile_initial_brief(self, session: RunSession) -> Any:
         from app.research.brief.compiler import compile_structured_brief_with_llm
 
-        return await compile_structured_brief_with_llm(
-            session.ctx.task_query,
-            agent=getattr(self.harness, "control_agent", None),
-            budget_manager=session.budget_manager,
-            conversation_delta=str(getattr(session.ctx, "conversation_summary", "") or ""),
-            session_id=session.session_id,
+        started = time.perf_counter()
+        try:
+            brief = await compile_structured_brief_with_llm(
+                session.ctx.task_query,
+                agent=getattr(self.harness, "control_agent", None),
+                budget_manager=session.budget_manager,
+                conversation_delta=str(getattr(session.ctx, "conversation_summary", "") or ""),
+                session_id=session.session_id,
+            )
+        except BaseException:
+            elapsed = int((time.perf_counter() - started) * 1000)
+            note_substep_duration(
+                session.state,
+                "understand",
+                "llm_request",
+                elapsed,
+                input_size=len(session.ctx.task_query),
+                status="error",
+            )
+            note_stage_duration(session.state, "brief", elapsed)
+            note_stage_duration(session.state, "understand", elapsed)
+            raise
+        elapsed = int((time.perf_counter() - started) * 1000)
+        note_substep_duration(
+            session.state,
+            "understand",
+            "llm_request",
+            elapsed,
+            input_size=len(session.ctx.task_query),
+            output_size=len(str(brief.to_dict() if brief else "")),
         )
+        note_stage_duration(session.state, "brief", elapsed)
+        note_stage_duration(session.state, "understand", elapsed)
+        return brief
 
     async def node_brief(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.research.brief.models import FastPathEligibility, StructuredResearchBrief
@@ -570,15 +598,48 @@ class ResearchGraphRunner:
         brief_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
         state = dict(gstate)
+        context_started = time.perf_counter()
         if not isinstance(state.get("brief"), dict) or not state.get("brief"):
             brief = await self._compile_initial_brief(session)
             state["brief"] = brief.to_dict()
+        note_substep_duration(
+            session.state,
+            "understand",
+            "context_build",
+            int((time.perf_counter() - context_started) * 1000),
+            input_size=len(str(gstate)),
+            output_size=len(str(state.get("brief") or "")),
+        )
+        parse_started = time.perf_counter()
         update = brief_node(cast(ResearchState, state))
         brief = StructuredResearchBrief.from_dict(update.get("brief"))
+        note_substep_duration(
+            session.state,
+            "understand",
+            "parse",
+            int((time.perf_counter() - parse_started) * 1000),
+            output_size=len(str(update.get("brief") or "")),
+        )
+        topology_started = time.perf_counter()
         eligibility = FastPathEligibility.from_brief(brief)
         issues = validate_structured_brief(brief)
+        note_substep_duration(
+            session.state,
+            "understand",
+            "validate",
+            int((time.perf_counter() - topology_started) * 1000),
+            output_size=len(issues),
+        )
         if eligibility.eligible:
             session.active_wave_size = 1
+            # The fast path builds its bounded lookup plan inside
+            # ``brief_node``.  Keep that deterministic work visible as a
+            # separate plan stage instead of folding it into topology.
+            note_stage_duration(
+                session.state,
+                "plan",
+                int((time.perf_counter() - topology_started) * 1000),
+            )
         sync_execution_projection(session.state, {**gstate, **update})
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
@@ -633,6 +694,16 @@ class ResearchGraphRunner:
             "brief",
             int((time.perf_counter() - brief_started) * 1000),
         )
+        note_stage_duration(
+            session.state,
+            "understand",
+            int((time.perf_counter() - brief_started) * 1000),
+        )
+        note_stage_duration(
+            session.state,
+            "topology",
+            int((time.perf_counter() - topology_started) * 1000),
+        )
         return update
 
     async def node_supervisor(self, gstate: dict[str, Any]) -> dict[str, Any]:
@@ -645,6 +716,7 @@ class ResearchGraphRunner:
         session = _require_session(gstate)
         supervisor_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
+        context_started = time.perf_counter()
         state = _sync_assessments(session, dict(gstate))
         brief = StructuredResearchBrief.from_dict(state.get("brief"))
         findings = [row for row in state.get("findings") or [] if isinstance(row, dict)]
@@ -657,6 +729,14 @@ class ResearchGraphRunner:
         }
         raw_value_signal = state.get("research_value_signal")
         value_signal = raw_value_signal if isinstance(raw_value_signal, dict) else {}
+        note_substep_duration(
+            session.state,
+            "supervisor",
+            "context_build",
+            int((time.perf_counter() - context_started) * 1000),
+            input_size=len(str(gstate)),
+            output_size=len(findings),
+        )
         _emit(
             session,
             "supervisor.started",
@@ -670,6 +750,7 @@ class ResearchGraphRunner:
             },
         )
         supervisor = SupervisorAgent(getattr(self.harness, "control_agent", None), session.budget_manager)
+        llm_started = time.perf_counter()
         action = await supervisor.decide(
             brief,
             findings,
@@ -678,6 +759,15 @@ class ResearchGraphRunner:
             previous_fingerprints=previous_fingerprints,
             duplicate_search_ratio=float(value_signal.get("duplicate_search_ratio") or 0.0),
         )
+        note_substep_duration(
+            session.state,
+            "supervisor",
+            "llm_request",
+            int((time.perf_counter() - llm_started) * 1000),
+            input_size=len(str(brief.to_dict())) + len(str(findings[:3])),
+            output_size=len(str(action.to_dict() if action else "")),
+        )
+        runtime_decision_started = time.perf_counter()
         action = supervisor.resolve_action(
             action,
             judgement,
@@ -721,6 +811,7 @@ class ResearchGraphRunner:
             if admission.approved:
                 from app.research.workers.registry import worker_tools_for_step
 
+                plan_started = time.perf_counter()
                 approved_requests = [item.request for item in admission.approved]
                 steps = [
                     PlanStep(
@@ -778,6 +869,16 @@ class ResearchGraphRunner:
                 for step in steps:
                     bounded_steps.extend(split_task(step))
                 steps = bounded_steps
+                plan_duration = int((time.perf_counter() - plan_started) * 1000)
+                note_substep_duration(
+                    session.state,
+                    "plan",
+                    "validate",
+                    plan_duration,
+                    input_size=len(approved_requests),
+                    output_size=len(steps),
+                )
+                note_stage_duration(session.state, "plan", plan_duration)
                 plan = ExecutionPlan(
                     steps=steps,
                     summary="Budget-approved Supervisor research action",
@@ -852,6 +953,14 @@ class ResearchGraphRunner:
             "task_ids": list(decision.task_ids),
             "policy_version": "runtime-policy.v1",
         }
+        note_substep_duration(
+            session.state,
+            "supervisor",
+            "runtime_decision",
+            int((time.perf_counter() - runtime_decision_started) * 1000),
+            input_size=len(str(payload)),
+            output_size=len(str(control_decision)),
+        )
         if decision.action == "retry":
             tasks = state.get("tasks")
             for task_id in decision.task_ids:
@@ -1100,6 +1209,11 @@ class ResearchGraphRunner:
             "coverage",
             int((time.perf_counter() - coverage_started) * 1000),
         )
+        note_stage_duration(
+            session.state,
+            "gap_check",
+            int((time.perf_counter() - coverage_started) * 1000),
+        )
         return transition_update(gstate, WorkflowPhase.COVERAGE_JUDGE, update)
 
     async def _bridge_interrupts(self, result: dict[str, Any], session: RunSession) -> Any:
@@ -1218,7 +1332,17 @@ class ResearchGraphRunner:
         result = await WorkerExecutorV2(self.harness, session).execute(task, context)
         if not isinstance(result, WorkerResult):
             raise TypeError("WorkerRuntime.execute must return WorkerResult")
+        result.metrics["dispatch_wave_id"] = dispatch_wave_id
+        result.metrics["worker_attempt"] = attempt
         note_worker_durations(session.state, [result])
+        # A worker fan-out has no single graph node duration.  Record the
+        # worker wall time here; ``critical_path_summary`` later projects the
+        # slowest worker per wave as the research stage wall time.
+        note_stage_duration(
+            session.state,
+            "research",
+            int(result.duration_ms or result.execution_ms or 0),
+        )
         if result.raw is not None:
             session.state.step_results.append(result.raw)
         row = worker_row(task_id, step, result.ok, result.raw) if result.raw is not None else {"task_id": task_id, "ok": result.ok, "summary": result.summary, "step_type": step.step_type, "payload": {"facts": result.facts, "sources": result.sources, "findings": result.findings, "evidence_ids": result.evidence_refs, "candidates": result.candidates}}
@@ -1635,6 +1759,7 @@ class ResearchGraphRunner:
             status=str(decision.get("action") or "synthesize"),
             attributes=control_decision_event_attributes(decision or {"action": "synthesize"}),
         )
+        context_started = time.perf_counter()
         evidence_records = [dict(row) for row in gstate.get("evidence_records") or [] if isinstance(row, dict)]
         claims = [dict(row) for row in gstate.get("claims") or [] if isinstance(row, dict)]
         judgement = dict(gstate.get("coverage_judgement") or {})
@@ -1682,6 +1807,14 @@ class ResearchGraphRunner:
             unresolved_conflicts=list(judgement.get("conflicts") or []),
             compact=compact,
         )
+        note_substep_duration(
+            session.state,
+            "synthesis",
+            "evidence_select",
+            int((time.perf_counter() - context_started) * 1000),
+            input_size=len(str(gstate)),
+            output_size=len(synthesis_context.findings),
+        )
 
         def selected_digests(pack: Any, *, compact_pack: bool) -> list[Any]:
             claims_by_ref: dict[str, list[str]] = {}
@@ -1718,6 +1851,7 @@ class ResearchGraphRunner:
             or (brief.objective,)
         )
         citation_numbers = _citation_numbers_by_evidence(session.ctx.citation_manager)
+        pack_started = time.perf_counter()
         evidence_pack = build_evidence_pack(
             criteria,
             synthesis_context.findings,
@@ -1735,6 +1869,14 @@ class ResearchGraphRunner:
             )
             for digest in selected_digests(evidence_pack, compact_pack=compact)
         ]
+        note_substep_duration(
+            session.state,
+            "synthesis",
+            "evidence_pack",
+            int((time.perf_counter() - pack_started) * 1000),
+            output_size=len(evidence_pack.findings) + len(evidence_pack.evidence_refs),
+        )
+        prompt_started = time.perf_counter()
         request = synthesis_executor_module.SynthesisRequest(
             mode=mode,
             evidence_refs=evidence_refs,
@@ -1770,6 +1912,13 @@ class ResearchGraphRunner:
             project_id=session.ctx.project_id,
             session_id=session.session_id,
         )
+        note_substep_duration(
+            session.state,
+            "synthesis",
+            "prompt_build",
+            int((time.perf_counter() - prompt_started) * 1000),
+            output_size=request.pack_tokens_estimated,
+        )
         digest_ready = validate_synthesis_digests(
             evidence_pack.findings,
             evidence_pack.evidence_refs,
@@ -1789,6 +1938,7 @@ class ResearchGraphRunner:
             },
         )
         skip_llm_synthesis = bool(evidence_records) and remaining_synthesis_tokens < 1_000
+        result: Any
         if skip_llm_synthesis:
             content = render_partial_delivery(
                 objective=brief.objective,
@@ -1825,6 +1975,7 @@ class ResearchGraphRunner:
                 },
             )
         else:
+            provider_started = time.perf_counter()
             span_key = self._start_synthesis_span(
                 session,
                 attempt=request.attempt,
@@ -1839,7 +1990,40 @@ class ResearchGraphRunner:
                 session, span_key, status="ok" if result.ok else "failed",
                 duration_ms=result.duration_ms,
             )
+            provider_duration_ms = int((time.perf_counter() - provider_started) * 1000)
+            provider_metadata = dict(getattr(result, "metadata", {}) or {})
+            note_substep_duration(
+                session.state,
+                "synthesis",
+                "provider_queue",
+                int(provider_metadata.get("provider_queue_ms") or 0),
+                status="ok" if result.ok else "error",
+            )
+            note_substep_duration(
+                session.state,
+                "synthesis",
+                "generation",
+                int(provider_metadata.get("generation_ms") or provider_duration_ms),
+                status="ok" if result.ok else "error",
+                model=str(provider_metadata.get("model") or ""),
+                tokens=int(provider_metadata.get("actual_output_tokens") or 0),
+            )
+            note_substep_duration(
+                session.state,
+                "synthesis",
+                "ttft",
+                int(provider_metadata.get("ttft_ms") or 0),
+                status="ok" if result.ok else "error",
+            )
         synthesis_metadata = dict(getattr(result, "metadata", {}) or {})
+        note_substep_duration(
+            session.state,
+            "synthesis",
+            "parse",
+            int(synthesis_metadata.get("parse_ms") or 0),
+            status="ok" if result.ok else "error",
+            output_size=len(str(getattr(result, "summary", "") or "")),
+        )
         first_attempt_reason = str(result.fail_reason or "")
         first_attempt_duration_ms = int(result.duration_ms or 0)
         attempt_metrics = [{
@@ -1986,6 +2170,30 @@ class ResearchGraphRunner:
                     session, span_key, status="ok" if result.ok else "failed",
                     duration_ms=result.duration_ms,
                 )
+                retry_metadata = dict(getattr(result, "metadata", {}) or {})
+                note_substep_duration(
+                    session.state,
+                    "synthesis",
+                    "provider_queue",
+                    int(retry_metadata.get("provider_queue_ms") or 0),
+                    status="ok" if result.ok else "error",
+                )
+                note_substep_duration(
+                    session.state,
+                    "synthesis",
+                    "generation",
+                    int(retry_metadata.get("generation_ms") or result.duration_ms or 0),
+                    status="ok" if result.ok else "error",
+                    model=str(retry_metadata.get("model") or ""),
+                    tokens=int(retry_metadata.get("actual_output_tokens") or 0),
+                )
+                note_substep_duration(
+                    session.state,
+                    "synthesis",
+                    "ttft",
+                    int(retry_metadata.get("ttft_ms") or 0),
+                    status="ok" if result.ok else "error",
+                )
                 _emit(
                     session,
                     "synthesis.compact.failed" if not result.ok else "synthesis.completed",
@@ -2097,6 +2305,7 @@ class ResearchGraphRunner:
             answer_complete = bool(content.strip() and answerability.answerable)
         content = scrub_internal_ids(content)
         manager = session.ctx.citation_manager
+        citation_started = time.perf_counter()
         if manager is not None and content:
             selected_findings = list(
                 (compact_pack if retried else evidence_pack).findings
@@ -2107,6 +2316,13 @@ class ResearchGraphRunner:
                 citation_numbers,
             )
             content = manager.build_cited_report(content)
+        note_substep_duration(
+            session.state,
+            "synthesis",
+            "citation_binding",
+            int((time.perf_counter() - citation_started) * 1000),
+            output_size=len(content),
+        )
         session.state.final_content = content
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
@@ -2289,6 +2505,15 @@ class ResearchGraphRunner:
             else "partial"
             if content and evidence_records and issues == degradation_issues
             else "fail"
+        )
+        note_substep_duration(
+            session.state,
+            "quality",
+            "validation",
+            int((time.perf_counter() - quality_started) * 1000),
+            input_size=len(content),
+            output_size=len(issues),
+            status="ok" if verdict == "pass" else "warning",
         )
         assessment = {
             "verdict": verdict,

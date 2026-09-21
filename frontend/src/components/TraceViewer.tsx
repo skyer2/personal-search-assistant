@@ -295,6 +295,38 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
   const failureOrigin = summary.failure_origin || null;
   const integrity = summary.trace_integrity || null;
   const progressCount = summary.progress_count ?? progress.length;
+  const latency = summary.latency || null;
+  const latencyRows = latency
+      ? [
+        ["Total", latency.total_ms],
+        ["Time to first evidence", latency.time_to_first_evidence_ms],
+        ["Time to enough evidence", latency.time_to_enough_evidence_ms],
+        ["Understanding", latency.understand_ms],
+        ["Topology", latency.topology_ms],
+        ["Planning", latency.planning_ms],
+        ["Research wall", latency.research_wall_ms],
+        ["Parallel saved", latency.research_parallel_saved_ms],
+        ["Gap check", latency.gap_check_ms],
+        ["Supervisor", Array.isArray(latency.supervisor_ms) ? latency.supervisor_ms.reduce((sum, value) => sum + Number(value || 0), 0) : undefined],
+        ["Synthesis", latency.synthesis_ms],
+        ["Quality gate", latency.quality_blocking_ms],
+        ["Time to answer", latency.time_to_final_answer_ms],
+        ["Delivery", latency.delivery_ms],
+        ["Post-run", latency.post_run_ms],
+        ["LLM", latency.llm_ms],
+        ["Tools", latency.tool_ms],
+        ["Storage", latency.storage_ms],
+        ["Telemetry", latency.telemetry_ms],
+        ["Worker LLM share", latency.worker_llm_ratio == null ? undefined : `${(Number(latency.worker_llm_ratio) * 100).toFixed(1)}%`],
+        ["Worker tool share", latency.worker_tool_ratio == null ? undefined : `${(Number(latency.worker_tool_ratio) * 100).toFixed(1)}%`],
+        ["Worker idle share", latency.worker_idle_ratio == null ? undefined : `${(Number(latency.worker_idle_ratio) * 100).toFixed(1)}%`]
+      ].map(([label, value], index) => ({
+        key: `${String(label)}-${index}`,
+        metric: String(label),
+        value,
+        ratio: String(label).startsWith("Worker ")
+      }))
+    : [];
 
   return (
     <div className="trace-viewer">
@@ -391,6 +423,24 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                   {" · "}
                   Lineage edges: {lineageTotal}
                 </Typography.Paragraph>
+                {latency ? (
+                  <Card size="small" title="Latency Breakdown" style={{ marginBottom: 12 }}>
+                    <ResizableTable
+                      dataSource={latencyRows}
+                      pagination={false}
+                      size="small"
+                      columns={[
+                        { title: "Metric", dataIndex: "metric", key: "metric", width: 180 },
+                        {
+                          title: "Time",
+                          dataIndex: "value",
+                          key: "value",
+                          render: (value: unknown, row: { ratio?: boolean }) => row.ratio ? asText(value) : formatDurationSeconds(value)
+                        }
+                      ]}
+                    />
+                  </Card>
+                ) : null}
                 {brief ? (
                   <Typography.Paragraph>
                     Brief {asText(brief.brief_id)} · dims={(brief.dimensions as string[] | undefined)?.join(", ") || "-"}

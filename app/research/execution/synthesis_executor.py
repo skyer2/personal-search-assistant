@@ -131,19 +131,23 @@ class SynthesisExecutor:
 
         prompt = self._prompt(request, context)
         attempt_metadata = self._attempt_metadata(request, prompt, model)
+        provider_started = time.perf_counter()
         try:
             raw_response = await asyncio.wait_for(
                 self._invoke_raw(model=model, request=request, context=context, prompt=prompt),
                 timeout=self._timeout_sec(timeout_sec),
             )
         except asyncio.TimeoutError:
+            provider_duration_ms = int((time.perf_counter() - provider_started) * 1000)
             return self._result(
                 started,
                 ok=False,
                 summary="synthesis_timeout",
                 fail_reason="synthesis_timeout",
                 evidence_refs=request.evidence_refs,
-                metadata={**attempt_metadata, **self._failure_metadata(
+                metadata={**attempt_metadata, "provider_duration_ms": provider_duration_ms,
+                    "generation_ms": max(0, provider_duration_ms - int(self._last_ttft_ms or 0)),
+                    **self._failure_metadata(
                     request,
                     context,
                     model,
@@ -153,6 +157,7 @@ class SynthesisExecutor:
                 ), "ttft_ms": self._last_ttft_ms},
             )
         except Exception as exc:
+            provider_duration_ms = int((time.perf_counter() - provider_started) * 1000)
             fail_reason, error_category = _failure_details(exc)
             return self._result(
                 started,
@@ -160,7 +165,9 @@ class SynthesisExecutor:
                 summary=f"synthesis_failed:{fail_reason}",
                 fail_reason=fail_reason,
                 evidence_refs=request.evidence_refs,
-                metadata={**attempt_metadata, **self._failure_metadata(
+                metadata={**attempt_metadata, "provider_duration_ms": provider_duration_ms,
+                    "generation_ms": max(0, provider_duration_ms - int(self._last_ttft_ms or 0)),
+                    **self._failure_metadata(
                     request,
                     context,
                     model,
@@ -170,10 +177,17 @@ class SynthesisExecutor:
                 ), "ttft_ms": self._last_ttft_ms},
             )
 
+        parse_started = time.perf_counter()
         response_analysis = {
             **attempt_metadata,
             **self._analyze_response(raw_response, request, context, model),
         }
+        response_analysis["parse_ms"] = int((time.perf_counter() - parse_started) * 1000)
+        provider_duration_ms = int((time.perf_counter() - provider_started) * 1000)
+        response_analysis["provider_duration_ms"] = provider_duration_ms
+        response_analysis["generation_ms"] = max(
+            0, provider_duration_ms - int(self._last_ttft_ms or 0)
+        )
         response_analysis["ttft_ms"] = self._last_ttft_ms
         content = response_analysis["cleaned_content"]
         if not content:

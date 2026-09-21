@@ -50,6 +50,28 @@ if _worker_model_name and _worker_model_name != os.getenv("LLM_QWEN_MAX"):
         print(f"[LLM] worker_model init failed, fallback to main model: {exc}")
         worker_model = model
 
+# Keep control-plane requests on a fast model by default. Deployments can
+# select a dedicated model; otherwise the worker model is reused so brief and
+# supervisor latency does not inherit the slowest research model.
+_supervisor_model_name = os.getenv("LLM_SUPERVISOR_MODEL") or _worker_model_name
+supervisor_model = worker_model
+if _supervisor_model_name and _supervisor_model_name not in {
+    _worker_model_name,
+    os.getenv("LLM_QWEN_MAX"),
+}:
+    try:
+        supervisor_model = wrap_model_with_budget(init_chat_model(
+            model=_supervisor_model_name,
+            model_provider="openai",
+            timeout=model_timeout_sec("LLM_SUPERVISOR_TIMEOUT_SEC"),
+            temperature=_supervisor_temperature,
+            base_url=_openai_base_url,
+            api_key=_openai_api_key,
+        ))
+    except Exception as exc:
+        print(f"[LLM] supervisor_model init failed, fallback to worker model: {exc}")
+        supervisor_model = worker_model
+
 _compression_model_name = os.getenv("LLM_COMPRESSION_MODEL", "qwen-turbo")
 _compression_enabled = os.getenv("HARNESS_LLM_COMPRESSION", "true").lower() != "false"
 

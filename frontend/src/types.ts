@@ -28,6 +28,8 @@ export type HarnessPhaseName =
   | "compress"
   | "validate"
   | "recover"
+  | "delivery"
+  | "post_run"
   | "finalize"
   | "abort";
 
@@ -261,6 +263,47 @@ export interface TraceSummary {
   ended_at?: string | null;
   counts?: Record<string, number>;
   termination?: Record<string, unknown> | null;
+  latency?: {
+    schema_version?: string;
+    total_ms?: number | null;
+    stage_ms?: Record<string, number>;
+    stages?: Record<string, Record<string, unknown>>;
+    substeps?: Record<string, Record<string, unknown>>;
+    understand_ms?: number | null;
+    topology_ms?: number | null;
+    planning_ms?: number | null;
+    research_wall_ms?: number | null;
+    research_worker_sum_ms?: number | null;
+    research_parallel_saved_ms?: number | null;
+    gap_check_ms?: number | null;
+    supervisor_ms?: number[];
+    synthesis_ms?: number | null;
+    synthesis_evidence_select_ms?: number | null;
+    synthesis_evidence_pack_ms?: number | null;
+    synthesis_prompt_build_ms?: number | null;
+    synthesis_provider_queue_ms?: number | null;
+    synthesis_ttft_ms?: number | null;
+    synthesis_generation_ms?: number | null;
+    synthesis_parse_ms?: number | null;
+    synthesis_citation_ms?: number | null;
+    synthesis_validation_ms?: number | null;
+    quality_blocking_ms?: number | null;
+    delivery_ms?: number | null;
+    post_run_ms?: number | null;
+    llm_ms?: number | null;
+    tool_ms?: number | null;
+    storage_ms?: number | null;
+    telemetry_ms?: number | null;
+    llm_calls?: number | null;
+    tokens?: number | null;
+    time_to_first_evidence_ms?: number | null;
+    time_to_enough_evidence_ms?: number | null;
+    time_to_final_answer_ms?: number | null;
+    worker_llm_ratio?: number | null;
+    worker_tool_ratio?: number | null;
+    worker_idle_ratio?: number | null;
+    [key: string]: unknown;
+  };
   identity?: {
     session_id?: string;
     run_id?: string;

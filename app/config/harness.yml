@@ -232,6 +232,8 @@ harness:
     direct_worker_invoke: true
     synthesis_step_timeout_sec: 60
     synthesis_retry_timeout_sec: 30
+    # Memory/consolidation/export enrichment must never block answer delivery.
+    post_run_timeout_sec: 10
     progress_eval_enabled: true
     graph_checkpoint_backend: sqlite
     graph_checkpoint_path: output/.harness/graph_checkpoints.sqlite

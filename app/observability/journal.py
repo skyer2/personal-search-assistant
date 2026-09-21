@@ -298,6 +298,7 @@ def summarize_trace(
     evals: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     termination: dict[str, Any] | None = None
+    latency: dict[str, Any] = {}
     usage = {
         "prompt_tokens": 0,
         "completion_tokens": 0,
@@ -311,6 +312,9 @@ def summarize_trace(
         attrs = event.get("attributes") if isinstance(event.get("attributes"), dict) else {}
         if event_type in {"run.completed", "run.failed", "run.terminated", "run_summary"}:
             metadata = attrs.get("metadata") if isinstance(attrs.get("metadata"), dict) else {}
+            candidate_latency = metadata.get("latency")
+            if isinstance(candidate_latency, dict):
+                latency = dict(candidate_latency)
             candidate = metadata.get("termination") if isinstance(metadata.get("termination"), dict) else None
             if candidate is None and isinstance(attrs.get("termination"), dict):
                 candidate = attrs["termination"]
@@ -671,6 +675,7 @@ def summarize_trace(
         "synthesis": synthesis,
         "recoveries": recoveries,
         "termination": termination,
+        "latency": latency,
         "quality": quality,
         "lineage": lineage,
         "evals": evals,

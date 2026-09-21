@@ -24,6 +24,52 @@ class SupervisorAgent:
         self.agent = agent
         self.budget_manager = budget_manager
 
+    @staticmethod
+    def _compact_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Build a bounded routing view instead of sending raw worker data."""
+        compact: list[dict[str, Any]] = []
+        per_criterion: dict[str, int] = {}
+        for finding in findings:
+            criteria = [
+                str(item)
+                for item in finding.get("supported_criteria") or []
+                if str(item).strip()
+            ]
+            criterion = criteria[0] if criteria else "general"
+            if per_criterion.get(criterion, 0) >= 3:
+                continue
+            per_criterion[criterion] = per_criterion.get(criterion, 0) + 1
+            compact.append(
+                {
+                    "finding_id": str(finding.get("finding_id") or ""),
+                    "claim": str(
+                        finding.get("claim") or finding.get("summary") or ""
+                    )[:800],
+                    "supported_criteria": criteria[:3],
+                    "evidence_ids": [
+                        str(item) for item in finding.get("evidence_ids") or []
+                    ][:5],
+                    "confidence": finding.get("confidence"),
+                    "partial": bool(finding.get("partial")),
+                }
+            )
+            if len(compact) >= 12:
+                break
+        return compact
+
+    @staticmethod
+    def _requires_semantic_decision(
+        judgement: CoverageJudgement | None,
+        budget: dict[str, Any],
+    ) -> bool:
+        # Runtime policy can decide these branches without a provider round
+        # trip. This is especially important after a budget stop.
+        if bool(budget.get("exhausted")):
+            return False
+        if judgement is not None and judgement.sufficient and not judgement.gaps:
+            return False
+        return True
+
     def _task(
         self,
         index: int,
@@ -37,7 +83,7 @@ class SupervisorAgent:
         blocking_conflict_ids: tuple[str, ...] = (),
     ) -> ResearchTaskRequest:
         profile = task_budget_profile("small" if index > 2 else "medium")
-        evidence = ("一手来源", "高质量独立来源")
+        evidence: tuple[str, ...] = ("一手来源", "高质量独立来源")
         if "primary_source" in missing_evidence_types:
             evidence = ("primary source", "一手来源", "高质量独立来源")
         elif "fresh_evidence" in missing_evidence_types:
@@ -107,7 +153,7 @@ class SupervisorAgent:
             )
         candidates = self._actionable_questions(brief, judgement)
         known = set(previous_fingerprints or set())
-        tasks: list[ResearchTaskRequest] = []
+        fallback_tasks: list[ResearchTaskRequest] = []
         for index, objective in enumerate(candidates[:2], start=1):
             task = self._task(
                 index,
@@ -121,12 +167,12 @@ class SupervisorAgent:
                 target_criteria=task.target_criteria,
             )
             if fingerprint not in known:
-                tasks.append(task)
+                fallback_tasks.append(task)
                 known.add(fingerprint)
         return SupervisorAction(
             "CONDUCT_RESEARCH",
             judgement.reason if judgement and judgement.reason else "brief questions are not yet covered",
-            tuple(tasks),
+            tuple(fallback_tasks),
         )
 
     def resolve_action(
@@ -206,10 +252,13 @@ class SupervisorAgent:
         )
         if self.agent is None:
             return fallback
+        if not self._requires_semantic_decision(judgement, budget):
+            return fallback
         started = time.perf_counter()
+        compact_findings = self._compact_findings(findings)
         prompt = SUPERVISOR_PROMPT.format(
             brief=json.dumps(brief.to_dict(), ensure_ascii=False, indent=2),
-            findings=json.dumps(findings[:24], ensure_ascii=False, indent=2),
+            findings=json.dumps(compact_findings, ensure_ascii=False, indent=2),
             coverage=json.dumps(judgement.to_dict() if judgement else {}, ensure_ascii=False, indent=2),
             budget=json.dumps(budget, ensure_ascii=False, indent=2),
             value_signal=json.dumps(

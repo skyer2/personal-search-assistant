@@ -13,7 +13,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from app.agent.harness.context_builder import ContextBuilder
 from app.agent.harness.loop import AgentHarness
 from app.agent.harness.compressor import ContextCompressor
-from app.agent.llm import compression_model, model, synthesis_model, worker_model
+from app.agent.llm import compression_model, model, supervisor_model, synthesis_model, worker_model
 from app.agent.memory.extractor import MemoryExtractor
 from app.agent.memory.store import get_memory_store
 from app.config.loader import get_harness_config
@@ -63,7 +63,7 @@ harness = AgentHarness(
     harness_config=harness_config,
     context_builder=ContextBuilder.from_harness_config(),
     workers=worker_graphs,
-    control_agent=model,
+    control_agent=supervisor_model,
     synthesis_model=synthesis_model,
 )
 
