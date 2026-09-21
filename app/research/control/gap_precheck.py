@@ -15,6 +15,7 @@ class GapPrecheckResult:
     supervisor_calls_avoided: int = 0
     wave: int = 0
     budget_available: bool = True
+    blocking_worker_failures: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -46,8 +47,25 @@ def precheck_gap(
             blocking.append(identifier)
             if identifier not in actionable:
                 actionable.append(identifier)
+    failed_questions: list[str] = []
+    for item in judgement.get("key_question_coverage") or []:
+        if not isinstance(item, dict) or not bool(item.get("blocking")):
+            continue
+        question_id = str(item.get("question_id") or "").strip()
+        missing_types = {str(value) for value in item.get("missing_evidence_types") or []}
+        if question_id and "worker_failed" in missing_types:
+            failed_questions.append(question_id)
+            identifier = f"worker_failed:{question_id}"
+            if identifier not in blocking:
+                blocking.append(identifier)
+            if identifier not in actionable:
+                actionable.append(identifier)
     sufficient = bool(judgement.get("sufficient"))
-    repair_budget = int(budget.get("max_replan_count") or 0)
+    # ``max_replan_count`` is a control-plane limit.  Older state snapshots
+    # omit it, which must mean the configured default rather than “no repair
+    # budget”.  Only an explicit zero disables a repair wave.
+    raw_repair_budget = budget.get("max_replan_count", max_repairs)
+    repair_budget = int(raw_repair_budget) if raw_repair_budget is not None else max_repairs
     if sufficient:
         reason = "coverage_sufficient"
     elif exhausted:
@@ -61,8 +79,8 @@ def precheck_gap(
     elif wave >= max_repairs + 1:
         reason = "repair_limit"
     else:
-        return GapPrecheckResult("TARGETED_RESEARCH", tuple(blocking), tuple(actionable), "blocking_actionable_gap", 0, wave, True)
-    return GapPrecheckResult("SYNTHESIZE", tuple(blocking), tuple(actionable), reason, 1, wave, not exhausted)
+        return GapPrecheckResult("TARGETED_RESEARCH", tuple(blocking), tuple(actionable), "blocking_actionable_gap", 0, wave, True, tuple(failed_questions))
+    return GapPrecheckResult("SYNTHESIZE", tuple(blocking), tuple(actionable), reason, 1, wave, not exhausted, tuple(failed_questions))
 
 
 __all__ = ["GapPrecheckResult", "precheck_gap"]

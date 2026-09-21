@@ -795,7 +795,16 @@ class ResearchGraphRunner:
         raw_value_signal = state.get("research_value_signal")
         value_signal = raw_value_signal if isinstance(raw_value_signal, dict) else {}
         gap_started = time.perf_counter()
-        gap_precheck = precheck_gap(state, max_waves=2, max_repairs=1)
+        harness_config = getattr(self.harness, "harness_config", None)
+        configured_repairs = max(
+            0,
+            int(getattr(harness_config, "max_replan_count", 1) or 0),
+        )
+        gap_precheck = precheck_gap(
+            state,
+            max_waves=2,
+            max_repairs=configured_repairs,
+        )
         note_stage_duration(
             session.state,
             "gap_precheck",
@@ -853,12 +862,15 @@ class ResearchGraphRunner:
             output_size=len(str(action.to_dict() if action else "")),
         )
         runtime_decision_started = time.perf_counter()
-        action = supervisor.resolve_action(
-            action,
-            judgement,
-            brief,
-            previous_fingerprints=previous_fingerprints,
-        )
+        # A deterministic budget/wave stop is authoritative.  Only resolve a
+        # model decision when runtime precheck has approved one repair wave.
+        if gap_precheck.action == "TARGETED_RESEARCH":
+            action = supervisor.resolve_action(
+                action,
+                judgement,
+                brief,
+                previous_fingerprints=previous_fingerprints,
+            )
         payload: dict[str, Any] = {
             "supervisor_action": action.to_dict(),
             "supervisor": {
@@ -882,8 +894,11 @@ class ResearchGraphRunner:
         }
         raw_iteration_limit = state.get("budget", {}).get("max_replan_count")
         iteration_limit = 3 if raw_iteration_limit is None else max(0, int(raw_iteration_limit))
+        # The initial plan is deterministic and must not consume the single
+        # allowed Supervisor repair.  Iteration 1 is the first repair decision;
+        # block only subsequent repair attempts.
         supervisor_iteration_exceeded = (
-            int(payload["supervisor"]["iteration"]) >= max(1, iteration_limit)
+            int(payload["supervisor"]["iteration"]) > max(1, iteration_limit)
         )
         if action.action == "CONDUCT_RESEARCH" and action.research_tasks and not supervisor_iteration_exceeded:
             session.wave_early_stop = False
@@ -915,27 +930,46 @@ class ResearchGraphRunner:
                             "target_criteria": list(item.target_criteria),
                             "target_gaps": list(item.target_gaps),
                             "criterion_id": item.criterion_id,
+                            "question_id": item.question_id,
+                            "hypothesis_id": item.hypothesis_id,
                             "gap_id": item.gap_id,
                             "missing_evidence_types": list(item.missing_evidence_types),
                             "blocking_conflict_ids": list(item.blocking_conflict_ids),
                             "objective": item.objective,
                             "expected_evidence": list(item.expected_evidence),
                             "coverage_keys": list(item.target_criteria),
-                            "estimated_queries": max(1, min(10, len(item.target_criteria) or 1)),
+                            "estimated_queries": min(5 if item.repair else 7, max(1, int(item.max_queries or 1))),
+                            "max_queries": min(5 if item.repair else 7, max(1, int(item.max_queries or 1))),
+                            "max_fetches": min(5 if item.repair else 7, max(1, int(item.max_fetches or 1))),
                             "source_hints": list(item.source_hints),
+                            "source_strategy": [
+                                "primary_source",
+                                "independent_corroboration",
+                                "counter_evidence",
+                            ],
+                            "evidence_needed": list(item.expected_evidence),
+                            "counter_evidence_needed": (
+                                ["counter-evidence or competing estimate"]
+                                if str(brief.user_intent) in {
+                                    "comparison", "trend_forecast", "conflict_analysis",
+                                    "recommendation", "structured_report", "explanation",
+                                }
+                                else []
+                            ),
                             "novelty_reason": item.novelty_reason,
                             "estimated_effort": item.estimated_effort,
                             "token_ceiling": (
                                 budget_profile := task_budget_profile(item.estimated_effort)
                             ).token_ceiling,
-                            "max_llm_calls": (
+                            "max_llm_calls": min(int(item.max_llm_calls or 4), (
                                 max(
                                     budget_profile.max_llm_calls,
                                     session.worker_llm_call_limit(),
                                 )
                                 if session.search_mode == "deep_debug"
                                 else budget_profile.max_llm_calls
-                            ),
+                            )),
+                            "repair": bool(item.repair),
                             **{
                                 key: value
                                 for key, value in task_budget_metadata(budget_profile).items()
@@ -1177,6 +1211,7 @@ class ResearchGraphRunner:
         from app.research.brief.models import StructuredResearchBrief
         from app.research.coverage.judge import CoverageJudgement
         from app.research.coverage.judge import CoverageJudge
+        from app.research.evidence.quality import source_quality_metrics
         from dataclasses import replace
         from app.research.runtime.atomic_fact import AtomicFactAnswer
 
@@ -1189,6 +1224,16 @@ class ResearchGraphRunner:
         claims = [row for row in state.get("claims") or [] if isinstance(row, dict)]
         conflicts = [row for row in state.get("claim_conflicts") or [] if isinstance(row, dict)]
         evidence_records = [row for row in state.get("evidence_records") or [] if isinstance(row, dict)]
+        source_metrics = source_quality_metrics(evidence_records)
+        plan_metadata: dict[str, dict[str, Any]] = {}
+        plan_raw = state.get("plan")
+        if isinstance(plan_raw, dict):
+            for index, step in enumerate(plan_raw.get("steps") or []):
+                if isinstance(step, dict):
+                    task_id = str(step.get("task_id") or f"step_{index}")
+                    metadata = step.get("metadata")
+                    if isinstance(metadata, dict):
+                        plan_metadata[task_id] = dict(metadata)
         previous_raw = state.get("coverage_judgement")
         previous = (
             CoverageJudgement.from_dict(previous_raw)
@@ -1207,6 +1252,8 @@ class ResearchGraphRunner:
             claims=claims,
             evidence=evidence_records,
             previous=previous,
+            worker_results=[row for row in state.get("worker_results") or [] if isinstance(row, dict)],
+            task_metadata=plan_metadata,
         )
         if bool(gstate.get("fast_path")):
             atomic_answer = AtomicFactAnswer.from_dict(state.get("fast_path_answer"))
@@ -1234,6 +1281,8 @@ class ResearchGraphRunner:
                 gap.gap_id or gap.criterion_id for gap in judgement.gaps
             ],
             "reason_codes": [] if judgement.sufficient else ["coverage_gap"],
+            "key_question_coverage": [item.to_dict() for item in judgement.key_question_coverage],
+            "blocking_gap_count": sum(1 for item in judgement.key_question_coverage if item.blocking),
         }
         value_signal = dict(state.get("research_value_signal") or {})
         value_signal.update(
@@ -1294,6 +1343,9 @@ class ResearchGraphRunner:
                 "source": judgement.source,
                 "reason": judgement.reason,
                 "criteria": [row.to_dict() for row in judgement.criteria],
+                "key_question_coverage": [row.to_dict() for row in judgement.key_question_coverage],
+                "blocking_gap_count": sum(1 for row in judgement.key_question_coverage if row.blocking),
+                "source_quality": source_metrics,
                 "delta": judgement.delta.to_dict(),
             },
         )
@@ -1559,7 +1611,21 @@ class ResearchGraphRunner:
         execution_status, result_status, stop_reason, lifecycle_failure = worker_result_lifecycle(result)
         failure = lifecycle_failure
         if step.step_type in {"research", "network_search"}:
-            if admitted_evidence_count == 0:
+            # A timed-out worker may have a source-backed raw artifact that
+            # was intentionally not promoted to canonical evidence. Preserve
+            # that execution fact as PARTIAL; it still cannot satisfy
+            # Coverage or Completion without later verified evidence.
+            salvageable_raw = bool(
+                result.evidence_refs
+                and (
+                    result.sources
+                    or any(
+                        isinstance(item, dict) and (item.get("sources") or item.get("source"))
+                        for item in result.findings
+                    )
+                )
+            )
+            if admitted_evidence_count == 0 and not salvageable_raw:
                 execution_status = TaskExecutionStatus.FAILED
                 result_status = ResultStatus.NONE
                 stop_reason = StopReason.NONE
@@ -1855,6 +1921,7 @@ class ResearchGraphRunner:
             )
         attempts_before = int(gstate.get("synthesis_attempts") or 0)
         compact = attempts_before >= 1
+        report_repair = attempts_before >= 2
         decision = dict(gstate.get("control_decision") or {})
         _emit(
             session,
@@ -1877,7 +1944,9 @@ class ResearchGraphRunner:
             for row in conflict_resolutions
         )
         mode = (
-            "degraded"
+            "report_repair"
+            if report_repair
+            else "degraded"
             if compact
             or has_blocking_conflict
             else "normal"
@@ -1907,7 +1976,20 @@ class ResearchGraphRunner:
         synthesis_context_builder = SynthesisContextBuilder(self.harness, session)
         synthesis_context = synthesis_context_builder.build(
             gstate,
-            limitations=list(judgement.get("missing") or []),
+            limitations=[
+                *list(judgement.get("missing") or []),
+                *(
+                    [
+                        "报告修复必须解决："
+                        + ", ".join(
+                            str(item)
+                            for item in (gstate.get("quality_assessment") or {}).get("issues", [])
+                        )
+                    ]
+                    if report_repair
+                    else []
+                ),
+            ],
             unresolved_conflicts=list(judgement.get("conflicts") or []),
             compact=compact,
         )
@@ -2031,7 +2113,7 @@ class ResearchGraphRunner:
         )
         _emit(
             session,
-            "synthesis.compact.started" if compact else "synthesis.primary.started",
+            "synthesis.report_repair.started" if report_repair else "synthesis.compact.started" if compact else "synthesis.primary.started",
             phase=WorkflowPhase.SYNTHESIS.value,
             status="start",
             attempt=request.attempt,
@@ -2151,6 +2233,7 @@ class ResearchGraphRunner:
         retried = False
         retry_allowed = bool(
             not result.ok
+            and not report_repair
             and result.fail_reason in synthesis_executor_module.RETRYABLE_SYNTHESIS_FAILURES
             and remaining_synthesis_tokens >= 1_000
         )
@@ -2568,11 +2651,13 @@ class ResearchGraphRunner:
         from app.research.delivery.insights import insight_density
         from app.research.domain.completion import evaluate_completion
         from app.research.coverage.gap_check import gap_check
+        from app.research.quality.gate import evaluate_report_quality
         session = _require_session(gstate)
         quality_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
         content = str(gstate.get("final_content") or "").strip()
         judgement = dict(gstate.get("coverage_judgement") or {})
+        strict_quality_contract = not bool(gstate.get("fast_path")) and "key_question_coverage" in judgement
         evidence_records = [row for row in gstate.get("evidence_records") or [] if isinstance(row, dict)]
         issues: list[str] = []
         if not content:
@@ -2587,7 +2672,7 @@ class ResearchGraphRunner:
             issues.append("no_usable_evidence")
         if bool(gstate.get("synthesis_failed")) and (not content or not evidence_records):
             issues.append("synthesis_failed")
-        if isinstance(answerability, dict) and answerability and not bool(answerability.get("answerable")):
+        if strict_quality_contract and isinstance(answerability, dict) and answerability and not bool(answerability.get("answerable")):
             issues.append("answerability_gap")
         answer_contract = dict(gstate.get("answer_contract") or {})
         brief_intent = str((gstate.get("brief") or {}).get("user_intent") or "")
@@ -2605,10 +2690,20 @@ class ResearchGraphRunner:
                 issues.append(citation_reason or "citation_validation_failed")
         # Provider reports created before the v1 answer schema are upgraded at
         # the runtime boundary so the Completion Contract remains authoritative.
-        if not answer_contract and answerable and content:
+        if not answer_contract and content and (answerable or not strict_quality_contract):
             statuses = answerability.get("question_status") if isinstance(answerability, dict) else []
             answers = []
-            for index, status in enumerate(statuses or [], 1):
+            if not statuses:
+                questions = list((gstate.get("brief") or {}).get("key_questions") or [])
+                statuses = [
+                    {
+                        "question_id": f"q{index}",
+                        "supporting_evidence": [str(row.get("evidence_id") or "") for row in evidence_records[:1]],
+                        "supporting_findings": [],
+                    }
+                    for index, _question in enumerate(questions or ["objective"], 1)
+                ]
+            for index, status in enumerate(statuses, 1):
                 answers.append({
                     "question_id": str(status.get("question_id") or f"q{index}"),
                     "direct_answer": content,
@@ -2617,20 +2712,35 @@ class ResearchGraphRunner:
                     "confidence": 0.7,
                 })
             answer_contract = {"objective": str((gstate.get("brief") or {}).get("objective") or ""), "answers": answers}
+        if strict_quality_contract:
+            report_quality = evaluate_report_quality(
+                content=content,
+                brief=dict(gstate.get("brief") or {}),
+                evidence_records=evidence_records,
+                answer_contract=answer_contract,
+            )
+        else:
+            from app.research.quality.gate import QualityGateResult
+            report_quality = QualityGateResult("PASS", (), {"legacy_or_fast_path": True})
+        issues.extend(report_quality.issues)
+        broken_evidence_count = int(report_quality.metrics.get("broken_sentence_count") or 0)
         completion = evaluate_completion(
             brief=gstate.get("brief") or {},
             answer_contract=answer_contract,
             evidence_records=evidence_records,
             final_content=content,
             citation_valid=citation_valid,
+            coverage=judgement if strict_quality_contract else {},
+            broken_evidence_count=broken_evidence_count,
+            minimum_high_authority_ratio=0.6 if strict_quality_contract else 0.0,
         )
-        if completion.passed:
-            issues = [item for item in issues if item not in {"coverage_gap", "answer_incomplete"}]
+        if completion.passed and report_quality.verdict == "PASS":
             answer_complete = True
         if isinstance(answer_contract, dict) and answer_contract:
             completeness = dict(answer_contract.get("completeness") or {})
             if completeness and not bool(completeness.get("complete")):
                 issues.append("answer_incomplete")
+        issues = list(dict.fromkeys(issues))
         blocking = bool(issues)
         degradation_issues = [
             item for item in ("coverage_gap", "synthesis_failed", "answerability_gap") if item in issues
@@ -2638,6 +2748,7 @@ class ResearchGraphRunner:
         repairable = (
             not bool(gstate.get("fast_path"))
             and bool(content)
+            and int(gstate.get("synthesis_attempts") or 0) < 3
             and (
                 not citation_valid
                 or (
@@ -2645,15 +2756,11 @@ class ResearchGraphRunner:
                     and bool(answer_contract)
                     and not bool((answer_contract.get("completeness") or {}).get("complete"))
                 )
+                or report_quality.repairable
             )
-            and int(gstate.get("synthesis_attempts") or 0) < 2
         )
-        verdict = (
-            "pass"
-            if not issues
-            else "partial"
-            if content and evidence_records and issues == degradation_issues
-            else "fail"
+        verdict = "pass" if completion.passed and report_quality.verdict == "PASS" and not issues else (
+            "repairable" if repairable else "partial" if content and evidence_records else "fail"
         )
         note_substep_duration(
             session.state,
@@ -2668,7 +2775,7 @@ class ResearchGraphRunner:
             "verdict": verdict,
             "issues": issues,
             "repairable": repairable,
-            "suggested_action": "repair_report" if repairable and answer_contract else "repair" if repairable else "",
+                    "suggested_action": "repair_report" if repairable and answer_contract else "repair" if repairable else "",
             "grounding": bool(content and evidence_records and citation_valid),
             "citation_metrics": {
                 "evidence_count": len(evidence_records),
@@ -2682,6 +2789,8 @@ class ResearchGraphRunner:
                 (gstate.get("synthesis_mode") or session.state.metadata.get("synthesis_mode") or "")
             ),
             "insight_density": insight,
+            "report_quality": report_quality.to_dict(),
+            "quality_metrics": report_quality.metrics,
         }
         decision = {
             "action": (

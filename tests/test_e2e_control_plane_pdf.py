@@ -85,7 +85,7 @@ class DeterministicSynthesisExecutor:
         )
 
 
-def test_ai_startup_pdf_end_to_end_reaches_success(tmp_path: Path, monkeypatch):
+def test_ai_startup_pdf_end_to_end_marks_unverified_sources_partial(tmp_path: Path, monkeypatch):
     get_recorder()._listeners = []
     monkeypatch.setattr(
         worker_executor_module,
@@ -105,15 +105,18 @@ def test_ai_startup_pdf_end_to_end_reaches_success(tmp_path: Path, monkeypatch):
     query = "你觉的当下国内AI初创有潜力值得加入的公司有哪些？为什么？输出结果为pdf"
     result = asyncio.run(harness.run(query, "e2e-control-plane-pdf", mode="agent"))
 
-    assert result.status == "success"
+    # The fixture intentionally supplies two unverified company homepages and
+    # no independent corroboration. v3 must deliver the PDF but must not call
+    # that research complete.
+    assert result.status == "partial"
     assert "DeepSeek" in result.content
     assert "Moonshot" in result.content
     assert any(path.lower().endswith(".pdf") for path in result.artifacts)
-    assert result.metadata["termination"]["outcome"] == "success"
-    assert result.metadata["termination"]["research_completed"] is True
+    assert result.metadata["termination"]["outcome"] == "partial"
+    assert result.metadata["termination"]["research_completed"] is False
     assert result.metadata["termination"]["synthesis_attempted"] is True
     assert result.metadata["termination"]["quality_attempted"] is True
-    assert result.metadata["quality"]["verdict"] == "pass"
+    assert result.metadata["quality"]["verdict"] != "pass"
 
     run_id = str(result.metadata["run_id"])
     deliverables = (

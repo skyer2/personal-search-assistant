@@ -19,6 +19,7 @@ class QuestionAnswer:
     confidence: float = 0.0
     limitations: list[str] = field(default_factory=list)
     claim_type: ClaimType = "fact"
+    display_title: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -199,7 +200,7 @@ def compile_deterministic_answer(
         status = next((item for item in answerability.question_status if item.question_id == qid), None)
         if status is None or not status.answerable:
             unresolved.append(str(question))
-            answers.append(QuestionAnswer(qid, "当前证据不足，无法可靠回答这一问题。", limitations=["缺少可绑定的支持证据"]))
+            answers.append(QuestionAnswer(qid, "当前证据不足，无法可靠回答这一问题。", limitations=["缺少可绑定的支持证据"], display_title=_display_title(str(question), index)))
             continue
         selected = [by_id[item] for item in status.supporting_findings if item in by_id]
         if not selected:
@@ -215,7 +216,7 @@ def compile_deterministic_answer(
             direct = f"基于当前证据，我判断：{direct}"
         reasoning = claims[1:4] if len(claims) > 1 else claims[:1]
         confidence = min(1.0, max(0.35, sum(float(row.get("confidence") or 0.6) for row in selected[:3]) / max(1, len(selected[:3]))))
-        answers.append(QuestionAnswer(qid, direct, reasoning, status.supporting_findings, status.supporting_evidence, confidence, claim_type=claim_type))
+        answers.append(QuestionAnswer(qid, direct, reasoning, status.supporting_findings, status.supporting_evidence, confidence, claim_type=claim_type, display_title=_display_title(str(question), index)))
     summary = answers[0].direct_answer if answers else "当前没有可生成的回答。"
     return FinalAnswer(objective, answers, summary, "deterministic_recovery", synthesis_degraded, unresolved)
 
@@ -255,7 +256,7 @@ def render_final_answer(answer: FinalAnswer, *, citation_numbers: dict[str, int]
     lines = ["## 直接回答", "", answer.overall_summary, "", "## 关键判断", ""]
     for item in answer.answers:
         refs = "".join(f"[{citation_numbers[ref]}]" for ref in item.evidence_refs if ref in citation_numbers)
-        lines.append(f"### {item.question_id}")
+        lines.append(f"### {item.display_title or _display_title(item.question_id, 0)}")
         lines.append("")
         lines.append(f"{item.direct_answer}{(' ' + refs) if refs else ''}")
         if item.reasoning:
@@ -265,6 +266,17 @@ def render_final_answer(answer: FinalAnswer, *, citation_numbers: dict[str, int]
         lines.extend(["## 尚未回答", "", *[f"- {row}" for row in answer.unresolved_questions], ""])
     lines.extend(["## 限制", "", "以上判断仅基于本次已登记证据；预测性内容明确标注为方向性判断。", ""])
     return "\n".join(lines).strip() + "\n"
+
+
+def _display_title(question: str, index: int) -> str:
+    value = str(question or "").strip()
+    if "热点" in value or "当前" in value:
+        return "2026 当前热点"
+    if "未来" in value or "方向" in value or "趋势" in value:
+        return "未来 1–2 年方向"
+    if value.startswith("q") and value[1:].isdigit():
+        return f"关键判断 {value[1:]}"
+    return value[:60] or f"关键判断 {index or 1}"
 
 
 __all__ = [

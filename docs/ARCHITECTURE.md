@@ -72,6 +72,12 @@ The Supervisor may return only:
 - `CONDUCT_RESEARCH`
 - `COMPLETE`
 
+`COMPLETE` is not authority to suppress a blocking `CoverageGap`: the runtime
+deterministically changes that decision to one bounded targeted repair whenever
+the gap is still actionable.  A missing `max_replan_count` in a legacy state
+snapshot uses the configured one-repair default; only an explicit zero disables
+repair. The deterministic initial plan does not consume that one repair wave.
+
 A research request declares its objective, target criterion, `CoverageGap` ID, missing evidence types, blocking conflict IDs, expected evidence, effort, and worker call limits. It never supplies a machine `task_id`. The deterministic fallback consumes `CoverageJudgement.gaps` directly; it never binds a criterion by array position.
 
 The runtime derives:
@@ -133,7 +139,7 @@ Each `researcher` result is ingested immediately with the same deterministic ing
 
 ## Coverage
 
-Coverage is judged only against Brief key questions. `success_criteria` belongs to the final Quality Gate. Each criterion records supported claim IDs, evidence IDs, independent source IDs, missing evidence types, unresolved conflicts, and confidence.
+Coverage is judged only against Brief key questions. `success_criteria` belongs to the final Quality Gate. Each criterion records supported claim IDs, evidence IDs, independent source IDs, missing evidence types, unresolved conflicts, and confidence. v3 additionally projects each question as `covered`, `partially_covered`, or `uncovered`, with a blocking bit, direct/high-authority support counts, and Worker-failure binding. A blocking question cannot reach `SUCCESS`; it triggers at most one bounded targeted repair.
 
 A criterion is `supported` only when all of the following hold:
 
@@ -155,7 +161,7 @@ Coverage is monotonic:
 
 ## Synthesis and Partial Delivery
 
-Synthesis reads a deterministic Evidence Pack built from Brief criteria, evidence-backed findings, claims, evidence records, and structured conflict resolutions. The pack is criterion-balanced, deduplicated, quality-ranked, and bounded to 8K input tokens normally and 4K on compact retry, with a 30K hard maximum. It does not read legacy coverage state and cannot search. Selected evidence must resolve to a non-empty Runtime-owned digest; otherwise synthesis is skipped and the runtime records `synthesis_evidence_digest_missing`. The single Completion Contract decides the business outcome: a complete grounded answer is `success` even when synthesis used compact or deterministic recovery (those are diagnostics). An evidence-oriented `partial` is reserved for unanswered questions or missing usable evidence. The final contract binds each key question to a direct answer, findings, evidence, confidence, and limitations.
+Synthesis reads a deterministic Evidence Pack built from Brief criteria, evidence-backed findings, claims, evidence records, and structured conflict resolutions. The pack is criterion-balanced, deduplicated, quality-ranked, and bounded to 8K input tokens normally and 4K on compact retry, with a 30K hard maximum. It does not read legacy coverage state and cannot search. Selected evidence must resolve to a non-empty Runtime-owned digest; otherwise synthesis is skipped and the runtime records `synthesis_evidence_digest_missing`. v3 requires semantic question-based organization, deduplication, and a signal → mechanism → milestone → uncertainty structure for forecasts. Raw `art-web-*` Artifact IDs are never canonical Evidence IDs. `SUCCESS` requires all blocking questions closed, sufficient source quality, valid citations, and a passing Quality Gate; compact or deterministic recovery remains a visible diagnostic rather than proof of primary-path performance.
 
 Canonical evidence IDs are bound to stable citation numbers during ingestion. Synthesis sees those numbers in its prompt; after generation, the runtime projects the selected evidence-backed findings onto numeric sentences and rejects unknown citation numbers. Internal worker JSON is removed from user-facing Markdown and PDF deliverables.
 

@@ -117,7 +117,7 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 .\.venv\Scripts\python.exe scripts\live_deep_research_e2e.py --runs 3 --mode deep_debug
 ```
 
-真实评测以 Completion Contract 为准：每个 key question 都有直接回答和可解析证据绑定，引用与 Trace 完整，最终业务状态只能是 `success`、`partial`、`failed` 或 `cancelled`。compact 或 deterministic recovery 只写入 `synthesis_degraded` 等诊断字段，完整回答仍计为 `success`；`partial` 不计通过。盲测套件使用独立查询集和重复运行，单次 fallback 只能证明恢复路径，不代表 primary 性能达标。
+真实评测以 Completion Contract 为准：每个 key question 都有直接回答和可解析证据绑定，引用与 Trace 完整，最终业务状态只能是 `success`、`partial`、`failed` 或 `cancelled`。对分析型问题，`success` 还要求没有 blocking gap、没有截断 finding、正式 Evidence 中高权威来源占比至少 60%，并通过报告质量门。compact 或 deterministic recovery 只写入 `synthesis_degraded` 等诊断字段；它们只有在完整回答仍通过该质量合同后才可计为 `success`。`partial` 不计通过。质量门判为 `REPAIRABLE` 时，运行时最多执行一次无工具的 report repair；单次 fallback 只能证明恢复路径，不代表 primary 性能达标。
 
 本轮十题校准集可通过 `scripts/live_deep_research_suite.py` 顺序执行。脚本每题使用独立 session，清理并重建 `output/live_deep_research_suite/`，保存 `answer_01.md` 至 `answer_10.md` 和 `report.json`；它不会把 Coverage 标签当作终态，最终以 Completion Contract、Quality 和 Trace 完整性联合审计。十题校准结果不等同于 SDD 要求的 20 题 × 3 次盲测发布门槛。
 

@@ -258,6 +258,26 @@ def test_quality_failure_routes_conditionally_and_partial_is_preserved() -> None
         )
         == "synthesize"
     )
+    # A provider compact retry and a report-only repair are distinct bounded
+    # recovery stages.  The repair gets one final no-tool synthesis turn.
+    assert (
+        route_after_quality(
+            {
+                "quality_assessment": {"verdict": "repairable", "repairable": True},
+                "synthesis_attempts": 2,
+            }
+        )
+        == "synthesize"
+    )
+    assert (
+        route_after_quality(
+            {
+                "quality_assessment": {"verdict": "repairable", "repairable": True},
+                "synthesis_attempts": 3,
+            }
+        )
+        == "finalize"
+    )
     assert (
         route_after_quality(
             {

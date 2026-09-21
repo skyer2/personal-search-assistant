@@ -29,7 +29,11 @@ RETRYABLE_SYNTHESIS_FAILURES = frozenset(
 NON_RETRYABLE_SYNTHESIS_FAILURES = frozenset(
     {"provider_auth", "provider_bad_request", "run_token_cap", "run_llm_call_cap"}
 )
-_OUTPUT_TOKEN_LIMITS = {"normal": 3_000, "degraded": 1_800}
+# The synthesis capability uses a low-latency model.  A long answer budget
+# encourages long reasoning/queue time without adding evidence; bounded
+# research reports are deliberately concise and can be expanded by a later
+# user request with fresh evidence.
+_OUTPUT_TOKEN_LIMITS = {"normal": 1_200, "degraded": 900, "report_repair": 700}
 
 
 class _FirstTokenCallback(BaseCallbackHandler):
@@ -111,7 +115,7 @@ class SynthesisExecutor:
     ) -> WorkerResult:
         started = time.perf_counter()
         self._last_ttft_ms: int | None = None
-        if request.mode not in {"normal", "degraded"}:
+        if request.mode not in {"normal", "degraded", "report_repair"}:
             return self._result(
                 started,
                 ok=False,
@@ -278,6 +282,8 @@ class SynthesisExecutor:
         mode_instruction = (
             "先直接回答每个用户问题，再给出关键判断、综合理由和对应证据。允许基于多条证据作出有边界的 inference/forecast，并明确区分 fact、inference、forecast 和 attributed opinion。"
             if request.mode == "normal"
+            else "这是唯一一次报告修复。只基于已有证据重写为紧凑、可读的最终回答：删除截断句、重复和证据罗列；每个核心结论只保留一次；每个预测必须包含当前信号、机制、可观察里程碑和不确定性。不得搜索、抓取或补写未证实内容。"
+            if request.mode == "report_repair"
             else "先直接回答每个用户问题，再给出简洁判断和证据。允许基于现有证据作出有边界的 inference/forecast，明确说明覆盖不足和无法确认的部分，不得补写未证实内容；不得搜索、抓取或重新规划。"
         )
         lines = [
@@ -288,7 +294,10 @@ class SynthesisExecutor:
             "冲突规则：resolved 只能采用指定 winner；expected_disagreement 必须说明口径差异；unresolved 只能披露不确定性，禁止自行选择任何一方。",
             "引用规则：正文每个含数字、金额、日期或百分比的事实句末尾必须标注证据摘录行前缀给出的 [n]；禁止使用 E 编号、artifact 编号或自造编号。",
             "交付规则：不要输出 JSON，也不要说明文件生成能力；PDF/Markdown 由运行时统一生成。",
-            "输出长度：normal 不超过2500字；degraded 不超过1500字。",
+            "结构规则：按用户问题和实际语义标题组织，禁止使用 q1/q2/q3 标题；禁止逐条复述证据摘录或堆砌来源。",
+            "分析/趋势规则：每个预测须明确写出当前信号、推演机制、可观察里程碑与不确定性；强结论必须有直接引用。",
+            "去重规则：同一结论只表达一次；事实、综合判断和预测分别标注。",
+            "输出长度：normal 不超过1200字；degraded 不超过900字；report_repair 不超过700字。",
         ]
         evidence_lines: list[str] = []
         for digest in request.evidence_digests:
@@ -316,7 +325,7 @@ class SynthesisExecutor:
             ("覆盖限制：", [f"- {item}" for item in request.limitations[:20]]),
             ("未解决冲突：", [f"- {item}" for item in request.unresolved_conflicts[:20]]),
             ("冲突处理契约：", conflict_lines),
-            ("输出要求：", ["直接输出面向用户的报告正文；开头必须回答问题，不能以‘已有以下信息’或证据清单开头；随后解释判断依据，最后给证据和限制；引用证据对应的原始来源；不要输出 JSON。"]),
+            ("输出要求：", ["直接输出面向用户的报告正文；开头必须回答问题，不能以‘已有以下信息’或证据清单开头；随后按语义标题解释判断依据、反例与限制；不得复制摘录、不得用 q1/q2/q3 标题；引用证据对应的原始来源；不要输出 JSON。"]),
         )
         budget = max(1_000, request.token_budget)
         for header, section_lines in sections:

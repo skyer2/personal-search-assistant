@@ -663,6 +663,33 @@ class WorkerExecutorV2:
             use_evidence_digest=self.harness.harness_config.synthesis_use_evidence_digest,
             dispatch_mode=dispatch_mode,
         )
+        source_strategy = [
+            str(item)
+            for item in (step.metadata.get("source_strategy") or [])
+            if str(item).strip()
+        ]
+        evidence_needed = [
+            str(item)
+            for item in (step.metadata.get("evidence_needed") or [])
+            if str(item).strip()
+        ]
+        counter_needed = [
+            str(item)
+            for item in (step.metadata.get("counter_evidence_needed") or [])
+            if str(item).strip()
+        ]
+        if source_strategy or evidence_needed or counter_needed:
+            user_message += (
+                "\n\n【证据质量合同】\n"
+                "先检索并抓取官方发布、监管原文、论文原文、公司 newsroom/docs，"
+                "或 Reuters/FT/Bloomberg 等独立权威报道；社区、聚合站和转载只能用于发现线索，"
+                "不得单独支撑核心结论。\n"
+                f"来源策略：{', '.join(source_strategy) or 'primary_source, independent_corroboration'}\n"
+                f"必须补足的证据：{', '.join(evidence_needed) or '至少一条可核验高质量来源'}\n"
+                f"反方/限制证据：{', '.join(counter_needed) or '如有相反证据请记录'}\n"
+                "每条 finding 必须是一句完整、可独立引用的话；不要复制截断 snippet，"
+                "并在 sources 中返回实际 URL，在 artifact_ids 中返回对应抓取 ID。"
+            )
         config = build_run_config(
             f"{context.session_id}:worker:{task.task_id}",
             metadata={

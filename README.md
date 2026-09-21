@@ -28,6 +28,7 @@ This project is not a search engine. Search is only an environment tool. The har
 - Workers reserve 20–45 seconds for soft finalization; first retrieval remains available when no evidence has yet been admitted. Tool errors and worker lifecycle are separate.
 - Synthesis consumes a deterministic 8K/4K Evidence Pack with Runtime-resolved evidence digests and structured conflict resolutions. Compact retry and deterministic recovery are diagnostics; a complete grounded answer remains `success`.
 - The final answer must satisfy the Completion Contract: every key question has a direct answer and real evidence binding.
+- Deep Research v3 additionally requires blocking-gap closure, canonical (non-Artifact) evidence, source-quality checks, and Quality Gate v3 before `success`; see [the quality contract](docs/DEEP_RESEARCH_QUALITY_CONTRACT_V3.md).
 - Semantic LLM calls go through one structured invocation boundary; workers cannot reinterpret user intent.
 - Worker budgets separate search queries, fetched sources, and logical tool invocations.
 - Search success requires at least one valid `http(s)` result; empty provider responses are failures.
@@ -78,6 +79,7 @@ The audit keeps `answer_01.md`–`answer_10.md` and `report.json` under `output/
 - [Observability contract](docs/OBSERVABILITY.md)
 - [Evaluation system](docs/EVALUATION.md)
 - [Deep Research convergence](docs/architecture/deep-research-convergence.md)
+- [Deep Research quality contract v3](docs/DEEP_RESEARCH_QUALITY_CONTRACT_V3.md)
 - [BrowseComp-Plus](docs/BROWSECOMP_PLUS_EVAL.md)
 - [Context and memory boundaries](docs/CONTEXT_SYSTEM.md)
 - [Deployment](docs/OPENEULER_BARE_METAL.md)

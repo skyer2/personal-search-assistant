@@ -13,6 +13,7 @@ from app.api.tracing import build_run_config
 from app.research.brief.models import StructuredResearchBrief
 from app.research.execution.llm_gateway import LLMGateway
 from app.research.evidence.policy import registrable_domain
+from app.research.evidence.quality import is_high_authority
 from app.research.findings.models import ResearchFinding
 
 
@@ -62,6 +63,9 @@ class CoverageGap:
     missing_evidence_type: tuple[str, ...] = ()
     blocking_conflict_ids: tuple[str, ...] = ()
     priority: str = "medium"
+    blocking: bool = True
+    question_id: str = ""
+    dimension: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -85,6 +89,44 @@ class CoverageGap:
                 str(item) for item in row.get("blocking_conflict_ids") or []
             ),
             priority=priority if priority in {"high", "medium", "low"} else "medium",
+            blocking=bool(row.get("blocking", True)),
+            question_id=str(row.get("question_id") or ""),
+            dimension=str(row.get("dimension") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class KeyQuestionCoverage:
+    question_id: str
+    status: str
+    blocking: bool
+    support_count: int = 0
+    independent_source_count: int = 0
+    high_authority_source_count: int = 0
+    direct_evidence_count: int = 0
+    counter_evidence_count: int = 0
+    unresolved_conflicts: tuple[str, ...] = ()
+    missing_evidence_types: tuple[str, ...] = ()
+    confidence: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "KeyQuestionCoverage":
+        row = data or {}
+        return cls(
+            question_id=str(row.get("question_id") or ""),
+            status=str(row.get("status") or "uncovered"),
+            blocking=bool(row.get("blocking", True)),
+            support_count=max(0, int(row.get("support_count") or 0)),
+            independent_source_count=max(0, int(row.get("independent_source_count") or 0)),
+            high_authority_source_count=max(0, int(row.get("high_authority_source_count") or 0)),
+            direct_evidence_count=max(0, int(row.get("direct_evidence_count") or 0)),
+            counter_evidence_count=max(0, int(row.get("counter_evidence_count") or 0)),
+            unresolved_conflicts=tuple(str(item) for item in row.get("unresolved_conflicts") or []),
+            missing_evidence_types=tuple(str(item) for item in row.get("missing_evidence_types") or []),
+            confidence=max(0.0, min(1.0, float(row.get("confidence") or 0.0))),
         )
 
 
@@ -120,6 +162,7 @@ class CoverageJudgement:
     weak_claims: tuple[str, ...] = ()
     recommended_next_questions: tuple[str, ...] = ()
     gaps: tuple[CoverageGap, ...] = ()
+    key_question_coverage: tuple[KeyQuestionCoverage, ...] = ()
     reason: str = ""
     source: str = "deterministic_fallback"
 
@@ -147,6 +190,11 @@ class CoverageJudgement:
             gaps=tuple(
                 CoverageGap.from_dict(item)
                 for item in row.get("gaps") or []
+                if isinstance(item, dict)
+            ),
+            key_question_coverage=tuple(
+                KeyQuestionCoverage.from_dict(item)
+                for item in row.get("key_question_coverage") or []
                 if isinstance(item, dict)
             ),
             reason=str(row.get("reason") or ""),
@@ -342,6 +390,8 @@ def judge_coverage(
     evidence: list[dict[str, Any]] | None = None,
     claim_resolutions: list[dict[str, Any]] | None = None,
     previous: CoverageJudgement | None = None,
+    worker_results: list[dict[str, Any]] | None = None,
+    task_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> CoverageJudgement:
     normalized_findings = [
         item if isinstance(item, ResearchFinding) else ResearchFinding.from_dict(item)
@@ -363,9 +413,30 @@ def judge_coverage(
     }
     required_sources = max(1, int(brief.source_requirements.min_independent_sources or 1))
 
+    task_metadata = task_metadata or {}
+    failed_questions: set[str] = set()
+    successful_questions: set[str] = set()
+    for row in worker_results or []:
+        if not isinstance(row, dict):
+            continue
+        task_id = str(row.get("task_id") or "")
+        metadata = row.get("task_metadata") if isinstance(row.get("task_metadata"), dict) else task_metadata.get(task_id, {})
+        question_id = str((metadata or {}).get("question_id") or "")
+        if not question_id:
+            continue
+        status = str(row.get("result_status") or row.get("status") or "").casefold()
+        failed = not bool(row.get("ok", status not in {"failed", "error"})) or status in {"failed", "error", "none"}
+        if failed:
+            failed_questions.add(question_id)
+        else:
+            successful_questions.add(question_id)
+    failed_questions -= successful_questions
+
     supports: list[CriterionSupport] = []
     gaps: list[CoverageGap] = []
-    for criterion_id, criterion in _criteria(brief):
+    question_coverage: list[KeyQuestionCoverage] = []
+    for question_index, (criterion_id, criterion) in enumerate(_criteria(brief), 1):
+        question_id = f"q{question_index}"
         claim_ids, evidence_ids, confidence, source_ids, directly_bound = _supported_rows(
             criterion_id,
             criterion,
@@ -427,16 +498,41 @@ def judge_coverage(
             status = "unsupported"
             missing = criterion
         priority = "high" if status in {"unsupported", "conflicted"} else "medium"
-        if status != "supported":
+        high_authority_count = sum(
+            1 for evidence_id in unique_evidence_ids
+            if (record := evidence_by_id.get(evidence_id)) is not None and is_high_authority(record)
+        )
+        direct_evidence_count = len(unique_evidence_ids) if directly_bound else 0
+        coverage_status = "covered" if status == "supported" else "partially_covered" if status == "partial" else "uncovered"
+        blocking = coverage_status != "covered" or question_id in failed_questions
+        if question_id in failed_questions:
+            missing_types.append("worker_failed")
+        question_coverage.append(KeyQuestionCoverage(
+            question_id=question_id,
+            status=coverage_status,
+            blocking=blocking,
+            support_count=len(unique_evidence_ids),
+            independent_source_count=len(unique_source_ids),
+            high_authority_source_count=high_authority_count,
+            direct_evidence_count=direct_evidence_count,
+            counter_evidence_count=0,
+            unresolved_conflicts=tuple(sorted(bound_conflicts)),
+            missing_evidence_types=tuple(dict.fromkeys(missing_types)),
+            confidence=confidence if coverage_status != "uncovered" else 0.0,
+        ))
+        if status != "supported" or question_id in failed_questions:
             gaps.append(
                 CoverageGap(
                     gap_id=f"gap_{criterion_id.removeprefix('coverage_')}",
                     criterion_id=criterion_id,
                     description=missing or criterion,
                     current_evidence_ids=tuple(unique_evidence_ids),
-                    missing_evidence_type=tuple(missing_types),
+                    missing_evidence_type=tuple(dict.fromkeys(missing_types)),
                     blocking_conflict_ids=tuple(sorted(bound_blocking_conflicts)),
                     priority=priority,
+                    blocking=blocking,
+                    question_id=question_id,
+                    dimension=criterion,
                 )
             )
         supports.append(
@@ -499,7 +595,7 @@ def judge_coverage(
 
     deterministic_sufficient = bool(supports) and all(
         row.status == "supported" for row in supports
-    ) and not blocking_conflict_ids
+    ) and not blocking_conflict_ids and not failed_questions
     if (
         previous is not None
         and previous.sufficient
@@ -529,6 +625,7 @@ def judge_coverage(
             conflicts=tuple(sorted(conflict_ids)),
             weak_claims=weak,
             gaps=(),
+            key_question_coverage=tuple(question_coverage),
             reason="all Brief key questions have independently supported evidence",
         )
     return CoverageJudgement(
@@ -541,6 +638,7 @@ def judge_coverage(
         weak_claims=weak,
         recommended_next_questions=tuple(gap.description for gap in gaps[:4]),
         gaps=tuple(gaps),
+        key_question_coverage=tuple(question_coverage),
         reason=(
             "coverage cannot improve without an evidence, claim, gap-closure, or conflict delta"
             if previous is not None and not previous.sufficient and not progress
@@ -564,6 +662,8 @@ class CoverageJudge:
         evidence: list[dict[str, Any]] | None = None,
         claim_resolutions: list[dict[str, Any]] | None = None,
         previous: CoverageJudgement | None = None,
+        worker_results: list[dict[str, Any]] | None = None,
+        task_metadata: dict[str, dict[str, Any]] | None = None,
     ) -> CoverageJudgement:
         fallback = judge_coverage(
             brief,
@@ -573,6 +673,8 @@ class CoverageJudge:
             evidence=evidence,
             claim_resolutions=claim_resolutions,
             previous=previous,
+            worker_results=worker_results,
+            task_metadata=task_metadata,
         )
         if self.agent is None:
             return fallback
@@ -644,6 +746,7 @@ __all__ = [
     "CoverageDelta",
     "CoverageGap",
     "CoverageJudgement",
+    "KeyQuestionCoverage",
     "CoverageJudge",
     "CriterionSupport",
     "judge_coverage",

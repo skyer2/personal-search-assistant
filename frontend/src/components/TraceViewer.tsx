@@ -776,6 +776,37 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                         render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join("; ") : asText(value)}</div>
                       },
                       {
+                        title: "Blocking gaps",
+                        dataIndex: "blocking_gap_count",
+                        width: 120,
+                        key: "blocking_gap_count",
+                        render: (value: unknown) => asText(value, "0")
+                      },
+                      {
+                        title: "Key-question coverage",
+                        dataIndex: "key_question_coverage",
+                        width: 300,
+                        key: "key_question_coverage",
+                        render: (value: unknown) => {
+                          if (!Array.isArray(value)) return "-";
+                          return <div className="table-wrap-cell">{value.map((item) => {
+                            const row = item as Record<string, unknown>;
+                            return `${asText(row.question_id)}: ${asText(row.status)}${row.blocking === true ? " (blocking)" : ""}`;
+                          }).join("; ")}</div>;
+                        }
+                      },
+                      {
+                        title: "Source quality",
+                        dataIndex: "source_quality",
+                        width: 220,
+                        key: "source_quality",
+                        render: (value: unknown) => {
+                          const row = value as Record<string, unknown> | undefined;
+                          if (!row || typeof row !== "object") return "-";
+                          return <div className="table-wrap-cell">primary {asText(row.primary_source_ratio, "0")} · high-authority {asText(row.high_authority_source_ratio, "0")} · domains {asText(row.independent_source_count, "0")}</div>;
+                        }
+                      },
+                      {
                         title: "Next Questions",
                         dataIndex: "recommended_next_questions",
                         width: 340,

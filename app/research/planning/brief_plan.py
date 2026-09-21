@@ -94,6 +94,7 @@ def execution_plan_from_brief(
     from app.research.runtime.task_budget import task_budget_metadata, task_budget_profile
 
     contract = build_brief_and_plan(brief, plan_version=plan_version)
+    analysis = _analysis_type(brief)
     steps: list[PlanStep] = []
     for task in contract.tasks:
         profile = task_budget_profile("medium")
@@ -108,8 +109,13 @@ def execution_plan_from_brief(
                 "task_kind": "initial_bounded_plan",
                 "question_id": task.question_id,
                 "hypothesis": task.hypothesis,
+                "hypothesis_id": f"h_{task.question_id}",
+                "criterion_id": task.objective,
+                "target_criteria": [task.objective],
+                "target_gaps": [task.objective],
                 "evidence_needed": list(task.evidence_needed),
                 "counter_evidence_needed": list(task.counter_evidence_needed),
+                "source_strategy": ["primary_source", "independent_corroboration", "counter_evidence"] if analysis else ["primary_source", "independent_corroboration"],
                 "search_hints": list(task.search_hints),
                 "entities": list(task.entities[:MAX_ENTITIES]),
                 "dimensions": list(task.dimensions[:MAX_DIMENSIONS]),

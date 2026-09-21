@@ -17,6 +17,11 @@ class EvidenceRecord:
     effective_at: str = ""
     source_tier: str = "SECONDARY"
     authority_score: float = 0.5
+    source_type: str = "secondary"
+    directness_score: float = 0.5
+    freshness_score: float = 0.5
+    independence_score: float = 1.0
+    completeness_score: float = 0.5
     excerpt_ref: str = ""
     artifact_ref: str = ""
     language: str = ""
@@ -39,6 +44,11 @@ class EvidenceRecord:
             effective_at=str(row.get("effective_at") or ""),
             source_tier=str(row.get("source_tier") or "SECONDARY"),
             authority_score=max(0.0, min(1.0, float(row.get("authority_score") or 0.5))),
+            source_type=str(row.get("source_type") or "secondary"),
+            directness_score=max(0.0, min(1.0, float(row.get("directness_score") or 0.5))),
+            freshness_score=max(0.0, min(1.0, float(row.get("freshness_score") or 0.5))),
+            independence_score=max(0.0, min(1.0, float(row.get("independence_score") or 1.0))),
+            completeness_score=max(0.0, min(1.0, float(row.get("completeness_score") or 0.5))),
             excerpt_ref=str(row.get("excerpt_ref") or ""),
             artifact_ref=str(row.get("artifact_ref") or ""),
             language=str(row.get("language") or ""),

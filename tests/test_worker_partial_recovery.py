@@ -447,4 +447,6 @@ async def test_partial_worker_result_maps_to_failed_partial_canonical_state(monk
     assert task["failure"]["code"] == "no_accepted_findings"
     assert task["stop_reason"] == "timeout"
     assert task["evidence_refs"] == ["art-web-1"]
-    assert update["evidence_refs"] == ["art-web-1"]
+    # Raw artifact references remain attached to the Worker diagnostic but are
+    # never promoted into the canonical evidence ledger.
+    assert update["evidence_refs"] == []

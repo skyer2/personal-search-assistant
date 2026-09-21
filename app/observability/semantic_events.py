@@ -243,6 +243,8 @@ def quality_event_attributes(assessment: dict[str, Any] | None) -> dict[str, Any
         "suggested_action": str(value.get("suggested_action") or ""),
         "grounding": bool(value.get("grounding")),
         "citation_metrics": dict(citation_metrics) if isinstance(citation_metrics, dict) else {},
+        "quality_metrics": dict(value.get("quality_metrics") or {}),
+        "completion_contract": dict(value.get("completion_contract") or {}),
     }
 
 

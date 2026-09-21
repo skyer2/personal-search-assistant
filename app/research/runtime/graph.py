@@ -327,6 +327,7 @@ def coverage_judge_node(state: ResearchState) -> dict[str, Any]:
         claims=[row for row in state.get("claims") or [] if isinstance(row, dict)],
         evidence=[row for row in state.get("evidence_records") or [] if isinstance(row, dict)],
         previous=previous,
+        worker_results=[row for row in state.get("worker_results") or [] if isinstance(row, dict)],
     )
     progress_projection = {
         "status": judgement.status,
@@ -453,7 +454,10 @@ def route_after_quality(state: ResearchState) -> str:
     assessment = state.get("quality_assessment") if isinstance(state.get("quality_assessment"), dict) else {}
     if str(assessment.get("verdict") or "") == "pass":
         return "finalize"
-    if bool(assessment.get("repairable")) and int(state.get("synthesis_attempts") or 0) < 2:
+    # The compact retry is recovery for a failed synthesis call.  A report
+    # repair is a separate, bounded operation and is therefore allowed once
+    # after that retry.  The runtime never loops beyond three total attempts.
+    if bool(assessment.get("repairable")) and int(state.get("synthesis_attempts") or 0) < 3:
         return "synthesize"
     return "finalize"
 

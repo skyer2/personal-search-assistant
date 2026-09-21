@@ -55,6 +55,17 @@ def test_gap_precheck_allows_one_targeted_repair_only_for_actionable_gap():
     assert result.supervisor_calls_avoided == 0
 
 
+def test_gap_precheck_uses_configured_repair_default_when_snapshot_omits_limit():
+    result = precheck_gap(
+        {
+            "coverage_judgement": {"sufficient": False, "gaps": [{"gap_id": "q3", "blocking": True}]},
+            "budget": {"exhausted": False},
+            "dispatch_wave_id": 1,
+        }
+    )
+    assert result.action == "TARGETED_RESEARCH"
+
+
 def test_gap_precheck_stops_at_max_wave_without_model_call():
     result = precheck_gap(
         {

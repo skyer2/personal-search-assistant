@@ -79,6 +79,7 @@ class SupervisorAgent:
         target_criteria: tuple[str, ...] = (),
         target_gaps: tuple[str, ...] = (),
         criterion_id: str = "",
+        question_id: str = "",
         gap_id: str = "",
         missing_evidence_types: tuple[str, ...] = (),
         blocking_conflict_ids: tuple[str, ...] = (),
@@ -96,6 +97,8 @@ class SupervisorAgent:
             target_criteria=target_criteria,
             target_gaps=target_gaps,
             criterion_id=criterion_id,
+            question_id=question_id,
+            hypothesis_id=f"repair:{criterion_id or question_id}",
             gap_id=gap_id,
             missing_evidence_types=missing_evidence_types,
             blocking_conflict_ids=blocking_conflict_ids,
@@ -103,6 +106,10 @@ class SupervisorAgent:
             expected_evidence=evidence,
             novelty_reason="针对当前 Coverage 缺口收敛研究范围",
             estimated_effort="small" if index > 2 else "medium",
+            repair=True,
+            max_queries=5,
+            max_fetches=5,
+            max_llm_calls=2,
         )
 
     def fallback_action(
@@ -135,6 +142,7 @@ class SupervisorAgent:
                     target_criteria=(gap.criterion_id,),
                     target_gaps=(gap.description,),
                     criterion_id=gap.criterion_id,
+                    question_id=gap.question_id,
                     gap_id=gap.gap_id,
                     missing_evidence_types=gap.missing_evidence_type,
                     blocking_conflict_ids=gap.blocking_conflict_ids,
@@ -183,6 +191,26 @@ class SupervisorAgent:
         brief: StructuredResearchBrief | None = None,
         previous_fingerprints: set[str] | None = None,
     ) -> SupervisorAction:
+        blocking_gaps = bool(
+            judgement
+            and any(bool(getattr(gap, "blocking", False)) for gap in judgement.gaps)
+        )
+        # A semantic model may choose COMPLETE, but it is never allowed to
+        # override an actionable blocking gap.  Runtime evidence state is the
+        # authority for this transition.
+        if action.action == "COMPLETE" and blocking_gaps:
+            fallback = self.fallback_action(
+                brief or StructuredResearchBrief("", 1, "", "research"),
+                judgement,
+                {},
+                previous_fingerprints=previous_fingerprints,
+            )
+            return SupervisorAction(
+                "CONDUCT_RESEARCH",
+                "runtime_override:blocking_coverage_gap",
+                fallback.research_tasks,
+                "runtime_blocking_gap_override",
+            )
         if action.action != "CONDUCT_RESEARCH" or action.research_tasks:
             return action
         questions = self._actionable_questions(brief, judgement)
@@ -205,6 +233,8 @@ class SupervisorAgent:
                     target_criteria=item.target_criteria,
                     target_gaps=item.target_gaps,
                     criterion_id=item.criterion_id,
+                    question_id=item.question_id,
+                    hypothesis_id=item.hypothesis_id,
                     gap_id=item.gap_id,
                     missing_evidence_types=item.missing_evidence_types,
                     blocking_conflict_ids=item.blocking_conflict_ids,
@@ -214,6 +244,10 @@ class SupervisorAgent:
                     novelty_reason=item.novelty_reason,
                     estimated_effort=item.estimated_effort,
                     task_id="",
+                    repair=item.repair,
+                    max_queries=item.max_queries,
+                    max_fetches=item.max_fetches,
+                    max_llm_calls=item.max_llm_calls,
                 )
             )
         return SupervisorAction(

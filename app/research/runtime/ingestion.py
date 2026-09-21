@@ -14,7 +14,9 @@ from app.research.claims.resolve import resolve_edges
 from app.research.evidence.admission import admit_evidence
 from app.research.evidence.models import EvidenceRecord
 from app.research.evidence.policy import registrable_domain
+from app.research.evidence.quality import score_source
 from app.research.findings.compress import compress_worker_result
+from app.research.findings.integrity import complete_sentence
 from app.research.runtime.task_identity import (
     normalize_search_query,
     worker_result_id,
@@ -51,7 +53,9 @@ def _authority(locator: str, source_quality: str = "") -> tuple[str, float]:
 
 
 def _evidence_id(task_id: str, locator: str, index: int, requested: str = "") -> str:
-    if requested:
+    # Artifact IDs identify raw captures, never canonical evidence.  Keep an
+    # explicit canonical E-id even when a model cites the artifact directly.
+    if requested and not requested.casefold().startswith("art-"):
         return requested
     digest = hashlib.sha1(f"{task_id}|{locator}|{index}".encode("utf-8")).hexdigest()[:12]
     return f"evidence_{digest}"
@@ -82,6 +86,29 @@ def _runtime_artifact_metadata(
         return {}
 
 
+def _resolve_artifact_source(artifact_ref: str) -> tuple[str, dict[str, Any]]:
+    """Return the original source URL for a runtime artifact when available.
+
+    A search worker commonly returns ``art-web-*`` IDs in its structured
+    payload.  Those IDs are internal captures, not sources.  Resolving them
+    here keeps the ledger, source scoring and citation manager anchored on the
+    fetch URL instead of on an opaque artifact handle.
+    """
+    if not artifact_ref:
+        return "", {}
+    try:
+        from app.agent.harness.artifacts import get_artifact_store
+
+        artifact = get_artifact_store().get(artifact_ref)
+        if artifact is None:
+            return "", {}
+        return str(getattr(artifact, "locator", "") or ""), dict(
+            getattr(artifact, "metadata", {}) or {}
+        )
+    except Exception:
+        return "", {}
+
+
 def _prepare_evidence(rows: list[dict[str, Any]]) -> tuple[list[EvidenceRecord], list[dict[str, Any]]]:
     records: list[EvidenceRecord] = []
     prepared: list[dict[str, Any]] = []
@@ -99,16 +126,31 @@ def _prepare_evidence(rows: list[dict[str, Any]]) -> tuple[list[EvidenceRecord],
         source_quality = str(payload.get("source_quality") or "")
         for index, locator in enumerate(locators):
             requested = requested_ids[index] if index < len(requested_ids) else ""
-            tier, authority = _authority(locator, source_quality)
             artifact_ref = str(
                 payload.get("artifact_ref")
                 or (artifact_ids[index] if index < len(artifact_ids) else "")
+                or (locator if locator.casefold().startswith("art-") else "")
                 or ""
             )
+            resolved_locator, resolved_metadata = _resolve_artifact_source(artifact_ref)
+            if resolved_locator:
+                locator = resolved_locator
+            tier, authority = _authority(locator, source_quality)
             runtime_metadata = _runtime_artifact_metadata(
                 artifact_ref,
                 locator,
                 requested,
+            )
+            runtime_metadata = {**resolved_metadata, **runtime_metadata}
+            quality = score_source(
+                locator,
+                declared_quality=source_quality,
+                published_at=str(runtime_metadata.get("published_at") or ""),
+            )
+            tier = "PRIMARY" if quality.source_type == "primary" else (
+                "HIGH_QUALITY_SECONDARY"
+                if quality.source_type == "authoritative_secondary"
+                else tier
             )
             record = EvidenceRecord(
                 evidence_id=_evidence_id(task_id, locator, index, requested),
@@ -125,7 +167,12 @@ def _prepare_evidence(rows: list[dict[str, Any]]) -> tuple[list[EvidenceRecord],
                     or ""
                 ),
                 source_tier=tier,
-                authority_score=authority,
+                authority_score=max(authority, quality.authority),
+                source_type=quality.source_type,
+                directness_score=quality.directness,
+                freshness_score=quality.freshness,
+                independence_score=quality.independence,
+                completeness_score=quality.completeness,
                 excerpt_ref=str(payload.get("excerpt_ref") or ""),
                 artifact_ref=artifact_ref,
                 language=str(payload.get("language") or ""),
@@ -246,7 +293,7 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     evidence_rows, prepared_rows = _prepare_evidence(selected)
-    admission = admit_evidence(evidence_rows)
+    admission = admit_evidence(evidence_rows, require_verified_artifact=True)
     admitted_ids = {item.evidence_id for item in admission.admitted}
     metadata = _task_metadata(state)
     for row in selected:
@@ -315,6 +362,19 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
         raw_finding_count += len(payload_findings)
         accepted_for_row: list[dict[str, Any]] = []
         for raw_finding in payload_findings:
+            claim_text = str(raw_finding.get("claim") or raw_finding.get("summary") or "")
+            complete, integrity_reason = complete_sentence(claim_text)
+            if not complete:
+                rejected_finding_count += 1
+                finding_diagnostics.append(
+                    {
+                        "task_id": row_task_id,
+                        "claim": claim_text,
+                        "status": "rejected",
+                        "reason": f"broken_sentence:{integrity_reason}",
+                    }
+                )
+                continue
             resolved = resolve_finding_evidence_refs(
                 raw_finding,
                 admission.admitted,
@@ -379,7 +439,11 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
-        facts = [str(item) for item in payload.get("facts") or payload.get("claims") or [] if str(item).strip()]
+        facts = [
+            str(item)
+            for item in payload.get("facts") or payload.get("claims") or []
+            if str(item).strip() and complete_sentence(str(item))[0]
+        ]
         if accepted_for_row:
             findings.extend(accepted_for_row)
         elif facts and row_admitted_ids:

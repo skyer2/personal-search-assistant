@@ -12,6 +12,8 @@ class ResearchTaskRequest:
     target_criteria: tuple[str, ...] = ()
     target_gaps: tuple[str, ...] = ()
     criterion_id: str = ""
+    question_id: str = ""
+    hypothesis_id: str = ""
     gap_id: str = ""
     missing_evidence_types: tuple[str, ...] = ()
     blocking_conflict_ids: tuple[str, ...] = ()
@@ -21,6 +23,10 @@ class ResearchTaskRequest:
     novelty_reason: str = ""
     estimated_effort: str = "medium"
     task_id: str = ""
+    repair: bool = False
+    max_queries: int = 7
+    max_fetches: int = 7
+    max_llm_calls: int = 4
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -36,6 +42,8 @@ class ResearchTaskRequest:
             target_criteria=tuple(str(item) for item in row.get("target_criteria") or []),
             target_gaps=tuple(str(item) for item in row.get("target_gaps") or []),
             criterion_id=str(row.get("criterion_id") or ""),
+            question_id=str(row.get("question_id") or ""),
+            hypothesis_id=str(row.get("hypothesis_id") or ""),
             gap_id=str(row.get("gap_id") or ""),
             missing_evidence_types=tuple(
                 str(item) for item in row.get("missing_evidence_types") or []
@@ -49,6 +57,10 @@ class ResearchTaskRequest:
             novelty_reason=str(row.get("novelty_reason") or ""),
             estimated_effort=str(row.get("estimated_effort") or "medium"),
             task_id=str(row.get("task_id") or ""),
+            repair=bool(row.get("repair")),
+            max_queries=max(1, min(7, int(row.get("max_queries") or 7))),
+            max_fetches=max(1, min(7, int(row.get("max_fetches") or 7))),
+            max_llm_calls=max(1, min(8, int(row.get("max_llm_calls") or 4))),
         )
 
 

@@ -6,6 +6,8 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from app.research.findings.integrity import complete_sentence
+
 
 @dataclass
 class Finding:
@@ -30,7 +32,7 @@ def _safe_id(value: str, fallback: str) -> str:
 
 def _evidence_ids(raw: dict[str, Any]) -> list[str]:
     values: list[str] = []
-    for key in ("evidence_ids", "artifact_ids"):
+    for key in ("evidence_ids", "artifact_ids", "sources"):
         values.extend(str(item) for item in (raw.get(key) or []) if str(item).strip())
     for key in ("artifact_id", "evidence_id"):
         value = str(raw.get(key) or "").strip()
@@ -68,6 +70,13 @@ def normalize_finding(
         return None, {
             "reason": "missing_claim_or_task_id",
             "task_id": resolved_task_id or task_id,
+            "index": index,
+        }
+    complete, reason = complete_sentence(claim)
+    if not complete:
+        return None, {
+            "reason": f"broken_sentence:{reason}",
+            "task_id": resolved_task_id,
             "index": index,
         }
 

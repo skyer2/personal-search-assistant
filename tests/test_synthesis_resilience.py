@@ -182,7 +182,7 @@ def test_synthesis_output_is_bounded_by_mode():
 
     asyncio.run(executor._invoke(model=model, request=_request(), context=_context()))
 
-    assert model.bind_kwargs == {"max_tokens": 1_800}
+    assert model.bind_kwargs == {"max_tokens": 900}
 
 
 def test_synthesis_failure_taxonomy():

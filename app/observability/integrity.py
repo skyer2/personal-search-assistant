@@ -60,6 +60,7 @@ def check_trace_integrity(
     failure_origin_stage = ""
     worker_evidence_ids: set[str] = set()
     synthesis_evidence_ids: set[str] = set()
+    artifact_to_evidence_ids: dict[str, set[str]] = {}
     evidence_statuses: list[str] = []
     synthesis_failed_events: list[dict[str, Any]] = []
     worker_terminal_without_task_id = 0
@@ -91,6 +92,11 @@ def check_trace_integrity(
             worker_evidence_ids.update(str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip())
         if event_type == "evidence.assessed":
             evidence_statuses.append(str(attrs.get("status") or ""))
+        if event_type == "evidence.registered":
+            evidence_id = str(attrs.get("evidence_id") or "").strip()
+            artifact_id = str(attrs.get("artifact_id") or "").strip()
+            if evidence_id and artifact_id:
+                artifact_to_evidence_ids.setdefault(artifact_id, set()).add(evidence_id)
         if event_type == "worker.started":
             try:
                 started_task_id = str(event.get("task_id") or attrs.get("task_id") or "")
@@ -301,7 +307,10 @@ def check_trace_integrity(
             issues.append("non_actionable_gap")
             break
 
-    if worker_evidence_ids and synthesis_evidence_ids and not (worker_evidence_ids & synthesis_evidence_ids):
+    canonical_worker_evidence_ids = set(worker_evidence_ids)
+    for artifact_id in worker_evidence_ids:
+        canonical_worker_evidence_ids.update(artifact_to_evidence_ids.get(artifact_id, set()))
+    if canonical_worker_evidence_ids and synthesis_evidence_ids and not (canonical_worker_evidence_ids & synthesis_evidence_ids):
         issues.append("artifact_evidence_disconnect")
     if worker_evidence_ids and synthesis_count == 0 and run_status in {"success", "partial", "completed"}:
         issues.append("artifact_evidence_without_synthesis")

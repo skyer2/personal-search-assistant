@@ -103,6 +103,9 @@ def evaluate_completion(
     final_content: str = "",
     citation_valid: bool = True,
     unresolved_blocking: list[str] | None = None,
+    coverage: dict[str, Any] | None = None,
+    broken_evidence_count: int = 0,
+    minimum_high_authority_ratio: float = 0.0,
 ) -> CompletionResult:
     """Apply the one completion contract using only runtime-observable facts."""
     records = [row for row in (evidence_records or []) if isinstance(row, dict)]
@@ -114,6 +117,24 @@ def evaluate_completion(
     questions = _questions(brief, contract_objective)
     results: list[QuestionCompletion] = []
     blocking = list(unresolved_blocking or [])
+    coverage_rows = [
+        row for row in (coverage or {}).get("key_question_coverage") or []
+        if isinstance(row, dict)
+    ]
+    for row in coverage_rows:
+        if bool(row.get("blocking")) or str(row.get("status") or "") == "uncovered":
+            blocking.append(f"{row.get('question_id') or 'question'}:blocking_coverage_gap")
+    if broken_evidence_count > 0:
+        blocking.append("broken_evidence_present")
+    if minimum_high_authority_ratio > 0:
+        high = sum(
+            1
+            for row in records
+            if str(row.get("source_tier") or "").upper() in {"PRIMARY", "HIGH_QUALITY_SECONDARY"}
+            or float(row.get("authority_score") or 0.0) >= 0.75
+        )
+        if not records or high / len(records) < minimum_high_authority_ratio:
+            blocking.append("minimum_source_quality_not_met")
     for index, question in enumerate(questions, 1):
         qid = f"q{index}"
         row = next((item for item in rows if str(item.get("question_id") or "") == qid), None)
@@ -128,6 +149,7 @@ def evaluate_completion(
         results.append(QuestionCompletion(qid, answered, bool(direct), refs, blocking_gap))
     answer_complete = bool(results) and all(item.answered for item in results)
     evidence_valid = bool(records) and any(item.evidence_refs for item in results)
+    blocking = list(dict.fromkeys(blocking))
     passed = bool(final_content.strip()) and answer_complete and evidence_valid and bool(citation_valid) and not blocking
     reason = None if passed else (blocking[0] if blocking else "completion_contract_failed")
     return CompletionResult(passed, results, evidence_valid, bool(citation_valid), answer_complete, blocking, reason)

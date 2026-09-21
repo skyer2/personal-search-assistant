@@ -22,7 +22,12 @@ class AdmissionResult:
         }
 
 
-def admit_evidence(records: list[Any] | None, *, allowed_source_kinds: set[str] | None = None) -> AdmissionResult:
+def admit_evidence(
+    records: list[Any] | None,
+    *,
+    allowed_source_kinds: set[str] | None = None,
+    require_verified_artifact: bool = False,
+) -> AdmissionResult:
     allowed = allowed_source_kinds or {"web", "file", "artifact", "internal"}
     admitted: list[EvidenceRecord] = []
     rejected: list[EvidenceRecord] = []
@@ -41,6 +46,15 @@ def admit_evidence(records: list[Any] | None, *, allowed_source_kinds: set[str] 
             rejected.append(record)
         elif record.source_kind not in allowed:
             reasons[record.evidence_id] = "forbidden_source_kind"
+            rejected.append(record)
+        elif require_verified_artifact and record.source_kind == "artifact":
+            reasons[record.evidence_id] = "raw_artifact_is_not_evidence"
+            rejected.append(record)
+        elif require_verified_artifact and not record.artifact_ref and not record.locator.startswith(("http://", "https://")):
+            reasons[record.evidence_id] = "missing_resolvable_source_or_artifact"
+            rejected.append(record)
+        elif require_verified_artifact and record.source_type in {"community", "unknown"}:
+            reasons[record.evidence_id] = "source_quality_below_evidence_minimum"
             rejected.append(record)
         else:
             seen.add(record.evidence_id)

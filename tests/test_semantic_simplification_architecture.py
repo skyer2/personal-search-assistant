@@ -101,6 +101,24 @@ def test_supervisor_conducts_research_for_actionable_gap() -> None:
     assert resolved.research_tasks
 
 
+def test_supervisor_cannot_complete_with_blocking_gap() -> None:
+    from app.research.coverage.judge import CoverageGap, CoverageJudgement
+    from app.research.supervisor.agent import SupervisorAgent
+    from app.research.supervisor.models import SupervisorAction
+
+    judgement = CoverageJudgement(
+        sufficient=False,
+        status="gap",
+        gaps=(CoverageGap("gap_q1", "criterion_q1", "缺少一手来源", blocking=True, question_id="q1"),),
+    )
+    resolved = SupervisorAgent(agent=None).resolve_action(
+        SupervisorAction(action="COMPLETE", reason="model requested complete"),
+        judgement,
+    )
+    assert resolved.action == "CONDUCT_RESEARCH"
+    assert resolved.research_tasks
+
+
 def test_findings_are_compressed_and_evidence_backed() -> None:
     from app.research.findings.compress import compress_worker_result
 
