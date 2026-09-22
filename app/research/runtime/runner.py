@@ -2748,14 +2748,9 @@ class ResearchGraphRunner:
         citation_started = time.perf_counter()
         explicit_citation_render = recovery_mode == "evidence_bound_recovery"
         if manager is not None and content and not explicit_citation_render:
-            selected_findings = list(
-                (compact_pack if retried else evidence_pack).findings
-            )
-            content = manager.inject_finding_citations(
-                content,
-                selected_findings,
-                citation_numbers,
-            )
+            # The writer must emit claim-level citation markers itself.
+            # Similarity-scanning a completed Markdown document can attach
+            # citations to questions, headings or status prose.
             content = manager.build_cited_report(content)
         # A provider can return content with citations but no closed References
         # block (or this run may not install CitationManager). Recover through
