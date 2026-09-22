@@ -8,7 +8,6 @@ writer never receives search snippets, worker transcripts, or raw findings.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from math import ceil
 import re
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -282,7 +281,7 @@ def _similar(left: str, right: str, left_refs: tuple[str, ...], right_refs: tupl
 def candidate_claims(findings: list[dict[str, Any]]) -> list[CandidateClaim]:
     output: list[CandidateClaim] = []
     for index, row in enumerate(findings, 1):
-        text = _claim_text(row)
+        text = _safe_statement(_claim_text(row), fallback="")
         refs = _refs(row, "evidence_ids", "artifact_ids", "source_ids", "sources")
         if not text or not refs:
             continue
@@ -324,64 +323,12 @@ def semantic_claim_dedup(candidates: list[CandidateClaim]) -> list[DedupedClaim]
     return output
 
 
-def _category(statement: str) -> tuple[str, str]:
-    lower = statement.casefold()
-    categories = (
-        (("mcp", "a2a", "协议", "互操作", "skills", "tool"), ("互操作与工具生态", "interoperability")),
-        (("评测", "可靠", "安全", "治理", "权限", "evaluation", "reliability"), ("可靠性与治理", "reliability")),
-        (("企业", "roi", "商业", "工作流", "交付", "收入"), ("企业结果导向", "enterprise")),
-        (("memory", "记忆", "runtime", "infra", "异步", "长任务", "context"), ("运行时与长期执行", "runtime")),
-        (("模型", "coding", "代码", "agent", "产品"), ("能力与产品形态", "product")),
-    )
-    for needles, result in categories:
-        if any(needle in lower for needle in needles):
-            return result
-    return "行业采用与生态变化", "general"
-
-
-def _mechanism_for(category: str) -> str:
-    templates = {
-        "interoperability": "不同工具和 Agent 之间的连接成本下降后，组织会优先比较协议兼容性、权限边界与可迁移性。",
-        "reliability": "当任务从演示走向生产，失败恢复、权限控制和可审计性会成为采购与上线的前置条件。",
-        "enterprise": "企业把 Agent 接入真实流程后，价值判断会从功能数量转向可量化结果、交付成本和可复用性。",
-        "runtime": "任务周期变长后，状态保存、上下文管理和异步编排决定了系统能否稳定完成跨步骤工作。",
-        "product": "模型能力逐步商品化后，产品差异更多来自工具链、工程工作流和人机协作方式。",
-        "general": "多类参与者持续发布相关进展，说明该方向已从单一产品试验进入需要跟踪的生态变化。",
-    }
-    return templates.get(category, templates["general"])
-
-
-def _importance_for(category: str) -> str:
-    templates = {
-        "interoperability": "它影响企业能否避免工具锁定，并把已有系统逐步接入 Agent 工作流。",
-        "reliability": "它决定 Agent 是否可以进入对正确性、权限和可追溯性有要求的业务场景。",
-        "enterprise": "它决定投入能否从概念验证转化为可持续的业务价值。",
-        "runtime": "它决定复杂任务能否跨越长时间、多工具和多轮上下文稳定运行。",
-        "product": "它决定团队选择产品时应关注实际工作流，而非单项模型能力。",
-        "general": "它提示决策者应继续用可核验的来源跟踪变化，而不宜据此做精确的市场或时间判断。",
-    }
-    return templates.get(category, templates["general"])
-
-
 def _bucket_claims(claims: list[DedupedClaim]) -> list[list[DedupedClaim]]:
+    """Group by explicit question lineage, never by keyword category."""
     buckets: dict[str, list[DedupedClaim]] = {}
     for claim in claims:
-        _label, category = _category(claim.statement)
-        buckets.setdefault(category, []).append(claim)
+        buckets.setdefault(claim.question_id or claim.canonical_claim_id, []).append(claim)
     groups = list(buckets.values())
-    # Trend reports need a useful 3–6 element abstraction.  Split only broad
-    # buckets, never create a one-finding "trend" for every input finding.
-    target = min(6, max(3, ceil(len(claims) / 4))) if len(claims) >= 3 else len(groups)
-    while len(groups) < target:
-        largest = max(groups, key=len, default=[])
-        if len(largest) < 2:
-            break
-        midpoint = ceil(len(largest) / 2)
-        groups.remove(largest)
-        groups.extend((largest[:midpoint], largest[midpoint:]))
-    while len(groups) > 6:
-        tail = groups.pop()
-        groups[-1].extend(tail)
     return [group for group in groups if group]
 
 
@@ -474,60 +421,29 @@ def build_insight_synthesis(
     for number, group in enumerate(groups, 1):
         seed = max(group, key=lambda item: (item.confidence, len(item.evidence_refs)))
         forecast_seed = next((item for item in group if item.claim_type == "forecast"), None)
-        label, category = _category(seed.statement)
+        # Deterministic code only organizes validated claims. It does not
+        # invent categories, mechanisms, significance or forecasts.
+        label = seed.statement[:72].rstrip("。") or f"已确认结论 {number}"
+        category = "evidence_bound"
         evidence = _unique([ref for claim in group for ref in claim.evidence_refs])
         sources = {urlparse(str(index.get(ref, {}).get("locator") or "")).netloc for ref in evidence}
         strength: Literal["weak", "medium", "strong"] = "strong" if len(evidence) >= 3 and len(sources - {""}) >= 2 else "medium" if len(evidence) >= 2 else "weak"
-        summary = f"多条证据共同指向“{label}”正在从孤立试验转向可复用的研究重点。"
+        summary = seed.statement
         signal = TrendSignal(f"S{number}", label, category, summary, tuple(item.canonical_claim_id for item in group), evidence, (), len(sources - {""}), strength, round(sum(item.confidence for item in group) / len(group), 3))
         signals.append(signal)
-        mechanism = MechanismAssessment(
-            mechanism_id=f"M{number}", title=f"{label} 的驱动机制",
-            explanation=_mechanism_for(category),
-            supporting_signal_ids=(signal.signal_id,), counter_signal_ids=(), evidence_refs=evidence,
-            reasoning_basis="跨来源证据的共同变化，而非单一供应商预测。", confidence=signal.confidence,
-        )
-        mechanisms.append(mechanism)
-        category_value: InsightCategory = "forecast" if forecast_seed else "constraint" if category == "reliability" else "current_trend"
-        fallback_claim = f"{label} 已出现可交叉核验的公开变化。"
-        # A deterministic recovery must still answer the user's question when
-        # the writer is unavailable.  It may retain a short, clean structured
-        # claim from any bound evidence, but never a search-result frame or
-        # article/excerpt shaped input.  Non-authoritative evidence is visibly
-        # qualified so it cannot masquerade as independently confirmed fact.
-        seed_has_authoritative_support = any(
-            str(index.get(ref, {}).get("source_type") or "")
-            in {"primary", "authoritative_secondary"}
-            for ref in seed.evidence_refs
-        )
-        safe_claim = _safe_statement(seed.statement, fallback=fallback_claim)
-        if safe_claim == fallback_claim:
-            core_claim = (
-                f"多份可绑定来源把“{label}”列为当前值得持续跟踪的变化信号；"
-                "现有证据不足以支持更精确的市场或时间断言。"
-            )
-        elif seed_has_authoritative_support:
-            core_claim = f"综合证据支持：{safe_claim.rstrip('。')}。"
-        else:
-            core_claim = (
-                f"已登记来源显示：{safe_claim.rstrip('。')}。"
-                "该判断仍需原始发布方或独立来源进一步交叉验证。"
-            )
+        category_value: InsightCategory = "forecast" if forecast_seed else "current_trend"
+        core_claim = seed.statement
         cards.append(InsightCard(
             insight_id=f"I{number}", title=label, category=category_value,
-            # Preserve the concrete, grounded conclusion while placing it in
-            # an analytical sentence.  The writer receives this normalized
-            # card, never the source snippet or worker transcript.
             core_claim=core_claim,
-            mechanism=mechanism.explanation, why_it_matters=_importance_for(category),
+            mechanism="", why_it_matters="",
             support_refs=evidence, counter_refs=(), source_refs=_unique([ref for claim in group for ref in claim.source_refs]), confidence=signal.confidence,
         ))
-        if forecast_seed is not None or any(token in seed.statement for token in ("未来", "将", "趋势", "预计")):
+        if forecast_seed is not None:
             forecasts.append(ForecastCard(
-                forecast_id=f"F{number}", title=f"{label} 的未来方向", current_signal=summary,
-                mechanism=mechanism.explanation, forecast=f"未来 1–2 年，{label} 更可能成为可验收交付的一部分，而不只是产品功能清单。",
-                observable_milestone="可观察到跨团队的生产部署、可复现实验指标或明确的采购/治理标准。",
-                uncertainty="这一判断取决于模型成本、可靠性改进和组织采用速度；现有来源不足以保证时间点或市场份额。",
+                forecast_id=f"F{number}", title=label, current_signal="",
+                mechanism="", forecast=forecast_seed.statement,
+                observable_milestone="", uncertainty="",
                 evidence_refs=evidence, counter_refs=(), confidence=min(signal.confidence, 0.75),
             ))
     upgrades = tuple(item for claim in claims if (item := _source_upgrade(claim, index)) is not None)
@@ -548,8 +464,8 @@ def build_insight_synthesis(
         "source_upgrade_attempts": sum(item.attempted for item in upgrades),
         "source_upgrade_queued": len(upgrades),
         "source_upgrade_success_rate": round(sum(item.upgraded for item in upgrades) / sum(item.attempted for item in upgrades), 4) if any(item.attempted for item in upgrades) else 0.0,
-        "forecast_milestone_coverage": 1.0 if all(card.observable_milestone for card in forecasts) else 0.0,
-        "forecast_uncertainty_coverage": 1.0 if all(card.uncertainty for card in forecasts) else 0.0,
+        "forecast_milestone_coverage": 0.0,
+        "forecast_uncertainty_coverage": 0.0,
         "raw_snippet_count": 0,
     }
     return InsightSynthesis(tuple(claims), tuple(signals), tuple(mechanisms), tuple(cards), tuple(forecasts), tuple(bindings), upgrades, tuple(_unique(list(limitations or []) + upgrade_limitations)), metrics)
@@ -558,39 +474,38 @@ def build_insight_synthesis(
 def render_deterministic_insight_report(
     *, synthesis: InsightSynthesis, objective: str, citation_numbers: dict[str, int] | None = None,
 ) -> str:
-    """Render a concise v5 report without raw excerpts or worker wording."""
+    """Render validated claims only; never synthesize a new viewpoint."""
     citations = citation_numbers or {}
     binding_by_claim = {item.claim_id: item for item in synthesis.bindings}
-    lines = ["# 结论摘要", ""]
-    for card in synthesis.insight_cards[:5]:
-        lines.append(f"- **{card.title}**：现有研究证据显示该方向已从单点观察转为需要持续验证的实践议题。")
-    if not synthesis.insight_cards:
-        lines.append("- 现有证据不足以形成可靠的研究结论。")
-    lines.extend(["", "# 2026 当前热点", ""])
-    current_cards = [card for card in synthesis.insight_cards if card.category != "forecast"]
-    for index, card in enumerate(current_cards, 1):
-        lines.extend([f"## {index}. {card.title}", "", f"**核心判断**：{card.core_claim}", "", f"**机制**：{card.mechanism}", "", f"**为什么重要**：{card.why_it_matters}", "", "**主要依据**："])
-        claim = next((item for item in synthesis.claims if item.canonical_claim_id in {ref for signal in synthesis.signals if signal.signal_id == f'S{index}' for ref in signal.claim_refs}), None)
-        binding = binding_by_claim.get(claim.canonical_claim_id) if claim else None
+    lines = ["# 部分研究结果", "", objective, "", "## 已确认的信息", ""]
+    for claim in synthesis.claims:
+        binding = binding_by_claim.get(claim.canonical_claim_id)
+        refs = list(claim.evidence_refs)
+        markers = "".join(
+            f"[{citations[ref]}]" for ref in refs if ref in citations
+        )
+        lines.append(f"- {claim.statement}{(' ' + markers) if markers else ''}")
         if binding and binding.display_evidence:
             for evidence in binding.display_evidence[:3]:
                 num = int(evidence.get("citation_number") or citations.get(str(evidence.get("evidence_id") or ""), 0) or 0)
                 marker = f"[{num}]" if num else ""
                 date = f"（{evidence['date']}）" if evidence.get("date") else ""
-                lines.append(f"- {marker}{evidence.get('source')}{date}：为该判断提供已登记的直接或支持性证据。")
-        else:
-            lines.append("- 已登记证据支持该判断；完整 Claim–Evidence 映射可在 Trace 查看。")
-        lines.append("")
-    lines.extend(["# 未来 1~2 年方向", ""])
-    if synthesis.forecast_cards:
-        for index, forecast in enumerate(synthesis.forecast_cards, 1):
-            lines.extend([f"## {index}. {forecast.title}", "", f"**当前信号**：{forecast.current_signal}", "", f"**机制**：{forecast.mechanism}", "", f"**方向判断**：{forecast.forecast}", "", f"**可观察里程碑**：{forecast.observable_milestone}", "", f"**不确定性**：{forecast.uncertainty}", ""])
-    else:
-        lines.append("现有证据主要描述当前状态；对未来的判断应以可观察里程碑和不确定性为边界。\n")
-    lines.extend(["# 主要不确定性", ""])
-    for item in synthesis.limitations[:6] or ("证据质量、发布时间和来源独立性会限制结论的外推范围。",):
+                lines.append(f"  - {marker}{evidence.get('source')}{date}")
+    if not synthesis.claims:
+        lines.append("- 当前证据不足，无法形成可靠综合判断。")
+    lines.extend(["", "## 尚未完成", ""])
+    for item in synthesis.limitations[:6] or ("完整模型综合未完成。",):
         lines.append(f"- {item}")
-    lines.extend(["", "# 综合判断", "", "这些信号共同说明，竞争重点正在从单点能力展示转向能否在真实工作流中长期、可靠、可验证地交付结果。", "", "# 参考来源", ""])
+    lines.extend(
+        [
+            "",
+            "本结果由运行时从已确认 Claim–Evidence 绑定恢复生成，"
+            "未生成新的机制、重要性或预测，因此属于降级部分交付。",
+            "",
+            "## 参考来源",
+            "",
+        ]
+    )
     displayed: set[int] = set()
     for binding in synthesis.bindings:
         for evidence in binding.display_evidence:

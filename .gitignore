@@ -30,6 +30,8 @@ frontend/.vite/
 # Python
 .venv/
 .uv-cache/
+.mypy_cache/
+*.egg-info/
 venv/
 env/
 .env

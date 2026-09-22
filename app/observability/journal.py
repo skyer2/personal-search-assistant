@@ -370,6 +370,14 @@ def summarize_trace(
                 "intent_confidence": attrs.get("intent_confidence"),
                 "brief_ref": attrs.get("brief_ref"),
                 "brief_hash": attrs.get("brief_hash"),
+                "brief_source": attrs.get("brief_source") or attrs.get("compiler_source"),
+                "brief_fallback_reason": attrs.get("brief_fallback_reason"),
+                "original_ask_count": attrs.get("original_ask_count"),
+                "research_question_count": attrs.get("research_question_count"),
+                "ask_ids": attrs.get("ask_ids") or [],
+                "semantic_fidelity_score": attrs.get("semantic_fidelity_score"),
+                "semantic_fidelity_passed": attrs.get("semantic_fidelity_passed"),
+                "semantic_fidelity_issues": attrs.get("semantic_fidelity_issues") or [],
                 "span_id": event.get("span_id"),
                 "timestamp": event.get("timestamp"),
             }
@@ -566,6 +574,10 @@ def summarize_trace(
                     "metric": attrs.get("metric"),
                     "score": attrs.get("score"),
                     "label": attrs.get("label"),
+                    "completion_contract": attrs.get("completion_contract") or {},
+                    "relevance": attrs.get("relevance") or {},
+                    "source_quality": attrs.get("source_quality") or {},
+                    "synthesis_mode": attrs.get("synthesis_mode"),
                 }
             )
         elif event_type in {"gen_ai.chat", "llm_usage"}:
@@ -660,6 +672,14 @@ def summarize_trace(
             None,
         ),
         "brief_coverage": (plans[-1].get("brief_coverage") if plans else None),
+        "latest": next(
+            (
+                row
+                for row in reversed(evals)
+                if row.get("type") == "quality.assessed"
+            ),
+            None,
+        ),
     }
     return {
         "identity": identity,

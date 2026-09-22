@@ -76,10 +76,11 @@ class SupervisorAgent:
         index: int,
         objective: str,
         *,
+        ask_id: str = "",
+        question_id: str = "",
         target_criteria: tuple[str, ...] = (),
         target_gaps: tuple[str, ...] = (),
         criterion_id: str = "",
-        question_id: str = "",
         gap_id: str = "",
         missing_evidence_types: tuple[str, ...] = (),
         blocking_conflict_ids: tuple[str, ...] = (),
@@ -94,10 +95,11 @@ class SupervisorAgent:
             evidence = ("same-scope authoritative evidence", "一手来源")
         return ResearchTaskRequest(
             objective=objective,
+            ask_id=ask_id,
+            question_id=question_id,
             target_criteria=target_criteria,
             target_gaps=target_gaps,
             criterion_id=criterion_id,
-            question_id=question_id,
             hypothesis_id=f"repair:{criterion_id or question_id}",
             gap_id=gap_id,
             missing_evidence_types=missing_evidence_types,
@@ -119,10 +121,18 @@ class SupervisorAgent:
         budget: dict[str, Any] | None,
         previous_fingerprints: set[str] | None = None,
     ) -> SupervisorAction:
-        if bool((budget or {}).get("exhausted")):
-            return SupervisorAction("COMPLETE", "budget exhausted; synthesize available evidence")
-        if judgement is not None and judgement.sufficient and not judgement.gaps:
+        coverage_sufficient = (
+            judgement is not None and judgement.sufficient and not judgement.gaps
+        )
+        if coverage_sufficient:
             return SupervisorAction("COMPLETE", "coverage meets brief key questions")
+        if bool((budget or {}).get("exhausted")):
+            # Budget exhaustion is not research completion. Coverage still has a
+            # gap, so stop explicitly and let delivery degrade to PARTIAL.
+            return SupervisorAction(
+                "STOP_BUDGET_PARTIAL",
+                "budget exhausted while coverage gaps remain",
+            )
         if judgement is not None and judgement.gaps:
             known = set(previous_fingerprints or set())
             tasks: list[ResearchTaskRequest] = []
@@ -190,30 +200,29 @@ class SupervisorAgent:
         judgement: CoverageJudgement | None = None,
         brief: StructuredResearchBrief | None = None,
         previous_fingerprints: set[str] | None = None,
+        budget: dict[str, Any] | None = None,
     ) -> SupervisorAction:
-        blocking_gaps = bool(
-            judgement
-            and any(bool(getattr(gap, "blocking", False)) for gap in judgement.gaps)
-        )
-        # A semantic model may choose COMPLETE, but it is never allowed to
-        # override an actionable blocking gap.  Runtime evidence state is the
-        # authority for this transition.
-        if action.action == "COMPLETE" and blocking_gaps:
-            fallback = self.fallback_action(
+        if (
+            action.action == "COMPLETE"
+            and judgement is not None
+            and (not judgement.sufficient or judgement.gaps)
+            and not bool((budget or {}).get("exhausted"))
+        ):
+            repair = self.fallback_action(
                 brief or StructuredResearchBrief("", 1, "", "research"),
                 judgement,
-                {},
+                budget or {},
                 previous_fingerprints=previous_fingerprints,
             )
             return SupervisorAction(
                 "CONDUCT_RESEARCH",
                 "runtime_override:blocking_coverage_gap",
-                fallback.research_tasks,
+                repair.research_tasks,
                 "runtime_blocking_gap_override",
             )
+        action = self.enforce_completion_invariant(action, judgement, budget=budget)
         if action.action != "CONDUCT_RESEARCH" or action.research_tasks:
             return action
-        questions = self._actionable_questions(brief, judgement)
         resolved = self.fallback_action(
             brief or StructuredResearchBrief("", 1, "", "research"),
             judgement,
@@ -223,17 +232,46 @@ class SupervisorAgent:
         return SupervisorAction(action.action, action.reason, resolved.research_tasks, action.source)
 
     @staticmethod
+    def enforce_completion_invariant(
+        action: SupervisorAction,
+        judgement: CoverageJudgement | None,
+        *,
+        budget: dict[str, Any] | None = None,
+    ) -> SupervisorAction:
+        """COMPLETE requires sufficient coverage; a gap can only produce a STOP.
+
+        This keeps ``coverage=gap`` from ever being reported as research
+        completion, no matter what the Supervisor model returned.
+        """
+        if action.action != "COMPLETE":
+            return action
+        if judgement is None:
+            return action
+        if judgement.sufficient and not judgement.gaps:
+            return action
+        exhausted = bool((budget or {}).get("exhausted"))
+        return SupervisorAction(
+            "STOP_BUDGET_PARTIAL" if exhausted else "STOP_FAILURE",
+            f"coverage_gap_blocks_complete:{judgement.status or 'gap'}",
+            (),
+            action.source,
+        )
+
+    @staticmethod
     def _sanitize_action(action: SupervisorAction) -> SupervisorAction:
+        if action.action != "CONDUCT_RESEARCH":
+            return SupervisorAction(action.action, action.reason, (), "structured_llm")
         tasks: list[ResearchTaskRequest] = []
         for item in action.research_tasks:
             profile = task_budget_profile(item.estimated_effort)
             tasks.append(
                 ResearchTaskRequest(
                     objective=item.objective,
+                    ask_id=item.ask_id,
+                    question_id=item.question_id,
                     target_criteria=item.target_criteria,
                     target_gaps=item.target_gaps,
                     criterion_id=item.criterion_id,
-                    question_id=item.question_id,
                     hypothesis_id=item.hypothesis_id,
                     gap_id=item.gap_id,
                     missing_evidence_types=item.missing_evidence_types,
@@ -335,7 +373,9 @@ class SupervisorAgent:
             )
             return fallback
         action = self._sanitize_action(action)
-        return self.resolve_action(action, judgement, brief, previous_fingerprints)
+        return self.resolve_action(
+            action, judgement, brief, previous_fingerprints, budget=budget
+        )
 
 
 __all__ = ["SupervisorAgent"]

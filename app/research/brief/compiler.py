@@ -17,8 +17,14 @@ from typing import Any
 from app.research.brief.models import (
     DeliverableRequirements,
     FreshnessRequirements,
+    ResearchQuestion,
     SourceRequirements,
     StructuredResearchBrief,
+)
+from app.research.intent.user_ask import (
+    UserAsk,
+    UserAskContract,
+    compile_user_ask_contract,
 )
 from app.config.timeouts import model_timeout_sec
 from app.research.brief.validator import validate_structured_brief
@@ -39,6 +45,12 @@ BRIEF_AGENT_PROMPT = """你是研究任务的结构化 Brief 编译器。理解�
 {{"objective":"","user_intent":"atomic_fact|comparison|trend_forecast|recommendation|conflict_analysis|freshness_update|structured_report|explanation|research","explicit_subjects":[],"key_questions":[],"constraints":[],"source_requirements":{{"min_independent_sources":2,"primary_required":false,"preferred":["official","primary"],"forbidden":[]}},"freshness_requirements":{{"required":true,"time_horizon":"recent|point_in_time|historical|any"}},"deliverable":{{"format":"text|markdown|pdf","depth":"brief|standard|long"}},"success_criteria":[],"assumptions":[],"clarification_needed":false,"confidence":0.9}}
 
 要求：区分 atomic fact、trend、forecast、recommendation、comparison、conflict；只保留必要问题；保留 freshness/source/output 显式约束；不确定时 clarification_needed=true。
+
+key_questions 硬约束：
+- 用户提出的每一个问题都必须有对应的 key_question，一个都不能丢。
+- 必须保留用户原问题里的主体（例如 Agent、Cursor）和时间范围（例如 2026年9月、未来1-2年）。
+- 可以把问题改写得更可检索，但不能换成另一个问题。
+- 禁止输出与用户问题无关的通用模板问题，例如「当前主要关注点和工程路径是什么？」。
 """
 
 _ATOMICS = ("什么时候", "哪一年", "哪年", "谁", "是什么", "多少", "发布时间", "when", "who", "what")
@@ -85,24 +97,25 @@ def _intent(query: str) -> str:
     return "research"
 
 
-def _key_questions(query: str, intent: str) -> list[str]:
-    if intent == "atomic_fact":
-        return [query]
-    if intent == "comparison":
-        return [f"「{query}」中各主体的核心差异是什么？", "哪些差异有一手来源或高质量独立来源支持？", "在用户关心的场景下应如何选择？"]
-    if intent == "trend_forecast":
-        return ["当前主要关注点和工程路径是什么？", "未来一段时间可验证的进展有哪些？", "这些判断的主要不确定性和依据是什么？"]
-    if intent == "recommendation":
-        return ["哪些候选最相关，依据是什么？", "用户决策需要哪些关键事实？", "主要风险和限制是什么？"]
-    if intent == "conflict_analysis":
-        return ["各方结论分别是什么？", "口径、样本、时间或方法差异是否能解释冲突？", "当前可确认的结论是什么？"]
-    if intent == "freshness_update":
-        return ["最近发生了哪些重要进展？", "哪些来源能确认这些进展？"]
-    if intent == "structured_report":
-        return [query, "商业化或应用落地的关键证据是什么？", "主要风险、不确定性和时间路径是什么？"]
-    if intent == "explanation":
-        return [query, "支持该解释的关键证据是什么？"]
-    return [query]
+def _research_question_text(ask: UserAsk) -> str:
+    """Keep the user's own question text.
+
+    Evidence requirements live in ``UserAsk.answer_requirements``; they must not
+    be appended here, or every downstream matcher (coverage, answerability)
+    would be diluted by boilerplate tokens.
+    """
+    return ask.text.strip().rstrip("？?。.！!")
+
+
+def _questions_from_contract(contract: UserAskContract) -> list[ResearchQuestion]:
+    questions: list[ResearchQuestion] = []
+    for index, ask in enumerate(contract.asks, 1):
+        text = _research_question_text(ask)
+        if not text:
+            continue
+        questions.append(ResearchQuestion(f"q{len(questions) + 1}", ask.ask_id, text))
+        _ = index
+    return questions[:8]
 
 
 def _freshness(intent: str, query: str) -> FreshnessRequirements:
@@ -140,16 +153,28 @@ def compile_structured_brief(
     conversation_delta: str = "",
     existing_brief: dict[str, Any] | None = None,
 ) -> StructuredResearchBrief:
+    """Query-preserving deterministic fallback.
+
+    This path must never re-invent the user's question from keywords. It splits
+    the original query into asks and keeps each ask verbatim inside its research
+    question, so a Brief LLM failure degrades understanding, not intent.
+    """
     objective = " ".join(part for part in (query, conversation_delta) if part).strip()
     intent = _intent(objective)
+    contract = compile_user_ask_contract(query, conversation_delta=conversation_delta)
     subjects = _explicit_subjects(objective)
+    if not subjects:
+        derived = [ask.subject for ask in contract.asks if ask.subject.strip()]
+        subjects = list(dict.fromkeys(derived))[:12]
     if not subjects and intent == "atomic_fact":
         subjects = [objective[:120]]
-    questions = _key_questions(objective, intent)[:8]
+    questions = _questions_from_contract(contract)
+    if not questions and objective:
+        questions = [ResearchQuestion("q1", "A1", objective)]
     success = ["回答直接对齐用户目标。", "结论有一手来源或独立高质量来源支持。", "明确区分事实、推断和未确认内容。"]
     if intent == "comparison":
         success.append("显式主体均被覆盖，不引入未要求对象。")
-    if intent == "trend_forecast":
+    if any(ask.ask_type == "forecast" for ask in contract.asks):
         success.append("区分当前事实与未来预测。")
     version = 1
     assumptions: tuple[str, ...] = ()
@@ -159,7 +184,10 @@ def compile_structured_brief(
         assumptions = previous.assumptions
     brief = StructuredResearchBrief(
         brief_id=_stable_brief_id(objective, version), version=version, objective=objective,
-        user_intent=intent, explicit_subjects=tuple(subjects), key_questions=tuple(questions),
+        user_intent=intent, explicit_subjects=tuple(subjects),
+        key_questions=tuple(item.text for item in questions),
+        user_asks=tuple(contract.asks),
+        research_questions=tuple(questions),
         constraints=("不要扩大到用户未要求的研究范围。",), source_requirements=_source(intent),
         freshness_requirements=_freshness(intent, objective), deliverable=_deliverable(objective, intent),
         success_criteria=tuple(success), assumptions=assumptions,
@@ -171,6 +199,55 @@ def compile_structured_brief(
     return brief
 
 
+def _ask_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]", str(text or "").casefold())
+    }
+
+
+def _align_questions_to_asks(
+    texts: list[str],
+    asks: tuple[UserAsk, ...],
+) -> tuple[ResearchQuestion, ...]:
+    """Bind LLM-rewritten questions back onto the user's asks.
+
+    Lineage is assigned by best token overlap, then every unmapped required ask
+    gets its verbatim question appended. A rewritten Brief may add detail; it may
+    not silently drop one of the user's asks.
+    """
+    if not asks:
+        return tuple(
+            ResearchQuestion(f"q{index}", "", text)
+            for index, text in enumerate(texts, 1)
+            if str(text).strip()
+        )
+    ask_tokens = {ask.ask_id: _ask_tokens(f"{ask.text} {ask.subject}") for ask in asks}
+    questions: list[ResearchQuestion] = []
+    for text in texts:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            continue
+        tokens = _ask_tokens(cleaned)
+        best_id, best_score = asks[0].ask_id, -1.0
+        for ask in asks:
+            reference = ask_tokens.get(ask.ask_id) or set()
+            if not reference:
+                continue
+            score = len(tokens & reference) / max(1, len(reference))
+            if score > best_score:
+                best_id, best_score = ask.ask_id, score
+        questions.append(ResearchQuestion(f"q{len(questions) + 1}", best_id, cleaned))
+    mapped = {item.ask_id for item in questions}
+    for ask in asks:
+        if not ask.required or ask.ask_id in mapped:
+            continue
+        text = _research_question_text(ask)
+        if text:
+            questions.append(ResearchQuestion(f"q{len(questions) + 1}", ask.ask_id, text))
+    return tuple(questions[:8])
+
+
 def _merge_llm_brief(fallback: StructuredResearchBrief, patch: dict[str, Any]) -> StructuredResearchBrief:
     source_raw = patch.get("source_requirements")
     freshness_raw = patch.get("freshness_requirements")
@@ -178,12 +255,18 @@ def _merge_llm_brief(fallback: StructuredResearchBrief, patch: dict[str, Any]) -
     source: dict[str, Any] = source_raw if isinstance(source_raw, dict) else {}
     freshness: dict[str, Any] = freshness_raw if isinstance(freshness_raw, dict) else {}
     deliverable: dict[str, Any] = deliverable_raw if isinstance(deliverable_raw, dict) else {}
+    questions = _align_questions_to_asks(
+        [str(item) for item in patch.get("key_questions") or fallback.key_questions],
+        fallback.user_asks,
+    )
     brief = StructuredResearchBrief(
         brief_id=fallback.brief_id, version=fallback.version,
         objective=str(patch.get("objective") or fallback.objective),
         user_intent=str(patch.get("user_intent") or fallback.user_intent),
         explicit_subjects=tuple(str(item) for item in patch.get("explicit_subjects") or fallback.explicit_subjects)[:12],
-        key_questions=tuple(str(item) for item in patch.get("key_questions") or fallback.key_questions)[:8],
+        key_questions=tuple(item.text for item in questions) or fallback.key_questions,
+        user_asks=fallback.user_asks,
+        research_questions=questions or fallback.research_questions,
         constraints=tuple(str(item) for item in patch.get("constraints") or fallback.constraints),
         source_requirements=SourceRequirements(
             min_independent_sources=max(1, int(source.get("min_independent_sources") or fallback.source_requirements.min_independent_sources)),
@@ -217,40 +300,89 @@ def _merge_llm_brief(fallback: StructuredResearchBrief, patch: dict[str, Any]) -
 async def compile_structured_brief_with_llm(
     query: str, *, agent: Any, budget_manager: Any, conversation_delta: str = "",
     existing_brief: dict[str, Any] | None = None, session_id: str = "",
+    max_attempts: int = 2,
 ) -> StructuredResearchBrief:
+    """Compile the Brief behind the Semantic Fidelity Gate.
+
+    A Brief that lost one of the user's asks is rejected and retried; when the
+    retry also fails, the query-preserving fallback is delivered instead.
+    """
+    from app.research.intent.fidelity import evaluate_semantic_fidelity
+
     fallback = compile_structured_brief(query, conversation_delta=conversation_delta, existing_brief=existing_brief)
     if agent is None:
         return fallback
+    contract = UserAskContract(
+        contract_id="", raw_query=query, asks=fallback.user_asks,
+    )
     prompt = BRIEF_AGENT_PROMPT.format(query=query, conversation_delta=conversation_delta or "无")
-    started = time.perf_counter()
-    try:
-        gateway = StructuredLLMGateway(budget_manager)
-        with gateway.gateway.execution_scope(phase="brief"):
-            structured = await gateway.ainvoke(
-                model=agent,
-                schema=StructuredResearchBrief,
-                prompt=prompt,
+    attempts = max(1, int(max_attempts))
+    for attempt in range(1, attempts + 1):
+        started = time.perf_counter()
+        try:
+            gateway = StructuredLLMGateway(budget_manager)
+            with gateway.gateway.execution_scope(phase="brief"):
+                structured = await gateway.ainvoke(
+                    model=agent,
+                    schema=StructuredResearchBrief,
+                    prompt=prompt,
+                    phase="brief",
+                    # Planning is control-plane work. A slow provider falls
+                    # back instead of consuming the research wall budget.
+                    timeout_sec=min(
+                        model_timeout_sec("LLM_BRIEF_TIMEOUT_SEC"),
+                        max(
+                            1.0,
+                            float(
+                                os.getenv("LLM_PLANNER_TIMEOUT_SEC", "30")
+                                or 30
+                            ),
+                        ),
+                    ),
+                )
+        except Exception as exc:
+            emit_semantic_fallback(
                 phase="brief",
-                # Planning is control-plane work.  A slow provider must fall
-                # back to the deterministic brief/plan instead of consuming
-                # the research wall budget.
-                timeout_sec=min(
-                    model_timeout_sec("LLM_BRIEF_TIMEOUT_SEC"),
-                    max(1.0, float(os.getenv("LLM_PLANNER_TIMEOUT_SEC", "30") or 30)),
-                ),
+                component="StructuredLLMGateway",
+                fallback="deterministic",
+                exc=exc,
+                schema=StructuredResearchBrief,
+                model=agent,
+                started=started,
             )
-    except Exception as exc:
-        emit_semantic_fallback(
+            return fallback
+        candidate = _merge_llm_brief(fallback, structured.to_dict())
+        fidelity = evaluate_semantic_fidelity(contract, candidate)
+        if fidelity.passed:
+            return candidate
+        _emit_fidelity_rejection(fidelity, attempt=attempt, attempts=attempts)
+        if attempt >= attempts:
+            return fallback
+    return fallback
+
+
+def _emit_fidelity_rejection(fidelity: Any, *, attempt: int, attempts: int) -> None:
+    try:
+        from app.observability import EventType, get_recorder
+
+        recorder = get_recorder()
+        if not recorder.is_active:
+            return
+        recorder.emit(
+            EventType.SEMANTIC_FALLBACK,
             phase="brief",
-            component="StructuredLLMGateway",
-            fallback="deterministic",
-            exc=exc,
-            schema=StructuredResearchBrief,
-            model=agent,
-            started=started,
+            status="fallback",
+            attributes={
+                "phase": "brief",
+                "component": "SemanticFidelityGate",
+                "fallback": "query_preserving" if attempt >= attempts else "brief_retry",
+                "error_category": "semantic_fidelity",
+                "attempt": attempt,
+                **fidelity.to_dict(),
+            },
         )
-        return fallback
-    return _merge_llm_brief(fallback, structured.to_dict())
+    except Exception:
+        return
 
 
 __all__ = ["BRIEF_AGENT_PROMPT", "compile_structured_brief", "compile_structured_brief_with_llm"]

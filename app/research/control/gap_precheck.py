@@ -5,10 +5,18 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+ResearchDecision = Literal[
+    "RETRY_EXECUTION",
+    "REPAIR_GAP",
+    "RESEARCH_COMPLETE",
+    "STOP_BUDGET_PARTIAL",
+    "STOP_FAILURE",
+]
+
 
 @dataclass(frozen=True)
 class GapPrecheckResult:
-    action: Literal["TARGETED_RESEARCH", "SYNTHESIZE"]
+    action: ResearchDecision
     blocking_gaps: tuple[str, ...] = ()
     actionable_gaps: tuple[str, ...] = ()
     reason: str = ""
@@ -22,7 +30,7 @@ class GapPrecheckResult:
 
 
 def precheck_gap(
-    state: dict[str, Any], *, max_waves: int = 2, max_repairs: int = 1
+    state: dict[str, Any], *, max_waves: int = 0, max_repairs: int = 1
 ) -> GapPrecheckResult:
     raw_judgement = state.get("coverage_judgement")
     judgement: dict[str, Any] = raw_judgement if isinstance(raw_judgement, dict) else {}
@@ -66,21 +74,71 @@ def precheck_gap(
     # budget”.  Only an explicit zero disables a repair wave.
     raw_repair_budget = budget.get("max_replan_count", max_repairs)
     repair_budget = int(raw_repair_budget) if raw_repair_budget is not None else max_repairs
+    # Execution failure and semantic insufficiency are different budgets.
+    # Retrying a timed-out worker must never consume a research repair.
+    tasks = state.get("tasks") if isinstance(state.get("tasks"), dict) else {}
+    retryable_execution = [
+        task_id
+        for task_id, task in tasks.items()
+        if isinstance(task, dict)
+        and str(task.get("execution_status") or "") == "failed"
+        and bool((task.get("failure") or {}).get("retryable"))
+    ]
+    if retryable_execution or (failed_questions and not tasks):
+        return GapPrecheckResult(
+            "RETRY_EXECUTION",
+            tuple(blocking),
+            tuple(actionable),
+            "retryable_execution_failure",
+            1,
+            wave,
+            not exhausted,
+            tuple(failed_questions),
+        )
     if sufficient:
-        reason = "coverage_sufficient"
-    elif exhausted:
-        reason = "budget_exhausted"
-    elif repair_budget <= 0:
-        reason = "repair_budget_unavailable"
-    elif wave >= max_waves:
-        reason = "max_research_waves"
-    elif not blocking:
-        reason = "no_blocking_actionable_gap"
-    elif wave >= max_repairs + 1:
-        reason = "repair_limit"
-    else:
-        return GapPrecheckResult("TARGETED_RESEARCH", tuple(blocking), tuple(actionable), "blocking_actionable_gap", 0, wave, True, tuple(failed_questions))
-    return GapPrecheckResult("SYNTHESIZE", tuple(blocking), tuple(actionable), reason, 1, wave, not exhausted, tuple(failed_questions))
+        return GapPrecheckResult(
+            "RESEARCH_COMPLETE",
+            tuple(blocking),
+            tuple(actionable),
+            "coverage_sufficient",
+            1,
+            wave,
+            not exhausted,
+            (),
+        )
+    semantic_repairs = int(state.get("semantic_repairs") or 0)
+    if blocking and not exhausted and repair_budget > semantic_repairs:
+        return GapPrecheckResult(
+            "REPAIR_GAP",
+            tuple(blocking),
+            tuple(actionable),
+            "blocking_actionable_gap",
+            0,
+            wave,
+            True,
+            (),
+        )
+    if blocking and (exhausted or repair_budget <= semantic_repairs):
+        return GapPrecheckResult(
+            "STOP_BUDGET_PARTIAL",
+            tuple(blocking),
+            tuple(actionable),
+            "budget_exhausted" if exhausted else "semantic_repair_budget_exhausted",
+            1,
+            wave,
+            not exhausted,
+            (),
+        )
+    return GapPrecheckResult(
+        "STOP_FAILURE",
+        tuple(blocking),
+        tuple(actionable),
+        "no_blocking_actionable_gap",
+        1,
+        wave,
+        not exhausted,
+        (),
+    )
 
 
-__all__ = ["GapPrecheckResult", "precheck_gap"]
+__all__ = ["GapPrecheckResult", "ResearchDecision", "precheck_gap"]

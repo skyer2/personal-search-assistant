@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from app.research.intent.user_ask import UserAsk
+
 
 @dataclass(frozen=True)
 class SourceRequirements:
@@ -27,6 +29,30 @@ class DeliverableRequirements:
 
 
 @dataclass(frozen=True)
+class ResearchQuestion:
+    """A researchable question that keeps lineage back to one UserAsk.
+
+    The text may be rewritten for searchability; ``ask_id`` may not be dropped.
+    """
+
+    question_id: str
+    ask_id: str
+    text: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "ResearchQuestion":
+        row = data or {}
+        return cls(
+            question_id=str(row.get("question_id") or ""),
+            ask_id=str(row.get("ask_id") or ""),
+            text=str(row.get("text") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class StructuredResearchBrief:
     brief_id: str
     version: int
@@ -34,6 +60,8 @@ class StructuredResearchBrief:
     user_intent: str
     explicit_subjects: tuple[str, ...] = ()
     key_questions: tuple[str, ...] = ()
+    user_asks: tuple[UserAsk, ...] = ()
+    research_questions: tuple[ResearchQuestion, ...] = ()
     constraints: tuple[str, ...] = ()
     source_requirements: SourceRequirements = field(default_factory=SourceRequirements)
     freshness_requirements: FreshnessRequirements = field(default_factory=FreshnessRequirements)
@@ -48,6 +76,19 @@ class StructuredResearchBrief:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def required_ask_ids(self) -> tuple[str, ...]:
+        return tuple(ask.ask_id for ask in self.user_asks if ask.required and ask.ask_id)
+
+    def ask_id_for_question_index(self, index: int) -> str:
+        """Map a 1-based key-question index onto its originating ask."""
+        qid = f"q{index}"
+        for item in self.research_questions:
+            if item.question_id == qid:
+                return item.ask_id
+        if 0 < index <= len(self.research_questions):
+            return self.research_questions[index - 1].ask_id
+        return ""
+
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "StructuredResearchBrief":
         row = data or {}
@@ -61,6 +102,16 @@ class StructuredResearchBrief:
             user_intent=str(row.get("user_intent") or "research"),
             explicit_subjects=tuple(str(item) for item in row.get("explicit_subjects") or [] if str(item).strip()),
             key_questions=tuple(str(item) for item in row.get("key_questions") or [] if str(item).strip()),
+            user_asks=tuple(
+                UserAsk.from_dict(item)
+                for item in row.get("user_asks") or []
+                if isinstance(item, dict) and str(item.get("text") or "").strip()
+            ),
+            research_questions=tuple(
+                ResearchQuestion.from_dict(item)
+                for item in row.get("research_questions") or []
+                if isinstance(item, dict) and str(item.get("text") or "").strip()
+            ),
             constraints=tuple(str(item) for item in row.get("constraints") or [] if str(item).strip()),
             source_requirements=SourceRequirements(
                 min_independent_sources=max(1, int(source.get("min_independent_sources") or 1)),
@@ -114,6 +165,7 @@ __all__ = [
     "DeliverableRequirements",
     "FastPathEligibility",
     "FreshnessRequirements",
+    "ResearchQuestion",
     "SourceRequirements",
     "StructuredResearchBrief",
 ]

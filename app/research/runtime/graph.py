@@ -73,6 +73,8 @@ def _plan_from_tasks(
                 "kind": "research_task",
                 "task_kind": "supervisor_research",
                 "priority": item.priority,
+                "ask_id": item.ask_id,
+                "question_id": item.question_id,
                 "target_criteria": list(item.target_criteria),
                 "target_gaps": list(item.target_gaps),
                 "criterion_id": item.criterion_id,
@@ -195,6 +197,15 @@ def supervisor_node(state: ResearchState) -> dict[str, Any]:
     budget = dict(state.get("budget"))
     action = SupervisorAgent(agent=None).fallback_action(brief, judgement, budget)
     action = SupervisorAgent(agent=None).resolve_action(action, judgement, brief)
+    if judgement is None:
+        from app.research.planning.semantic_planner import bind_plan_lineage
+
+        action = SupervisorAction(
+            action.action,
+            action.reason,
+            bind_plan_lineage(brief, action.research_tasks),
+            action.source,
+        )
     from dataclasses import replace
 
     known = {
@@ -468,7 +479,10 @@ def finalize_node(state: ResearchState) -> dict[str, Any]:
         state,
         reason=str((state.get("termination") or {}).get("reason") or ""),
         stage=WorkflowPhase.FINALIZE.value,
-        research_completed=str(assessment.get("verdict") or "") == "pass",
+        # Completion is the authority: a recovered or degraded delivery may pass
+        # the quality checks and still not be completed research.
+        research_completed=str(assessment.get("verdict") or "") == "pass"
+        and bool((assessment.get("completion_contract") or {}).get("passed", True)),
         synthesis_attempted=bool(state.get("final_content")) or int(state.get("synthesis_attempts") or 0) > 0,
         quality_attempted=bool(assessment),
     )

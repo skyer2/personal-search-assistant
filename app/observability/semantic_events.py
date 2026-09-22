@@ -236,6 +236,9 @@ def control_decision_event_attributes(decision: dict[str, Any] | None) -> dict[s
 def quality_event_attributes(assessment: dict[str, Any] | None) -> dict[str, Any]:
     value = dict(assessment or {})
     citation_metrics = value.get("citation_metrics")
+    completion = value.get("completion_contract")
+    relevance = value.get("relevance")
+    source_quality = value.get("source_quality")
     return {
         "verdict": str(value.get("verdict") or "unknown"),
         "issues": _strings(value.get("issues")),
@@ -244,7 +247,10 @@ def quality_event_attributes(assessment: dict[str, Any] | None) -> dict[str, Any
         "grounding": bool(value.get("grounding")),
         "citation_metrics": dict(citation_metrics) if isinstance(citation_metrics, dict) else {},
         "quality_metrics": dict(value.get("quality_metrics") or {}),
-        "completion_contract": dict(value.get("completion_contract") or {}),
+        "completion_contract": dict(completion) if isinstance(completion, dict) else {},
+        "relevance": dict(relevance) if isinstance(relevance, dict) else {},
+        "source_quality": dict(source_quality) if isinstance(source_quality, dict) else {},
+        "synthesis_mode": str(value.get("synthesis_mode") or ""),
     }
 
 

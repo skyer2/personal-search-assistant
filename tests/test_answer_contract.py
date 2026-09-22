@@ -36,7 +36,12 @@ def _findings():
     ]
 
 
-def test_deterministic_recovery_answers_every_question_and_marks_forecast():
+def test_evidence_bound_recovery_never_invents_a_forecast():
+    """Recovery organizes existing claims; it must not manufacture judgement.
+
+    A forecast question that only has present-tense evidence stays incomplete,
+    so a provider failure can never be delivered as a finished answer.
+    """
     result = assess_answerability(
         brief=_brief(),
         findings=_findings(),
@@ -50,14 +55,71 @@ def test_deterministic_recovery_answers_every_question_and_marks_forecast():
         findings=_findings(),
         answerability=result,
     )
-    complete = assess_answer_completeness(final, _brief())
-    assert complete.complete
+    assert final.synthesis_mode == "evidence_bound_recovery"
     assert final.answers[0].evidence_refs
-    assert final.answers[1].claim_type in {"inference", "forecast"}
+    # No worker claimed a forecast, so recovery must not upgrade the claim type.
+    assert final.answers[1].claim_type == "fact"
+    complete = assess_answer_completeness(final, _brief())
+    assert not complete.complete
+    assert "missing_judgement:q2" in complete.issues
+
     rendered = render_final_answer(final, citation_numbers={"e1": 1, "e2": 2})
     assert rendered.startswith("# 结论摘要")
     assert "直接回答" not in rendered
-    assert "已有以下信息" not in rendered
+    for template in (
+        "基于当前证据，我判断",
+        "可以形成方向性判断",
+        "更可能成为可验收交付的一部分",
+        "已有以下信息",
+    ):
+        assert template not in rendered
+
+
+def test_recovery_keeps_worker_declared_forecast():
+    findings = [
+        *_findings(),
+        {
+            "finding_id": "f3",
+            "claim": "多家厂商已公布 2027 年 agent runtime 路线图",
+            "evidence_ids": ["e2"],
+            "claim_type": "forecast",
+            "question_ids": ["q2"],
+            "confidence": 0.7,
+        },
+    ]
+    brief = _brief()
+    result = assess_answerability(
+        brief=brief,
+        findings=findings,
+        evidence_records=[{"evidence_id": "e1"}, {"evidence_id": "e2"}],
+        coverage={"sufficient": True},
+    )
+    final = compile_deterministic_answer(
+        objective=brief.objective,
+        brief=brief,
+        findings=findings,
+        answerability=result,
+    )
+    q2 = next(item for item in final.answers if item.question_id == "q2")
+    assert q2.claim_type == "forecast"
+
+
+def test_recovery_refuses_when_no_claim_is_bound():
+    brief = SimpleNamespace(objective="问题", key_questions=("问题",))
+    result = assess_answerability(
+        brief=brief,
+        findings=[{"finding_id": "f1", "claim": "结论", "evidence_ids": ["e1"]}],
+        evidence_records=[{"evidence_id": "e1"}],
+        coverage={"sufficient": True},
+    )
+    final = compile_deterministic_answer(
+        objective="问题",
+        brief=brief,
+        findings=[],
+        answerability=result,
+    )
+    assert final.answers[0].direct_answer.startswith("当前证据不足")
+    assert final.unresolved_questions
 
 
 def test_answerability_requires_real_evidence_alias():

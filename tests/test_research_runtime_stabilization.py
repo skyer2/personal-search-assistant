@@ -256,7 +256,7 @@ async def test_synthesis_failure_with_grounded_answer_uses_deterministic_recover
     update = await runner_module.ResearchGraphRunner(harness).node_synthesize(_synthesis_state())
     assert update["final_content"].strip()
     assert update["synthesis_failed"] is True
-    assert session.state.metadata["fallback_used"] == "deterministic_recovery"
+    assert session.state.metadata["fallback_used"] == "evidence_bound_recovery"
     assert session.state.metadata["answer_complete"] is True
     assert session.state.metadata["synthesis_fail_reason"] == "provider_unavailable"
     assert "Company A has recent funding evidence." in update["final_content"]

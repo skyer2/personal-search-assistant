@@ -37,7 +37,7 @@ def test_gap_precheck_skips_supervisor_when_coverage_is_sufficient():
             "dispatch_wave_id": 1,
         }
     )
-    assert result.action == "SYNTHESIZE"
+    assert result.action == "RESEARCH_COMPLETE"
     assert result.reason == "coverage_sufficient"
     assert result.supervisor_calls_avoided == 1
 
@@ -50,7 +50,7 @@ def test_gap_precheck_allows_one_targeted_repair_only_for_actionable_gap():
             "dispatch_wave_id": 1,
         }
     )
-    assert result.action == "TARGETED_RESEARCH"
+    assert result.action == "REPAIR_GAP"
     assert result.blocking_gaps == ("q2",)
     assert result.supervisor_calls_avoided == 0
 
@@ -63,16 +63,17 @@ def test_gap_precheck_uses_configured_repair_default_when_snapshot_omits_limit()
             "dispatch_wave_id": 1,
         }
     )
-    assert result.action == "TARGETED_RESEARCH"
+    assert result.action == "REPAIR_GAP"
 
 
-def test_gap_precheck_stops_at_max_wave_without_model_call():
+def test_gap_precheck_stops_when_semantic_repair_budget_is_exhausted():
     result = precheck_gap(
         {
             "coverage_judgement": {"sufficient": False, "gaps": [{"gap_id": "q2", "blocking": True}]},
             "budget": {"exhausted": False, "max_replan_count": 1},
             "dispatch_wave_id": 2,
+            "semantic_repairs": 1,
         }
     )
-    assert result.action == "SYNTHESIZE"
-    assert result.reason == "max_research_waves"
+    assert result.action == "STOP_BUDGET_PARTIAL"
+    assert result.reason == "semantic_repair_budget_exhausted"

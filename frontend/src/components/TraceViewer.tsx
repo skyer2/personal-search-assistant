@@ -298,6 +298,13 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
   }), [synthesis]);
   const lineage = summary.lineage || [];
   const brief = summary.brief || null;
+  const latestQuality = (summary.quality?.latest as Record<string, unknown> | null | undefined) || null;
+  const relevance = (latestQuality?.relevance as Record<string, unknown> | undefined) || null;
+  const sourceQuality = (latestQuality?.source_quality as Record<string, unknown> | undefined) || null;
+  const completionContract = (latestQuality?.completion_contract as Record<string, unknown> | undefined) || null;
+  const latestCoverage = coverageJudgements.length
+    ? coverageJudgements[coverageJudgements.length - 1]
+    : null;
   const failureOrigin = summary.failure_origin || null;
   const integrity = summary.trace_integrity || null;
   const progressCount = summary.progress_count ?? progress.length;
@@ -397,7 +404,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                   <Alert
                     message={
                       integrity.passed
-                        ? `Trace Integrity: PASS — ${Object.entries(integrity.counts || {}).map(([k, v]) => `${k}=${v}`).join(" · ")}`
+                        ? `Trace Integrity: PASS（仅表示事件链完整）— ${Object.entries(integrity.counts || {}).map(([k, v]) => `${k}=${v}`).join(" · ")}`
                         : `Trace Integrity: FAIL — ${(integrity.issues || []).join(", ")}`
                     }
                     showIcon
@@ -405,6 +412,23 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     type={integrity.passed ? "success" : "error"}
                   />
                 ) : null}
+                <Space wrap style={{ marginBottom: 12 }}>
+                  <Tag color={brief?.semantic_fidelity_passed === true ? "green" : brief?.semantic_fidelity_passed === false ? "red" : "default"}>
+                    Semantic Fidelity: {brief?.semantic_fidelity_passed === true ? "PASS" : brief?.semantic_fidelity_passed === false ? "FAIL" : "N/A"}
+                  </Tag>
+                  <Tag color={latestCoverage?.status === "sufficient" ? "green" : latestCoverage ? "red" : "default"}>
+                    Research Coverage: {latestCoverage ? asText(latestCoverage.status).toUpperCase() : "N/A"}
+                  </Tag>
+                  <Tag color={sourceQuality?.passed === true ? "green" : sourceQuality?.partial_passed === true ? "orange" : sourceQuality ? "red" : "default"}>
+                    Source Quality: {sourceQuality?.passed === true ? "PASS" : sourceQuality?.partial_passed === true ? "PARTIAL" : sourceQuality ? "FAIL" : "N/A"}
+                  </Tag>
+                  <Tag color={relevance?.passed === true ? "green" : relevance?.partial_passed === true ? "orange" : relevance ? "red" : "default"}>
+                    Answer Relevance: {relevance?.passed === true ? "PASS" : relevance?.partial_passed === true ? "PARTIAL" : relevance ? "FAIL" : "N/A"}
+                  </Tag>
+                  <Tag color={completionContract?.passed === true ? "green" : completionContract?.outcome === "partial" ? "orange" : completionContract ? "red" : "default"}>
+                    Completion: {completionContract ? asText(completionContract.outcome).toUpperCase() : asText(summary.status, "N/A").toUpperCase()}
+                  </Tag>
+                </Space>
                 {integrity?.span_tree && integrity.span_tree.valid !== null && integrity.span_tree.valid !== undefined ? (
                   <Typography.Paragraph type="secondary">
                     Span tree: {integrity.span_tree.span_count} spans / {integrity.span_tree.root_count} roots / {integrity.span_tree.cycle_count} cycles
@@ -478,6 +502,11 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       { key: "depth", field: "depth", value: asText(brief.depth) },
                       { key: "freshness", field: "freshness", value: asText(brief.freshness) },
                       { key: "deliverable", field: "deliverable", value: asText(brief.deliverable) },
+                      { key: "brief_source", field: "brief_source", value: asText(brief.brief_source) },
+                      { key: "brief_fallback_reason", field: "brief_fallback_reason", value: asText(brief.brief_fallback_reason) },
+                      { key: "original_ask_count", field: "original_ask_count", value: asText(brief.original_ask_count) },
+                      { key: "research_question_count", field: "research_question_count", value: asText(brief.research_question_count) },
+                      { key: "semantic_fidelity_score", field: "semantic_fidelity_score", value: asText(brief.semantic_fidelity_score) },
                       { key: "brief_ref", field: "brief_ref", value: asText(brief.brief_ref) },
                       { key: "topology", field: "topology", value: asText(topology?.topology) },
                       {

@@ -46,10 +46,10 @@ def test_twenty_findings_become_bounded_signals_and_writer_never_sees_snippets()
     synthesis = build_insight_synthesis(
         findings=_findings(), evidence_records=_records(), citation_numbers={f"E{i}": i for i in range(1, 21)},
     )
-    assert 3 <= len(synthesis.signals) <= 6
+    assert 1 <= len(synthesis.signals) <= 3
     assert synthesis.metrics["claims_before_dedup"] == 20
     assert synthesis.metrics["duplicate_claim_ratio"] <= 0.05
-    assert all(card.mechanism and card.support_refs for card in synthesis.insight_cards)
+    assert all(not card.mechanism and not card.why_it_matters and card.support_refs for card in synthesis.insight_cards)
 
     request = SynthesisRequest(
         mode="normal",
@@ -118,10 +118,10 @@ def test_secondary_excerpt_is_not_promoted_to_a_substantive_report_claim() -> No
     report = render_deterministic_insight_report(synthesis=synthesis, objective="研究 Agent 热点")
 
     assert "彻底改变所有企业" not in report
-    assert "值得持续跟踪的变化信号" in report
+    assert "值得持续跟踪的变化信号" not in report
     report = render_deterministic_insight_report(synthesis=synthesis, objective="研究 Agent")
-    assert "# 结论摘要" in report
-    assert "# 综合判断" in report
+    assert "# 部分研究结果" in report
+    assert "降级部分交付" in report
     assert "https://" not in report
 
 
@@ -160,7 +160,12 @@ def test_quality_gate_rejects_raw_snippet_and_repairs_summary_duplication() -> N
     assert "summary_detail_overlap" in duplicate.issues
 
 
-def test_forecast_cards_always_include_milestone_and_uncertainty() -> None:
+def test_forecast_cards_never_receive_deterministic_mechanism_or_milestone() -> None:
     synthesis = build_insight_synthesis(findings=_findings(), evidence_records=_records())
     assert synthesis.forecast_cards
-    assert all(card.mechanism and card.observable_milestone and card.uncertainty for card in synthesis.forecast_cards)
+    assert all(
+        not card.mechanism
+        and not card.observable_milestone
+        and not card.uncertainty
+        for card in synthesis.forecast_cards
+    )

@@ -131,6 +131,35 @@ class KeyQuestionCoverage:
 
 
 @dataclass(frozen=True)
+class AskCoverage:
+    """Coverage of one original user ask, rolled up from its criteria."""
+
+    ask_id: str
+    direct_answer_available: bool = False
+    source_quality: str = "unknown"
+    evidence_count: int = 0
+    unresolved_gaps: tuple[str, ...] = ()
+    criterion_ids: tuple[str, ...] = ()
+    required: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "AskCoverage":
+        row = data or {}
+        return cls(
+            ask_id=str(row.get("ask_id") or ""),
+            direct_answer_available=bool(row.get("direct_answer_available")),
+            source_quality=str(row.get("source_quality") or "unknown"),
+            evidence_count=max(0, int(row.get("evidence_count") or 0)),
+            unresolved_gaps=tuple(str(item) for item in row.get("unresolved_gaps") or []),
+            criterion_ids=tuple(str(item) for item in row.get("criterion_ids") or []),
+            required=bool(row.get("required", True)),
+        )
+
+
+@dataclass(frozen=True)
 class CoverageDelta:
     new_evidence_ids: tuple[str, ...] = ()
     new_supported_claim_ids: tuple[str, ...] = ()
@@ -156,6 +185,7 @@ class CoverageJudgement:
     sufficient: bool
     status: str
     criteria: tuple[CriterionSupport, ...] = ()
+    ask_coverage: tuple[AskCoverage, ...] = ()
     delta: CoverageDelta = CoverageDelta()
     missing: tuple[str, ...] = ()
     conflicts: tuple[str, ...] = ()
@@ -178,6 +208,11 @@ class CoverageJudgement:
             criteria=tuple(
                 CriterionSupport.from_dict(item)
                 for item in row.get("criteria") or []
+                if isinstance(item, dict)
+            ),
+            ask_coverage=tuple(
+                AskCoverage.from_dict(item)
+                for item in row.get("ask_coverage") or []
                 if isinstance(item, dict)
             ),
             delta=CoverageDelta.from_dict(row.get("delta") if isinstance(row.get("delta"), dict) else None),
@@ -212,8 +247,77 @@ def _criteria(brief: StructuredResearchBrief) -> tuple[tuple[str, str], ...]:
     return tuple((_criterion_id(item), item) for item in rows if str(item).strip())
 
 
+def _criterion_ask_ids(brief: StructuredResearchBrief) -> dict[str, str]:
+    """Map each criterion id onto the user ask it came from."""
+    mapping: dict[str, str] = {}
+    for index, (criterion_id, _text) in enumerate(_criteria(brief), 1):
+        ask_id = brief.ask_id_for_question_index(index)
+        if ask_id:
+            mapping[criterion_id] = ask_id
+    return mapping
+
+
+def _ask_coverage(
+    brief: StructuredResearchBrief,
+    supports: list[CriterionSupport],
+    evidence_by_id: dict[str, dict[str, Any]],
+) -> tuple[AskCoverage, ...]:
+    """Roll criterion support up to the user's asks."""
+    asks = list(brief.user_asks)
+    if not asks:
+        return ()
+    criterion_to_ask = _criterion_ask_ids(brief)
+    by_ask: dict[str, list[CriterionSupport]] = {}
+    for support in supports:
+        ask_id = criterion_to_ask.get(support.criterion_id, "")
+        if ask_id:
+            by_ask.setdefault(ask_id, []).append(support)
+    rows: list[AskCoverage] = []
+    for ask in asks:
+        ask_id = str(ask.ask_id or "")
+        mapped = by_ask.get(ask_id) or []
+        evidence_ids = list(
+            dict.fromkeys(item for support in mapped for item in support.evidence_ids)
+        )
+        tier = "unknown"
+        if evidence_ids:
+            from app.research.evidence.source_tier import classify_source_tier
+
+            tiers = {
+                classify_source_tier(evidence_by_id[item])
+                for item in evidence_ids
+                if item in evidence_by_id
+            }
+            tier = "tier1" if "tier1" in tiers else "tier2" if "tier2" in tiers else "tier3" if tiers else "unknown"
+        rows.append(
+            AskCoverage(
+                ask_id=ask_id,
+                direct_answer_available=bool(mapped) and all(
+                    support.status == "supported" for support in mapped
+                ),
+                source_quality=tier,
+                evidence_count=len(evidence_ids),
+                unresolved_gaps=tuple(
+                    support.missing for support in mapped if support.status != "supported" and support.missing
+                )
+                or (() if mapped else ("no_research_question",)),
+                criterion_ids=tuple(support.criterion_id for support in mapped),
+                required=bool(ask.required),
+            )
+        )
+    return tuple(rows)
+
+
+_PUNCT = re.compile(r"[?？!！。.,，、;；:：\s]+")
+
+
 def _normalize(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").casefold()).strip()
+
+
+def _normalize_criterion(value: str) -> str:
+    """Criterion identity must not depend on trailing punctuation."""
+    return _PUNCT.sub("", str(value or "").casefold())
 
 
 def _significant_characters(text: str) -> set[str]:
@@ -243,8 +347,8 @@ def _source_identity(row: dict[str, Any]) -> str:
 
 
 def _explicitly_bound(criterion_id: str, criterion: str, finding: ResearchFinding) -> bool:
-    target = _normalize(criterion)
-    targets = {_normalize(item) for item in finding.supported_criteria}
+    target = _normalize_criterion(criterion)
+    targets = {_normalize_criterion(item) for item in finding.supported_criteria}
     return criterion_id in finding.supported_criteria or target in targets
 
 
@@ -263,8 +367,8 @@ def _claim_bound(criterion_id: str, criterion: str, row: dict[str, Any]) -> bool
             if str(item).strip()
         ],
     }
-    return criterion_id in criteria or _normalize(criterion) in {
-        _normalize(item) for item in criteria
+    return criterion_id in criteria or _normalize_criterion(criterion) in {
+        _normalize_criterion(item) for item in criteria
     }
 
 
@@ -593,9 +697,16 @@ def judge_coverage(
         resolved_conflict_ids=tuple(sorted(previous_conflicts - conflict_ids)),
     )
 
+    ask_coverage = _ask_coverage(brief, supports, evidence_by_id)
     deterministic_sufficient = bool(supports) and all(
         row.status == "supported" for row in supports
     ) and not blocking_conflict_ids and not failed_questions
+    # Every required user ask must have a direct answer available; a fully
+    # supported criterion set that lost an ask is still a gap.
+    if ask_coverage and not all(
+        row.direct_answer_available for row in ask_coverage if row.required
+    ):
+        deterministic_sufficient = False
     if (
         previous is not None
         and previous.sufficient
@@ -621,6 +732,7 @@ def judge_coverage(
             sufficient=True,
             status="sufficient",
             criteria=tuple(supports),
+            ask_coverage=ask_coverage,
             delta=delta,
             conflicts=tuple(sorted(conflict_ids)),
             weak_claims=weak,
@@ -632,6 +744,7 @@ def judge_coverage(
         sufficient=False,
         status="gap",
         criteria=tuple(supports),
+        ask_coverage=ask_coverage,
         delta=delta,
         missing=missing or tuple(row[1] for row in _criteria(brief)),
         conflicts=tuple(sorted(conflict_ids)),
@@ -732,6 +845,7 @@ class CoverageJudge:
             sufficient=fallback.sufficient,
             status=fallback.status,
             criteria=fallback.criteria,
+            ask_coverage=fallback.ask_coverage,
             delta=fallback.delta,
             missing=missing,
             conflicts=tuple(str(item) for item in patch.get("conflicts") or [])[:8] or fallback.conflicts,
@@ -743,6 +857,7 @@ class CoverageJudge:
 
 
 __all__ = [
+    "AskCoverage",
     "CoverageDelta",
     "CoverageGap",
     "CoverageJudgement",

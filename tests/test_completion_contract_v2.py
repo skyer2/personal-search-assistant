@@ -27,7 +27,7 @@ def test_failed_blocking_worker_requests_targeted_repair() -> None:
             "key_question_coverage": [{"question_id": "q1", "blocking": True, "missing_evidence_types": ["worker_failed"]}],
         },
     })
-    assert precheck.action == "TARGETED_RESEARCH"
+    assert precheck.action == "RETRY_EXECUTION"
     assert precheck.blocking_worker_failures == ("q1",)
 
 

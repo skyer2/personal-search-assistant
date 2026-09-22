@@ -191,7 +191,7 @@ def test_supervisor_terminal_budget_decision_skips_provider() -> None:
             {"exhausted": True},
         )
     )
-    assert action.action == "COMPLETE"
+    assert action.action == "STOP_BUDGET_PARTIAL"
 
 
 def test_disabled_memory_never_calls_model_or_store() -> None:

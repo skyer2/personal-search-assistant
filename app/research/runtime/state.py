@@ -75,6 +75,16 @@ class ResearchState(TypedDict):
 
     budget: BudgetState
     budget_status: str
+    # Semantic repair budget and execution recovery budget are tracked apart so
+    # a worker timeout cannot consume a research wave.
+    execution_retries: int
+    semantic_repairs: int
+    worker_failures_by_type: dict[str, int]
+    user_ask_contract: dict[str, Any]
+    semantic_fidelity: dict[str, Any]
+    plan_semantic_validation: dict[str, Any]
+    relevance_assessment: dict[str, Any]
+    source_quality: dict[str, Any]
     dispatch_wave_id: int
     dispatch_admission: dict[str, Any]
     task_fingerprints: Annotated[dict[str, dict[str, Any]], merge_dicts]
@@ -190,7 +200,7 @@ def empty_research_state(
             "synthesis_reserve_sec": 180.0,
             "max_parallel_workers": 3,
             "max_replan_count": max_replan_count,
-            "max_research_waves": 2,
+            "max_research_waves": max(1, int(max_replan_count) + 1),
             "max_task_attempts": 2,
             "max_semantic_stall_cycles": 2,
             "max_active_tasks": 3,
@@ -198,6 +208,14 @@ def empty_research_state(
             "low": False,
         },
         "budget_status": "available",
+        "execution_retries": 0,
+        "semantic_repairs": 0,
+        "worker_failures_by_type": {},
+        "user_ask_contract": {},
+        "semantic_fidelity": {},
+        "plan_semantic_validation": {},
+        "relevance_assessment": {},
+        "source_quality": {},
         "dispatch_wave_id": 0,
         "dispatch_admission": {},
         "task_fingerprints": {},

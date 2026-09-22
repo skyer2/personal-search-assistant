@@ -9,10 +9,11 @@ from typing import Any, Literal
 @dataclass(frozen=True)
 class ResearchTaskRequest:
     objective: str
+    ask_id: str = ""
+    question_id: str = ""
     target_criteria: tuple[str, ...] = ()
     target_gaps: tuple[str, ...] = ()
     criterion_id: str = ""
-    question_id: str = ""
     hypothesis_id: str = ""
     gap_id: str = ""
     missing_evidence_types: tuple[str, ...] = ()
@@ -39,10 +40,11 @@ class ResearchTaskRequest:
             expected = [expected]
         return cls(
             objective=str(row.get("objective") or ""),
+            ask_id=str(row.get("ask_id") or ""),
+            question_id=str(row.get("question_id") or ""),
             target_criteria=tuple(str(item) for item in row.get("target_criteria") or []),
             target_gaps=tuple(str(item) for item in row.get("target_gaps") or []),
             criterion_id=str(row.get("criterion_id") or ""),
-            question_id=str(row.get("question_id") or ""),
             hypothesis_id=str(row.get("hypothesis_id") or ""),
             gap_id=str(row.get("gap_id") or ""),
             missing_evidence_types=tuple(
@@ -64,9 +66,23 @@ class ResearchTaskRequest:
         )
 
 
+SupervisorActionName = Literal[
+    "CONDUCT_RESEARCH",
+    "COMPLETE",
+    "STOP_BUDGET_PARTIAL",
+    "STOP_FAILURE",
+]
+
+# ``COMPLETE`` means the research objective is satisfied. Running out of budget
+# is a different outcome and must use a STOP_* action, never COMPLETE.
+SEMANTIC_COMPLETE_ACTIONS = frozenset({"COMPLETE"})
+STOP_ACTIONS = frozenset({"STOP_BUDGET_PARTIAL", "STOP_FAILURE"})
+SUPERVISOR_ACTIONS = frozenset({"CONDUCT_RESEARCH"}) | SEMANTIC_COMPLETE_ACTIONS | STOP_ACTIONS
+
+
 @dataclass(frozen=True)
 class SupervisorAction:
-    action: Literal["CONDUCT_RESEARCH", "COMPLETE"]
+    action: SupervisorActionName
     reason: str
     research_tasks: tuple[ResearchTaskRequest, ...] = field(default_factory=tuple)
     source: str = "deterministic_fallback"
@@ -86,7 +102,7 @@ class SupervisorAction:
     def from_dict(cls, data: dict[str, Any] | None) -> "SupervisorAction":
         row = data or {}
         action = str(row.get("action") or "CONDUCT_RESEARCH")
-        if action not in {"CONDUCT_RESEARCH", "COMPLETE"}:
+        if action not in SUPERVISOR_ACTIONS:
             action = "CONDUCT_RESEARCH"
         return cls(
             action=action,  # type: ignore[arg-type]
@@ -100,4 +116,11 @@ class SupervisorAction:
         )
 
 
-__all__ = ["ResearchTaskRequest", "SupervisorAction"]
+__all__ = [
+    "SEMANTIC_COMPLETE_ACTIONS",
+    "STOP_ACTIONS",
+    "SUPERVISOR_ACTIONS",
+    "ResearchTaskRequest",
+    "SupervisorAction",
+    "SupervisorActionName",
+]
