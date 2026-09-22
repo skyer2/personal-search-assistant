@@ -151,6 +151,7 @@ def execution_plan_from_brief(
                 "kind": "research_task",
                 "task_kind": "initial_bounded_plan",
                 "question_id": task.question_id,
+                "ask_id": f"a{task.question_id[1:]}",
                 "hypothesis": task.hypothesis,
                 "hypothesis_id": f"h_{task.question_id}",
                 "criterion_id": task.objective,

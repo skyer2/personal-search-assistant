@@ -26,12 +26,18 @@ def _findings():
             "claim": "2026年9月 agent 热点集中在企业级治理与工具调用",
             "evidence_ids": ["e1"],
             "confidence": 0.9,
+            "question_id": "q1",
+            "ask_id": "a1",
+            "validated": True,
         },
         {
             "finding_id": "f2",
             "claim": "多家机构将身份权限、审计和可靠性作为 agent 落地重点",
             "evidence_ids": ["e2"],
-            "confidence": 0.8,
+            "confidence": 0.9,
+            "question_id": "q2",
+            "ask_id": "a2",
+            "validated": True,
         },
     ]
 

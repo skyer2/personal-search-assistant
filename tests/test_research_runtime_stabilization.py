@@ -97,6 +97,10 @@ def _synthesis_state() -> dict[str, Any]:
                     "source_kind": "web",
                     "locator": "https://example.com/company-a",
                     "authority_score": 0.8,
+                    "source_type": "authoritative_secondary",
+                    "directness_score": 0.8,
+                    "question_id": "q1",
+                    "ask_id": "a1",
                     "excerpt_ref": "Company A has recent funding evidence.",
                 }
             ],
@@ -105,6 +109,9 @@ def _synthesis_state() -> dict[str, Any]:
                     "claim_id": "claim_company_a",
                     "text": "Company A has recent funding evidence.",
                     "evidence_ids": ["evidence_company_a"],
+                    "question_id": "q1",
+                    "ask_id": "a1",
+                    "validated": True,
                 }
             ],
             "findings": [
@@ -162,7 +169,9 @@ def test_worker_budget_stop_preserves_recovered_evidence():
         assert result.status == "partial"
         assert result.fail_reason == "research_phase_token_cap"
         assert result.evidence_refs
-        assert result.findings
+        assert result.findings == []
+        assert result.salvage_evidence
+        assert result.salvage_evidence[0]["publishable_as_claim"] is False
     finally:
         reset_artifact_store()
 
@@ -323,11 +332,11 @@ def test_deep_debug_primary_synthesis_timeout_honors_explicit_env(monkeypatch):
     session = _run_session(_budget_manager())
     session.state.metadata["run_budget"] = {"synthesis_step_timeout_sec": 300}
     monkeypatch.delenv("HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC", raising=False)
-    assert session.synthesis_timeout_sec() == 180
+    assert session.synthesis_timeout_sec() == 90
     monkeypatch.setenv("HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC", "120")
-    assert session.synthesis_timeout_sec() == 120
+    assert session.synthesis_timeout_sec() == 90
     monkeypatch.setenv("HARNESS_SYNTHESIS_STEP_TIMEOUT_SEC", "invalid")
-    assert session.synthesis_timeout_sec() == 180
+    assert session.synthesis_timeout_sec() == 90
     assert budget_for_mode("deep_debug", {"experiment": {"deep_debug": {}}})[
         "synthesis_step_timeout_sec"
     ] == 180
@@ -368,8 +377,9 @@ def test_worker_result_replay_is_idempotent():
     first = ingest_new_worker_results(state)
     assert first
     assert len(first["evidence_records"]) == 1
-    assert len(first["claims"]) == 1
-    assert len(first["findings"]) == 1
+    # Facts are ledger material; replay must not promote them to Claims.
+    assert first["claims"] == []
+    assert first["findings"] == []
 
     state["processed_worker_result_ids"] = list(first["processed_worker_result_ids"])
     state["evidence_records"] = list(first["evidence_records"])

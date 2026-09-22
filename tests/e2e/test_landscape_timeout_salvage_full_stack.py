@@ -41,7 +41,8 @@ def test_landscape_timeout_salvage_reaches_partial_pdf_and_run_download(tmp_path
     result = asyncio.run(harness.run(query, session_id, mode="agent"))
 
     assert result.status == "partial"
-    assert "降级部分交付" in result.content
+    assert "部分交付" in result.content
+    assert "可追溯证据" in result.content
     assert any(path.lower().endswith(".pdf") for path in result.artifacts)
     assert result.metadata["termination"]["outcome"] == "partial"
     assert result.metadata["termination"]["research_completed"] is False

@@ -30,12 +30,7 @@ class FinalAnswer:
     objective: str
     answers: list[QuestionAnswer]
     overall_summary: str
-    synthesis_mode: Literal[
-        "primary",
-        "compact_retry",
-        "deterministic_recovery",
-        "evidence_bound_recovery",
-    ]
+    synthesis_mode: Literal["primary", "compact_retry", "deterministic_recovery"]
     synthesis_degraded: bool
     unresolved_questions: list[str] = field(default_factory=list)
 
@@ -54,22 +49,9 @@ class FinalAnswer:
 class QuestionAnswerability:
     question_id: str
     answerable: bool
+    status: Literal["UNANSWERABLE", "PARTIAL", "SUPPORTED", "STRONG"] = "UNANSWERABLE"
     supporting_findings: list[str] = field(default_factory=list)
     supporting_evidence: list[str] = field(default_factory=list)
-    missing_requirements: list[str] = field(default_factory=list)
-    ask_id: str = ""
-    binding: str = "lineage"
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class AskAnswerability:
-    ask_id: str
-    answerable: bool
-    question_ids: list[str] = field(default_factory=list)
-    evidence_refs: list[str] = field(default_factory=list)
     missing_requirements: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -81,13 +63,11 @@ class AnswerabilityResult:
     answerable: bool
     question_status: list[QuestionAnswerability]
     reason: str = ""
-    ask_status: list[AskAnswerability] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "answerable": self.answerable,
             "question_status": [item.to_dict() for item in self.question_status],
-            "ask_status": [item.to_dict() for item in self.ask_status],
             "reason": self.reason,
         }
 
@@ -148,21 +128,6 @@ def _finding_id(finding: dict[str, Any], index: int) -> str:
     )
 
 
-def _declared_lineage(finding: dict[str, Any]) -> set[str]:
-    """Explicit question/criterion lineage a worker or planner bound to a finding."""
-    values: set[str] = set()
-    for key in ("question_ids", "question_id", "criterion_ids", "criterion_id", "supported_criteria", "ask_ids", "ask_id"):
-        raw = finding.get(key) or []
-        raw = [raw] if isinstance(raw, str) else raw
-        values.update(str(item).strip() for item in raw if str(item).strip())
-    return values
-
-
-def _lineage_keys(question_id: str, question: str, ask_id: str) -> set[str]:
-    keys = {question_id, question.strip(), ask_id}
-    return {item for item in keys if item}
-
-
 def assess_answerability(
     *,
     brief: Any,
@@ -170,17 +135,17 @@ def assess_answerability(
     evidence_records: list[dict[str, Any]],
     coverage: dict[str, Any] | None = None,
     conflicts: list[dict[str, Any]] | None = None,
+    validated_claims: list[dict[str, Any]] | None = None,
 ) -> AnswerabilityResult:
-    """Assess answerability from explicit lineage, not keyword similarity.
+    """Assess each question by explicit claim lineage, never lexical overlap.
 
-    A finding counts for a question when it declares that question/criterion/ask
-    id. Token overlap remains only as a last-resort bridge for payloads that
-    carry no lineage at all, and is recorded as ``binding="token_overlap"``.
+    ``findings`` remains an input for older callers, but only rows already
+    marked as validated and carrying a question_id are eligible.  Runtime
+    callers pass ``validated_claims`` from the claim-admission boundary.
     """
     questions = list(getattr(brief, "key_questions", None) or [])
     if not questions:
         questions = [str(getattr(brief, "objective", "") or "")]
-    coverage_sufficient = bool((coverage or {}).get("sufficient"))
     records: set[str] = set()
     for row in evidence_records:
         for key in ("evidence_id", "artifact_ref", "artifact_id", "source_id", "source"):
@@ -191,53 +156,28 @@ def assess_answerability(
         str(row.get("status") or "") == "unresolved" and bool(row.get("blocking"))
         for row in conflicts or [] if isinstance(row, dict)
     )
-    coverage_criteria = [
-        row
-        for row in (coverage or {}).get("criteria") or []
+    rows = validated_claims if validated_claims is not None else findings
+    claim_rows = [
+        row for row in rows or []
         if isinstance(row, dict)
+        and bool(row.get("validated", validated_claims is not None))
+        and str(row.get("question_id") or "").strip()
     ]
-    any_lineage = any(_declared_lineage(row) for row in findings if isinstance(row, dict))
     statuses: list[QuestionAnswerability] = []
     for index, question in enumerate(questions, 1):
         qid = f"q{index}"
-        ask_id = ""
-        resolver = getattr(brief, "ask_id_for_question_index", None)
-        if callable(resolver):
-            ask_id = str(resolver(index) or "")
-        keys = _lineage_keys(qid, str(question), ask_id)
-        if index <= len(coverage_criteria):
-            criterion_id = str(
-                coverage_criteria[index - 1].get("criterion_id") or ""
-            )
-            if criterion_id:
-                keys.add(criterion_id)
-        bound = [
-            finding
-            for finding in findings
-            if isinstance(finding, dict)
-            and _claim(finding)
-            and _refs(finding)
-            and (_declared_lineage(finding) & keys)
-        ]
-        binding = "lineage"
-        selected = bound
-        if not selected and not any_lineage:
-            qtokens = _tokens(str(question))
-            ranked = sorted(
-                (
-                    (len(qtokens & _tokens(_claim(finding))) / max(1, len(qtokens)), finding)
-                    for finding in findings
-                    if isinstance(finding, dict) and _claim(finding) and _refs(finding)
-                ),
-                key=lambda row: row[0],
-                reverse=True,
-            )
-            selected = [row for score, row in ranked if score >= 0.12]
-            if not selected and coverage_sufficient:
-                selected = [row for _score, row in ranked[:3]]
-            binding = "token_overlap"
+        selected: list[dict[str, Any]] = []
+        for finding in claim_rows:
+            if str(finding.get("question_id") or "") != qid:
+                continue
+            claim = _claim(finding)
+            refs = _refs(finding)
+            if not claim or not refs:
+                continue
+            selected.append(finding)
         finding_refs = [_finding_id(row, i) for i, row in enumerate(selected)]
         evidence_refs = list(dict.fromkeys(ref for row in selected for ref in _refs(row) if ref in records))
+        high_quality = sum(float(row.get("authority_score") or row.get("source_quality_score") or 0.0) >= 0.75 for row in selected)
         answerable = bool(selected and evidence_refs) and not usable_conflict
         missing: list[str] = []
         if not selected:
@@ -246,57 +186,22 @@ def assess_answerability(
             missing.append("supporting_evidence")
         if usable_conflict:
             missing.append("blocking_unresolved_conflict")
-        statuses.append(
-            QuestionAnswerability(
-                qid, answerable, finding_refs, evidence_refs, missing,
-                ask_id=ask_id, binding=binding,
-            )
-        )
+        status: Literal["UNANSWERABLE", "PARTIAL", "SUPPORTED", "STRONG"]
+        if not selected or not evidence_refs:
+            status = "UNANSWERABLE"
+        elif usable_conflict or len(selected) < 2:
+            status = "PARTIAL"
+        elif high_quality >= 2 and len(set(evidence_refs)) >= 2:
+            status = "STRONG"
+        else:
+            status = "SUPPORTED"
+        statuses.append(QuestionAnswerability(qid, answerable, status, finding_refs, evidence_refs, missing))
     answerable = bool(statuses) and all(item.answerable for item in statuses)
-    reason = (
-        "coverage_sufficient"
-        if answerable and coverage_sufficient
-        else "all_key_questions_supported"
-        if answerable
-        else "one_or_more_key_questions_unanswerable"
-    )
-    return AnswerabilityResult(answerable, statuses, reason, _ask_status(brief, statuses))
+    reason = "all_key_questions_explicitly_supported" if answerable else "one_or_more_key_questions_unanswerable"
+    return AnswerabilityResult(answerable, statuses, reason)
 
 
-def _ask_status(brief: Any, statuses: list[QuestionAnswerability]) -> list[AskAnswerability]:
-    """Roll question answerability up to the user's asks."""
-    asks = list(getattr(brief, "user_asks", None) or ())
-    if not asks:
-        return []
-    by_ask: dict[str, list[QuestionAnswerability]] = {}
-    for item in statuses:
-        if item.ask_id:
-            by_ask.setdefault(item.ask_id, []).append(item)
-    output: list[AskAnswerability] = []
-    for ask in asks:
-        ask_id = str(getattr(ask, "ask_id", "") or "")
-        mapped = by_ask.get(ask_id) or []
-        answerable = bool(mapped) and any(item.answerable for item in mapped)
-        missing: list[str] = []
-        if not mapped:
-            missing.append("no_research_question")
-        elif not answerable:
-            missing.append("no_answerable_research_question")
-        output.append(
-            AskAnswerability(
-                ask_id=ask_id,
-                answerable=answerable,
-                question_ids=[item.question_id for item in mapped],
-                evidence_refs=list(
-                    dict.fromkeys(ref for item in mapped for ref in item.supporting_evidence)
-                ),
-                missing_requirements=missing,
-            )
-        )
-    return output
-
-
-def compile_evidence_bound_answer(
+def compile_deterministic_answer(
     *,
     objective: str,
     brief: Any,
@@ -304,14 +209,13 @@ def compile_evidence_bound_answer(
     answerability: AnswerabilityResult,
     synthesis_degraded: bool = True,
 ) -> FinalAnswer:
-    """Recover an answer from validated claims only.
-
-    This is EvidenceBoundRecovery: it may under-answer, but it must never invent
-    a mechanism, a trend label or a forecast. Every sentence here is either a
-    claim the workers produced or an explicit statement that evidence is missing.
-    """
+    """Compile a direct, evidence-bound answer without calling tools or an LLM."""
     questions = list(getattr(brief, "key_questions", None) or []) or [objective]
-    by_id = {_finding_id(row, i): row for i, row in enumerate(findings) if isinstance(row, dict)}
+    by_id = {
+        _finding_id(row, i): row
+        for i, row in enumerate(findings)
+        if isinstance(row, dict) and bool(row.get("validated", False)) and str(row.get("question_id") or "").strip()
+    }
     answers: list[QuestionAnswer] = []
     unresolved: list[str] = []
     for index, question in enumerate(questions, 1):
@@ -319,70 +223,23 @@ def compile_evidence_bound_answer(
         status = next((item for item in answerability.question_status if item.question_id == qid), None)
         if status is None or not status.answerable:
             unresolved.append(str(question))
-            answers.append(
-                QuestionAnswer(
-                    qid,
-                    "当前证据不足，无法可靠回答这一问题。",
-                    limitations=["缺少可绑定的支持证据"],
-                    display_title=_display_title(str(question), index),
-                )
-            )
+            answers.append(QuestionAnswer(qid, "当前证据不足，无法可靠回答这一问题。", limitations=["缺少可绑定的支持证据"], display_title=_display_title(str(question), index)))
             continue
         selected = [by_id[item] for item in status.supporting_findings if item in by_id]
         claims = [_claim(row) for row in selected if _claim(row)]
-        if not claims:
-            # No verbatim claim bound to this question: do not fabricate one.
-            unresolved.append(str(question))
-            answers.append(
-                QuestionAnswer(
-                    qid,
-                    "当前证据不足，无法可靠回答这一问题。",
-                    finding_refs=status.supporting_findings,
-                    evidence_refs=status.supporting_evidence,
-                    limitations=["已登记证据未绑定到该问题的可用结论"],
-                    display_title=_display_title(str(question), index),
-                )
-            )
-            continue
-        direct = "；".join(claims[:3])
+        # A recovery only organizes validated claims.  It never promotes a
+        # snippet or fabricates a bridge from an unrelated question.
+        direct = claims[0][:420] if claims else "当前证据不足，无法可靠回答这一问题。"
+        trend = any(word in str(question) for word in _TREND_WORDS)
         explicit_types = [str(row.get("claim_type") or "") for row in selected]
-        # Claim type is read from the worker payload; recovery never upgrades a
-        # fact into a forecast on its own.
-        claim_type: ClaimType = (
-            "forecast"
-            if "forecast" in explicit_types
-            else "inference"
-            if "inference" in explicit_types
-            else "fact"
-        )
-        reasoning = claims[1:4] if len(claims) > 1 else claims[:1]
-        confidence = min(
-            1.0,
-            max(
-                0.35,
-                sum(float(row.get("confidence") or 0.6) for row in selected[:3])
-                / max(1, len(selected[:3])),
-            ),
-        )
-        answers.append(
-            QuestionAnswer(
-                qid,
-                direct,
-                reasoning,
-                status.supporting_findings,
-                status.supporting_evidence,
-                confidence,
-                claim_type=claim_type,
-                display_title=_display_title(str(question), index),
-            )
-        )
-    answered = [item for item in answers if item.evidence_refs and item.reasoning]
-    summary = answered[0].direct_answer if answered else "当前证据不足，无法形成可靠综合判断。"
-    return FinalAnswer(objective, answers, summary, "evidence_bound_recovery", synthesis_degraded, unresolved)
-
-
-# Backwards-compatible alias; the behaviour is now evidence-bound recovery.
-compile_deterministic_answer = compile_evidence_bound_answer
+        claim_type: ClaimType = "forecast" if trend and ("forecast" in explicit_types or "未来" in str(question)) else "inference" if trend else "fact"
+        if trend and claim_type == "forecast":
+            direct = f"基于当前证据，我判断：{direct}"
+        reasoning = claims[1:3] if len(claims) > 1 else ["该判断仅覆盖本次已登记且可绑定的来源。"]
+        confidence = min(1.0, max(0.35, sum(float(row.get("confidence") or 0.6) for row in selected[:3]) / max(1, len(selected[:3]))))
+        answers.append(QuestionAnswer(qid, direct, reasoning, status.supporting_findings, status.supporting_evidence, confidence, claim_type=claim_type, display_title=_display_title(str(question), index)))
+    summary = answers[0].direct_answer if answers else "当前没有可生成的回答。"
+    return FinalAnswer(objective, answers, summary, "deterministic_recovery", synthesis_degraded, unresolved)
 
 
 def assess_answer_completeness(final_answer: FinalAnswer, brief: Any) -> AnswerCompletenessResult:
@@ -428,23 +285,15 @@ def render_final_answer(answer: FinalAnswer, *, citation_numbers: dict[str, int]
         if item.reasoning:
             lines.extend(["", "**依据与限制**：", *[f"- {row}" for row in item.reasoning]])
         lines.append("")
-    if future:
-        lines.extend(["# 未来 1~2 年方向", ""])
-        for item in future:
-            refs = "".join(f"[{citation_numbers[ref]}]" for ref in item.evidence_refs if ref in citation_numbers)
-            lines.extend([f"## {item.display_title or '方向性判断'}", "", f"**方向判断**：{item.direct_answer}{(' ' + refs) if refs else ''}", "", "**不确定性**：该判断仅基于本次已登记证据，需以后续可观察结果验证。", ""])
+    lines.extend(["# 未来 1~2 年方向", ""])
+    for item in future:
+        refs = "".join(f"[{citation_numbers[ref]}]" for ref in item.evidence_refs if ref in citation_numbers)
+        lines.extend([f"## {item.display_title or '方向性判断'}", "", f"**方向判断**：{item.direct_answer}{(' ' + refs) if refs else ''}", "", "**不确定性**：该判断仅基于本次已登记证据，需以后续可观察结果验证。", ""])
+    if not future:
+        lines.append("现有证据以当前状态为主；未来判断应以可观察里程碑和不确定性为边界。\n")
     if answer.unresolved_questions:
-        lines.extend(["# 尚未回答", "", *[f"- {row}" for row in answer.unresolved_questions], ""])
-    lines.extend(["# 限制", "", "以上内容仅来自本次已登记证据，未超出证据做推断。", ""])
-    if answer.synthesis_mode in {"evidence_bound_recovery", "deterministic_recovery"}:
-        # Recovery assembled existing claims; the model never wrote this report.
-        lines.extend(
-            [
-                "本结果由运行时从已确认证据恢复生成，未经过完整模型综合，"
-                "因此属于降级部分交付，不能视为完整成功。",
-                "",
-            ]
-        )
+        lines.extend(["# 主要不确定性", "", *[f"- {row}" for row in answer.unresolved_questions], ""])
+    lines.extend(["# 综合判断", "", "这些结论需要结合来源质量、证据独立性和后续变化持续复核，而不能替代新的事实核验。", ""])
     return "\n".join(lines).strip() + "\n"
 
 
@@ -460,9 +309,7 @@ def _display_title(question: str, index: int) -> str:
 
 
 __all__ = [
-    "AnswerabilityResult", "AnswerCompletenessResult", "AskAnswerability",
-    "ClaimType", "FinalAnswer",
+    "AnswerabilityResult", "AnswerCompletenessResult", "ClaimType", "FinalAnswer",
     "QuestionAnswer", "QuestionAnswerability", "assess_answerability",
-    "assess_answer_completeness", "compile_deterministic_answer",
-    "compile_evidence_bound_answer", "render_final_answer",
+    "assess_answer_completeness", "compile_deterministic_answer", "render_final_answer",
 ]

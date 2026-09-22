@@ -65,6 +65,16 @@ def _finding() -> ResearchFinding:
     )
 
 
+def _validated_claim() -> dict[str, object]:
+    return {
+        "claim_id": "claim-1",
+        "text": "Company A commercial traction",
+        "criterion_id": "What is Company A's commercial traction?",
+        "validated": True,
+        "evidence_ids": ["evidence-1", "evidence-2"],
+    }
+
+
 def _evidence(
     *,
     primary: bool = True,
@@ -98,10 +108,8 @@ def test_coverage_uses_key_questions_and_lexical_only_is_partial() -> None:
     judgement = judge_coverage(_brief(), [finding], evidence=_evidence())
 
     assert len(judgement.criteria) == 1
-    assert judgement.criteria[0].status == "partial"
-    assert judgement.criteria[0].missing_evidence_types == (
-        "direct_criterion_binding",
-    )
+    assert judgement.criteria[0].status == "unsupported"
+    assert "direct_criterion_binding" in judgement.criteria[0].missing_evidence_types
     assert judgement.sufficient is False
 
 
@@ -109,6 +117,7 @@ def test_primary_and_freshness_requirements_gate_supported() -> None:
     primary_missing = judge_coverage(
         _brief(primary_required=True),
         [_finding()],
+        claims=[_validated_claim()],
         evidence=_evidence(primary=False, published=_recent_date()),
     )
     assert primary_missing.criteria[0].status == "partial"
@@ -117,6 +126,7 @@ def test_primary_and_freshness_requirements_gate_supported() -> None:
     stale = judge_coverage(
         _brief(fresh_required=True),
         [_finding()],
+        claims=[_validated_claim()],
         evidence=_evidence(published="2020-01-01T00:00:00+00:00"),
     )
     assert stale.criteria[0].status == "partial"
@@ -125,6 +135,7 @@ def test_primary_and_freshness_requirements_gate_supported() -> None:
     supported = judge_coverage(
         _brief(primary_required=True, fresh_required=True),
         [_finding()],
+        claims=[_validated_claim()],
         evidence=_evidence(published=_recent_date()),
     )
     assert supported.criteria[0].status == "supported"
@@ -136,6 +147,7 @@ def test_dangling_evidence_reference_is_not_counted_and_does_not_crash() -> None
     judgement = judge_coverage(
         _brief(primary_required=True),
         [_finding()],
+        claims=[_validated_claim()],
         evidence=_evidence(primary=False, published=_recent_date())[:1],
     )
 
@@ -147,6 +159,7 @@ def test_blocking_conflict_prevents_sufficient_and_creates_gap() -> None:
     judgement = judge_coverage(
         _brief(),
         [_finding()],
+        claims=[_validated_claim()],
         evidence=_evidence(),
         claim_conflicts=[{"edge_id": "edge-1"}],
         claim_resolutions=[

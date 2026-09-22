@@ -152,7 +152,7 @@ def test_quality_gate_rejects_raw_snippet_and_repairs_summary_duplication() -> N
     )
     assert raw_url.verdict == "FAIL"
     duplicate = evaluate_report_quality(
-        content="# 结论摘要\n\n企业正在从 PoC 转向业务结果。[1]\n\n# 当前热点\n\n企业正在从 PoC 转向业务结果。[1]",
+        content="# 结论摘要\n\n企业正在从 PoC 转向业务结果。[1]\n\n# 当前热点\n\n企业正在从 PoC 转向业务结果。[1]\n\n# 参考来源\n[1] official.example — https://official.example/source",
         brief={"key_questions": ["当前热点是什么？"]}, evidence_records=evidence,
         answer_contract={"answers": [{"question_id": "q1", "direct_answer": "有结论"}]},
     )

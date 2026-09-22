@@ -244,10 +244,11 @@ def test_one_failed_worker_does_not_discard_usable_worker_evidence() -> None:
         {
             "task_id": "task_success",
             "dispatch_wave_id": 1,
-            "ok": True,
-            "status": "done",
-            "summary": "Company A has funding evidence.",
-            "payload": {
+                "ok": True,
+                "status": "done",
+                "summary": "Company A has funding evidence.",
+                "task_metadata": {"question_id": "q1", "ask_id": "a1"},
+                "payload": {
                 "summary": "Company A has funding evidence.",
                 "facts": ["Company A has funding evidence."],
                 "sources": ["https://example.com/company-a"],

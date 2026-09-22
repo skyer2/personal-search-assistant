@@ -67,7 +67,12 @@ def test_key_questions_and_source_identity_drive_coverage():
         {"evidence_id": "evidence-1", "source_id": "company-a.com"},
         {"evidence_id": "evidence-2", "source_id": "company-a.com"},
     ]
-    partial = judge_coverage(brief, [finding], evidence=same_source)
+    claims = [{
+        "claim_id": "claim-1", "text": "Company A should be studied with evidence.",
+        "criterion_id": "How should Company A be studied?", "evidence_ids": ["evidence-1", "evidence-2"],
+        "validated": True,
+    }]
+    partial = judge_coverage(brief, [finding], claims=claims, evidence=same_source)
     assert partial.sufficient is False
     assert partial.criteria[0].status == "partial"
     assert partial.criteria[0].evidence_ids == ("evidence-1", "evidence-2")
@@ -77,6 +82,7 @@ def test_key_questions_and_source_identity_drive_coverage():
     independent = judge_coverage(
         brief,
         [independent_finding],
+        claims=[{**claims[0], "evidence_ids": ["evidence-1", "evidence-3"]}],
         evidence=[
             *same_source,
             {"evidence_id": "evidence-3", "source_id": "reuters.com"},

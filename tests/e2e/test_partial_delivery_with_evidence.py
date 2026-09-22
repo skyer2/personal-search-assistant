@@ -33,6 +33,9 @@ def test_partial_delivery_keeps_usable_evidence_and_discloses_limits():
                     "text": "月之暗面具有可验证的 AI 初创证据。",
                     "evidence_ids": ["ev_partial"],
                     "confidence": 0.82,
+                    "validated": True,
+                    "question_id": "q1",
+                    "ask_id": "a1",
                 }
             ],
             "findings": [
@@ -42,6 +45,8 @@ def test_partial_delivery_keeps_usable_evidence_and_discloses_limits():
                     "summary": "月之暗面具有可验证的 AI 初创证据。",
                     "claims": ["月之暗面具有可验证的 AI 初创证据。"],
                     "evidence_ids": ["ev_partial"],
+                    "validated": True,
+                    "question_id": "q1",
                 }
             ],
             "worker_results": [
@@ -57,13 +62,13 @@ def test_partial_delivery_keeps_usable_evidence_and_discloses_limits():
 
     state.update(synthesize_node(state))
     content = state["final_content"]
-    assert "月之暗面具有可验证的 AI 初创证据" in content
-    assert "https://example.com/ai-startup" in content
+    assert "月之暗面具有可验证的 AI 初创证据。" in content
+    assert "https://example.com/ai-startup" not in content
     assert "技术路线与产品" in content
     assert "ev_partial" not in content
     assert "finding_partial" not in content
     assert "部分交付" in content
-    assert "降级部分交付" in content
+    assert "不能视为完整成功" not in content
 
     state.update(quality_gate_node(state))
     assert "coverage_gap" in state["quality_assessment"]["issues"]

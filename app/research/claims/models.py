@@ -20,6 +20,8 @@ class ClaimRecord:
     claim_id: str
     text: str
     task_id: str = ""
+    ask_id: str = ""
+    question_id: str = ""
     subject: str = ""
     subject_id: str = ""
     dimension_id: str = ""
@@ -36,6 +38,10 @@ class ClaimRecord:
     authority_score: float = 0.0
     normalized_key: str = ""
     claim_type: ClaimType = "fact"
+    provenance: str = "worker"
+    validated: bool = False
+    publishability_score: float = 0.0
+    admission_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -52,6 +58,8 @@ class ClaimRecord:
             claim_id=str(row.get("claim_id") or ""),
             text=str(row.get("text") or row.get("claim") or ""),
             task_id=str(row.get("task_id") or ""),
+            ask_id=str(row.get("ask_id") or ""),
+            question_id=str(row.get("question_id") or ""),
             subject=str(row.get("subject") or ""),
             subject_id=str(row.get("subject_id") or ""),
             dimension_id=str(row.get("dimension_id") or ""),
@@ -68,6 +76,10 @@ class ClaimRecord:
             authority_score=float(row.get("authority_score") or 0.0),
             normalized_key=str(row.get("normalized_key") or ""),
             claim_type=str(row.get("claim_type") or "fact"),  # type: ignore[arg-type]
+            provenance=str(row.get("provenance") or "worker"),
+            validated=bool(row.get("validated", False)),
+            publishability_score=max(0.0, min(1.0, float(row.get("publishability_score") or 0.0))),
+            admission_reasons=[str(x) for x in (row.get("admission_reasons") or []) if str(x).strip()],
         )
 
 

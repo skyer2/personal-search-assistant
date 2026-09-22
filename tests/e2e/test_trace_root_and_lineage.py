@@ -66,7 +66,10 @@ def test_trace_root_and_evidence_lineage_survive_full_stack(tmp_path: Path, monk
         edge["from_type"] == "task" and edge["to_type"] == "evidence"
         for edge in summary["lineage"]
     )
-    assert any(
+    # This fixture intentionally faults workers after retrieval.  Its records
+    # are salvage evidence only, so the truth-pipeline must not create an
+    # evidence → synthesis edge without an admitted Claim.
+    assert not any(
         edge["from_type"] == "evidence" and edge["to_type"] == "synthesis"
         for edge in summary["lineage"]
     )

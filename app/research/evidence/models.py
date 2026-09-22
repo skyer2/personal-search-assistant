@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -29,7 +29,13 @@ class EvidenceRecord:
     artifact_ref: str = ""
     language: str = ""
     task_id: str = ""
+    question_id: str = ""
+    ask_id: str = ""
     run_id: str = ""
+    # Evidence quality is deliberately independent from URL/source quality.
+    # It is populated by the artifact/extractor boundary when text is known.
+    excerpt_quality: float = 0.0
+    extraction_confidence: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -59,8 +65,40 @@ class EvidenceRecord:
             artifact_ref=str(row.get("artifact_ref") or ""),
             language=str(row.get("language") or ""),
             task_id=str(row.get("task_id") or ""),
+            question_id=str(row.get("question_id") or ""),
+            ask_id=str(row.get("ask_id") or ""),
             run_id=str(row.get("run_id") or ""),
+            excerpt_quality=max(0.0, min(1.0, float(row.get("excerpt_quality") or 0.0))),
+            extraction_confidence=max(0.0, min(1.0, float(row.get("extraction_confidence") or 0.0))),
         )
 
 
-__all__ = ["EvidenceRecord"]
+@dataclass(frozen=True)
+class SalvageEvidence:
+    """Artifact material recovered after a worker stops.
+
+    This type intentionally cannot become a Finding by itself.  A later
+    promotion must build a ClaimDraft and pass the same admission gate as a
+    normal worker claim.
+    """
+
+    evidence_id: str
+    task_id: str
+    question_id: str
+    source_id: str
+    locator: str
+    title: str
+    excerpt: str
+    source_type: str
+    extraction_quality: float
+    is_complete_sentence: bool
+    is_navigation_text: bool
+    is_search_snippet: bool
+    provenance: Literal["worker_salvage"] = "worker_salvage"
+    publishable_as_claim: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+__all__ = ["EvidenceRecord", "SalvageEvidence"]

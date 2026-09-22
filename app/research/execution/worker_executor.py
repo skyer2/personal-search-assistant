@@ -1252,12 +1252,15 @@ class WorkerExecutorV2:
             task_id=task.task_id,
             step_index=step_index,
         )
-        findings = list(salvaged.get("findings") or [])
+        # Salvage is evidence-only.  It must never travel in ``findings``;
+        # otherwise a timeout can become an answer through the fallback path.
+        salvage_evidence = list(salvaged.get("salvage_evidence") or [])
+        findings: list[dict[str, Any]] = []
         evidence_refs = list(salvaged.get("evidence_refs") or [])
         sources = list(salvaged.get("sources") or [])
         facts = list(salvaged.get("facts") or [])
         candidates = list(salvaged.get("candidates") or [])
-        if not findings and not evidence_refs and not sources and not facts and not candidates:
+        if not salvage_evidence and not evidence_refs and not sources and not facts and not candidates:
             return self._result(
                 task,
                 started,
@@ -1273,6 +1276,7 @@ class WorkerExecutorV2:
             "facts": facts,
             "sources": sources,
             "findings": findings,
+            "salvage_evidence": salvage_evidence,
             "artifact_ids": evidence_refs,
             "candidates": candidates,
             "error_code": fail_reason,
@@ -1295,7 +1299,7 @@ class WorkerExecutorV2:
         )
         lifecycle = classify_worker_completion(
             structured_valid=False,
-            accepted_findings=len(findings),
+            accepted_findings=0,
             evidence_count=len(set(evidence_refs or sources)),
             terminal_reason=fail_reason or stop_reason,
         )
@@ -1312,6 +1316,7 @@ class WorkerExecutorV2:
             ),
             summary=payload["summary"],
             findings=findings,
+            salvage_evidence=salvage_evidence,
             evidence_refs=evidence_refs,
             facts=facts,
             sources=sources,
@@ -1333,7 +1338,8 @@ class WorkerExecutorV2:
                 "fail_reason": lifecycle.fail_reason,
                 "execution_status": lifecycle.execution_status.value,
                 "result_status": lifecycle.result_status.value,
-                "accepted_finding_count": len(findings),
+                "accepted_finding_count": 0,
+                "salvage_evidence_count": len(salvage_evidence),
                 "admitted_evidence_count": len(set(evidence_refs or sources)),
                 "last_tool_error": cause,
             }
@@ -1349,6 +1355,7 @@ class WorkerExecutorV2:
         status: WorkerResultStatus,
         summary: str = "",
         findings: list[dict[str, Any]] | None = None,
+        salvage_evidence: list[dict[str, Any]] | None = None,
         evidence_refs: list[str] | None = None,
         facts: list[str] | None = None,
         sources: list[str] | None = None,
@@ -1365,6 +1372,7 @@ class WorkerExecutorV2:
             status=status,
             summary=summary,
             findings=findings or [],
+            salvage_evidence=salvage_evidence or [],
             evidence_refs=evidence_refs or [],
             facts=facts or [],
             sources=sources or [],

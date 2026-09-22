@@ -19,7 +19,6 @@ from app.agent.harness.step_budget import (
 from app.agent.harness.tool_contract import wrap_tool_with_contract
 from app.observability.recorder import AgentTelemetry
 from app.research.delivery.partial_renderer import render_partial_delivery
-from app.research.delivery.answer_view_builder import build_partial_answer_view
 from app.research.delivery.synthesis_context import EvidenceDigest
 from app.research.execution.structured_llm_gateway import emit_semantic_fallback
 from app.research.execution.worker_executor import WorkerExecutorV2
@@ -209,36 +208,35 @@ def test_ingestion_prefers_recovered_findings_over_runtime_failure_summary():
 
     update = ingest_new_worker_results(state)
 
-    assert update["findings"]
-    claims = [str(finding.get("claim") or finding.get("summary")) for finding in update["findings"]]
-    assert claims == ["Recovered evidence supports this fact."]
-    assert update["findings"][0]["supported_criteria"] == ["回答直接对齐用户目标。"]
-    assert update["findings"][0]["claims"] == ["Recovered evidence supports this fact."]
-    assert all("worker_timeout" not in claim for claim in claims)
+    assert update["evidence_records"]
+    # Timeout recovery is diagnostic evidence only.  It lacks question lineage
+    # and must not gain publication rights by inheriting a failure summary.
+    assert update["findings"] == []
+    assert update["claims"] == []
+    assert update["finding_diagnostics"]
 
 
 def test_partial_renderer_filters_embedded_runtime_codes():
-    view = build_partial_answer_view(
-        brief={"key_questions": ["评估公司"]},
-        claims=[
-            {"claim_id": "c1", "text": "worker_timeout; recovered evidence", "evidence_ids": ["ev-1"]},
-            {"claim_id": "c2", "text": "Company A has verifiable evidence.", "evidence_ids": ["ev-1"]},
+    content = render_partial_delivery(
+        objective="评估公司",
+        findings=[
+            {"claim": "worker_timeout; recovered evidence", "evidence_ids": ["ev-1"]},
+            {"claim": "Company A has verifiable evidence.", "evidence_ids": ["ev-1"], "validated": True},
         ],
-        bindings=[],
-        coverage={},
-        source_registry=[
-            {
-                "evidence_id": "ev-1",
-                "locator": "https://example.com",
-                "source_type": "secondary",
-            }
+        evidence_digests=[
+            EvidenceDigest("ev-1", "Source", "https://example.com", "verified excerpt")
         ],
+        worker_summaries=[],
+        semantic_gaps=[],
+        limitations=[],
+        unresolved_conflicts=[],
+        worker_failure_reasons=["worker_timeout"],
+        synthesis_failure_reason="synthesis_timeout",
     )
-    content = render_partial_delivery(view)
-    assert "Company A has verifiable evidence" in content
+    assert "Company A has verifiable evidence." in content
     assert "worker_timeout" not in content
     assert "synthesis_timeout" not in content
-    assert "降级部分交付" in content
+    assert "部分研究结果" in content
 
 
 def test_worker_success_event_carries_budget_snapshot(monkeypatch):

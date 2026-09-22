@@ -84,6 +84,7 @@ def run_coverage_eval(path: Path | None = None) -> list[TaskEvalResult]:
         judgement = judge_coverage(
             brief,
             list(case.get("findings") or []),
+            claims=list(case.get("claims") or []),
             claim_conflicts=list(case.get("claim_conflicts") or []),
             evidence=list(case.get("evidence") or []),
         )

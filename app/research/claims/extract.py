@@ -168,7 +168,14 @@ def extract_claims_from_worker_results(rows: list[Any] | None) -> list[ClaimReco
         for finding in findings:
             if not isinstance(finding, dict):
                 continue
-            text = str(finding.get("claim") or finding.get("text") or "").strip()
+            structured_claims = finding.get("claims") if isinstance(finding.get("claims"), list) else []
+            text = str(
+                finding.get("claim")
+                or finding.get("text")
+                or (structured_claims[0] if structured_claims else "")
+                or finding.get("summary")
+                or ""
+            ).strip()
             if not text:
                 continue
             sq = str(finding.get("source_quality") or source_quality)
@@ -207,34 +214,9 @@ def extract_claims_from_worker_results(rows: list[Any] | None) -> list[ClaimReco
                 seen.add(claim.claim_id)
                 claims.append(claim)
 
-        facts = [str(x) for x in (payload.get("facts") or []) if str(x).strip()]
-        summary = str(payload.get("summary") or row.get("summary") or "")
-        for fact in facts:
-            for claim in _parse_from_text(
-                fact,
-                task_id=tid,
-                sources=sources,
-                evidence_ids=evidence_ids,
-                confidence=confidence,
-                source_quality=source_quality,
-            ):
-                if claim.claim_id in seen:
-                    continue
-                seen.add(claim.claim_id)
-                claims.append(claim)
-        if summary:
-            for claim in _parse_from_text(
-                summary,
-                task_id=tid,
-                sources=sources,
-                evidence_ids=evidence_ids,
-                confidence=confidence,
-                source_quality=source_quality,
-            ):
-                if claim.claim_id in seen:
-                    continue
-                seen.add(claim.claim_id)
-                claims.append(claim)
+        # Facts and summaries are research material, not ClaimDrafts.  Their
+        # old implicit promotion let tool snippets bypass claim admission.
+        # Only structured worker findings reach this extractor.
     return _dedupe_claims(claims)
 
 

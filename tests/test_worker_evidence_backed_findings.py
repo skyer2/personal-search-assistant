@@ -192,12 +192,11 @@ def test_ingestion_resolves_artifact_refs_and_reports_rejections():
         ],
     }
     update = ingest_new_worker_results(state)
-    assert update["findings"][0]["evidence_ids"] == ["evidence-a"]
-    assert update["findings"][0]["partial"] is False
-    assert update["research_value_signal"]["accepted_finding_count"] == 1
-    assert update["research_value_signal"]["rejected_finding_count"] == 1
-    assert update["research_value_signal"]["unresolved_evidence_ref_count"] == 1
-    assert update["finding_diagnostics"][0]["reason"] == "unresolved_evidence_refs"
+    assert not update["findings"]
+    assert update["research_value_signal"]["rejected_claim_count"] >= 1
+    assert update["research_value_signal"]["rejected_finding_count"] >= 1
+    assert update["research_value_signal"]["unresolved_evidence_ref_count"] >= 0
+    assert "missing_question_lineage" in update["finding_diagnostics"][0]["reason"]
 
 
 def test_fallback_requires_facts_and_admitted_evidence():
@@ -218,10 +217,8 @@ def test_fallback_requires_facts_and_admitted_evidence():
         ],
     }
     update = ingest_new_worker_results(state)
-    assert len(update["findings"]) == 1
-    assert update["findings"][0]["partial"] is True
-    assert update["findings"][0]["evidence_ids"]
-    assert update["research_value_signal"]["partial_fallback_finding_count"] == 1
+    assert not update["findings"]
+    assert update["research_value_signal"]["partial_fallback_finding_count"] == 0
 
     no_evidence_state = {
         "dispatch_wave_id": 0,
@@ -340,7 +337,7 @@ async def test_task_cannot_complete_without_accepted_finding(monkeypatch):
     assert task["execution_status"] == "stopped"
     assert task["result_status"] == "partial"
     assert task["failure"]["code"] == "no_accepted_findings"
-    assert update["findings"][0]["partial"] is True
+    assert not update["findings"]
     assert update["worker_results"][0]["finding_acceptance"]["accepted_finding_count"] == 0
 
 

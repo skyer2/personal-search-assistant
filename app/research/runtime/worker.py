@@ -110,7 +110,12 @@ def salvage_worker_evidence(
     step_index: int,
     limit: int = 8,
 ) -> dict[str, list[Any]]:
-    """Recover artifact-backed evidence when a worker misses its deadline."""
+    """Recover artifact-backed material without promoting it to a finding.
+
+    A deadline may leave useful provenance in the artifact store.  That is
+    evidence for a later, explicit claim-admission decision; it is never a
+    worker conclusion and must not change coverage by itself.
+    """
     try:
         from app.agent.harness.artifacts import get_artifact_store
         from app.research.runtime.untrusted import structured_evidence_from_artifact
@@ -126,9 +131,12 @@ def salvage_worker_evidence(
             )
         ][:limit]
     except Exception:
-        return {"findings": [], "evidence_refs": [], "sources": []}
+        return {"salvage_evidence": [], "evidence_refs": [], "sources": [], "facts": [], "candidates": []}
 
-    findings: list[dict[str, Any]] = []
+    from app.research.claims.admission import classify_claim_text
+    from app.research.evidence.models import SalvageEvidence
+
+    salvage_evidence: list[dict[str, Any]] = []
     evidence_refs: list[str] = []
     sources: list[str] = []
     facts: list[str] = []
@@ -159,22 +167,27 @@ def salvage_worker_evidence(
                     "evidence_ids": list(dict.fromkeys(bound_evidence)),
                 }
             )
-        findings.append(
-            {
-                "task_id": task_id,
-                "finding_id": f"salvage_{artifact.artifact_id}",
-                "summary": evidence["excerpt"] or evidence["title"],
-                "facts": [evidence["title"]][:1],
-                "sources": [locator],
-                "artifact_id": artifact.artifact_id,
-                "evidence_ids": [evidence["evidence_id"]],
-                "trust": evidence["trust"],
-                "instruction_free": evidence["instruction_free"],
-                "partial": True,
-            }
+        excerpt = str(evidence.get("excerpt") or "")
+        text_quality = classify_claim_text(excerpt)
+        source_type = str(artifact.metadata.get("source_type") or "secondary")
+        salvage_evidence.append(
+            SalvageEvidence(
+                evidence_id=str(evidence.get("evidence_id") or artifact.artifact_id),
+                task_id=task_id,
+                question_id=str(artifact.metadata.get("question_id") or ""),
+                source_id=str(artifact.metadata.get("source_id") or locator),
+                locator=str(locator),
+                title=str(evidence.get("title") or ""),
+                excerpt=excerpt,
+                source_type=source_type,
+                extraction_quality=1.0 if text_quality.publishable else 0.0,
+                is_complete_sentence=text_quality.grammatical_complete,
+                is_navigation_text=text_quality.ui_navigation_detected,
+                is_search_snippet=bool(artifact.metadata.get("is_search_snippet", False)),
+            ).to_dict()
         )
     return {
-        "findings": findings,
+        "salvage_evidence": salvage_evidence,
         "evidence_refs": evidence_refs,
         "sources": sources,
         "facts": facts,
@@ -197,6 +210,8 @@ class ResearchTask:
     plan_version: int = 1
     attempt: int = 1
     dispatch_wave_id: int = 0
+    question_id: str = ""
+    ask_id: str = ""
 
 
 @dataclass
@@ -216,6 +231,7 @@ class WorkerResult:
     status: WorkerResultStatus = "done"
     summary: str = ""
     findings: list[dict[str, Any]] = field(default_factory=list)
+    salvage_evidence: list[dict[str, Any]] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
     facts: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
@@ -652,7 +668,8 @@ class LangChainWorkerRuntime:
                         task_id=task.task_id,
                         status="failed",
                         summary=fail_reason,
-                        findings=list(salvaged["findings"]),
+                        findings=[],
+                        salvage_evidence=list(salvaged["salvage_evidence"]),
                         evidence_refs=list(salvaged["evidence_refs"]),
                         sources=list(salvaged["sources"]),
                         facts=list(salvaged["facts"]),
@@ -863,7 +880,8 @@ class LangChainWorkerRuntime:
                     task_id=task.task_id,
                     status="blocked",
                     summary=f"budget_blocked:{reason}",
-                    findings=list(salvaged["findings"]),
+                    findings=[],
+                    salvage_evidence=list(salvaged["salvage_evidence"]),
                     evidence_refs=list(salvaged["evidence_refs"]),
                     sources=list(salvaged["sources"]),
                     facts=list(salvaged["facts"]),
@@ -933,7 +951,8 @@ class LangChainWorkerRuntime:
                     task_id=task.task_id,
                     status="failed",
                     summary=f"provider_{provider_failure.kind.value}",
-                    findings=list(salvaged["findings"]),
+                    findings=[],
+                    salvage_evidence=list(salvaged["salvage_evidence"]),
                     evidence_refs=list(salvaged["evidence_refs"]),
                     sources=list(salvaged["sources"]),
                     facts=list(salvaged["facts"]),

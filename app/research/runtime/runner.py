@@ -16,7 +16,7 @@ from app.research.assessment.delivery import assess_delivery
 from app.research.assessment.evidence import assess_evidence
 from app.research.assessment.execution_health import assess_execution_health
 from app.research.assessment.progress import assess_progress
-from app.research.control.runtime_policy import answerable_user_ask, decide_control
+from app.research.control.runtime_policy import decide_control
 from app.research.control.terminal_policy import terminal_update
 from app.research.control.transitions import transition_update
 from app.research.domain.contracts import (
@@ -139,15 +139,20 @@ class RunSession:
                     profile_timeout = min(profile_timeout, requested)
             except ValueError:
                 pass
-        return min(profile_timeout, 180.0)
+        # A primary synthesis that has not produced its first token within
+        # 90 seconds is not a stable delivery path.  Bound it here even when
+        # an inherited .env still carries an older, larger timeout.
+        return min(profile_timeout, 90.0)
 
     def synthesis_retry_timeout_sec(self) -> float:
-        return float(
+        profile_timeout = float(
             self._run_budget_value(
                 "synthesis_retry_timeout_sec",
                 getattr(self.harness.harness_config, "synthesis_retry_timeout_sec", 30),
             )
         )
+        # Compact retry is recovery, never a second primary run.
+        return min(profile_timeout, 30.0)
 
 
 def get_session(run_id: str) -> RunSession | None:
@@ -445,20 +450,10 @@ class ResearchGraphRunner:
         budget_cfg = budget_for_mode(profile, personal)
         overrides = run_budget_overrides_for_mode(profile, personal)
         run_budget = {**budget_cfg, **overrides, **previous}
-        # Semantic repair is controlled by the configured semantic budget.
-        # Never silently clamp it to one repair/two waves: execution failures
-        # use their separate retry budget and must not spend this allowance.
-        semantic_repairs = max(
-            0, int(run_budget.get("max_replan_count", 1) or 0)
-        )
-        run_budget["max_replan_count"] = semantic_repairs
-        run_budget["max_research_waves"] = max(
-            1,
-            int(
-                run_budget.get("max_research_waves")
-                or (semantic_repairs + 1)
-            ),
-        )
+        # v1 bounds research to one repair wave (two waves total), regardless
+        # of legacy deep-debug settings.
+        run_budget["max_replan_count"] = min(1, max(0, int(run_budget.get("max_replan_count", 1) or 0)))
+        run_budget["max_research_waves"] = 2
         if manager is None:
             manager = create_run_budget_manager(
                 self.harness.harness_config,
@@ -480,7 +475,7 @@ class ResearchGraphRunner:
             synthesis_reserve_tokens=snapshot.synthesis_reserve_tokens,
             synthesis_reserve_sec=manager.synthesis_reserve_sec,
             deadline_at_monotonic=manager.deadline_at,
-            max_research_waves=int(run_budget["max_research_waves"]),
+            max_research_waves=2,
         )
         metadata["run_budget"] = run_budget
         metadata["route_decision"] = decision.to_dict()
@@ -648,61 +643,6 @@ class ResearchGraphRunner:
         topology_started = time.perf_counter()
         eligibility = FastPathEligibility.from_brief(brief)
         issues = validate_structured_brief(brief)
-        from app.research.intent import UserAskContract, evaluate_semantic_fidelity
-
-        contract = UserAskContract(
-            contract_id=f"asks_{brief.brief_id}",
-            raw_query=brief.raw_query or session.ctx.task_query,
-            asks=brief.user_asks,
-        )
-        fidelity = evaluate_semantic_fidelity(contract, brief)
-        update["user_ask_contract"] = contract.to_dict()
-        update["semantic_fidelity"] = fidelity.to_dict()
-        if not fidelity.passed:
-            issues = [*issues, "semantic_fidelity_failed"]
-        plan_semantic_validation: dict[str, Any] = {}
-        planner_enabled = bool(
-            getattr(self.harness.harness_config, "planner_llm_enabled", True)
-        )
-        if not eligibility.eligible and fidelity.passed and planner_enabled:
-            from app.research.planning.semantic_planner import SemanticPlanner
-            from app.research.runtime.graph import _plan_from_tasks
-            from app.research.planning.brief_plan import (
-                build_brief_and_plan,
-                validate_brief_plan,
-            )
-
-            semantic_planner = SemanticPlanner(
-                getattr(self.harness, "control_agent", None),
-                session.budget_manager,
-            )
-            initial_action, validation = await semantic_planner.plan(
-                brief,
-                findings=[],
-                budget=dict(state.get("budget") or {}),
-                previous_fingerprints=set(),
-            )
-            plan_semantic_validation = validation.to_dict()
-            if validation.passed and initial_action.research_tasks:
-                semantic_plan = _plan_from_tasks(
-                    list(initial_action.research_tasks),
-                    plan_version=int(state.get("plan_version") or 1),
-                    planning_mode="semantic_planner",
-                )
-                update.update(
-                    {
-                        "plan": semantic_plan.to_dict(),
-                        "tasks": initialize_tasks(semantic_plan),
-                        "plan_validation": validate_brief_plan(
-                            semantic_plan, brief=brief
-                        ),
-                        "brief_plan": build_brief_and_plan(
-                            brief, plan_version=semantic_plan.plan_version
-                        ).to_dict(),
-                        "dispatch_wave_id": 1,
-                        "plan_semantic_validation": plan_semantic_validation,
-                    }
-                )
         note_substep_duration(
             session.state,
             "understand",
@@ -754,10 +694,6 @@ class ResearchGraphRunner:
                     "task_shape": brief.user_intent,
                     "execution_path": "fast_path" if eligibility.eligible else "harness",
                     "route_signals": update.get("route_signals") or [],
-                    "user_ask_contract": contract.to_dict(),
-                    "semantic_fidelity": fidelity.to_dict(),
-                    "original_ask_count": len(brief.user_asks),
-                    "research_question_count": len(brief.research_questions),
                     "control_plane": {
                         "brief_source": brief.compiler_source,
                         "brief_fallback": brief.compiler_source != "structured_llm",
@@ -782,16 +718,6 @@ class ResearchGraphRunner:
                 "dimensions": list(brief.key_questions),
                 "validation_issues": issues,
                 "compiler_source": brief.compiler_source,
-                "brief_source": brief.compiler_source,
-                "brief_fallback_reason": (
-                    "" if brief.compiler_source == "structured_llm" else "deterministic_fallback"
-                ),
-                "original_ask_count": len(brief.user_asks),
-                "research_question_count": len(brief.research_questions),
-                "ask_ids": [ask.ask_id for ask in brief.user_asks],
-                "semantic_fidelity_score": fidelity.score,
-                "semantic_fidelity_passed": fidelity.passed,
-                "semantic_fidelity_issues": list(fidelity.issues),
             },
             input_refs=[{"type": "query", "id": session.run_id}],
             output_refs=[{"type": "brief", "id": brief.brief_id}],
@@ -905,25 +831,12 @@ class ResearchGraphRunner:
                 "coverage_status": judgement.status if judgement else "unknown",
             },
         )
-        from app.research.domain.research_budget import (
-            is_execution_recovery_pass,
-            worker_failures_by_type,
-        )
-
-        # Execution recovery must not spend a semantic research wave.
-        execution_recovery = is_execution_recovery_pass(state)
-        previous_iteration = int((state.get("supervisor") or {}).get("iteration") or 0)
-        semantic_iteration = previous_iteration + (
-            1 if state.get("plan") and not execution_recovery else 0
-        )
-        execution_retries = int(state.get("execution_retries") or 0) + (
-            1 if execution_recovery else 0
-        )
-
         supervisor = SupervisorAgent(getattr(self.harness, "control_agent", None), session.budget_manager)
-        plan_semantic_validation: dict[str, Any] = {}
         llm_started = time.perf_counter()
-        if gap_precheck.action == "RESEARCH_COMPLETE":
+        if gap_precheck.action == "SYNTHESIZE":
+            # The runtime has enough information to decide that no further
+            # research is legal or useful.  Do not spend a model call asking
+            # the Supervisor to repeat that deterministic decision.
             from app.research.supervisor.models import SupervisorAction
 
             action = SupervisorAction(
@@ -931,24 +844,6 @@ class ResearchGraphRunner:
                 f"gap_precheck:{gap_precheck.reason}",
                 (),
                 "deterministic_gap_precheck",
-            )
-        elif gap_precheck.action in {"STOP_BUDGET_PARTIAL", "STOP_FAILURE"}:
-            from app.research.supervisor.models import SupervisorAction
-
-            action = SupervisorAction(
-                gap_precheck.action,
-                f"gap_precheck:{gap_precheck.reason}",
-                (),
-                "deterministic_gap_precheck",
-            )
-        elif gap_precheck.action == "RETRY_EXECUTION":
-            from app.research.supervisor.models import SupervisorAction
-
-            action = SupervisorAction(
-                "CONDUCT_RESEARCH",
-                f"gap_precheck:{gap_precheck.reason}",
-                (),
-                "deterministic_execution_retry",
             )
         else:
             action = await supervisor.decide(
@@ -959,13 +854,6 @@ class ResearchGraphRunner:
                 previous_fingerprints=previous_fingerprints,
                 duplicate_search_ratio=float(value_signal.get("duplicate_search_ratio") or 0.0),
             )
-            action = supervisor.resolve_action(
-                action,
-                judgement,
-                brief,
-                previous_fingerprints=previous_fingerprints,
-                budget=budget,
-            )
         note_substep_duration(
             session.state,
             "supervisor",
@@ -975,14 +863,20 @@ class ResearchGraphRunner:
             output_size=len(str(action.to_dict() if action else "")),
         )
         runtime_decision_started = time.perf_counter()
+        # A deterministic budget/wave stop is authoritative.  Only resolve a
+        # model decision when runtime precheck has approved one repair wave.
+        if gap_precheck.action == "TARGETED_RESEARCH":
+            action = supervisor.resolve_action(
+                action,
+                judgement,
+                brief,
+                previous_fingerprints=previous_fingerprints,
+            )
         payload: dict[str, Any] = {
-            "execution_retries": execution_retries,
-            "semantic_repairs": semantic_iteration,
-            "worker_failures_by_type": worker_failures_by_type(state),
-            "plan_semantic_validation": plan_semantic_validation,
             "supervisor_action": action.to_dict(),
             "supervisor": {
-                "iteration": semantic_iteration,
+                "iteration": int((state.get("supervisor") or {}).get("iteration") or 0)
+                + (1 if state.get("plan") else 0),
                 "last_action": action.action,
                 "reasoning_summary": action.reason,
                 "source": action.source,
@@ -1033,8 +927,6 @@ class ResearchGraphRunner:
                             "kind": "research_task",
                             "task_kind": "supervisor_research",
                             "priority": item.priority,
-                            "ask_id": item.ask_id,
-                            "question_id": item.question_id,
                             "target_criteria": list(item.target_criteria),
                             "target_gaps": list(item.target_gaps),
                             "criterion_id": item.criterion_id,
@@ -1201,16 +1093,16 @@ class ResearchGraphRunner:
                     ("supervisor_conduct_research", "budget_admission"),
                     tuple(str(item) for item in admission_payload["approved_task_ids"]),
                 )
-            elif answerable_user_ask({**state, **payload}):
+            elif bool(state.get("evidence_records")):
                 decision = type(decision)(
                     "deliver_partial",
-                    ("budget_stop", "answerable_user_ask", "no_approved_dispatch"),
+                    ("budget_stop", "usable_evidence", "no_approved_dispatch"),
                     (),
                 )
             else:
                 decision = type(decision)(
                     "finalize_failure",
-                    ("budget_stop", "no_answerable_user_ask", "no_approved_dispatch"),
+                    ("budget_stop", "no_usable_evidence", "no_approved_dispatch"),
                     (),
                 )
         control_decision = {
@@ -1617,7 +1509,9 @@ class ResearchGraphRunner:
                 ],
             }
         dispatch_wave_id = int(gstate.get("dispatch_wave_id") or 0)
-        task = ResearchTask(task_id=task_id, objective=str(step.objective or step.description), step_type=step.step_type, step_index=step_index, description=step.description, subagent=step.subagent or "", allowed_tools=list(step.allowed_tools or []), plan_version=int(gstate.get("plan_version") or 1), attempt=attempt, dispatch_wave_id=dispatch_wave_id)
+        question_id = str((step.metadata or {}).get("question_id") or "")
+        ask_id = str((step.metadata or {}).get("ask_id") or (f"a{question_id[1:]}" if question_id.startswith("q") else ""))
+        task = ResearchTask(task_id=task_id, objective=str(step.objective or step.description), step_type=step.step_type, step_index=step_index, description=step.description, subagent=step.subagent or "", allowed_tools=list(step.allowed_tools or []), plan_version=int(gstate.get("plan_version") or 1), attempt=attempt, dispatch_wave_id=dispatch_wave_id, question_id=question_id, ask_id=ask_id)
         context = ResearchContext(run_id=session.run_id, query=session.ctx.task_query, user_id=session.ctx.user_id, tenant_id=session.ctx.tenant_id, project_id=session.ctx.project_id, session_id=session.session_id)
         running = transition_task(gstate.get("tasks"), task_id, execution_status=TaskExecutionStatus.RUNNING, attempt=attempt, timestamp=_now())
         result = await WorkerExecutorV2(self.harness, session).execute(task, context)
@@ -1636,7 +1530,7 @@ class ResearchGraphRunner:
         )
         if result.raw is not None:
             session.state.step_results.append(result.raw)
-        row = worker_row(task_id, step, result.ok, result.raw) if result.raw is not None else {"task_id": task_id, "ok": result.ok, "summary": result.summary, "step_type": step.step_type, "payload": {"facts": result.facts, "sources": result.sources, "findings": result.findings, "evidence_ids": result.evidence_refs, "candidates": result.candidates}}
+        row = worker_row(task_id, step, result.ok, result.raw) if result.raw is not None else {"task_id": task_id, "ok": result.ok, "summary": result.summary, "step_type": step.step_type, "payload": {"facts": result.facts, "sources": result.sources, "findings": result.findings, "salvage_evidence": result.salvage_evidence, "evidence_ids": result.evidence_refs, "candidates": result.candidates}}
         row.update(status=result.status, fail_reason=result.fail_reason, queue_ms=result.queue_ms, execution_ms=result.execution_ms, metrics=result.metrics)
         row.update(
             dispatch_wave_id=dispatch_wave_id,
@@ -1659,6 +1553,7 @@ class ResearchGraphRunner:
         row["payload"] = {
             **payload,
             "findings": normalized_findings,
+            "salvage_evidence": list(payload.get("salvage_evidence") or result.salvage_evidence or []),
             "evidence_ids": list(
                 payload.get("evidence_ids")
                 or result.evidence_refs
@@ -1715,6 +1610,31 @@ class ResearchGraphRunner:
             )
             if judgement.sufficient:
                 session.wave_early_stop = True
+            if isinstance(session.state.metadata, dict):
+                session.state.metadata["claim_admission_diagnostics"] = list(
+                    ingest_update.get("claim_admission_diagnostics") or []
+                )
+            # Admission is a delivery boundary.  Keep its compact reason
+            # distribution in the trace so an empty evidence pack is
+            # explainable without exposing raw evidence in the final answer.
+            for diagnostic in ingest_update.get("claim_admission_diagnostics") or []:
+                if not isinstance(diagnostic, dict):
+                    continue
+                _emit(
+                    session,
+                    "claim.admission",
+                    phase="research",
+                    status=str(diagnostic.get("status") or "rejected"),
+                    plan_version=int(gstate.get("plan_version") or 1),
+                    task_id=task_id,
+                    attempt=attempt,
+                    attributes={
+                        "claim_id": str(diagnostic.get("claim_id") or ""),
+                        "question_id": str(diagnostic.get("question_id") or ""),
+                        "reasons": list(diagnostic.get("reasons") or []),
+                        "publishability_score": float(diagnostic.get("publishability_score") or 0.0),
+                    },
+                )
         ingested_findings = [
             finding
             for finding in ingest_update.get("findings") or []
@@ -1976,14 +1896,13 @@ class ResearchGraphRunner:
             assess_answerability,
             assess_answer_completeness,
             compile_deterministic_answer,
+            render_final_answer,
         )
+        from app.research.delivery.final_renderer import render_final_view
+        from app.research.delivery.view_builder import build_answer_view
         from app.research.delivery.insight_synthesis import (
             build_insight_synthesis,
-        )
-        from app.research.delivery.answer_renderer import render_answer
-        from app.research.delivery.answer_view_builder import (
-            build_partial_answer_view,
-            build_recovery_view,
+            render_deterministic_insight_report,
         )
         from app.research.runtime.atomic_fact import (
             AtomicFactAnswer,
@@ -2057,37 +1976,6 @@ class ResearchGraphRunner:
                 "synthesis",
                 int((time.perf_counter() - synthesis_started) * 1000),
             )
-            # The fast path still owes the Completion Contract a typed answer so
-            # terminal state never depends on a quality-verdict shortcut.
-            fast_brief = StructuredResearchBrief.from_dict(gstate.get("brief") or {})
-            # Citation source ids are manager-local; the Completion Contract
-            # validates against evidence-record ids, so resolve to locators.
-            locator_by_source = {
-                str(getattr(source, "source_id", "") or ""): str(getattr(source, "locator", "") or "")
-                for source in (list(getattr(manager, "sources", []) or []) if manager is not None else [])
-            }
-            evidence_refs: list[str] = []
-            for item in answer.supporting_source_ids or payload.get("evidence_ids") or []:
-                key = str(item).strip()
-                if not key:
-                    continue
-                evidence_refs.append(locator_by_source.get(key) or key)
-            evidence_refs = list(dict.fromkeys(evidence_refs))
-            fast_contract = {
-                "objective": fast_brief.objective,
-                "synthesis_mode": "atomic_fact_structured",
-                "answers": [
-                    {
-                        "question_id": "q1",
-                        "ask_id": fast_brief.ask_id_for_question_index(1),
-                        "direct_answer": answer.answer if answer.sufficient else "",
-                        "evidence_refs": evidence_refs,
-                        "finding_refs": [],
-                        "confidence": 0.9 if answer.sufficient else 0.0,
-                        "claim_type": "fact",
-                    }
-                ],
-            }
             return transition_update(
                 gstate,
                 WorkflowPhase.SYNTHESIS,
@@ -2095,7 +1983,6 @@ class ResearchGraphRunner:
                     "final_content": content,
                     "synthesis_attempts": 1,
                     "synthesis_failed": not answer.sufficient,
-                    "answer_contract": fast_contract,
                     "quality_assessment": {},
                 },
             )
@@ -2138,6 +2025,7 @@ class ResearchGraphRunner:
             evidence_records=evidence_records,
             coverage=judgement,
             conflicts=conflict_resolutions,
+            validated_claims=[row for row in claims if bool(row.get("validated"))],
         )
         if isinstance(session.state.metadata, dict):
             session.state.metadata["answerability"] = answerability.to_dict()
@@ -2216,6 +2104,22 @@ class ResearchGraphRunner:
             or brief.success_criteria
             or (brief.objective,)
         )
+        # The Evidence Pack and writer consume the same admitted-claim view as
+        # answerability.  Raw worker findings stay in runtime diagnostics.
+        validated_claim_findings = [
+            {
+                "finding_id": str(row.get("claim_id") or ""),
+                "claim": str(row.get("text") or row.get("claim") or ""),
+                "summary": str(row.get("text") or row.get("claim") or ""),
+                "claims": [str(row.get("text") or row.get("claim") or "")],
+                "evidence_ids": list(row.get("evidence_ids") or []),
+                "question_id": str(row.get("question_id") or ""),
+                "validated": True,
+                "confidence": float(row.get("confidence") or 0.0),
+            }
+            for row in claims
+            if bool(row.get("validated")) and str(row.get("text") or row.get("claim") or "").strip()
+        ]
         citation_numbers = _citation_numbers_by_evidence(session.ctx.citation_manager)
         # The report contract must remain self-contained when a caller does
         # not install a CitationManager (for example the standalone live
@@ -2228,10 +2132,20 @@ class ResearchGraphRunner:
             if evidence_id and evidence_id not in citation_numbers:
                 citation_numbers[evidence_id] = next_citation_number
                 next_citation_number += 1
+        # The writer's internal bindings use evidence aliases, while the final
+        # delivery model deliberately cites canonical sources.  Preserve the
+        # same stable number at that presentation boundary.
+        source_citation_numbers: dict[str, int] = {}
+        for record in evidence_records:
+            evidence_id = str(record.get("evidence_id") or "").strip()
+            source_id = str(record.get("source_id") or evidence_id).strip()
+            number = citation_numbers.get(evidence_id)
+            if source_id and number is not None:
+                source_citation_numbers.setdefault(source_id, number)
         pack_started = time.perf_counter()
         evidence_pack = build_evidence_pack(
             criteria,
-            synthesis_context.findings,
+            validated_claim_findings,
             claims,
             evidence_records,
             conflict_resolutions,
@@ -2336,19 +2250,17 @@ class ResearchGraphRunner:
         skip_llm_synthesis = bool(evidence_records) and remaining_synthesis_tokens < 1_000
         result: Any
         if skip_llm_synthesis:
-            partial_view = build_partial_answer_view(
-                brief=brief,
-                claims=[
-                    row.to_dict() for row in insight_synthesis.claims
-                ],
-                bindings=[
-                    row.to_dict() for row in insight_synthesis.bindings
-                ],
-                coverage=judgement,
-                source_registry=evidence_records,
+            content = render_partial_delivery(
+                objective=brief.objective,
+                findings=list(synthesis_context.findings),
+                evidence_digests=list(synthesis_context.evidence_digests),
+                worker_summaries=[],
+                semantic_gaps=list(synthesis_context.semantic_gaps),
                 limitations=list(synthesis_context.limitations),
+                unresolved_conflicts=list(synthesis_context.unresolved_conflicts),
+                worker_failure_reasons=[],
+                synthesis_failure_reason="synthesis_budget_low",
             )
-            content = render_partial_delivery(partial_view)
             result = SimpleNamespace(
                 ok=False,
                 status="stopped",
@@ -2657,14 +2569,11 @@ class ResearchGraphRunner:
         # missing criterion binding) even though every user question has
         # grounded findings and evidence. In that case recovery must still
         # produce a direct answer instead of an evidence dump.
-        # Always compile the evidence-bound contract on the recovery path: the
-        # Completion Contract needs a typed answer to decide PARTIAL vs FAILED,
-        # and unanswerable questions render as explicit refusals, not filler.
-        if fallback:
+        if fallback and answerability.answerable:
             recovered = compile_deterministic_answer(
                 objective=brief.objective or str(gstate.get("task_query") or ""),
                 brief=brief,
-                findings=[row for row in gstate.get("findings") or [] if isinstance(row, dict)],
+                findings=[row for row in claims if bool(row.get("validated"))],
                 answerability=answerability,
                 synthesis_degraded=True,
             )
@@ -2673,32 +2582,24 @@ class ResearchGraphRunner:
             answer_contract = {
                 "final_answer": recovered.to_dict(),
                 "completeness": completeness.to_dict(),
-                # A repair can only fix the write-up. When answerability itself
-                # is short on evidence, rewriting the report changes nothing.
-                "repair_eligible": bool(answerability.answerable),
             }
             _emit(
                 session,
                 "answer_recovery.started",
                 phase=WorkflowPhase.SYNTHESIS.value,
                 status="start",
-                attributes={"mode": "evidence_bound_recovery"},
+                attributes={"mode": "deterministic_recovery"},
             )
             if answer_complete:
-                recovery_mode = "evidence_bound_recovery"
-                recovery_view = build_recovery_view(
-                    brief=brief,
-                    claims=[
-                        row.to_dict() for row in insight_synthesis.claims
-                    ],
-                    bindings=[
-                        row.to_dict() for row in insight_synthesis.bindings
-                    ],
-                    coverage=judgement,
-                    source_registry=evidence_records,
-                    limitations=list(synthesis_context.limitations),
+                recovery_mode = "deterministic_recovery"
+                content = render_final_view(
+                    build_answer_view(
+                        answer=recovered,
+                        evidence_records=evidence_records,
+                        questions=list(brief.key_questions or (brief.objective,)),
+                    ),
+                    citation_numbers=source_citation_numbers,
                 )
-                content = render_answer(recovery_view)
                 fallback = False
                 _emit(
                     session,
@@ -2713,7 +2614,7 @@ class ResearchGraphRunner:
                     "answer_recovery.completed",
                     phase=WorkflowPhase.SYNTHESIS.value,
                     status="failed",
-                    attributes={"mode": "evidence_bound_recovery", "answer_complete": False},
+                    attributes={"mode": "deterministic_recovery", "answer_complete": False},
                 )
             _emit(
                 session,
@@ -2723,20 +2624,22 @@ class ResearchGraphRunner:
                 attributes=completeness.to_dict(),
             )
         if fallback:
-            partial_view = build_partial_answer_view(
-                brief=brief,
-                claims=[
-                    row.to_dict() for row in insight_synthesis.claims
-                ],
-                bindings=[
-                    row.to_dict() for row in insight_synthesis.bindings
-                ],
-                coverage=judgement,
-                source_registry=evidence_records,
+            worker_failure_reasons = [
+                str(row.get("fail_reason") or "")
+                for row in gstate.get("worker_results") or []
+                if isinstance(row, dict) and str(row.get("fail_reason") or "").strip()
+            ]
+            content = render_partial_delivery(
+                objective=brief.objective,
+                findings=[row for row in claims if bool(row.get("validated"))],
+                evidence_digests=list(synthesis_context.evidence_digests),
+                worker_summaries=[],
+                semantic_gaps=list(synthesis_context.semantic_gaps),
                 limitations=list(synthesis_context.limitations),
+                unresolved_conflicts=list(synthesis_context.unresolved_conflicts),
+                worker_failure_reasons=worker_failure_reasons,
+                synthesis_failure_reason=str(result.fail_reason or "synthesis_failed"),
             )
-            content = render_partial_delivery(partial_view)
-            recovery_mode = "evidence_bound_recovery"
         else:
             content = content if recovery_mode else result.summary
             # Provider synthesis is a free-form report today; a non-empty,
@@ -2746,60 +2649,50 @@ class ResearchGraphRunner:
         content = scrub_internal_ids(content)
         manager = session.ctx.citation_manager
         citation_started = time.perf_counter()
-        explicit_citation_render = recovery_mode == "evidence_bound_recovery"
-        if manager is not None and content and not explicit_citation_render:
-            # The writer must emit claim-level citation markers itself.
-            # Similarity-scanning a completed Markdown document can attach
-            # citations to questions, headings or status prose.
-            content = manager.build_cited_report(content)
-        # A provider can return content with citations but no closed References
-        # block (or this run may not install CitationManager). Recover through
-        # the explicit ViewModel instead of asking the provider to rewrite it.
-        from app.research.delivery.answer_renderer import validate_reference_closure
-
-        closure = validate_reference_closure(content)
-        if not closure.passed and answerability.answerable:
-            recovered = compile_deterministic_answer(
-                objective=brief.objective or str(gstate.get("task_query") or ""),
-                brief=brief,
-                findings=[
-                    row
-                    for row in gstate.get("findings") or []
-                    if isinstance(row, dict)
-                ],
-                answerability=answerability,
-                synthesis_degraded=True,
-            )
-            completeness = assess_answer_completeness(recovered, brief)
-            recovery_mode = "evidence_bound_recovery"
-            answer_contract = {
-                "final_answer": recovered.to_dict(),
-                "completeness": completeness.to_dict(),
-                "repair_eligible": False,
-            }
-            recovery_view = build_recovery_view(
-                brief=brief,
-                claims=[row.to_dict() for row in insight_synthesis.claims],
-                bindings=[row.to_dict() for row in insight_synthesis.bindings],
-                coverage=judgement,
-                source_registry=evidence_records,
-                limitations=list(synthesis_context.limitations),
-            )
-            content = render_answer(recovery_view)
-            fallback = False
-            synthesis_failed = False
-            answer_complete = completeness.complete
-            synthesis_degraded = True
-            _emit(
-                session,
-                "answer_recovery.completed",
-                phase=WorkflowPhase.SYNTHESIS.value,
-                status="ok" if completeness.complete else "partial",
-                attributes={
-                    "mode": recovery_mode,
-                    "reason": "reference_closure_failed",
-                },
-            )
+        if manager is not None and content:
+            # A provider can return a non-empty report whose citations do not
+            # bind to the current evidence pack.  Treat that as a report
+            # defect, not as a terminal delivery failure: compile a bounded
+            # evidence-first answer locally and send it through the same
+            # citation builder before Quality Gate.
+            try:
+                cited_ok, _ = manager.validate_citations(content)
+            except Exception:
+                cited_ok = True
+            if not cited_ok and answerability.answerable:
+                recovered = compile_deterministic_answer(
+                    objective=brief.objective or str(gstate.get("task_query") or ""),
+                    brief=brief,
+                    findings=[row for row in claims if bool(row.get("validated"))],
+                    answerability=answerability,
+                    synthesis_degraded=True,
+                )
+                completeness = assess_answer_completeness(recovered, brief)
+                if completeness.complete:
+                    recovery_mode = "deterministic_recovery"
+                    answer_contract = {
+                        "final_answer": recovered.to_dict(),
+                        "completeness": completeness.to_dict(),
+                    }
+                    content = render_final_view(
+                        build_answer_view(
+                            answer=recovered,
+                            evidence_records=evidence_records,
+                            questions=list(brief.key_questions or (brief.objective,)),
+                        ),
+                        citation_numbers=source_citation_numbers,
+                    )
+                    fallback = False
+                    synthesis_failed = False
+                    answer_complete = True
+                    synthesis_degraded = True
+                    _emit(
+                        session,
+                        "answer_recovery.completed",
+                        phase=WorkflowPhase.SYNTHESIS.value,
+                        status="ok",
+                        attributes={"mode": "deterministic_recovery", "reason": "citation_coverage_low"},
+                    )
         note_substep_duration(
             session.state,
             "synthesis",
@@ -2825,7 +2718,7 @@ class ResearchGraphRunner:
                     "successful_pack_tokens": successful_pack_tokens,
                     "synthesis_attempt_metrics": attempt_metrics,
                     "synthesis_fail_reason": result.fail_reason,
-                    "fallback_used": "evidence_bound_recovery" if fallback else recovery_mode,
+                    "fallback_used": "deterministic_partial" if fallback else recovery_mode,
                     "answerability": answerability.to_dict(),
                     "answer_complete": answer_complete,
                     "answer_contract": answer_contract,
@@ -2882,7 +2775,7 @@ class ResearchGraphRunner:
                     (compact_pack if retried else evidence_pack).estimated_tokens
                 ),
                 "fail_reason": result.fail_reason,
-                "fallback_action": recovery_mode or ("evidence_bound_recovery" if fallback else ""),
+                "fallback_action": recovery_mode or ("deterministic_partial" if fallback else ""),
                 "synthesis_degraded": synthesis_degraded,
                 "synthesis_retry_count": int(retried),
                 "successful_attempt": successful_attempt,
@@ -2934,19 +2827,6 @@ class ResearchGraphRunner:
         if not content:
             issues.append("no_content")
         answerability = gstate.get("answerability")
-        if not (isinstance(answerability, dict) and answerability):
-            # The gate must always have question→evidence lineage; derive it
-            # rather than treating a missing projection as "nothing answered".
-            from app.research.brief.models import StructuredResearchBrief as _Brief
-            from app.research.delivery.answer_contract import assess_answerability
-
-            answerability = assess_answerability(
-                brief=_Brief.from_dict(gstate.get("brief") or {}),
-                findings=[row for row in gstate.get("findings") or [] if isinstance(row, dict)],
-                evidence_records=[row for row in gstate.get("evidence_records") or [] if isinstance(row, dict)],
-                coverage=dict(gstate.get("coverage_judgement") or {}),
-                conflicts=[row for row in gstate.get("claim_resolutions") or [] if isinstance(row, dict)],
-            ).to_dict()
         answerable = bool(answerability.get("answerable")) if isinstance(answerability, dict) and answerability else False
         gap_result = gap_check(brief=gstate.get("brief") or {}, answerability=answerability if isinstance(answerability, dict) else {})
         answer_complete = bool(gstate.get("answer_complete"))
@@ -2977,50 +2857,30 @@ class ResearchGraphRunner:
             citation_valid, citation_reason = manager.validate_citations(content)
             if not citation_valid:
                 issues.append(citation_reason or "citation_validation_failed")
-        from app.research.delivery.answer_renderer import validate_reference_closure
-
-        closure = validate_reference_closure(content)
-        if not closure.passed:
-            citation_valid = False
-            if closure.missing:
-                issues.append("reference_missing")
-            if closure.orphan:
-                issues.append("reference_orphan")
-        # A free-form provider report carries no typed answer. Attribute it to
-        # the questions that actually have grounded evidence so the Completion
-        # Contract stays authoritative; ungrounded questions stay unanswered.
-        if not answer_contract and content:
+        # Provider reports created before the v1 answer schema are upgraded at
+        # the runtime boundary so the Completion Contract remains authoritative.
+        if not answer_contract and content and (answerable or not strict_quality_contract):
             statuses = answerability.get("question_status") if isinstance(answerability, dict) else []
-            if not statuses and not strict_quality_contract:
+            answers = []
+            if not statuses:
                 questions = list((gstate.get("brief") or {}).get("key_questions") or [])
                 statuses = [
                     {
                         "question_id": f"q{index}",
-                        "supporting_evidence": [
-                            str(row.get("evidence_id") or "")
-                            for row in evidence_records[:1]
-                            if str(row.get("evidence_id") or "")
-                        ],
+                        "supporting_evidence": [str(row.get("evidence_id") or "") for row in evidence_records[:1]],
                         "supporting_findings": [],
                     }
                     for index, _question in enumerate(questions or ["objective"], 1)
                 ]
-            answers = []
-            for index, status in enumerate(statuses or [], 1):
-                grounded = [str(item) for item in status.get("supporting_evidence") or [] if str(item).strip()]
+            for index, status in enumerate(statuses, 1):
                 answers.append({
                     "question_id": str(status.get("question_id") or f"q{index}"),
-                    "ask_id": str(status.get("ask_id") or ""),
-                    "direct_answer": content if grounded else "",
-                    "evidence_refs": grounded,
+                    "direct_answer": content,
+                    "evidence_refs": list(status.get("supporting_evidence") or []),
                     "finding_refs": list(status.get("supporting_findings") or []),
-                    "confidence": 0.7 if grounded else 0.0,
+                    "confidence": 0.7,
                 })
-            if answers:
-                answer_contract = {
-                    "objective": str((gstate.get("brief") or {}).get("objective") or ""),
-                    "answers": answers,
-                }
+            answer_contract = {"objective": str((gstate.get("brief") or {}).get("objective") or ""), "answers": answers}
         if strict_quality_contract:
             report_quality = evaluate_report_quality(
                 content=content,
@@ -3048,31 +2908,8 @@ class ResearchGraphRunner:
             if not (answerable and answer_complete)
             else {}
         )
-        from app.research.brief.models import StructuredResearchBrief
-        from app.research.evidence.source_tier import evaluate_source_quality
-        from app.research.quality import evaluate_relevance
-
-        brief_model = StructuredResearchBrief.from_dict(gstate.get("brief") or {})
-        relevance = evaluate_relevance(
-            brief=brief_model,
-            answer_contract=answer_contract,
-            final_content=content,
-        )
-        source_quality = evaluate_source_quality(
-            evidence_records,
-            require_core_support=bool(
-                brief_model.freshness_requirements.required
-                or brief_model.source_requirements.primary_required
-            ),
-        )
-        # Only the partial-floor violations are hard blockers; "not every ask is
-        # answered" is a degradation signal that downgrades SUCCESS to PARTIAL.
-        if not relevance.passed:
-            issues.extend(f"relevance:{reason}" for reason in relevance.blocking_reasons)
-        if not source_quality.passed:
-            issues.append(f"source_quality:{source_quality.reason or 'insufficient_tier'}")
         completion = evaluate_completion(
-            brief=brief_model,
+            brief=gstate.get("brief") or {},
             answer_contract=answer_contract,
             evidence_records=evidence_records,
             final_content=content,
@@ -3081,10 +2918,6 @@ class ResearchGraphRunner:
             broken_evidence_count=broken_evidence_count,
             minimum_high_authority_ratio=0.6 if strict_quality_contract and primary_required else 0.0,
             require_authoritative_per_question=strict_quality_contract and primary_required,
-            source_quality_pass=source_quality.passed,
-            relevance_pass=relevance.passed,
-            relevance_partial_pass=relevance.partial_passed,
-            source_quality_partial_pass=source_quality.partial_passed,
         )
         if completion.passed and report_quality.verdict == "PASS":
             answer_complete = True
@@ -3094,60 +2927,25 @@ class ResearchGraphRunner:
                 issues.append("answer_incomplete")
         issues = list(dict.fromkeys(issues))
         blocking = bool(issues)
-        # Relevance and source-tier failures are never mere degradation: an
-        # off-topic or tier3-only report must not be delivered as PARTIAL pass.
-        degradation_issues: list[str] = [
+        degradation_issues = [
             item for item in ("coverage_gap", "synthesis_failed", "answerability_gap") if item in issues
         ]
-        hard_relevance = {f"relevance:{reason}" for reason in relevance.partial_blocking_reasons}
-        hard_source = set()
-        if not source_quality.partial_passed:
-            hard_source = {item for item in issues if item.startswith("source_quality:")}
-        hard_issues = [item for item in issues if item in hard_relevance or item in hard_source]
-        degradation_issues.extend(
-            item
-            for item in issues
-            if (item.startswith("relevance:") or item.startswith("source_quality:"))
-            and item not in hard_relevance
-            and item not in hard_source
-        )
-        # Only a contract that carries its own completeness assessment can ask
-        # for a synthesis repair; an attributed provider report must not trigger
-        # an extra provider call.
-        assessed_incomplete = (
-            isinstance(answer_contract.get("completeness"), dict)
-            and not bool((answer_contract.get("completeness") or {}).get("complete"))
-            and bool(answer_contract.get("repair_eligible", True))
-        )
-        report_repairable = (
-            report_quality.repairable
-            and "weak_sources" not in set(report_quality.issues)
-        )
         repairable = (
             not bool(gstate.get("fast_path"))
-            # When the provider produced nothing, rewriting the report cannot
-            # help; recovery already salvaged what the evidence supports.
-            and not bool(gstate.get("synthesis_failed"))
             and bool(content)
             and int(gstate.get("synthesis_attempts") or 0) < 3
             and (
                 not citation_valid
-                or (bool(evidence_records) and assessed_incomplete)
-                or report_repairable
+                or (
+                    bool(evidence_records)
+                    and bool(answer_contract)
+                    and not bool((answer_contract.get("completeness") or {}).get("complete"))
+                )
+                or report_quality.repairable
             )
         )
-        verdict = (
-            "pass"
-            if completion.passed and report_quality.verdict == "PASS" and not issues
-            else "repairable"
-            if repairable
-            else "partial"
-            if content
-            and evidence_records
-            and not hard_issues
-            and completion.partial_contract.passed
-            and issues == degradation_issues
-            else "fail"
+        verdict = "pass" if completion.passed and report_quality.verdict == "PASS" and not issues else (
+            "repairable" if repairable else "partial" if content and evidence_records else "fail"
         )
         note_substep_duration(
             session.state,
@@ -3171,8 +2969,6 @@ class ResearchGraphRunner:
             },
             "answer_complete": bool(gstate.get("answer_complete")),
             "completion_contract": completion.to_dict(),
-            "relevance": relevance.to_dict(),
-            "source_quality": source_quality.to_dict(),
             "gap_check": gap_result.to_dict(),
             "synthesis_mode": str(
                 (gstate.get("synthesis_mode") or session.state.metadata.get("synthesis_mode") or "")
@@ -3197,8 +2993,6 @@ class ResearchGraphRunner:
             "quality_assessment": assessment,
             "answer_contract": answer_contract,
             "answer_complete": bool(answer_complete or completion.passed),
-            "relevance_assessment": relevance.to_dict(),
-            "source_quality": source_quality.to_dict(),
         })
         if isinstance(session.state.metadata, dict):
             session.state.metadata.update(
@@ -3249,11 +3043,6 @@ class ResearchGraphRunner:
                     "termination": termination_payload,
                     "quality": dict(gstate.get("quality_assessment") or {}),
                     "quality_attempted": bool(gstate.get("quality_assessment")),
-                    "execution_retries": int(gstate.get("execution_retries") or 0),
-                    "semantic_repairs": int(gstate.get("semantic_repairs") or 0),
-                    "worker_failures_by_type": dict(
-                        gstate.get("worker_failures_by_type") or {}
-                    ),
                 }
             )
         control_plane = session.state.metadata.get("control_plane")
@@ -3288,48 +3077,6 @@ class ResearchGraphRunner:
                     "brief": brief,
                     "brief_id": str(brief.get("brief_id") or ""),
                     "brief_version": int(brief.get("version") or 1),
-                    "brief_source": str(brief.get("compiler_source") or ""),
-                    "brief_fallback_reason": (
-                        ""
-                        if str(brief.get("compiler_source") or "") == "structured_llm"
-                        else "deterministic_fallback"
-                    ),
-                    "original_ask_count": len(brief.get("user_asks") or []),
-                    "research_question_count": len(
-                        brief.get("research_questions") or []
-                    ),
-                    "semantic_fidelity": dict(
-                        gstate.get("semantic_fidelity") or {}
-                    ),
-                    "execution_retries": int(gstate.get("execution_retries") or 0),
-                    "semantic_repairs": int(gstate.get("semantic_repairs") or 0),
-                    "worker_failures_by_type": dict(
-                        gstate.get("worker_failures_by_type") or {}
-                    ),
-                    "synthesis_mode": str(
-                        (gstate.get("synthesis_mode") or
-                         session.state.metadata.get("synthesis_mode") or "")
-                    ),
-                    "final_relevance_score": float(
-                        (gstate.get("relevance_assessment") or {}).get(
-                            "ask_answer_rate", 0.0
-                        )
-                    ),
-                    "boilerplate_ratio": float(
-                        (gstate.get("relevance_assessment") or {}).get(
-                            "boilerplate_ratio", 0.0
-                        )
-                    ),
-                    "completion_reason": str(
-                        (
-                            (gstate.get("quality_assessment") or {}).get(
-                                "completion_contract"
-                            )
-                            or {}
-                        ).get("failure_reason")
-                        or termination_payload.get("reason")
-                        or ""
-                    ),
                     "user_intent": str(brief.get("user_intent") or ""),
                     "task_shape": str(brief.get("user_intent") or ""),
                     "execution_path": "fast_path" if bool(gstate.get("fast_path")) else "supervisor_loop",

@@ -379,10 +379,10 @@ def synthesize_node(state: ResearchState) -> dict[str, Any]:
     decision = state.get("control_decision") if isinstance(state.get("control_decision"), dict) else {}
     judgement = state.get("coverage_judgement") if isinstance(state.get("coverage_judgement"), dict) else {}
     findings = [row for row in state.get("findings") or [] if isinstance(row, dict)]
-    partial_findings = findings or [
-        {"claim": row.get("text"), "evidence_ids": row.get("evidence_ids")}
+    partial_findings = [row for row in findings if bool(row.get("validated", False))] or [
+        {"claim": row.get("text"), "evidence_ids": row.get("evidence_ids"), "validated": True}
         for row in state.get("claims") or []
-        if isinstance(row, dict) and str(row.get("text") or "").strip()
+        if isinstance(row, dict) and bool(row.get("validated", False)) and str(row.get("text") or "").strip()
     ]
     if str(decision.get("action") or "") == "deliver_partial" or not bool(judgement.get("sufficient")):
         from app.research.delivery.answer_view_builder import build_partial_answer_view

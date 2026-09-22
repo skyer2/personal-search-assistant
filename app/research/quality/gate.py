@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from app.research.evidence.quality import source_quality_metrics
+from app.research.claims.admission import classify_claim_text
 from app.research.findings.integrity import complete_sentence
 
 
@@ -24,6 +25,9 @@ _FORECAST = ("未来", "将", "可能", "预计", "趋势", "forecast")
 _MECHANISM = ("因为", "由于", "驱动", "机制", "因此", "意味着")
 _MILESTONE = ("里程碑", "验证", "观察", "指标", "若", "如果")
 _UNCERTAINTY = ("不确定", "风险", "取决于", "可能", "尚待", "限制")
+_NAVIGATION = re.compile(r"\b(?:skip to|cookie(?:s)?|subscribe|sign in|footer|breadcrumb)\b|跳到(?:主要)?内容|导航|页脚", re.I)
+_UNKNOWN_REFERENCE = re.compile(r"\[(?:unknown|来源|source)\]", re.I)
+_REFERENCE_SECTION = re.compile(r"^#{1,6}\s*(?:参考来源|参考资料|references?)\s*$", re.I | re.M)
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,17 @@ class QualityGateResult:
 
 def _sentences(content: str) -> list[str]:
     return [item.strip(" -\t") for item in re.split(r"[。！？!?\n]+", content) if item.strip(" -\t")]
+
+
+def _presentation_body(content: str) -> str:
+    """Exclude the structured reference list from claim-text checks.
+
+    URLs are required and publishable in a reference row, but would be a raw
+    snippet in the body of the answer.  Citation closure is still evaluated
+    against the full document below.
+    """
+    match = _REFERENCE_SECTION.search(content)
+    return content[:match.start()].rstrip() if match else content
 
 
 def _is_structural_sentence(value: str) -> bool:
@@ -101,23 +116,35 @@ def evaluate_report_quality(
 ) -> QualityGateResult:
     text = str(content or "").strip()
     issues: list[str] = []
-    sentences = _sentences(text)
+    body = _presentation_body(text)
+    sentences = _sentences(body)
     if not text:
         issues.append("no_content")
-    if _RAW_ARTIFACT.search(text):
+    if _RAW_ARTIFACT.search(body):
         issues.append("raw_artifact_citation")
-    raw_snippet_count = len(_RAW_SNIPPET.findall(text))
-    raw_snippet_count += len(_RAW_URL.findall(text))
+    raw_snippet_count = len(_RAW_SNIPPET.findall(body))
+    raw_snippet_count += len(_RAW_URL.findall(body))
     if raw_snippet_count:
         issues.append("raw_search_snippet")
-    if any(_INTERNAL_TITLE.match(line.strip()) for line in text.splitlines()):
+    if any(_INTERNAL_TITLE.match(line.strip()) for line in body.splitlines()):
         issues.append("internal_question_title")
+    if _NAVIGATION.search(body):
+        issues.append("navigation_text")
+    if _UNKNOWN_REFERENCE.search(text):
+        issues.append("unknown_reference_title")
     broken = [
         item for item in sentences
         if not _is_structural_sentence(item) and not complete_sentence(item)[0]
     ]
     if broken:
         issues.append("broken_sentence")
+    if any(
+        not classify_claim_text(item).publishable
+        and not _is_structural_sentence(item)
+        and len(item) >= 16
+        for item in sentences
+    ):
+        issues.append("unpublishable_claim_text")
     duplicate_ratio = _duplicate_ratio(sentences)
     if duplicate_ratio > 0.05:
         issues.append("duplicate_claims")
@@ -127,6 +154,13 @@ def evaluate_report_quality(
     citation_count = len(_CITATION.findall(text))
     if evidence_records and citation_count == 0:
         issues.append("citation_missing")
+    cited_numbers = {int(item.strip("[]")) for item in _CITATION.findall(text)}
+    reference_numbers = {
+        int(item)
+        for item in re.findall(r"^\[(\d+)\]\s+", text, re.M)
+    }
+    if cited_numbers and not cited_numbers.issubset(reference_numbers):
+        issues.append("citation_reference_closure_failed")
     bullet_count = sum(line.lstrip().startswith(("- ", "* ")) for line in text.splitlines())
     # A large list of bullet-sized snippets with no usable citation bindings
     # is an evidence dump even when it has a few headings around it.
@@ -173,7 +207,10 @@ def evaluate_report_quality(
     strong_lines = [item for item in sentences if any(token in item for token in ("一定", "必然", "唯一", "超过"))]
     if any(not _CITATION.search(item) for item in strong_lines):
         issues.append("unsupported_strong_claim")
-    if any(token in issues for token in ("no_content", "raw_artifact_citation", "raw_search_snippet", "missing_question")):
+    if any(token in issues for token in (
+        "no_content", "raw_artifact_citation", "raw_search_snippet", "missing_question",
+        "navigation_text", "unpublishable_claim_text", "citation_reference_closure_failed",
+    )):
         verdict: QualityVerdict = "FAIL"
     elif issues:
         verdict = "REPAIRABLE"
@@ -198,6 +235,8 @@ def evaluate_report_quality(
         "forecast_milestone_coverage": not has_forecast or "forecast_missing_contract" not in issues,
         "source_quality_warning": bool(evidence_records and quality["high_authority_source_ratio"] < 0.6),
         "primary_source_required": primary_required,
+        "presentation_navigation_detected": bool(_NAVIGATION.search(text)),
+        "reference_closure": not bool("citation_reference_closure_failed" in issues),
     })
 
 

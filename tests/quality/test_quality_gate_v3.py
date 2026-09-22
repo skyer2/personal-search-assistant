@@ -78,7 +78,8 @@ def test_good_report_with_semantic_forecast_contract_passes() -> None:
         content=(
             "# 结论摘要\nAgent runtime 是当前重点。[1]\n\n"
             "# 未来 1~2 年方向\n未来两年可能成为部署核心，因为工具协议与评测需求正在驱动落地。[1]"
-            "可观察里程碑是企业将其纳入生产工作流；不确定性在于成本和可靠性。"
+            "可观察里程碑是企业将其纳入生产工作流；不确定性在于成本和可靠性。\n\n"
+            "# 参考来源\n[1] official.example.com — https://official.example.com/news"
         ),
         brief={"key_questions": ["未来方向是什么？"], "user_intent": "trend_forecast"},
         evidence_records=_evidence(),

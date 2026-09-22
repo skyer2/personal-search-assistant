@@ -2,6 +2,13 @@
 
 This document is the repository architecture authority. The production workflow is an eight-node, Brief-driven research graph. Legacy semantic planning and coverage modules do not control it.
 
+> **v6 truth boundary:** synthesis and delivery receive only admitted claims
+> with explicit question lineage.  Artifact salvage remains evidence-only;
+> it cannot become a finding or answer without Claim Admission.  The final
+> renderer receives a typed AnswerViewModel with point-owned citations.
+> Primary synthesis is bounded to 90 seconds; compact retry and report repair
+> are bounded to 30 seconds each and remain explicit degraded diagnostics.
+>
 > **v5 delivery boundary:** synthesis receives normalized Insight Cards,
 > Forecast Cards and deterministic Claim–Evidence bindings, not raw Findings
 > or search snippets. See [DEEP_RESEARCH_INSIGHT_SYNTHESIS_V5.md](DEEP_RESEARCH_INSIGHT_SYNTHESIS_V5.md).

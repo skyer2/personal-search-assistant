@@ -257,8 +257,10 @@ def test_worker_timeout_salvages_artifact_evidence(monkeypatch):
         assert result.status == "failed"
         assert result.fail_reason == "step_timeout"
         assert result.evidence_refs
-        assert result.findings
-        assert result.findings[0]["partial"] is True
+        assert result.findings == []
+        assert result.salvage_evidence
+        assert result.salvage_evidence[0]["provenance"] == "worker_salvage"
+        assert result.salvage_evidence[0]["publishable_as_claim"] is False
     finally:
         reset_artifact_store()
 

@@ -78,7 +78,8 @@ def test_timeout_with_evidence_is_failed_partial_and_keeps_failure():
     assert result.status == "partial"
     assert result.fail_reason == "worker_timeout"
     assert result.evidence_refs == [artifact.artifact_id]
-    assert result.findings
+    assert not result.findings
+    assert result.salvage_evidence
     assert result.sources == ["https://example.com/deepseek"]
 
 
@@ -111,7 +112,8 @@ def test_soft_finalization_with_salvaged_evidence_is_partial():
     assert result.fail_reason == "worker_token_cap"
     assert result.metrics["stop_reason"] == "budget"
     assert result.evidence_refs == [artifact.artifact_id]
-    assert result.findings
+    assert not result.findings
+    assert result.salvage_evidence
 
 
 def test_soft_deadline_reserves_bounded_finishing_window(monkeypatch):

@@ -116,7 +116,8 @@ async def test_worker_result_is_ingested_before_wave_barrier(monkeypatch):
     update = await runner_module.ResearchGraphRunner(FakeHarness()).node_research_worker(state)
     assert update["processed_worker_result_ids"]
     assert update["evidence_records"]
-    assert update["findings"]
+    assert not update["findings"]
+    assert update["research_value_signal"]["admitted_claim_count"] == 0
 
     merged = {**state, **update}
     assert ingest_new_worker_results(merged) == {}

@@ -414,36 +414,24 @@ def _supported_rows(
     evidence_ids: list[str] = []
     directly_bound = False
     for row in claims:
+        # Coverage is an authority consumer.  Raw findings and unadmitted
+        # claim drafts are useful diagnostics, never support for a criterion.
+        if not bool(row.get("validated", False)):
+            continue
         text = str(row.get("text") or row.get("claim") or "")
         refs = [str(item) for item in row.get("evidence_ids") or [] if str(item).strip()]
         explicit_claim = _claim_bound(criterion_id, criterion, row)
-        if refs and (explicit_claim or _matches(criterion, text)):
+        if refs and explicit_claim:
             claim_id = str(row.get("claim_id") or "")
             if claim_id:
                 claim_ids.append(claim_id)
             evidence_ids.extend(refs)
             directly_bound = directly_bound or explicit_claim
-    for finding in findings:
-        if not finding.evidence_ids:
-            continue
-        text = " ".join([finding.summary, *finding.claims])
-        explicit_finding = _explicitly_bound(criterion_id, criterion, finding)
-        if explicit_finding or _matches(criterion, text):
-            evidence_ids.extend(finding.evidence_ids)
-            directly_bound = directly_bound or explicit_finding
     source_ids = [
         _source_identity(evidence_by_id[evidence_id])
         for evidence_id in dict.fromkeys(evidence_ids)
         if evidence_id in evidence_by_id
     ]
-    for finding in findings:
-        if _explicitly_bound(criterion_id, criterion, finding):
-            directly_bound = True
-            source_ids.extend(
-                registrable_domain(source) or source
-                for source in finding.source_ids
-                if str(source).strip()
-            )
     if atomic_fact and (claim_ids or evidence_ids):
         return claim_ids[:1], list(dict.fromkeys(evidence_ids)), 0.55, list(dict.fromkeys(source_ids)), directly_bound
     unique_sources = list(dict.fromkeys(source_ids))
