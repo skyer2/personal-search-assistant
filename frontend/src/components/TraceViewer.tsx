@@ -281,6 +281,16 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
       .filter((item) => item.source_id === highlightSourceId)
       .map((item) => item.step_index)
   ), [citations, highlightSourceId]);
+  const canonicalCitationNumbers = useMemo(() => {
+    const numbers = new Map<string, number>();
+    citations.forEach((source) => {
+      const key = source.canonical_source_id || source.locator || source.source_id;
+      if (!numbers.has(key)) {
+        numbers.set(key, numbers.size + 1);
+      }
+    });
+    return numbers;
+  }, [citations]);
   const workers = summary.workers || [];
   const topology = summary.topology || null;
   const supervisorDecisions = summary.supervisor_decisions || [];
@@ -1003,7 +1013,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                   dataSource={citations.map((source, index) => ({
                     ...source,
                     key: source.source_id || `cite-${index}`,
-                    ref_num: index + 1
+                    ref_num: canonicalCitationNumbers.get(source.canonical_source_id || source.locator || source.source_id) || index + 1
                   }))}
                   pagination={{ pageSize: 10 }}
                   size="small"
@@ -1014,6 +1024,13 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       width: 72,
                       key: "ref_num",
                       render: (num: number) => <Tag color="blue">[{num}]</Tag>
+                    },
+                    {
+                      title: "Canonical Source",
+                      dataIndex: "canonical_source_id",
+                      width: 170,
+                      key: "canonical_source_id",
+                      render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
                     },
                     {
                       title: "类型",

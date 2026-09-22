@@ -11,6 +11,11 @@ from app.agent.harness.artifacts import reset_artifact_store, set_artifact_store
 from app.agent.harness.run_budget import RunBudgetManager
 from app.agent.harness.token_counter import estimate_tokens
 from app.research.delivery.partial_renderer import render_partial_delivery
+from app.research.delivery.view_model import (
+    AnswerPoint,
+    AnswerViewModel,
+    QuestionAnswerSection,
+)
 from app.research.delivery.synthesis_context import (
     EvidenceDigest,
     SynthesisContextBuilder,
@@ -341,35 +346,34 @@ def test_synthesis_attempt_metrics_include_full_prompt_and_usage():
 
 
 def test_partial_renderer_discloses_limitations_and_never_claims_success():
-    content = render_partial_delivery(
-        objective="评估公司",
-        findings=[{"claim": "Company A raised funding.", "evidence_ids": ["ev-1"]}],
-        evidence_digests=[EvidenceDigest("ev-1", "Source", "https://example.com", "excerpt")],
-        worker_summaries=[{"task_id": "t1", "summary": "Collected evidence."}],
-        semantic_gaps=["gap_candidate_pool"],
-        limitations=["research_token_cap"],
-        unresolved_conflicts=[],
-        worker_failure_reasons=["research_token_cap"],
-        synthesis_failure_reason="synthesis_timeout",
-    )
+    content = render_partial_delivery(AnswerViewModel(
+        title="部分研究结果",
+        status="partial",
+        sections=(
+            QuestionAnswerSection(
+                "q1",
+                "评估公司",
+                "partial",
+                (AnswerPoint("Company A 已获得融资。"),),
+                "候选池仍需交叉验证。",
+            ),
+        ),
+        delivery_note="本轮研究部分完成，仅展示能够确认的内容。",
+    ))
     assert content
     assert "部分研究结果" in content
-    assert "执行限制" in content
-    assert "不能视为完整成功" in content
+    assert "状态：部分确认" in content
+    assert "候选池仍需交叉验证" in content
+    assert "## 证据" not in content
     assert "research_token_cap" not in content
     assert "worker_llm_call_cap" not in content
     assert "synthesis_timeout" not in content
-    assert render_partial_delivery(
-        objective="q",
-        findings=[],
-        evidence_digests=[],
-        worker_summaries=[],
-        semantic_gaps=[],
-        limitations=[],
-        unresolved_conflicts=[],
-        worker_failure_reasons=[],
-        synthesis_failure_reason="provider_auth",
-    ) == ""
+    empty = render_partial_delivery(AnswerViewModel(
+        title="研究未完成",
+        status="failed",
+    ))
+    assert "研究未完成" in empty
+    assert "provider_auth" not in empty
 
 
 def test_research_cap_still_reserves_synthesis_tokens():

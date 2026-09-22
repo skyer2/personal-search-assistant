@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+from difflib import SequenceMatcher
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from datetime import datetime
@@ -53,6 +54,13 @@ _OFFICIAL_DOMAINS = {
     "langchain.com", "microsoft.com", "openai.com", "pytorch.org",
     "tensorflow.org",
 }
+
+
+def _canonical_source_id(locator: str, title: str = "") -> str:
+    value = str(locator or "").strip().casefold() or re.sub(
+        r"[\W_]+", "", str(title or "").casefold()
+    )
+    return f"SRC_{hashlib.sha1(value.encode('utf-8')).hexdigest()[:12].upper()}"
 
 
 def classify_source_tier(locator: str) -> str:
@@ -105,6 +113,10 @@ class EvidenceSource:
     source_kind: str  # url | sql | file | text | kb
     locator: str
     excerpt: str
+    canonical_source_id: str = ""
+    publisher: str = ""
+    title: str = ""
+    published_at: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     bound_fact: str = ""
     artifact_id: str = ""
@@ -114,6 +126,10 @@ class EvidenceSource:
     source_tier: str = SourceTier.UNKNOWN.value
 
     def __post_init__(self) -> None:
+        if not self.canonical_source_id:
+            self.canonical_source_id = _canonical_source_id(
+                self.locator, self.title
+            )
         if not self.source_tier or (
             self.source_tier == SourceTier.UNKNOWN.value
             and self.source_kind == "url"
@@ -174,11 +190,54 @@ class CitationManager:
         ):
             return False
         src.locator = self._canonical_locator(src.locator)
+        src.canonical_source_id = _canonical_source_id(src.locator, src.title)
         content_hash = hashlib.sha256(
             (src.excerpt or src.bound_fact).strip().lower().encode()
         ).hexdigest()
+        normalized_title = re.sub(r"[\W_]+", "", src.title.casefold())
         keys = {f"locator:{src.locator}", f"content:{content_hash}"}
+        if normalized_title:
+            keys.add(f"title:{normalized_title}")
         if any(key in self._admission_keys for key in keys):
+            return False
+        normalized_excerpt = re.sub(
+            r"[\W_]+", "", (src.excerpt or src.bound_fact).casefold()
+        )[:600]
+        duplicate = next(
+            (
+                old
+                for old in self.sources
+                if len(normalized_excerpt) >= 80
+                and SequenceMatcher(
+                    None,
+                    normalized_excerpt,
+                    re.sub(
+                        r"[\W_]+",
+                        "",
+                        (old.excerpt or old.bound_fact).casefold(),
+                    )[:600],
+                ).ratio()
+                >= 0.94
+            ),
+            None,
+        )
+        if duplicate is not None:
+            rank = {
+                SourceTier.PRIMARY.value: 4,
+                SourceTier.HIGH_QUALITY_SECONDARY.value: 3,
+                SourceTier.COMMUNITY.value: 2,
+                SourceTier.UNKNOWN.value: 1,
+            }
+            if rank.get(src.source_tier, 0) > rank.get(
+                duplicate.source_tier, 0
+            ):
+                duplicate.locator = src.locator
+                duplicate.canonical_source_id = src.canonical_source_id
+                duplicate.publisher = src.publisher
+                duplicate.title = src.title
+                duplicate.published_at = src.published_at
+                duplicate.source_tier = src.source_tier
+            self._admission_keys.update(keys)
             return False
         self._admission_keys.update(keys)
         self.sources.append(src)
@@ -390,6 +449,12 @@ class CitationManager:
                 step_type = str(span.get("step_type") or "")
                 start = int(span.get("start_offset") or 0)
                 end = int(span.get("end_offset") or 0)
+                canonical_source_id = str(span.get("canonical_source_id") or "")
+                publisher = str(span.get("publisher") or "")
+                title = str(span.get("title") or "")
+                published_at = str(
+                    span.get("published_at") or span.get("effective_at") or ""
+                )
             else:
                 eid = str(getattr(span, "evidence_id", "") or "")
                 locator = str(getattr(span, "locator", "") or "")
@@ -400,6 +465,16 @@ class CitationManager:
                 step_type = str(getattr(span, "step_type", "") or "")
                 start = int(getattr(span, "start_offset", 0) or 0)
                 end = int(getattr(span, "end_offset", 0) or 0)
+                canonical_source_id = str(
+                    getattr(span, "canonical_source_id", "") or ""
+                )
+                publisher = str(getattr(span, "publisher", "") or "")
+                title = str(getattr(span, "title", "") or "")
+                published_at = str(
+                    getattr(span, "published_at", "")
+                    or getattr(span, "effective_at", "")
+                    or ""
+                )
             src = EvidenceSource(
                 source_id=self._next_id(),
                 step_index=step_index,
@@ -412,6 +487,10 @@ class CitationManager:
                 evidence_id=eid,
                 start_offset=start,
                 end_offset=end,
+                canonical_source_id=canonical_source_id,
+                publisher=publisher,
+                title=title,
+                published_at=published_at,
             )
             if not self._admit(src, respect_step_limit=not bypass_step_limit):
                 continue
@@ -462,6 +541,18 @@ class CitationManager:
                 if not existing.evidence_id:
                     existing.evidence_id = evidence_id
                 existing.artifact_id = str(row.get("artifact_ref") or existing.artifact_id)
+                existing.publisher = str(row.get("publisher") or existing.publisher)
+                existing.title = str(row.get("title") or existing.title)
+                existing.published_at = str(
+                    row.get("published_at")
+                    or row.get("effective_at")
+                    or existing.published_at
+                )
+                existing.canonical_source_id = str(
+                    row.get("canonical_source_id")
+                    or existing.canonical_source_id
+                    or _canonical_source_id(existing.locator, existing.title)
+                )
                 existing.bound_fact = (
                     claim_by_evidence_id.get(evidence_id)
                     or existing.bound_fact
@@ -607,8 +698,25 @@ class CitationManager:
         return ""
 
     def source_number_map(self) -> dict[str, int]:
-        """source_id → 引用编号 [1][2]…"""
-        return {src.source_id: idx + 1 for idx, src in enumerate(self.sources)}
+        """Runtime source_id → canonical-source citation number."""
+        canonical_numbers = self.canonical_source_number_map()
+        return {
+            src.source_id: canonical_numbers[src.canonical_source_id]
+            for src in self.sources
+            if src.canonical_source_id in canonical_numbers
+        }
+
+    def canonical_source_number_map(self) -> dict[str, int]:
+        """canonical_source_id → citation number; many Evidence may share one."""
+        output: dict[str, int] = {}
+        for source in self.sources:
+            canonical_id = source.canonical_source_id or _canonical_source_id(
+                source.locator, source.title
+            )
+            source.canonical_source_id = canonical_id
+            if canonical_id not in output:
+                output[canonical_id] = len(output) + 1
+        return output
 
     def evidence_number_map(self) -> dict[str, int]:
         """Canonical evidence_id → stable citation number."""
@@ -638,25 +746,39 @@ class CitationManager:
         sources = [source for source in self.sources if source.source_id in selected]
         if not sources:
             return ""
+        canonical_numbers = self.canonical_source_number_map()
+        best_by_canonical: dict[str, EvidenceSource] = {}
+        rank = {
+            SourceTier.PRIMARY.value: 4,
+            SourceTier.HIGH_QUALITY_SECONDARY.value: 3,
+            SourceTier.COMMUNITY.value: 2,
+            SourceTier.UNKNOWN.value: 1,
+        }
+        for source in sources:
+            old = best_by_canonical.get(source.canonical_source_id)
+            if old is None or rank.get(source.source_tier, 0) > rank.get(
+                old.source_tier, 0
+            ):
+                best_by_canonical[source.canonical_source_id] = source
         lines = ["", "## 参考文献", ""]
-        id_to_num = self.source_number_map()
-        for src in sources:
-            num = id_to_num[src.source_id]
-            kind_label = {
-                "url": "网络",
-                "sql": "数据库",
-                "file": "文件",
-                "kb": "知识库",
-                "text": "步骤产出",
-            }.get(src.source_kind, src.source_kind)
+        for canonical_id, src in sorted(
+            best_by_canonical.items(),
+            key=lambda item: canonical_numbers[item[0]],
+        ):
+            num = canonical_numbers[canonical_id]
             parsed = urlsplit(src.locator) if src.locator.startswith(("http://", "https://")) else None
-            publisher = (parsed.netloc.removeprefix("www.") if parsed else "") or src.source_kind
+            publisher = src.publisher or (
+                parsed.netloc.removeprefix("www.") if parsed else ""
+            ) or src.source_kind
+            title = src.title or "标题未知"
+            date = f"，{src.published_at[:10]}" if src.published_at else ""
             if include_locator:
-                lines.append(f"[{num}] ({kind_label}) {src.locator} — {src.source_tier}")
+                lines.append(
+                    f"[{num}] {publisher}，《{title}》{date}，{src.locator}"
+                )
             else:
                 lines.append(
-                    f"[{num}] {publisher}（{kind_label}）— {src.source_tier} · "
-                    f"已登记证据；完整来源定位见 Trace。"
+                    f"[{num}] {publisher}，《{title}》{date}"
                 )
         return "\n".join(lines)
 
@@ -679,12 +801,8 @@ class CitationManager:
             return content
 
         id_to_num = self.source_number_map()
-        header = (
-            "> **Evidence-First 报告**：正文含数字的结论应标注已登记的 [n]；"
-            "完整来源见文末参考文献。未核实断言不要编造引用。\n\n"
-        )
-        if content.startswith("> **Evidence-First"):
-            header = ""
+        # Citation policy is an internal contract, never user-facing prose.
+        header = ""
 
         bindings = self.fact_bindings or [
             {"fact": src.bound_fact or src.excerpt, "source_id": src.source_id}
@@ -744,10 +862,26 @@ class CitationManager:
             for number in cited_numbers
             if number in number_to_id
         }
-        refs = self.build_references_block(source_ids=used_source_ids)
+        refs = self.build_references_block(
+            source_ids=used_source_ids, include_locator=True
+        )
         if refs and refs.strip() not in body:
             return body.rstrip() + "\n" + refs + "\n"
         return body
+
+    def validate_reference_closure(
+        self, final_content: str
+    ) -> tuple[bool, str]:
+        from app.research.delivery.answer_renderer import (
+            validate_reference_closure,
+        )
+
+        closure = validate_reference_closure(final_content)
+        if closure.missing:
+            return False, "reference_missing"
+        if closure.orphan:
+            return False, "reference_orphan"
+        return True, ""
 
     def compute_metrics(self, final_content: str) -> dict[str, float]:
         """CCR：优先统计「含数字的句子」中带 [n] 的比例，避免把标题句算进幻觉。"""
@@ -805,6 +939,11 @@ class CitationManager:
         }
         if cited_numbers - valid_numbers:
             return False, "citation_invalid_number"
+        closure_ok, closure_reason = self.validate_reference_closure(
+            final_content
+        )
+        if not closure_ok:
+            return False, closure_reason
         if (
             "## 参考文献" not in final_content
             and metrics["citation_coverage_rate"] < min_coverage
@@ -840,6 +979,12 @@ class CitationManager:
                     source_kind=str(row.get("source_kind") or "text"),
                     locator=str(row.get("locator") or ""),
                     excerpt=str(row.get("excerpt") or ""),
+                    canonical_source_id=str(
+                        row.get("canonical_source_id") or ""
+                    ),
+                    publisher=str(row.get("publisher") or ""),
+                    title=str(row.get("title") or ""),
+                    published_at=str(row.get("published_at") or ""),
                     timestamp=str(row.get("timestamp") or datetime.now().isoformat()),
                     bound_fact=str(row.get("bound_fact") or ""),
                     artifact_id=str(row.get("artifact_id") or ""),

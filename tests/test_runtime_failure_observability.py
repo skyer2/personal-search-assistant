@@ -19,6 +19,7 @@ from app.agent.harness.step_budget import (
 from app.agent.harness.tool_contract import wrap_tool_with_contract
 from app.observability.recorder import AgentTelemetry
 from app.research.delivery.partial_renderer import render_partial_delivery
+from app.research.delivery.answer_view_builder import build_partial_answer_view
 from app.research.delivery.synthesis_context import EvidenceDigest
 from app.research.execution.structured_llm_gateway import emit_semantic_fallback
 from app.research.execution.worker_executor import WorkerExecutorV2
@@ -217,23 +218,24 @@ def test_ingestion_prefers_recovered_findings_over_runtime_failure_summary():
 
 
 def test_partial_renderer_filters_embedded_runtime_codes():
-    content = render_partial_delivery(
-        objective="评估公司",
-        findings=[
-            {"claim": "worker_timeout; recovered evidence", "evidence_ids": ["ev-1"]},
-            {"claim": "Company A has verifiable evidence.", "evidence_ids": ["ev-1"]},
+    view = build_partial_answer_view(
+        brief={"key_questions": ["评估公司"]},
+        claims=[
+            {"claim_id": "c1", "text": "worker_timeout; recovered evidence", "evidence_ids": ["ev-1"]},
+            {"claim_id": "c2", "text": "Company A has verifiable evidence.", "evidence_ids": ["ev-1"]},
         ],
-        evidence_digests=[
-            EvidenceDigest("ev-1", "Source", "https://example.com", "verified excerpt")
+        bindings=[],
+        coverage={},
+        source_registry=[
+            {
+                "evidence_id": "ev-1",
+                "locator": "https://example.com",
+                "source_type": "secondary",
+            }
         ],
-        worker_summaries=[],
-        semantic_gaps=[],
-        limitations=[],
-        unresolved_conflicts=[],
-        worker_failure_reasons=["worker_timeout"],
-        synthesis_failure_reason="synthesis_timeout",
     )
-    assert "Company A has verifiable evidence." in content
+    content = render_partial_delivery(view)
+    assert "Company A has verifiable evidence" in content
     assert "worker_timeout" not in content
     assert "synthesis_timeout" not in content
     assert "降级部分交付" in content

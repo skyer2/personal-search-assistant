@@ -18,7 +18,6 @@ from app.research.coverage.judge import CoverageJudgement, judge_coverage
 from app.research.domain.contracts import WorkflowPhase
 from app.research.domain.task_state import initialize_tasks, retry_task
 from app.research.delivery.partial_renderer import render_partial_delivery, scrub_internal_ids
-from app.research.delivery.synthesis_context import EvidenceDigest
 from app.research.runtime.ingestion import ingest_new_worker_results
 from app.research.runtime.task_identity import execution_task_id, semantic_fingerprint
 from app.research.routing.mode_router import canonicalize_mode
@@ -385,32 +384,30 @@ def synthesize_node(state: ResearchState) -> dict[str, Any]:
         for row in state.get("claims") or []
         if isinstance(row, dict) and str(row.get("text") or "").strip()
     ]
-    evidence_digests = [
-        EvidenceDigest(
-            evidence_id=str(row.get("evidence_id") or row.get("source_id") or ""),
-            title=str(row.get("title") or row.get("source_id") or "来源")[:120],
-            locator=str(row.get("locator") or row.get("source_id") or "")[:240],
-            excerpt=str(row.get("excerpt") or "")[:500],
-        )
-        for row in state.get("evidence_records") or []
-        if isinstance(row, dict) and (row.get("evidence_id") or row.get("locator") or row.get("source_id"))
-    ]
     if str(decision.get("action") or "") == "deliver_partial" or not bool(judgement.get("sufficient")):
-        content = render_partial_delivery(
-            objective=brief.objective,
-            findings=partial_findings,
-            evidence_digests=evidence_digests,
-            worker_summaries=[
-                {"task_id": row.get("task_id"), "summary": row.get("summary")}
-                for row in state.get("worker_results") or []
-                if isinstance(row, dict) and row.get("summary")
+        from app.research.delivery.answer_view_builder import build_partial_answer_view
+
+        view = build_partial_answer_view(
+            brief=brief,
+            claims=[
+                {
+                    "claim_id": row.get("claim_id") or row.get("finding_id"),
+                    "text": row.get("text") or row.get("claim") or row.get("summary"),
+                    "evidence_ids": row.get("evidence_ids") or [],
+                    "question_id": row.get("question_id") or "",
+                    "criterion_id": row.get("criterion_id") or "",
+                    "supported_criteria": row.get("supported_criteria") or [],
+                    "confidence": row.get("confidence"),
+                }
+                for row in partial_findings
             ],
-            semantic_gaps=[str(item) for item in judgement.get("missing") or []],
-            limitations=[],
-            unresolved_conflicts=[str(item) for item in judgement.get("conflicts") or []],
-            worker_failure_reasons=[],
-            synthesis_failure_reason="coverage_gap",
+            bindings=[],
+            coverage=judgement,
+            source_registry=[
+                row for row in state.get("evidence_records") or [] if isinstance(row, dict)
+            ],
         )
+        content = render_partial_delivery(view)
     else:
         content = scrub_internal_ids(
             "\n".join(

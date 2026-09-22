@@ -1976,10 +1976,14 @@ class ResearchGraphRunner:
             assess_answerability,
             assess_answer_completeness,
             compile_deterministic_answer,
-            render_final_answer,
         )
         from app.research.delivery.insight_synthesis import (
             build_insight_synthesis,
+        )
+        from app.research.delivery.answer_renderer import render_answer
+        from app.research.delivery.answer_view_builder import (
+            build_partial_answer_view,
+            build_recovery_view,
         )
         from app.research.runtime.atomic_fact import (
             AtomicFactAnswer,
@@ -2332,17 +2336,19 @@ class ResearchGraphRunner:
         skip_llm_synthesis = bool(evidence_records) and remaining_synthesis_tokens < 1_000
         result: Any
         if skip_llm_synthesis:
-            content = render_partial_delivery(
-                objective=brief.objective,
-                findings=list(synthesis_context.findings),
-                evidence_digests=list(synthesis_context.evidence_digests),
-                worker_summaries=[],
-                semantic_gaps=list(synthesis_context.semantic_gaps),
+            partial_view = build_partial_answer_view(
+                brief=brief,
+                claims=[
+                    row.to_dict() for row in insight_synthesis.claims
+                ],
+                bindings=[
+                    row.to_dict() for row in insight_synthesis.bindings
+                ],
+                coverage=judgement,
+                source_registry=evidence_records,
                 limitations=list(synthesis_context.limitations),
-                unresolved_conflicts=list(synthesis_context.unresolved_conflicts),
-                worker_failure_reasons=[],
-                synthesis_failure_reason="synthesis_budget_low",
             )
+            content = render_partial_delivery(partial_view)
             result = SimpleNamespace(
                 ok=False,
                 status="stopped",
@@ -2680,7 +2686,19 @@ class ResearchGraphRunner:
             )
             if answer_complete:
                 recovery_mode = "evidence_bound_recovery"
-                content = render_final_answer(recovered, citation_numbers=citation_numbers)
+                recovery_view = build_recovery_view(
+                    brief=brief,
+                    claims=[
+                        row.to_dict() for row in insight_synthesis.claims
+                    ],
+                    bindings=[
+                        row.to_dict() for row in insight_synthesis.bindings
+                    ],
+                    coverage=judgement,
+                    source_registry=evidence_records,
+                    limitations=list(synthesis_context.limitations),
+                )
+                content = render_answer(recovery_view)
                 fallback = False
                 _emit(
                     session,
@@ -2705,22 +2723,20 @@ class ResearchGraphRunner:
                 attributes=completeness.to_dict(),
             )
         if fallback:
-            worker_failure_reasons = [
-                str(row.get("fail_reason") or "")
-                for row in gstate.get("worker_results") or []
-                if isinstance(row, dict) and str(row.get("fail_reason") or "").strip()
-            ]
-            content = render_partial_delivery(
-                objective=brief.objective,
-                findings=list(synthesis_context.findings),
-                evidence_digests=list(synthesis_context.evidence_digests),
-                worker_summaries=[],
-                semantic_gaps=list(synthesis_context.semantic_gaps),
+            partial_view = build_partial_answer_view(
+                brief=brief,
+                claims=[
+                    row.to_dict() for row in insight_synthesis.claims
+                ],
+                bindings=[
+                    row.to_dict() for row in insight_synthesis.bindings
+                ],
+                coverage=judgement,
+                source_registry=evidence_records,
                 limitations=list(synthesis_context.limitations),
-                unresolved_conflicts=list(synthesis_context.unresolved_conflicts),
-                worker_failure_reasons=worker_failure_reasons,
-                synthesis_failure_reason=str(result.fail_reason or "synthesis_failed"),
             )
+            content = render_partial_delivery(partial_view)
+            recovery_mode = "evidence_bound_recovery"
         else:
             content = content if recovery_mode else result.summary
             # Provider synthesis is a free-form report today; a non-empty,
@@ -2730,7 +2746,8 @@ class ResearchGraphRunner:
         content = scrub_internal_ids(content)
         manager = session.ctx.citation_manager
         citation_started = time.perf_counter()
-        if manager is not None and content:
+        explicit_citation_render = recovery_mode == "evidence_bound_recovery"
+        if manager is not None and content and not explicit_citation_render:
             selected_findings = list(
                 (compact_pack if retried else evidence_pack).findings
             )
@@ -2740,48 +2757,54 @@ class ResearchGraphRunner:
                 citation_numbers,
             )
             content = manager.build_cited_report(content)
-            # A provider can return a non-empty report whose citations do not
-            # bind to the current evidence pack.  Treat that as a report
-            # defect, not as a terminal delivery failure: compile a bounded
-            # evidence-first answer locally and send it through the same
-            # citation builder before Quality Gate.
-            try:
-                cited_ok, _ = manager.validate_citations(content)
-            except Exception:
-                cited_ok = True
-            if not cited_ok and answerability.answerable:
-                recovered = compile_deterministic_answer(
-                    objective=brief.objective or str(gstate.get("task_query") or ""),
-                    brief=brief,
-                    findings=[row for row in gstate.get("findings") or [] if isinstance(row, dict)],
-                    answerability=answerability,
-                    synthesis_degraded=True,
-                )
-                completeness = assess_answer_completeness(recovered, brief)
-                if completeness.complete:
-                    recovery_mode = "evidence_bound_recovery"
-                    answer_contract = {
-                        "final_answer": recovered.to_dict(),
-                        "completeness": completeness.to_dict(),
-                        "repair_eligible": False,
-                    }
-                    content = manager.build_cited_report(
-                        render_final_answer(
-                            recovered,
-                            citation_numbers=citation_numbers,
-                        )
-                    )
-                    fallback = False
-                    synthesis_failed = False
-                    answer_complete = True
-                    synthesis_degraded = True
-                    _emit(
-                        session,
-                        "answer_recovery.completed",
-                        phase=WorkflowPhase.SYNTHESIS.value,
-                        status="ok",
-                        attributes={"mode": recovery_mode, "reason": "citation_coverage_low"},
-                    )
+        # A provider can return content with citations but no closed References
+        # block (or this run may not install CitationManager). Recover through
+        # the explicit ViewModel instead of asking the provider to rewrite it.
+        from app.research.delivery.answer_renderer import validate_reference_closure
+
+        closure = validate_reference_closure(content)
+        if not closure.passed and answerability.answerable:
+            recovered = compile_deterministic_answer(
+                objective=brief.objective or str(gstate.get("task_query") or ""),
+                brief=brief,
+                findings=[
+                    row
+                    for row in gstate.get("findings") or []
+                    if isinstance(row, dict)
+                ],
+                answerability=answerability,
+                synthesis_degraded=True,
+            )
+            completeness = assess_answer_completeness(recovered, brief)
+            recovery_mode = "evidence_bound_recovery"
+            answer_contract = {
+                "final_answer": recovered.to_dict(),
+                "completeness": completeness.to_dict(),
+                "repair_eligible": False,
+            }
+            recovery_view = build_recovery_view(
+                brief=brief,
+                claims=[row.to_dict() for row in insight_synthesis.claims],
+                bindings=[row.to_dict() for row in insight_synthesis.bindings],
+                coverage=judgement,
+                source_registry=evidence_records,
+                limitations=list(synthesis_context.limitations),
+            )
+            content = render_answer(recovery_view)
+            fallback = False
+            synthesis_failed = False
+            answer_complete = completeness.complete
+            synthesis_degraded = True
+            _emit(
+                session,
+                "answer_recovery.completed",
+                phase=WorkflowPhase.SYNTHESIS.value,
+                status="ok" if completeness.complete else "partial",
+                attributes={
+                    "mode": recovery_mode,
+                    "reason": "reference_closure_failed",
+                },
+            )
         note_substep_duration(
             session.state,
             "synthesis",
@@ -2807,7 +2830,7 @@ class ResearchGraphRunner:
                     "successful_pack_tokens": successful_pack_tokens,
                     "synthesis_attempt_metrics": attempt_metrics,
                     "synthesis_fail_reason": result.fail_reason,
-                    "fallback_used": "deterministic_partial" if fallback else recovery_mode,
+                    "fallback_used": "evidence_bound_recovery" if fallback else recovery_mode,
                     "answerability": answerability.to_dict(),
                     "answer_complete": answer_complete,
                     "answer_contract": answer_contract,
@@ -2864,7 +2887,7 @@ class ResearchGraphRunner:
                     (compact_pack if retried else evidence_pack).estimated_tokens
                 ),
                 "fail_reason": result.fail_reason,
-                "fallback_action": recovery_mode or ("deterministic_partial" if fallback else ""),
+                "fallback_action": recovery_mode or ("evidence_bound_recovery" if fallback else ""),
                 "synthesis_degraded": synthesis_degraded,
                 "synthesis_retry_count": int(retried),
                 "successful_attempt": successful_attempt,
@@ -2959,6 +2982,15 @@ class ResearchGraphRunner:
             citation_valid, citation_reason = manager.validate_citations(content)
             if not citation_valid:
                 issues.append(citation_reason or "citation_validation_failed")
+        from app.research.delivery.answer_renderer import validate_reference_closure
+
+        closure = validate_reference_closure(content)
+        if not closure.passed:
+            citation_valid = False
+            if closure.missing:
+                issues.append("reference_missing")
+            if closure.orphan:
+                issues.append("reference_orphan")
         # A free-form provider report carries no typed answer. Attribute it to
         # the questions that actually have grounded evidence so the Completion
         # Contract stays authoritative; ungrounded questions stay unanswered.

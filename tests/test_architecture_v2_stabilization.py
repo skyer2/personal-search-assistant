@@ -139,11 +139,13 @@ def test_evidence_never_finishes_with_empty_content():
     update = synthesize_node(state)
     content = str(update["final_content"])
     assert content.strip()
-    assert "Company A has funding." in content
+    # Evidence without a resolvable Source cannot become a user-facing Claim.
+    assert "Company A has funding" not in content
+    assert "尚未形成可确认的答案" in content
     assert "ev_1" not in content
     assert "部分交付" in content
     assert "证据" in content
-    assert "不能视为完整成功" in content
+    assert "降级部分交付" in content
 
 
 def test_landscape_spec_extracts_decision_dimensions():

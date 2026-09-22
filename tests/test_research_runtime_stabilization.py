@@ -242,7 +242,7 @@ async def test_low_synthesis_budget_skips_llm_and_renders_partial(monkeypatch):
     assert update["synthesis_failed"] is True
     assert session.state.metadata["synthesis_budget_low"] is True
     assert session.state.metadata["synthesis_fail_reason"] == "synthesis_budget_low"
-    assert "Company A has recent funding evidence." in update["final_content"]
+    assert "Company A has recent funding evidence" in update["final_content"]
     assert "evidence_company_a" not in update["final_content"]
 
 
@@ -259,7 +259,7 @@ async def test_synthesis_failure_with_grounded_answer_uses_deterministic_recover
     assert session.state.metadata["fallback_used"] == "evidence_bound_recovery"
     assert session.state.metadata["answer_complete"] is True
     assert session.state.metadata["synthesis_fail_reason"] == "provider_unavailable"
-    assert "Company A has recent funding evidence." in update["final_content"]
+    assert "Company A has recent funding evidence" in update["final_content"]
     assert "evidence_company_a" not in update["final_content"]
 
 

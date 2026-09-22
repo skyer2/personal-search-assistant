@@ -12,6 +12,9 @@ class EvidenceRecord:
     source_id: str
     source_kind: str
     locator: str
+    canonical_source_id: str = ""
+    publisher: str = ""
+    title: str = ""
     retrieved_at: str = ""
     published_at: str = ""
     effective_at: str = ""
@@ -39,6 +42,9 @@ class EvidenceRecord:
             source_id=str(row.get("source_id") or ""),
             source_kind=str(row.get("source_kind") or "web"),
             locator=str(row.get("locator") or ""),
+            canonical_source_id=str(row.get("canonical_source_id") or ""),
+            publisher=str(row.get("publisher") or ""),
+            title=str(row.get("title") or ""),
             retrieved_at=str(row.get("retrieved_at") or ""),
             published_at=str(row.get("published_at") or ""),
             effective_at=str(row.get("effective_at") or ""),

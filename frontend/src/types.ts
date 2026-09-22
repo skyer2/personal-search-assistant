@@ -377,11 +377,15 @@ export interface TraceSummary {
 
 export interface EvidenceSource {
   source_id: string;
+  canonical_source_id?: string;
   step_index: number;
   step_type: string;
   source_kind: string;
   locator: string;
   excerpt: string;
+  publisher?: string;
+  title?: string;
+  published_at?: string;
   timestamp?: string;
 }
 
