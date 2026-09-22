@@ -679,7 +679,19 @@ class WorkerExecutorV2:
             for item in (step.metadata.get("counter_evidence_needed") or [])
             if str(item).strip()
         ]
-        if source_strategy or evidence_needed or counter_needed:
+        source_hints = [
+            str(item)
+            for item in (step.metadata.get("source_hints") or [])
+            if str(item).strip()
+        ]
+        if source_strategy or evidence_needed or counter_needed or source_hints:
+            hint_block = (
+                "第一批 batch_search 至少使用两个检索提示，并优先抓取命中的原始页面：\n- "
+                + "\n- ".join(source_hints[:3])
+                + "\n"
+                if source_hints
+                else ""
+            )
             user_message += (
                 "\n\n【证据质量合同】\n"
                 "先检索并抓取官方发布、监管原文、论文原文、公司 newsroom/docs，"
@@ -688,6 +700,8 @@ class WorkerExecutorV2:
                 f"来源策略：{', '.join(source_strategy) or 'primary_source, independent_corroboration'}\n"
                 f"必须补足的证据：{', '.join(evidence_needed) or '至少一条可核验高质量来源'}\n"
                 f"反方/限制证据：{', '.join(counter_needed) or '如有相反证据请记录'}\n"
+                + hint_block
+                +
                 "每条 finding 必须是一句完整、可独立引用的话；不要复制截断 snippet，"
                 "并在 sources 中返回实际 URL，在 artifact_ids 中返回对应抓取 ID。"
             )

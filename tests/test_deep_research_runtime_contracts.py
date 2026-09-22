@@ -36,7 +36,7 @@ def test_research_tool_authority_comes_from_one_registry() -> None:
     assert {"internet_search", "batch_search", "read_evidence"} <= set(web_only)
 
 
-def test_synthesis_prompt_exposes_stable_citation_numbers() -> None:
+def test_synthesis_prompt_exposes_stable_binding_numbers_without_raw_digest() -> None:
     request = SynthesisRequest(
         mode="normal",
         evidence_refs=["E1"],
@@ -49,12 +49,20 @@ def test_synthesis_prompt_exposes_stable_citation_numbers() -> None:
                 citation_number=7,
             )
         ],
+        insight_cards=[{
+            "insight_id": "I1", "title": "企业结果导向", "core_claim": "企业正在要求可验证交付。",
+            "mechanism": "ROI 与治理要求共同推动。", "why_it_matters": "影响生产采用。", "confidence": 0.8,
+        }],
+        claim_evidence_bindings=[{
+            "claim_id": "C1", "display_evidence": [{"citation_number": 7, "source": "example.com", "date": "2026-01-01"}],
+        }],
     )
     executor = SynthesisExecutor(SimpleNamespace(), SimpleNamespace())
     prompt = executor._prompt(request, ResearchContext(run_id="r", query="q", session_id="s"))
 
-    assert "[7]｜E1" in prompt
+    assert "[7] example.com 2026-01-01" in prompt
     assert "禁止使用 E 编号" in prompt
+    assert "Company raised 500 million USD." not in prompt
 
 
 def test_selected_findings_project_numeric_claims_to_citations() -> None:

@@ -55,7 +55,8 @@ def test_deterministic_recovery_answers_every_question_and_marks_forecast():
     assert final.answers[0].evidence_refs
     assert final.answers[1].claim_type in {"inference", "forecast"}
     rendered = render_final_answer(final, citation_numbers={"e1": 1, "e2": 2})
-    assert rendered.startswith("## 直接回答")
+    assert rendered.startswith("# 结论摘要")
+    assert "直接回答" not in rendered
     assert "已有以下信息" not in rendered
 
 

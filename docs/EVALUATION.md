@@ -4,6 +4,11 @@
 
 本文是评测实现说明。[ARCHITECTURE.md](./ARCHITECTURE.md) 仍是仓库范围权威。
 
+v5 在既有 outcome、grounding、citation 和 latency 指标之外，增加报告交付合同：
+`summary_detail_overlap < 0.85`、无 raw snippet、规范 Claim 的重复率不超过 5%、
+机制非空、预测的 milestone/uncertainty 完整，以及 Trace 中完整的
+Claim–Evidence binding。它们是确定性回归指标，不能代替真实 provider 的质量评估。
+
 ## 两类 Eval
 
 | 类型 | 问题 | 数据源 |
@@ -117,7 +122,7 @@ Trajectory 评的是 required / forbidden / if-then / limits，不是固定 `A�
 .\.venv\Scripts\python.exe scripts\live_deep_research_e2e.py --runs 3 --mode deep_debug
 ```
 
-真实评测以 Completion Contract 为准：每个 key question 都有直接回答和可解析证据绑定，引用与 Trace 完整，最终业务状态只能是 `success`、`partial`、`failed` 或 `cancelled`。对分析型问题，`success` 还要求没有 blocking gap、没有截断 finding、每个 key question 至少绑定一条 `PRIMARY` 或 `HIGH_QUALITY_SECONDARY` 证据、正式 Evidence 中高权威来源占比至少 60%，并通过报告质量门。compact 或 deterministic recovery 只写入 `synthesis_degraded` 等诊断字段；它们只有在完整回答仍通过该质量合同后才可计为 `success`。`partial` 不计通过。质量门判为 `REPAIRABLE` 时，运行时最多执行一次无工具的 report repair；单次 fallback 只能证明恢复路径，不代表 primary 性能达标。
+真实评测以 Completion Contract 为准：每个 key question 都有直接回答和可解析证据绑定，引用与 Trace 完整，最终业务状态只能是 `success`、`partial`、`failed` 或 `cancelled`。`Brief.source_requirements.primary_required=true` 时，`success` 还要求每个 key question 至少绑定一条 `PRIMARY` 或 `HIGH_QUALITY_SECONDARY` 证据，并达到要求的高权威来源占比；`atomic_fact` 与 `recommendation` Brief 默认启用这项要求。没有这项显式要求时，来源质量会作为可见诊断和修复输入，不能因局部低等级来源单独把完整交付降为 `partial`。所有运行仍要求没有 blocking gap、没有截断 finding 并通过报告质量门。compact 或 deterministic recovery 只写入 `synthesis_degraded` 等诊断字段；它们只有在完整回答仍通过该质量合同后才可计为 `success`。`partial` 不计通过。质量门判为 `REPAIRABLE` 时，运行时最多执行一次无工具的 report repair；单次 fallback 只能证明恢复路径，不代表 primary 性能达标。
 
 本轮十题校准集可通过 `scripts/live_deep_research_suite.py` 顺序执行。脚本每题使用独立 session，清理并重建 `output/live_deep_research_suite/`，保存 `answer_01.md` 至 `answer_10.md` 和 `report.json`；它不会把 Coverage 标签当作终态，最终以 Completion Contract、Quality 和 Trace 完整性联合审计。十题校准结果不等同于 SDD 要求的 20 题 × 3 次盲测发布门槛。
 

@@ -189,7 +189,8 @@ def render_atomic_fact_answer(
         body = f"{body} {citation}"
     lines = ["## 答案", "", body]
     references = citation_manager.build_references_block(
-        source_ids=answer.supporting_source_ids
+        source_ids=answer.supporting_source_ids,
+        include_locator=True,
     )
     if references:
         lines.extend(["", "### 依据", "", references.strip()])

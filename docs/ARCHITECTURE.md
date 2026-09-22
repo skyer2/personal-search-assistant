@@ -2,6 +2,10 @@
 
 This document is the repository architecture authority. The production workflow is an eight-node, Brief-driven research graph. Legacy semantic planning and coverage modules do not control it.
 
+> **v5 delivery boundary:** synthesis receives normalized Insight Cards,
+> Forecast Cards and deterministic Claim–Evidence bindings, not raw Findings
+> or search snippets. See [DEEP_RESEARCH_INSIGHT_SYNTHESIS_V5.md](DEEP_RESEARCH_INSIGHT_SYNTHESIS_V5.md).
+
 ## Position
 
 The system is a production-oriented Deep Research Agent Harness. The Brief and Supervisor own research semantics; a deterministic runtime owns cost, scheduling, evidence admission, termination, and observability.

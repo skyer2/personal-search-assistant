@@ -274,19 +274,15 @@ def _emit_assessments(
         if key == "progress_assessment" and not include_progress:
             continue
         assessment = dict(state.get(key) or {})
+        attributes = dict(event_attributes(assessment))
+        if key == "progress_assessment":
+            attributes["dispatch_wave_id"] = int(state.get("dispatch_wave_id") or 0)
         _emit(
             session,
             event_type,
             phase=phase,
             status=str(assessment.get("status") or "unknown"),
-            attributes=(
-                event_attributes(
-                    assessment,
-                    dispatch_wave_id=int(state.get("dispatch_wave_id") or 0),
-                )
-                if key == "progress_assessment"
-                else event_attributes(assessment)
-            ),
+            attributes=attributes,
         )
     _emit(
         session,
@@ -894,12 +890,11 @@ class ResearchGraphRunner:
         }
         raw_iteration_limit = state.get("budget", {}).get("max_replan_count")
         iteration_limit = 3 if raw_iteration_limit is None else max(0, int(raw_iteration_limit))
-        # The initial plan is deterministic and must not consume the single
-        # allowed Supervisor repair.  Iteration 1 is the first repair decision;
-        # block only subsequent repair attempts.
-        supervisor_iteration_exceeded = (
-            int(payload["supervisor"]["iteration"]) > max(1, iteration_limit)
-        )
+        # The deterministic initial wave never consumes a targeted-repair
+        # allowance. `dispatch_wave_id=1` is that initial wave, so permit the
+        # first Supervisor repair when the configured limit is one.
+        completed_repair_waves = max(0, int(state.get("dispatch_wave_id") or 1) - 1)
+        supervisor_iteration_exceeded = completed_repair_waves >= iteration_limit
         if action.action == "CONDUCT_RESEARCH" and action.research_tasks and not supervisor_iteration_exceeded:
             session.wave_early_stop = False
             task_requests = [ResearchTaskRequest.from_dict(item.to_dict()) for item in action.research_tasks]
@@ -1083,12 +1078,16 @@ class ResearchGraphRunner:
             raw_admission = payload.get("dispatch_admission")
             admission_payload = raw_admission if isinstance(raw_admission, dict) else {}
             if admission_payload.get("approved_task_ids"):
-                if decision.action in {"dispatch", "retry"}:
-                    decision = type(decision)(
-                        decision.action,
-                        (*decision.reason_codes, "budget_admission"),
-                        tuple(str(item) for item in admission_payload["approved_task_ids"]),
-                    )
+                # Admission has already checked the hard budget and created
+                # the replacement plan.  It is the authoritative runtime
+                # decision for this Supervisor action: do not let the stale
+                # task table or a generic iteration check convert it into
+                # partial delivery before the approved repair is dispatched.
+                decision = type(decision)(
+                    "dispatch",
+                    ("supervisor_conduct_research", "budget_admission"),
+                    tuple(str(item) for item in admission_payload["approved_task_ids"]),
+                )
             elif bool(state.get("evidence_records")):
                 decision = type(decision)(
                     "deliver_partial",
@@ -1473,8 +1472,9 @@ class ResearchGraphRunner:
             resume = interrupt({"kind": "step_gate", "step_index": step_index, "description": step.description})
             if isinstance(resume, dict) and resume.get("_timeout"):
                 return {"phase": WorkflowPhase.EXECUTE.value, "cancel_reason": "user_cancelled"}
-        current_task = normalize_tasks(gstate.get("tasks")).get(task_id)
-        attempt = int((current_task or {}).get("attempt") or 0) + 1
+        current_task_raw = normalize_tasks(gstate.get("tasks")).get(task_id)
+        current_task = dict(current_task_raw) if isinstance(current_task_raw, dict) else None
+        attempt = int(cast(Any, (current_task or {}).get("attempt")) or 0) + 1
         if current_task is not None and current_task["execution_status"] != TaskExecutionStatus.PENDING.value:
             _emit(
                 session,
@@ -1483,7 +1483,7 @@ class ResearchGraphRunner:
                 status="duplicate",
                 plan_version=int(gstate.get("plan_version") or 1),
                 task_id=task_id,
-                attempt=int(current_task.get("attempt") or 0),
+                attempt=int(cast(Any, current_task.get("attempt")) or 0),
                 attributes={
                     "decision": "skip_duplicate_worker",
                     "execution_status": current_task["execution_status"],
@@ -1541,16 +1541,18 @@ class ResearchGraphRunner:
         )
         row["worker_result_id"] = worker_result_id(row)
         normalized_findings, _ = normalize_findings(result.findings, task_id=task_id, subject_id=str(step.metadata.get("subject_id") or "general"), dimension=str((step.metadata.get("coverage_keys") or ["general"])[0]))
+        raw_payload = row.get("payload")
+        payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
         row["payload"] = {
-            **(row.get("payload") or {}),
+            **payload,
             "findings": normalized_findings,
             "evidence_ids": list(
-                (row.get("payload") or {}).get("evidence_ids")
+                payload.get("evidence_ids")
                 or result.evidence_refs
                 or []
             ),
-            "artifact_ids": list((row.get("payload") or {}).get("artifact_ids") or []),
-            "search_queries": list((row.get("payload") or {}).get("search_queries") or []),
+            "artifact_ids": list(payload.get("artifact_ids") or []),
+            "search_queries": list(payload.get("search_queries") or []),
         }
         row["task_metadata"] = dict(step.metadata or {})
         ingest_update = ingest_new_worker_results({**gstate, "worker_results": [row]})
@@ -1681,13 +1683,17 @@ class ResearchGraphRunner:
             evidence_refs=result.evidence_refs,
             timestamp=_now(),
         )
+        transitioned_task = tasks.get(task_id)
+        transitioned_attempt = int(
+            cast(Any, dict(transitioned_task).get("attempt")) or 0
+        ) if isinstance(transitioned_task, dict) else 0
         _emit(
             session,
             "task.transitioned",
             phase=WorkflowPhase.EXECUTE.value,
             status=execution_status.value,
             task_id=task_id,
-            attempt=int(tasks.get(task_id, {}).get("attempt") or 0),
+            attempt=transitioned_attempt,
             attributes={
                 "result_status": result_status.value,
                 "failure": failure or {},
@@ -1859,7 +1865,10 @@ class ResearchGraphRunner:
             compile_deterministic_answer,
             render_final_answer,
         )
-        from app.research.delivery.insights import build_insight_layer
+        from app.research.delivery.insight_synthesis import (
+            build_insight_synthesis,
+            render_deterministic_insight_report,
+        )
         from app.research.runtime.atomic_fact import (
             AtomicFactAnswer,
             extract_atomic_fact_answer,
@@ -2060,6 +2069,17 @@ class ResearchGraphRunner:
             or (brief.objective,)
         )
         citation_numbers = _citation_numbers_by_evidence(session.ctx.citation_manager)
+        # The report contract must remain self-contained when a caller does
+        # not install a CitationManager (for example the standalone live
+        # evaluator).  Preserve registered numbers, then assign stable local
+        # numbers to the remainder so every visible evidence binding can be
+        # resolved in the report and Trace.
+        next_citation_number = max(citation_numbers.values(), default=0) + 1
+        for record in evidence_records:
+            evidence_id = str(record.get("evidence_id") or "").strip()
+            if evidence_id and evidence_id not in citation_numbers:
+                citation_numbers[evidence_id] = next_citation_number
+                next_citation_number += 1
         pack_started = time.perf_counter()
         evidence_pack = build_evidence_pack(
             criteria,
@@ -2071,7 +2091,16 @@ class ResearchGraphRunner:
             compact=compact,
         )
         evidence_refs = list(evidence_pack.evidence_refs)
-        insight_layer = build_insight_layer(list(evidence_pack.findings))
+        insight_synthesis = build_insight_synthesis(
+            findings=list(evidence_pack.findings),
+            evidence_records=evidence_records,
+            citation_numbers=citation_numbers,
+            limitations=list(judgement.get("missing") or []),
+        )
+        insight_layer = {
+            "signals": [row.to_dict() for row in insight_synthesis.signals],
+            "mechanisms": [row.to_dict() for row in insight_synthesis.mechanisms],
+        }
         digests = [
             replace(
                 digest,
@@ -2099,6 +2128,13 @@ class ResearchGraphRunner:
             worker_summaries=[],
             insight_signals=list(insight_layer["signals"]),
             insight_mechanisms=list(insight_layer["mechanisms"]),
+            insight_cards=[row.to_dict() for row in insight_synthesis.insight_cards],
+            forecast_cards=[row.to_dict() for row in insight_synthesis.forecast_cards],
+            claim_evidence_bindings=[row.to_dict() for row in insight_synthesis.bindings],
+            coverage_summary={
+                "sufficient": bool(judgement.get("sufficient")),
+                "missing": list(judgement.get("missing") or []),
+            },
             token_budget=evidence_pack.token_budget,
             attempt=attempts_before + 1,
             pack_tokens_estimated=evidence_pack.estimated_tokens,
@@ -2197,7 +2233,23 @@ class ResearchGraphRunner:
                     "prompt_tokens_estimated": self._estimate_synthesis_input_tokens(executor, request, context),
                 },
             )
-            result = await executor.execute(request, context)
+            if report_repair:
+                # A report repair is presentation-only.  It must not spend a
+                # second long provider window after primary/compact attempts.
+                import inspect
+
+                timeout = min(30.0, float(session.synthesis_timeout_sec()))
+                supports_timeout = "timeout_sec" in inspect.signature(executor.execute).parameters
+                result = await (
+                    executor.execute(request, context, timeout_sec=timeout)
+                    if supports_timeout
+                    else executor.execute(request, context)
+                )
+            else:
+                # Do not pass an explicit ``None``: lightweight deterministic
+                # executors used by integrations intentionally expose the
+                # historical two-argument interface.
+                result = await executor.execute(request, context)
             self._end_synthesis_span(
                 session, span_key, status="ok" if result.ok else "failed",
                 duration_ms=result.duration_ms,
@@ -2327,6 +2379,12 @@ class ResearchGraphRunner:
                 )
                 for digest in selected_digests(compact_pack, compact_pack=True)
             ]
+            compact_insight_synthesis = build_insight_synthesis(
+                findings=list(compact_pack.findings),
+                evidence_records=evidence_records,
+                citation_numbers=citation_numbers,
+                limitations=list(judgement.get("missing") or []),
+            )
             if not validate_synthesis_digests(
                 compact_pack.findings,
                 compact_pack.evidence_refs,
@@ -2356,6 +2414,9 @@ class ResearchGraphRunner:
                     evidence_digests=compact_digests,
                     findings=list(compact_pack.findings),
                     conflict_resolutions=list(compact_pack.conflict_resolutions),
+                    insight_cards=[row.to_dict() for row in compact_insight_synthesis.insight_cards],
+                    forecast_cards=[row.to_dict() for row in compact_insight_synthesis.forecast_cards],
+                    claim_evidence_bindings=[row.to_dict() for row in compact_insight_synthesis.bindings],
                     token_budget=min(
                         compact_pack.token_budget,
                         max(0, remaining_synthesis_tokens),
@@ -2469,7 +2530,11 @@ class ResearchGraphRunner:
             )
             if answer_complete:
                 recovery_mode = "deterministic_recovery"
-                content = render_final_answer(recovered, citation_numbers=citation_numbers)
+                content = render_deterministic_insight_report(
+                    synthesis=insight_synthesis,
+                    objective=brief.objective or str(gstate.get("task_query") or ""),
+                    citation_numbers=citation_numbers,
+                )
                 fallback = False
                 _emit(
                     session,
@@ -2554,7 +2619,11 @@ class ResearchGraphRunner:
                         "completeness": completeness.to_dict(),
                     }
                     content = manager.build_cited_report(
-                        render_final_answer(recovered, citation_numbers=citation_numbers)
+                        render_deterministic_insight_report(
+                            synthesis=insight_synthesis,
+                            objective=brief.objective or str(gstate.get("task_query") or ""),
+                            citation_numbers=citation_numbers,
+                        )
                     )
                     fallback = False
                     synthesis_failed = False
@@ -2598,6 +2667,7 @@ class ResearchGraphRunner:
                     "answer_contract": answer_contract,
                     "synthesis_budget_low": skip_llm_synthesis,
                     "insight_layer": insight_layer,
+                    "insight_synthesis": insight_synthesis.to_dict(),
                 }
             )
         _emit(
@@ -2656,6 +2726,11 @@ class ResearchGraphRunner:
                 "synthesis_mode": recovery_mode or mode,
                 "insight_signal_count": len(insight_layer["signals"]),
                 "insight_mechanism_count": len(insight_layer["mechanisms"]),
+                "insight_card_count": len(insight_synthesis.insight_cards),
+                "forecast_card_count": len(insight_synthesis.forecast_cards),
+                "claim_evidence_bindings": [row.to_dict() for row in insight_synthesis.bindings],
+                "insight_metrics": dict(insight_synthesis.metrics),
+                "source_upgrades": [row.to_dict() for row in insight_synthesis.source_upgrades],
             },
         )
         note_stage_duration(
@@ -2674,6 +2749,7 @@ class ResearchGraphRunner:
                 "answerability": answerability.to_dict(),
                 "answer_complete": answer_complete,
                 "answer_contract": answer_contract,
+                "insight_synthesis": insight_synthesis.to_dict(),
                 "quality_assessment": {},
             },
         )
@@ -2706,6 +2782,11 @@ class ResearchGraphRunner:
         if strict_quality_contract and isinstance(answerability, dict) and answerability and not bool(answerability.get("answerable")):
             issues.append("answerability_gap")
         answer_contract = dict(gstate.get("answer_contract") or {})
+        insight_synthesis = dict(
+            gstate.get("insight_synthesis")
+            or session.state.metadata.get("insight_synthesis")
+            or {}
+        )
         brief_intent = str((gstate.get("brief") or {}).get("user_intent") or "")
         insight = insight_density(
             content=content,
@@ -2749,22 +2830,37 @@ class ResearchGraphRunner:
                 brief=dict(gstate.get("brief") or {}),
                 evidence_records=evidence_records,
                 answer_contract=answer_contract,
+                insight_metrics=dict(insight_synthesis.get("metrics") or {}),
             )
         else:
             from app.research.quality.gate import QualityGateResult
             report_quality = QualityGateResult("PASS", (), {"legacy_or_fast_path": True})
         issues.extend(report_quality.issues)
         broken_evidence_count = int(report_quality.metrics.get("broken_sentence_count") or 0)
+        source_requirements = (
+            dict((gstate.get("brief") or {}).get("source_requirements") or {})
+            if isinstance((gstate.get("brief") or {}).get("source_requirements"), dict)
+            else {}
+        )
+        primary_required = bool(source_requirements.get("primary_required"))
+        # Coverage identifies research gaps and can trigger the one allowed
+        # repair wave.  Once every key question has a direct, evidence-bound
+        # answer, it is diagnostic rather than a second terminal authority.
+        completion_coverage = (
+            judgement
+            if not (answerable and answer_complete)
+            else {}
+        )
         completion = evaluate_completion(
             brief=gstate.get("brief") or {},
             answer_contract=answer_contract,
             evidence_records=evidence_records,
             final_content=content,
             citation_valid=citation_valid,
-            coverage=judgement if strict_quality_contract else {},
+            coverage=completion_coverage if strict_quality_contract else {},
             broken_evidence_count=broken_evidence_count,
-            minimum_high_authority_ratio=0.6 if strict_quality_contract else 0.0,
-            require_authoritative_per_question=strict_quality_contract,
+            minimum_high_authority_ratio=0.6 if strict_quality_contract and primary_required else 0.0,
+            require_authoritative_per_question=strict_quality_contract and primary_required,
         )
         if completion.passed and report_quality.verdict == "PASS":
             answer_complete = True
@@ -2892,6 +2988,8 @@ class ResearchGraphRunner:
                     "quality_attempted": bool(gstate.get("quality_assessment")),
                 }
             )
+        control_plane = session.state.metadata.get("control_plane")
+        control_plane_attributes = dict(control_plane) if isinstance(control_plane, dict) else {}
         _emit(
             session,
             "run.terminated",
@@ -2900,15 +2998,9 @@ class ResearchGraphRunner:
             attributes={
                 **termination_event_attributes(termination_payload),
                 "final_content_chars": len(session.state.final_content),
-                **(
-                    session.state.metadata.get("control_plane")
-                    if isinstance(session.state.metadata.get("control_plane"), dict)
-                    else {}
-                ),
+                **control_plane_attributes,
                 "control_plane_degraded": bool(
-                    (session.state.metadata.get("control_plane") or {}).get(
-                        "control_plane_degraded"
-                    )
+                    control_plane_attributes.get("control_plane_degraded")
                 ),
             },
         )

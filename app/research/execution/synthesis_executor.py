@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.language_models.chat_models import BaseChatModel
 from app.api.tracing import build_run_config
 from app.agent.harness.token_counter import estimate_tokens
 from app.research.execution.llm_gateway import LLMGateway
@@ -98,6 +99,14 @@ class SynthesisRequest:
     worker_summaries: list[dict[str, Any]] = field(default_factory=list)
     insight_signals: list[dict[str, Any]] = field(default_factory=list)
     insight_mechanisms: list[dict[str, Any]] = field(default_factory=list)
+    # v5 allow-list.  These normalized cards and bindings are the only
+    # research material exposed to the report writer.  The older digest and
+    # findings fields remain for compatibility with callers, but _prompt never
+    # reads them.
+    insight_cards: list[dict[str, Any]] = field(default_factory=list)
+    forecast_cards: list[dict[str, Any]] = field(default_factory=list)
+    claim_evidence_bindings: list[dict[str, Any]] = field(default_factory=list)
+    coverage_summary: dict[str, Any] = field(default_factory=dict)
     token_budget: int = 40_000
     attempt: int = 1
     pack_tokens_estimated: int = 0
@@ -258,14 +267,88 @@ class SynthesisExecutor:
             if callable(bind):
                 invoke_target = bind(max_tokens=output_token_limit)
             try:
-                response = await gateway.ainvoke(
-                    invoke_target,
-                    [HumanMessage(content=prompt if prompt is not None else self._prompt(request, context))],
-                    config,
-                )
+                payload = [
+                    HumanMessage(
+                        content=prompt if prompt is not None else self._prompt(request, context)
+                    )
+                ]
+                # OpenAI-compatible providers commonly buffer an ``ainvoke``
+                # response until all hidden reasoning and output is complete.
+                # A bounded report does not need that buffering: consuming the
+                # ordinary LangChain stream exposes TTFT, lets transport-level
+                # cancellation reach the provider, and still returns the same
+                # final message to the parser.  Lightweight test doubles and
+                # alternative providers may expose only ``ainvoke``, so retain
+                # the compatibility fallback.
+                stream = getattr(invoke_target, "astream", None)
+                if self._supports_synthesis_streaming(invoke_target) and callable(stream):
+                    response = await self._collect_stream(
+                        gateway=gateway,
+                        target=invoke_target,
+                        payload=payload,
+                        config=config,
+                        ttft_callback=ttft_callback,
+                    )
+                else:
+                    response = await gateway.ainvoke(invoke_target, payload, config)
             finally:
                 self._last_ttft_ms = ttft_callback.first_token_ms
         return response
+
+    @staticmethod
+    def _supports_synthesis_streaming(target: Any) -> bool:
+        """Avoid treating a graph-agent ``astream`` as a chat token stream."""
+
+        if bool(getattr(target, "supports_synthesis_streaming", False)):
+            return True
+        return isinstance(target, BaseChatModel) or isinstance(
+            getattr(target, "bound", None), BaseChatModel
+        )
+
+    async def _collect_stream(
+        self,
+        *,
+        gateway: LLMGateway,
+        target: Any,
+        payload: list[HumanMessage],
+        config: dict[str, Any],
+        ttft_callback: _FirstTokenCallback,
+    ) -> Any:
+        """Collect a streaming model response without discarding its metadata.
+
+        ``AIMessageChunk`` implements additive merging, including token usage
+        reported on a final empty chunk.  If a provider returns an unusual
+        chunk shape, keep a text fallback so its answer remains deliverable
+        rather than turning an otherwise valid response into a local error.
+        """
+
+        merged: Any | None = None
+        merge_supported = True
+        text_parts: list[str] = []
+        async for chunk in gateway.astream(target, payload, config):
+            content = getattr(chunk, "content", "")
+            if content and ttft_callback.first_token_ms is None:
+                ttft_callback.first_token_ms = int(
+                    (time.perf_counter() - ttft_callback.started) * 1000
+                )
+            if isinstance(content, str) and content:
+                text_parts.append(content)
+            if merged is None and merge_supported:
+                merged = chunk
+                continue
+            if merge_supported:
+                try:
+                    merged = merged + chunk
+                except (TypeError, ValueError):
+                    # Preserve a usable final answer for non-LangChain chunk
+                    # implementations.  The standard message path keeps usage
+                    # metadata through the additive merge above.
+                    merge_supported = False
+                    merged = None
+
+        if merge_supported and merged is not None:
+            return merged
+        return "".join(text_parts)
 
     def _attempt_metadata(
         self, request: SynthesisRequest, prompt: str, model: Any
@@ -298,27 +381,33 @@ class SynthesisExecutor:
             f"任务：{context.query}",
             f"合成模式：{request.mode}",
             f"要求：{mode_instruction}",
-            "硬性约束：只允许使用下方研究摘要和证据摘录；禁止联网、读取文件或发明新证据。",
+            "硬性约束：只允许使用下方结构化洞察卡、预测卡和证据绑定；禁止联网、读取文件或发明新证据。",
             "冲突规则：resolved 只能采用指定 winner；expected_disagreement 必须说明口径差异；unresolved 只能披露不确定性，禁止自行选择任何一方。",
-            "引用规则：正文每个含数字、金额、日期或百分比的事实句末尾必须标注证据摘录行前缀给出的 [n]；禁止使用 E 编号、artifact 编号或自造编号。",
+            "引用规则：正文每个含数字、金额、日期或百分比的事实句末尾必须标注证据绑定给出的 [n]；禁止使用 E 编号、artifact 编号、URL 或自造编号。",
             "交付规则：不要输出 JSON，也不要说明文件生成能力；PDF/Markdown 由运行时统一生成。",
-            "结构规则：按用户问题和实际语义标题组织，禁止使用 q1/q2/q3 标题；禁止逐条复述证据摘录或堆砌来源。",
-            "分析/趋势规则：每个预测须明确写出当前信号、推演机制、可观察里程碑与不确定性；强结论必须有直接引用。",
-            "去重规则：同一结论只表达一次；事实、综合判断和预测分别标注。",
+            "结构规则：严格使用“结论摘要、2026 当前热点、未来 1~2 年方向、主要不确定性、综合判断、参考来源”组织；禁止使用直接回答、关键判断、q1/q2/q3 标题。",
+            "摘要规则：结论摘要只写 3~5 条抽象结论，不能复制正文整句，也不能堆砌来源。",
+            "分析规则：每个当前热点都写核心结论、机制、为什么重要、最强依据和限制；每个预测都写当前信号、机制、方向判断、可观察里程碑和不确定性。",
+            "去重规则：同一结论只能由一个正文段落拥有；事实、综合判断和预测必须清楚区分。",
             "输出长度：normal 不超过1200字；degraded 不超过900字；report_repair 不超过700字。",
         ]
-        evidence_lines: list[str] = []
-        for digest in request.evidence_digests:
-            citation_label = (
-                f"[{digest.citation_number}]"
-                if digest.citation_number > 0
-                else "[未编号]"
+        card_lines = [
+            f"- {row.get('insight_id')}｜{row.get('title')}｜核心结论：{row.get('core_claim')}｜机制：{row.get('mechanism')}｜重要性：{row.get('why_it_matters')}｜置信度={row.get('confidence')}"
+            for row in request.insight_cards[:6] if isinstance(row, dict)
+        ]
+        forecast_lines = [
+            f"- {row.get('forecast_id')}｜{row.get('title')}｜当前信号：{row.get('current_signal')}｜机制：{row.get('mechanism')}｜方向：{row.get('forecast')}｜里程碑：{row.get('observable_milestone')}｜不确定性：{row.get('uncertainty')}"
+            for row in request.forecast_cards[:6] if isinstance(row, dict)
+        ]
+        binding_lines = []
+        for row in request.claim_evidence_bindings[:18]:
+            display = [item for item in row.get("display_evidence") or [] if isinstance(item, dict)]
+            rendered = "; ".join(
+                f"[{item.get('citation_number')}] {item.get('source')} {item.get('date') or ''}".strip()
+                for item in display[:3] if int(item.get("citation_number") or 0) > 0
             )
-            evidence_lines.append(
-                f"- {citation_label}｜{digest.evidence_id}｜{digest.title}｜{digest.locator}｜{digest.excerpt}"
-            )
-        if not evidence_lines:
-            evidence_lines.extend(f"- {item}" for item in request.evidence_refs[:80])
+            if rendered:
+                binding_lines.append(f"- {row.get('claim_id')}：{rendered}")
         conflict_lines = [
             f"- {row.get('edge_id')}｜{row.get('status')}｜blocking={bool(row.get('blocking'))}｜"
             f"criterion={row.get('criterion_id') or 'unbound'}｜{row.get('label') or ''}"
@@ -327,23 +416,14 @@ class SynthesisExecutor:
         ]
         if not conflict_lines:
             conflict_lines.extend(f"- {item}" for item in request.unresolved_conflicts[:20])
-        signal_lines = [
-            f"- {row.get('signal_id')}｜{row.get('statement')}｜evidence={','.join(str(item) for item in row.get('evidence_refs') or [])}"
-            for row in request.insight_signals[:12] if isinstance(row, dict)
-        ]
-        mechanism_lines = [
-            f"- {row.get('mechanism_id')}｜{row.get('statement')}"
-            for row in request.insight_mechanisms[:6] if isinstance(row, dict)
-        ]
         sections = (
-            ("研究摘要：", [request.research_summary] if request.research_summary else []),
-            ("证据摘录：", evidence_lines),
+            ("结构化洞察卡：", card_lines),
+            ("结构化预测卡：", forecast_lines),
+            ("Claim–Evidence 绑定：", binding_lines),
             ("覆盖限制：", [f"- {item}" for item in request.limitations[:20]]),
             ("未解决冲突：", [f"- {item}" for item in request.unresolved_conflicts[:20]]),
             ("冲突处理契约：", conflict_lines),
-            ("已验证信号：", signal_lines),
-            ("机制推演边界：", mechanism_lines),
-            ("输出要求：", ["直接输出面向用户的报告正文；开头必须回答问题，不能以‘已有以下信息’或证据清单开头；随后按语义标题解释判断依据、反例与限制；不得复制摘录、不得用 q1/q2/q3 标题；引用证据对应的原始来源；不要输出 JSON。"]),
+            ("输出要求：", ["直接输出面向用户的研究报告正文；不得复制任何原始 Finding、搜索摘录或 URL；不得用 q1/q2/q3 标题；引用必须来自 Claim–Evidence 绑定；不要输出 JSON。"]),
         )
         budget = max(1_000, request.token_budget)
         for header, section_lines in sections:

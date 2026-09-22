@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-SEMANTIC_ACTIONS = frozenset()
+SEMANTIC_ACTIONS: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,8 @@ def decide_control(state: dict[str, Any]) -> RuntimeDecision:
     if str(state.get("cancel_reason") or ""):
         return RuntimeDecision("cancel", ("user_cancelled",))
 
-    budget = state.get("budget") if isinstance(state.get("budget"), dict) else {}
+    raw_budget = state.get("budget")
+    budget: dict[str, Any] = raw_budget if isinstance(raw_budget, dict) else {}
     if bool(budget.get("exhausted")) or str(state.get("budget_status") or "") == "exhausted":
         if _coverage_sufficient(state) and _usable_evidence(state):
             return RuntimeDecision("synthesize", ("budget_stop", "coverage_sufficient"))
@@ -44,12 +45,19 @@ def decide_control(state: dict[str, Any]) -> RuntimeDecision:
             return RuntimeDecision("deliver_partial", ("internal_error", "usable_evidence"))
         return RuntimeDecision("finalize_failure", ("internal_error",))
 
-    supervisor = state.get("supervisor_action") if isinstance(state.get("supervisor_action"), dict) else {}
+    raw_supervisor = state.get("supervisor_action")
+    supervisor: dict[str, Any] = raw_supervisor if isinstance(raw_supervisor, dict) else {}
     action = str(supervisor.get("action") or "")
-    supervisor_meta = state.get("supervisor") if isinstance(state.get("supervisor"), dict) else {}
+    raw_supervisor_meta = state.get("supervisor")
+    supervisor_meta: dict[str, Any] = raw_supervisor_meta if isinstance(raw_supervisor_meta, dict) else {}
     raw_iteration_limit = budget.get("max_replan_count")
     iteration_limit = 3 if raw_iteration_limit is None else max(0, int(raw_iteration_limit))
-    if int(supervisor_meta.get("iteration") or 0) >= max(1, iteration_limit) and action != "COMPLETE":
+    # ``iteration`` identifies the repair action currently under consideration,
+    # whereas ``max_replan_count`` is the number of repair actions the run may
+    # execute.  The action at the limit is therefore still permitted.  Using
+    # ``>=`` here silently discarded the first and only repair when the limit
+    # was one.
+    if int(supervisor_meta.get("iteration") or 0) > iteration_limit and action != "COMPLETE":
         if _usable_evidence(state):
             return RuntimeDecision("deliver_partial", ("supervisor_iteration_limit", "usable_evidence"))
         return RuntimeDecision("finalize_failure", ("supervisor_iteration_limit",))

@@ -114,7 +114,11 @@ def _freshness(intent: str, query: str) -> FreshnessRequirements:
 
 
 def _source(intent: str) -> SourceRequirements:
-    if intent == "atomic_fact":
+    # A recommendation changes a user's decision.  Like an atomic fact, its
+    # core claims need original or independently corroborated support; a
+    # generic web result may remain a diagnostic signal but cannot close the
+    # Completion Contract by itself.
+    if intent in {"atomic_fact", "recommendation"}:
         return SourceRequirements(min_independent_sources=1, primary_required=True)
     return SourceRequirements(min_independent_sources=2, primary_required=False)
 
@@ -183,7 +187,13 @@ def _merge_llm_brief(fallback: StructuredResearchBrief, patch: dict[str, Any]) -
         constraints=tuple(str(item) for item in patch.get("constraints") or fallback.constraints),
         source_requirements=SourceRequirements(
             min_independent_sources=max(1, int(source.get("min_independent_sources") or fallback.source_requirements.min_independent_sources)),
-            primary_required=bool(source.get("primary_required", fallback.source_requirements.primary_required)),
+            # A model may strengthen a source requirement, never silently
+            # weaken the deterministic safety floor selected from the user's
+            # intent (for example a recommendation).
+            primary_required=(
+                fallback.source_requirements.primary_required
+                or bool(source.get("primary_required", False))
+            ),
             preferred=tuple(str(item) for item in source.get("preferred") or fallback.source_requirements.preferred),
             forbidden=tuple(str(item) for item in source.get("forbidden") or fallback.source_requirements.forbidden),
         ),

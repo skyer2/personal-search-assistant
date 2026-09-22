@@ -254,18 +254,26 @@ def assess_answer_completeness(final_answer: FinalAnswer, brief: Any) -> AnswerC
 
 def render_final_answer(answer: FinalAnswer, *, citation_numbers: dict[str, int] | None = None) -> str:
     citation_numbers = citation_numbers or {}
-    lines = ["## 直接回答", "", answer.overall_summary, "", "## 关键判断", ""]
-    for item in answer.answers:
+    current = [item for item in answer.answers if item.claim_type != "forecast"]
+    future = [item for item in answer.answers if item.claim_type == "forecast"]
+    lines = ["# 结论摘要", "", f"- {answer.overall_summary}", "", "# 当前研究结论", ""]
+    for item in current:
         refs = "".join(f"[{citation_numbers[ref]}]" for ref in item.evidence_refs if ref in citation_numbers)
-        lines.append(f"### {item.display_title or _display_title(item.question_id, 0)}")
+        lines.append(f"## {item.display_title or _display_title(item.question_id, 0)}")
         lines.append("")
-        lines.append(f"{item.direct_answer}{(' ' + refs) if refs else ''}")
+        lines.append(f"**结论**：{item.direct_answer}{(' ' + refs) if refs else ''}")
         if item.reasoning:
-            lines.extend(["", "依据：", *[f"- {row}" for row in item.reasoning]])
+            lines.extend(["", "**依据与限制**：", *[f"- {row}" for row in item.reasoning]])
         lines.append("")
+    lines.extend(["# 未来 1~2 年方向", ""])
+    for item in future:
+        refs = "".join(f"[{citation_numbers[ref]}]" for ref in item.evidence_refs if ref in citation_numbers)
+        lines.extend([f"## {item.display_title or '方向性判断'}", "", f"**方向判断**：{item.direct_answer}{(' ' + refs) if refs else ''}", "", "**不确定性**：该判断仅基于本次已登记证据，需以后续可观察结果验证。", ""])
+    if not future:
+        lines.append("现有证据以当前状态为主；未来判断应以可观察里程碑和不确定性为边界。\n")
     if answer.unresolved_questions:
-        lines.extend(["## 尚未回答", "", *[f"- {row}" for row in answer.unresolved_questions], ""])
-    lines.extend(["## 限制", "", "以上判断仅基于本次已登记证据；预测性内容明确标注为方向性判断。", ""])
+        lines.extend(["# 主要不确定性", "", *[f"- {row}" for row in answer.unresolved_questions], ""])
+    lines.extend(["# 综合判断", "", "这些结论需要结合来源质量、证据独立性和后续变化持续复核，而不能替代新的事实核验。", ""])
     return "\n".join(lines).strip() + "\n"
 
 

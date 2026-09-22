@@ -84,7 +84,8 @@ def test_budget_stop_with_evidence_delivers_partial() -> None:
 
 def test_supervisor_iteration_limit_converges() -> None:
     state = _state()
-    state["supervisor"] = {"iteration": 3}
+    state["budget"]["max_replan_count"] = 3
+    state["supervisor"] = {"iteration": 4}
     state["supervisor_action"] = {
         "action": "CONDUCT_RESEARCH",
         "research_tasks": [{"task_id": "supervisor_task_1"}],
@@ -93,3 +94,18 @@ def test_supervisor_iteration_limit_converges() -> None:
 
     state["evidence_records"] = [{"evidence_id": "e0"}]
     assert decide_control(state).action == "deliver_partial"
+
+
+def test_first_allowed_repair_dispatches_at_iteration_limit() -> None:
+    state = _state()
+    state["budget"]["max_replan_count"] = 1
+    state["supervisor"] = {"iteration": 1}
+    state["supervisor_action"] = {
+        "action": "CONDUCT_RESEARCH",
+        "research_tasks": [{"task_id": "repair_1"}],
+    }
+
+    decision = decide_control(state)
+
+    assert decision.action == "dispatch"
+    assert decision.task_ids == ("repair_1",)

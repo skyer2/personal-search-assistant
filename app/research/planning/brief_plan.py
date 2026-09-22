@@ -110,7 +110,15 @@ def build_brief_and_plan(brief: StructuredResearchBrief, *, plan_version: int = 
                 hypothesis=f"可通过来源证据回答：{question}",
                 evidence_needed=evidence,
                 counter_evidence_needed=counter,
-                search_hints=(brief.objective[:180],),
+                # These are bounded query hints for the worker's existing
+                # primary-source lane, not additional tasks or budget.  The
+                # objective alone consistently led broad queries to reposts
+                # during provider degradation.
+                search_hints=(
+                    f"{question[:120]} official newsroom docs announcement",
+                    f"{question[:120]} original paper regulator filing",
+                    brief.objective[:180],
+                ),
                 entities=entities,
                 dimensions=dimensions,
                 # Each focused task uses explicit primary/support/counter

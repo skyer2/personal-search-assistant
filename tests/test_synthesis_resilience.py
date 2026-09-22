@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 from app.agent.harness.artifacts import reset_artifact_store, set_artifact_store, ArtifactStore
 from app.agent.harness.run_budget import RunBudgetManager
@@ -58,6 +58,29 @@ class StaticModel:
 
     async def ainvoke(self, *args: Any, **kwargs: Any):
         return self.response
+
+
+class StreamingModel:
+    supports_synthesis_streaming = True
+
+    def __init__(self) -> None:
+        self.stream_calls = 0
+        self.invoke_calls = 0
+
+    def bind(self, **_kwargs: Any) -> "StreamingModel":
+        return self
+
+    async def ainvoke(self, *args: Any, **kwargs: Any):
+        self.invoke_calls += 1
+        raise AssertionError("synthesis should prefer the streaming capability")
+
+    async def astream(self, *args: Any, **kwargs: Any):
+        self.stream_calls += 1
+        yield AIMessageChunk(content="第一段")
+        yield AIMessageChunk(
+            content="第二段",
+            usage_metadata={"input_tokens": 32, "output_tokens": 8, "total_tokens": 40},
+        )
 
 
 class FakeSession:
@@ -183,6 +206,24 @@ def test_synthesis_output_is_bounded_by_mode():
     asyncio.run(executor._invoke(model=model, request=_request(), context=_context()))
 
     assert model.bind_kwargs == {"max_tokens": 900}
+
+
+def test_synthesis_prefers_streaming_and_preserves_response_usage():
+    model = StreamingModel()
+    harness = FakeHarness()
+    harness.synthesis_model = model
+
+    result = asyncio.run(
+        SynthesisExecutor(harness, FakeSession()).execute(_request(), _context())
+    )
+
+    assert result.ok
+    assert result.summary == "第一段第二段"
+    assert model.stream_calls == 1
+    assert model.invoke_calls == 0
+    assert result.metadata["actual_input_tokens"] == 32
+    assert result.metadata["actual_output_tokens"] == 8
+    assert result.metadata["ttft_ms"] is not None
 
 
 def test_synthesis_failure_taxonomy():

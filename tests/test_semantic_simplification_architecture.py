@@ -219,7 +219,7 @@ def test_supervisor_iteration_limit_emits_control_decision(monkeypatch) -> None:
         session_id="session-supervisor-limit",
         task_query="research an open-ended topic",
     )
-    state["supervisor"] = {"iteration": 3, "last_action": "", "reasoning_summary": ""}
+    state["supervisor"] = {"iteration": 4, "last_action": "", "reasoning_summary": ""}
     state["budget"]["max_replan_count"] = 3
     state["phase"] = "coverage_judge"
     session = SimpleNamespace(

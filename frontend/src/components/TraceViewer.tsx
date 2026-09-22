@@ -290,6 +290,12 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
   const evals = summary.evals || [];
   const plans = summary.plans || [];
   const synthesis = summary.synthesis || [];
+  const claimEvidenceBindings = useMemo(() => synthesis.flatMap((row) => {
+    const bindings = (row as Record<string, unknown>).claim_evidence_bindings;
+    return Array.isArray(bindings)
+      ? bindings.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+      : [];
+  }), [synthesis]);
   const lineage = summary.lineage || [];
   const brief = summary.brief || null;
   const failureOrigin = summary.failure_origin || null;
@@ -933,6 +939,25 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     ]}
                   />
                 )}
+                {claimEvidenceBindings.length > 0 ? (
+                  <>
+                    <Typography.Title level={5} style={{ marginTop: 16 }}>Claim–Evidence Map</Typography.Title>
+                    <Typography.Paragraph type="secondary">
+                      正文只使用每项结论最强的 2–4 条证据；这里保留该结论的完整可追溯绑定。
+                    </Typography.Paragraph>
+                    <ResizableTable
+                      dataSource={claimEvidenceBindings.map((row, index) => ({ ...row, key: `binding-${index}` }))}
+                      pagination={{ pageSize: 8 }}
+                      size="small"
+                      columns={[
+                        { title: "Claim", dataIndex: "claim_id", width: 120, key: "claim_id" },
+                        { title: "Primary evidence", dataIndex: "primary_evidence_refs", key: "primary_evidence_refs", render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div> },
+                        { title: "Supporting evidence", dataIndex: "supporting_evidence_refs", key: "supporting_evidence_refs", render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div> },
+                        { title: "Counter / limitation", key: "constraints", render: (_: unknown, row: Record<string, unknown>) => <div className="table-wrap-cell">{asText([...(Array.isArray(row.counter_evidence_refs) ? row.counter_evidence_refs : []), ...(Array.isArray(row.limitation_refs) ? row.limitation_refs : [])])}</div> }
+                      ]}
+                    />
+                  </>
+                ) : null}
               </Card>
             )
           },

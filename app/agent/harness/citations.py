@@ -624,7 +624,12 @@ class CitationManager:
                 output.setdefault(evidence_id, source_number)
         return output
 
-    def build_references_block(self, *, source_ids: Iterable[str] | None = None) -> str:
+    def build_references_block(
+        self,
+        *,
+        source_ids: Iterable[str] | None = None,
+        include_locator: bool = False,
+    ) -> str:
         selected = (
             {str(item) for item in source_ids}
             if source_ids is not None
@@ -644,11 +649,15 @@ class CitationManager:
                 "kb": "知识库",
                 "text": "步骤产出",
             }.get(src.source_kind, src.source_kind)
-            excerpt = src.excerpt[:120] + ("…" if len(src.excerpt) > 120 else "")
-            lines.append(
-                f"[{num}] ({kind_label}) {src.locator} — "
-                f"{src.source_tier} · Step {src.step_index + 1}/{src.step_type}: {excerpt}"
-            )
+            parsed = urlsplit(src.locator) if src.locator.startswith(("http://", "https://")) else None
+            publisher = (parsed.netloc.removeprefix("www.") if parsed else "") or src.source_kind
+            if include_locator:
+                lines.append(f"[{num}] ({kind_label}) {src.locator} — {src.source_tier}")
+            else:
+                lines.append(
+                    f"[{num}] {publisher}（{kind_label}）— {src.source_tier} · "
+                    f"已登记证据；完整来源定位见 Trace。"
+                )
         return "\n".join(lines)
 
     def source_counts_by_tier(self) -> dict[str, int]:
