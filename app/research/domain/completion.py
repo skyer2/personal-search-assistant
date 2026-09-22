@@ -106,10 +106,17 @@ def evaluate_completion(
     coverage: dict[str, Any] | None = None,
     broken_evidence_count: int = 0,
     minimum_high_authority_ratio: float = 0.0,
+    require_authoritative_per_question: bool = False,
 ) -> CompletionResult:
     """Apply the one completion contract using only runtime-observable facts."""
     records = [row for row in (evidence_records or []) if isinstance(row, dict)]
     valid_ids = _record_ids(records)
+    records_by_id: dict[str, dict[str, Any]] = {}
+    for record in records:
+        for key in ("evidence_id", "artifact_ref", "artifact_id", "source_id", "source", "url", "source_url"):
+            value = str(record.get(key) or "").strip()
+            if value:
+                records_by_id[value] = record
     rows = _answer_rows(answer_contract)
     contract_objective = str((answer_contract or {}).get("objective") or "")
     if not contract_objective and isinstance((answer_contract or {}).get("final_answer"), dict):
@@ -137,15 +144,28 @@ def evaluate_completion(
             blocking.append("minimum_source_quality_not_met")
     for index, question in enumerate(questions, 1):
         qid = f"q{index}"
-        row = next((item for item in rows if str(item.get("question_id") or "") == qid), None)
-        if row is None and index <= len(rows):
-            row = rows[index - 1]
-        direct = str((row or {}).get("direct_answer") or "").strip()
-        refs = [ref for ref in _refs(row or {}) if ref in valid_ids]
-        blocking_gap = not refs
+        answer_row: dict[str, Any] | None = None
+        for candidate in rows:
+            if str(candidate.get("question_id") or "") == qid:
+                answer_row = candidate
+                break
+        if answer_row is None and index <= len(rows):
+            answer_row = rows[index - 1]
+        direct = str((answer_row or {}).get("direct_answer") or "").strip()
+        refs = [ref for ref in _refs(answer_row or {}) if ref in valid_ids]
+        authoritative = any(
+            str(records_by_id[ref].get("source_tier") or "").upper() in {"PRIMARY", "HIGH_QUALITY_SECONDARY"}
+            or float(records_by_id[ref].get("authority_score") or 0.0) >= 0.75
+            for ref in refs if ref in records_by_id
+        )
+        blocking_gap = not refs or (require_authoritative_per_question and not authoritative)
         answered = bool(direct) and not blocking_gap
         if not answered:
-            blocking.append(f"{qid}:evidence_or_direct_answer_missing")
+            blocking.append(
+                f"{qid}:authoritative_evidence_missing"
+                if refs and require_authoritative_per_question and not authoritative
+                else f"{qid}:evidence_or_direct_answer_missing"
+            )
         results.append(QuestionCompletion(qid, answered, bool(direct), refs, blocking_gap))
     answer_complete = bool(results) and all(item.answered for item in results)
     evidence_valid = bool(records) and any(item.evidence_refs for item in results)

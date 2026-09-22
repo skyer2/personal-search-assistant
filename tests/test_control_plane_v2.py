@@ -17,8 +17,8 @@ def test_brief_plan_is_bounded_and_has_hypothesis_contract():
     brief = compile_structured_brief("比较 Cursor 与 Claude Code 的能力边界、成本和风险")
     plan = execution_plan_from_brief(brief)
     assert isinstance(plan, ExecutionPlan)
-    assert 1 <= len(plan.steps) <= 2
-    assert validate_brief_plan(plan) == []
+    assert len(plan.steps) == len(brief.key_questions)
+    assert validate_brief_plan(plan, brief=brief) == []
     for step in plan.steps:
         metadata = step.metadata
         assert metadata["question_id"]

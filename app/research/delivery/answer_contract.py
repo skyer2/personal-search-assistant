@@ -206,7 +206,8 @@ def compile_deterministic_answer(
         if not selected:
             selected = [row for row in findings if isinstance(row, dict) and _claim(row)][:3]
         claims = [_claim(row) for row in selected if _claim(row)]
-        direct = "；".join(claims[:3])
+        # A recovery is still an answer, not a replay of every worker finding.
+        direct = claims[0][:420] if claims else ""
         if not direct:
             direct = "基于现有证据，可以形成方向性判断，但细节仍需继续核验。"
         trend = any(word in str(question) for word in _TREND_WORDS)
@@ -214,7 +215,7 @@ def compile_deterministic_answer(
         claim_type: ClaimType = "forecast" if trend and ("forecast" in explicit_types or "未来" in str(question)) else "inference" if trend else "fact"
         if trend and claim_type == "forecast":
             direct = f"基于当前证据，我判断：{direct}"
-        reasoning = claims[1:4] if len(claims) > 1 else claims[:1]
+        reasoning = claims[1:3] if len(claims) > 1 else ["该判断仅覆盖本次已登记且可绑定的来源。"]
         confidence = min(1.0, max(0.35, sum(float(row.get("confidence") or 0.6) for row in selected[:3]) / max(1, len(selected[:3]))))
         answers.append(QuestionAnswer(qid, direct, reasoning, status.supporting_findings, status.supporting_evidence, confidence, claim_type=claim_type, display_title=_display_title(str(question), index)))
     summary = answers[0].direct_answer if answers else "当前没有可生成的回答。"

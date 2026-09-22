@@ -412,6 +412,7 @@ class LangChainWorkerRuntime:
                             max_output_tokens_per_call=(
                                 int(step.metadata.get("max_output_tokens_per_call") or 0) or None
                             ),
+                            stage="repair" if bool(step.metadata.get("repair")) else "research",
                         )
                     # Research 不得侵占 synthesis 时间储备
                     remaining = mgr.remaining_for_research_sec()

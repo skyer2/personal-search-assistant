@@ -69,11 +69,18 @@ def admit_dispatch(
     max_active = max(1, int(budget.get("max_active_tasks") or max_workers))
     max_slots = min(max_workers, max_active)
 
-    remaining_tokens_method = _method(budget_manager, "remaining_for_research_tokens")
+    is_repair_wave = int(wave_id or 0) > 1
+    remaining_tokens_method = _method(
+        budget_manager,
+        "remaining_for_repair_tokens" if is_repair_wave else "remaining_for_research_tokens",
+    )
     remaining_tokens = int(remaining_tokens_method()) if remaining_tokens_method else max(
         0, int(budget.get("max_total_tokens") or 0) - int(budget.get("total_tokens") or 0)
     )
-    research_allowed = _method(budget_manager, "research_allowed")
+    research_allowed = _method(
+        budget_manager,
+        "repair_allowed" if is_repair_wave else "research_allowed",
+    )
     allowed, block_reason = research_allowed() if research_allowed else (True, "")
     remaining_sec_method = _method(budget_manager, "remaining_for_research_sec")
     remaining_sec = float(remaining_sec_method()) if remaining_sec_method else float(

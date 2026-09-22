@@ -51,6 +51,8 @@ class RunBudgetSnapshot:
     remaining_for_research_tokens: int = 0
     remaining_for_synthesis_tokens: int = 0
     remaining_for_quality_tokens: int = 0
+    repair_reserve_tokens: int = 0
+    remaining_for_repair_tokens: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +78,8 @@ class RunBudgetSnapshot:
             "remaining_for_research_tokens": self.remaining_for_research_tokens,
             "remaining_for_synthesis_tokens": self.remaining_for_synthesis_tokens,
             "remaining_for_quality_tokens": self.remaining_for_quality_tokens,
+            "repair_reserve_tokens": self.repair_reserve_tokens,
+            "remaining_for_repair_tokens": self.remaining_for_repair_tokens,
         }
 
 
@@ -89,6 +93,7 @@ class _WorkerLease:
     used_tokens: int = 0
     in_flight_tokens: int = 0
     llm_calls: int = 0
+    stage: str = "research"
 
 
 @dataclass(frozen=True)
@@ -185,12 +190,25 @@ class RunBudgetManager:
         share = float(self.stage_reserves.get(str(stage), 0.0) or 0.0)
         return max(0, int(self.token_limit * max(0.0, min(1.0, share))))
 
+    def _research_stage_cap_tokens(self, stage: str) -> int:
+        """Return the non-borrowable ceiling for a research stage.
+
+        Initial research may consume only its 60% share.  The one targeted
+        repair wave is allowed to consume the separately protected 15% after
+        that, while report and verification shares remain unavailable.
+        """
+        initial = self.stage_reserve_tokens("research")
+        if str(stage).lower() == "repair":
+            return min(self.token_limit, initial + self.stage_reserve_tokens("repair"))
+        return initial
+
     def reserve(self, stage: str) -> dict[str, Any]:
         """Return a diagnostic reservation without spending capacity."""
         reserved = self.stage_reserve_tokens(stage)
         with self._lock:
-            available = max(0, reserved - self._used_tokens)
-        return {"stage": str(stage), "reserved_tokens": reserved, "available_tokens": available}
+            cap = self._research_stage_cap_tokens(stage) if str(stage) in {"research", "repair"} else reserved
+            available = max(0, cap - self._used_tokens - self._effective_reserved_tokens_locked())
+        return {"stage": str(stage), "reserved_tokens": reserved, "available_tokens": available, "stage_cap_tokens": cap}
 
     def sync_from_usage(self, *, session_id: str = "", tool_calls: int = 0) -> None:
         """Reconcile real LLM usage; this is not an authorization path."""
@@ -272,15 +290,17 @@ class RunBudgetManager:
         token_ceiling: int | None = None,
         parallel_workers: int | None = None,
         max_output_tokens_per_call: int | None = None,
+        stage: str = "research",
     ) -> tuple[str, str]:
         """Atomically reserve worker research capacity."""
-        research_cap = self.phase_plan.research_cap_tokens(self.token_limit)
+        normalized_stage = "repair" if str(stage).lower() == "repair" else "research"
+        research_cap = self._research_stage_cap_tokens(normalized_stage)
         workers = max(1, int(parallel_workers or self.max_parallel_workers))
         fair_share = max(1, research_cap // workers) if research_cap > 0 else 0
         requested = max(0, int(token_ceiling if token_ceiling is not None else fair_share))
 
         with self._lock:
-            reason = self._research_block_reason_locked()
+            reason = self._research_block_reason_locked(stage=normalized_stage)
             if reason:
                 resource = (
                     "token" if reason.endswith("token_cap")
@@ -338,6 +358,7 @@ class RunBudgetManager:
                     1,
                     int(max_output_tokens_per_call or 4_096),
                 ),
+                stage=normalized_stage,
             )
             return lease_id, ""
 
@@ -477,10 +498,11 @@ class RunBudgetManager:
                     limit=self.token_limit,
                 )
                 return "", "run_token_cap"
+            research_stage = lease.stage if lease is not None else "research"
             if (
                 normalized_phase in self._RESEARCH_LLM_PHASES
                 and self.token_limit > 0
-                and effective_after > self.phase_plan.research_cap_tokens(self.token_limit)
+                and effective_after > self._research_stage_cap_tokens(research_stage)
             ):
                 self._emit_denied(
                     scope="research_phase",
@@ -489,7 +511,7 @@ class RunBudgetManager:
                     task_id=worker_task_id,
                     used=self._used_tokens,
                     reserved=self._effective_reserved_tokens_locked(),
-                    limit=self.phase_plan.research_cap_tokens(self.token_limit),
+                    limit=self._research_stage_cap_tokens(research_stage),
                 )
                 return "", "research_phase_token_cap"
 
@@ -511,6 +533,7 @@ class RunBudgetManager:
                     used_tokens=lease.used_tokens,
                     in_flight_tokens=lease.in_flight_tokens + total,
                     llm_calls=lease.llm_calls + 1,
+                    stage=lease.stage,
                 )
             else:
                 self._reserved_nonworker_tokens += total
@@ -539,6 +562,7 @@ class RunBudgetManager:
                         used_tokens=lease.used_tokens + actual,
                         in_flight_tokens=max(0, lease.in_flight_tokens - reservation.estimated_tokens),
                         llm_calls=lease.llm_calls,
+                        stage=lease.stage,
                     )
             else:
                 self._reserved_nonworker_tokens = max(
@@ -572,6 +596,7 @@ class RunBudgetManager:
                     used_tokens=lease.used_tokens,
                     in_flight_tokens=max(0, lease.in_flight_tokens - reservation.estimated_tokens),
                     llm_calls=lease.llm_calls,
+                    stage=lease.stage,
                 )
         else:
             self._reserved_nonworker_tokens = max(
@@ -598,7 +623,7 @@ class RunBudgetManager:
             return True, ""
 
     def _maybe_force_synthesis_locked(self) -> None:
-        research_cap = self.phase_plan.research_cap_tokens(self.token_limit)
+        research_cap = self._research_stage_cap_tokens("research")
         if self.token_limit > 0 and self._used_tokens >= research_cap:
             self._force_synthesis = True
         if self.llm_call_limit > 0 and self._llm_calls >= self.llm_call_limit:
@@ -631,7 +656,7 @@ class RunBudgetManager:
         with self._lock:
             return max(
                 0,
-                self.phase_plan.research_cap_tokens(self.token_limit)
+                self._research_stage_cap_tokens("research")
                 - self._used_tokens
                 - self._effective_reserved_tokens_locked(),
             )
@@ -639,6 +664,21 @@ class RunBudgetManager:
     def remaining_for_supervisor_tokens(self) -> int:
         """Supervisor shares the research admission ceiling, not the synthesis reserve."""
         return self.remaining_for_research_tokens()
+
+    def remaining_for_repair_tokens(self) -> int:
+        """Capacity still protected for the single targeted repair wave."""
+        with self._lock:
+            return max(
+                0,
+                self._research_stage_cap_tokens("repair")
+                - self._used_tokens
+                - self._effective_reserved_tokens_locked(),
+            )
+
+    def repair_allowed(self) -> tuple[bool, str]:
+        with self._lock:
+            reason = self._research_block_reason_locked(stage="repair")
+        return not reason, reason
 
     def remaining_for_synthesis_tokens(self) -> int:
         """Tokens available after protecting only the quality reserve."""
@@ -673,7 +713,7 @@ class RunBudgetManager:
                 llm_call_limit=self.llm_call_limit,
                 tool_calls=self._tool_calls,
                 tool_call_limit=self.tool_call_limit,
-                research_cap_tokens=self.phase_plan.research_cap_tokens(self.token_limit),
+                research_cap_tokens=self._research_stage_cap_tokens("research"),
                 synthesis_reserve_tokens=self.phase_plan.synthesis_reserve_tokens(self.token_limit),
                 force_synthesis=self._force_synthesis,
                 deadline_sec=self.deadline_sec,
@@ -687,14 +727,17 @@ class RunBudgetManager:
                 remaining_for_research_tokens=self.remaining_for_research_tokens(),
                 remaining_for_synthesis_tokens=self.remaining_for_synthesis_tokens(),
                 remaining_for_quality_tokens=self.remaining_for_quality_tokens(),
+                repair_reserve_tokens=self.stage_reserve_tokens("repair"),
+                remaining_for_repair_tokens=self.remaining_for_repair_tokens(),
             )
 
-    def _research_block_reason_locked(self) -> str:
+    def _research_block_reason_locked(self, *, stage: str = "research") -> str:
         snap = self.snapshot()
         effective_used = snap.used_tokens + snap.reserved_tokens
         if snap.token_limit > 0 and effective_used >= snap.token_limit:
             return "run_token_cap"
-        if snap.token_limit > 0 and effective_used >= snap.research_cap_tokens:
+        research_cap = self._research_stage_cap_tokens(stage)
+        if snap.token_limit > 0 and effective_used >= research_cap:
             return "research_phase_token_cap"
         if (
             snap.llm_call_limit > 0
@@ -711,7 +754,7 @@ class RunBudgetManager:
 
     def research_allowed(self) -> tuple[bool, str]:
         with self._lock:
-            reason = self._research_block_reason_locked()
+            reason = self._research_block_reason_locked(stage="research")
         return not reason, reason
 
     def exhaustion_reason(self) -> str:
@@ -719,7 +762,7 @@ class RunBudgetManager:
         snap = self.snapshot()
         if snap.token_limit > 0 and snap.used_tokens >= snap.token_limit:
             return "run_token_cap"
-        if snap.token_limit > 0 and snap.used_tokens >= snap.research_cap_tokens:
+        if snap.token_limit > 0 and snap.used_tokens >= self._research_stage_cap_tokens("research"):
             return "research_phase_token_cap"
         if snap.llm_call_limit > 0 and snap.llm_calls >= snap.llm_call_limit:
             return "run_llm_call_cap"

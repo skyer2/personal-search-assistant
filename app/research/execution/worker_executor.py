@@ -190,6 +190,7 @@ class WorkerExecutorV2:
             max_output_tokens_per_call=(
                 int(step.metadata.get("max_output_tokens_per_call") or 0) or None
             ),
+            stage="repair" if bool(step.metadata.get("repair")) else "research",
         )
         queue_ms = int((time.perf_counter() - queue_started) * 1000)
         if not lease_id:

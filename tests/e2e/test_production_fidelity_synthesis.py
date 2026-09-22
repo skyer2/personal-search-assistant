@@ -311,7 +311,9 @@ def test_l3_empty_content_falls_back_to_partial_delivery(tmp_path: Path, monkeyp
     result = _run(tmp_path, "l3-synthesis-empty", provider)
     events, summary = _trace("l3-synthesis-empty", result)
     _assert_common_invariants(result, summary)
-    assert provider.synthesis_calls == 1
+    # Empty provider responses are retryable v4 failures: compact synthesis
+    # gets one chance before deterministic recovery.
+    assert provider.synthesis_calls == 2
     assert all(
         event["attributes"]["fail_reason"] == "provider_empty_content"
         for event in events

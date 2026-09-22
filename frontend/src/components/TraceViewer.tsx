@@ -927,6 +927,8 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                         render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
                       },
                       { title: "Fail Reason", dataIndex: "fail_reason", width: 180, key: "fail_reason", render: (value: unknown) => <div className="table-wrap-cell">{asText(value) || "-"}</div> },
+                      { title: "Provider Class", dataIndex: "provider_failure_class", width: 170, key: "provider_failure_class", render: (value: unknown) => <div className="table-wrap-cell">{asText(value) || "-"}</div> },
+                      { title: "Signals / Mechanisms", width: 150, key: "insights", render: (_: unknown, row: Record<string, unknown>) => `${asText(row.insight_signal_count, "0")} / ${asText(row.insight_mechanism_count, "0")}` },
                       { title: "Fallback", dataIndex: "fallback_action", width: 200, key: "fallback_action", render: (value: unknown) => <div className="table-wrap-cell">{asText(value) || "-"}</div> }
                     ]}
                   />

@@ -49,6 +49,38 @@ class ResearchBriefAndPlan:
         return {"brief": self.brief.to_dict(), "tasks": [task.to_dict() for task in self.tasks], "source": self.source}
 
 
+@dataclass(frozen=True)
+class PlanCoverage:
+    """Deterministic mapping from every key question to an initial task.
+
+    Coverage is a planning invariant, not a best-effort diagnostic.  A
+    question that is absent from the first wave cannot be silently delegated
+    to an already constrained repair wave.
+    """
+
+    required_question_ids: tuple[str, ...]
+    covered_question_ids: tuple[str, ...]
+    uncovered_question_ids: tuple[str, ...]
+    duplicate_question_ids: tuple[str, ...]
+
+    @property
+    def complete(self) -> bool:
+        return not self.uncovered_question_ids
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "required_question_ids": list(self.required_question_ids),
+            "covered_question_ids": list(self.covered_question_ids),
+            "uncovered_question_ids": list(self.uncovered_question_ids),
+            "duplicate_question_ids": list(self.duplicate_question_ids),
+            "complete": self.complete,
+            "coverage_ratio": (
+                len(self.covered_question_ids) / len(self.required_question_ids)
+                if self.required_question_ids else 1.0
+            ),
+        }
+
+
 def _analysis_type(brief: StructuredResearchBrief) -> bool:
     return brief.user_intent in {
         "comparison", "trend_forecast", "conflict_analysis", "recommendation", "structured_report", "explanation"
@@ -56,10 +88,10 @@ def _analysis_type(brief: StructuredResearchBrief) -> bool:
 
 
 def build_brief_and_plan(brief: StructuredResearchBrief, *, plan_version: int = 1) -> ResearchBriefAndPlan:
-    # Two focused workers are enough for the initial wave; any remaining
-    # question is represented in the same task's evidence contract and can be
-    # repaired once if the deterministic gap check proves it blocking.
-    questions = list(brief.key_questions or (brief.objective,))[:2]
+    # Every key question must be represented in the initial bounded DAG.
+    # Parallelism is controlled at dispatch time; truncating questions here
+    # turns a known delivery requirement into an impossible repair request.
+    questions = list(brief.key_questions or (brief.objective,))
     entities = tuple(brief.explicit_subjects[:MAX_ENTITIES])
     if not entities:
         entities = (brief.objective[:100],)
@@ -81,7 +113,10 @@ def build_brief_and_plan(brief: StructuredResearchBrief, *, plan_version: int = 
                 search_hints=(brief.objective[:180],),
                 entities=entities,
                 dimensions=dimensions,
-                max_queries=min(MAX_ESTIMATED_QUERIES, 2 if len(questions) > 1 else 4),
+                # Each focused task uses explicit primary/support/counter
+                # lanes.  This preserves uncertainty handling without making
+                # a worker a miniature open-ended research system.
+                max_queries=min(MAX_ESTIMATED_QUERIES, 3 if len(questions) > 1 else 4),
             )
         )
     return ResearchBriefAndPlan(brief=brief, tasks=tuple(tasks))
@@ -116,6 +151,7 @@ def execution_plan_from_brief(
                 "evidence_needed": list(task.evidence_needed),
                 "counter_evidence_needed": list(task.counter_evidence_needed),
                 "source_strategy": ["primary_source", "independent_corroboration", "counter_evidence"] if analysis else ["primary_source", "independent_corroboration"],
+                "research_lanes": ["primary_source", "supporting_evidence", "counter_evidence"] if analysis else ["primary_source", "supporting_evidence"],
                 "search_hints": list(task.search_hints),
                 "entities": list(task.entities[:MAX_ENTITIES]),
                 "dimensions": list(task.dimensions[:MAX_DIMENSIONS]),
@@ -140,7 +176,28 @@ def execution_plan_from_brief(
     return plan
 
 
-def validate_brief_plan(plan: ExecutionPlan, *, query_budget: int = DEFAULT_WORKER_QUERY_BUDGET) -> list[dict[str, str]]:
+def plan_coverage(plan: ExecutionPlan, brief: StructuredResearchBrief) -> PlanCoverage:
+    required = tuple(f"q{index}" for index, _ in enumerate(brief.key_questions or (brief.objective,), 1))
+    counts: dict[str, int] = {}
+    for step in plan.steps:
+        question_id = str((step.metadata or {}).get("question_id") or "").strip()
+        if question_id:
+            counts[question_id] = counts.get(question_id, 0) + 1
+    covered = tuple(question_id for question_id in required if counts.get(question_id, 0) > 0)
+    return PlanCoverage(
+        required_question_ids=required,
+        covered_question_ids=covered,
+        uncovered_question_ids=tuple(question_id for question_id in required if not counts.get(question_id, 0)),
+        duplicate_question_ids=tuple(question_id for question_id in required if counts.get(question_id, 0) > 1),
+    )
+
+
+def validate_brief_plan(
+    plan: ExecutionPlan,
+    *,
+    query_budget: int = DEFAULT_WORKER_QUERY_BUDGET,
+    brief: StructuredResearchBrief | None = None,
+) -> list[dict[str, str]]:
     issues = [issue.to_dict() for issue in validate_bounded_plan(plan.steps, query_budget=query_budget)]
     for step in plan.steps:
         metadata = step.metadata or {}
@@ -151,7 +208,16 @@ def validate_brief_plan(plan: ExecutionPlan, *, query_budget: int = DEFAULT_WORK
         analysis = str(metadata.get("analysis_type") or "")
         if analysis in {"comparison", "trend_forecast", "conflict_analysis", "recommendation", "structured_report", "explanation"} and not metadata.get("counter_evidence_needed"):
             issues.append({"code": "missing_counter_evidence", "task_id": step.task_id, "detail": analysis})
+        if analysis and not metadata.get("research_lanes"):
+            issues.append({"code": "missing_research_lanes", "task_id": step.task_id, "detail": analysis})
+    if brief is not None:
+        coverage = plan_coverage(plan, brief)
+        for question_id in coverage.uncovered_question_ids:
+            issues.append({"code": "uncovered_key_question", "task_id": "", "detail": question_id})
     return issues
 
 
-__all__ = ["ResearchBriefAndPlan", "ResearchTaskSpec", "build_brief_and_plan", "execution_plan_from_brief", "validate_brief_plan"]
+__all__ = [
+    "PlanCoverage", "ResearchBriefAndPlan", "ResearchTaskSpec", "build_brief_and_plan",
+    "execution_plan_from_brief", "plan_coverage", "validate_brief_plan",
+]

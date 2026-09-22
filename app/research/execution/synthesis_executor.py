@@ -24,6 +24,8 @@ RETRYABLE_SYNTHESIS_FAILURES = frozenset(
         "provider_unavailable",
         "context_length_exceeded",
         "synthesis_timeout",
+        "provider_empty_content",
+        "content_removed_by_cleaner",
     }
 )
 NON_RETRYABLE_SYNTHESIS_FAILURES = frozenset(
@@ -94,6 +96,8 @@ class SynthesisRequest:
     evidence_digests: list[EvidenceDigest] = field(default_factory=list)
     findings: list[dict[str, Any]] = field(default_factory=list)
     worker_summaries: list[dict[str, Any]] = field(default_factory=list)
+    insight_signals: list[dict[str, Any]] = field(default_factory=list)
+    insight_mechanisms: list[dict[str, Any]] = field(default_factory=list)
     token_budget: int = 40_000
     attempt: int = 1
     pack_tokens_estimated: int = 0
@@ -195,6 +199,8 @@ class SynthesisExecutor:
         response_analysis["ttft_ms"] = self._last_ttft_ms
         content = response_analysis["cleaned_content"]
         if not content:
+            response_analysis["provider_failure_class"] = str(response_analysis["fail_reason"])
+            response_analysis["retryable"] = str(response_analysis["fail_reason"]) in RETRYABLE_SYNTHESIS_FAILURES
             return self._result(
                 started,
                 ok=False,
@@ -276,6 +282,8 @@ class SynthesisExecutor:
             "ttft_ms": self._last_ttft_ms,
             "model": str(getattr(model, "model_name", None) or getattr(model, "model", None) or "unknown"),
             "provider": "openai-compatible",
+            "provider_failure_class": "",
+            "retryable": False,
         }
 
     def _prompt(self, request: SynthesisRequest, context: ResearchContext) -> str:
@@ -319,12 +327,22 @@ class SynthesisExecutor:
         ]
         if not conflict_lines:
             conflict_lines.extend(f"- {item}" for item in request.unresolved_conflicts[:20])
+        signal_lines = [
+            f"- {row.get('signal_id')}｜{row.get('statement')}｜evidence={','.join(str(item) for item in row.get('evidence_refs') or [])}"
+            for row in request.insight_signals[:12] if isinstance(row, dict)
+        ]
+        mechanism_lines = [
+            f"- {row.get('mechanism_id')}｜{row.get('statement')}"
+            for row in request.insight_mechanisms[:6] if isinstance(row, dict)
+        ]
         sections = (
             ("研究摘要：", [request.research_summary] if request.research_summary else []),
             ("证据摘录：", evidence_lines),
             ("覆盖限制：", [f"- {item}" for item in request.limitations[:20]]),
             ("未解决冲突：", [f"- {item}" for item in request.unresolved_conflicts[:20]]),
             ("冲突处理契约：", conflict_lines),
+            ("已验证信号：", signal_lines),
+            ("机制推演边界：", mechanism_lines),
             ("输出要求：", ["直接输出面向用户的报告正文；开头必须回答问题，不能以‘已有以下信息’或证据清单开头；随后按语义标题解释判断依据、反例与限制；不得复制摘录、不得用 q1/q2/q3 标题；引用证据对应的原始来源；不要输出 JSON。"]),
         )
         budget = max(1_000, request.token_budget)
@@ -438,6 +456,8 @@ class SynthesisExecutor:
                 or "unknown"
             ),
             "provider": "openai-compatible",
+            "provider_failure_class": fail_reason,
+            "retryable": fail_reason in RETRYABLE_SYNTHESIS_FAILURES,
         }
 
     def _response_content(self, response: Any) -> str:
@@ -562,6 +582,8 @@ class SynthesisExecutor:
             ),
             "provider": "openai-compatible",
             "mode": request.mode,
+            "provider_failure_class": error_category,
+            "retryable": error_category in {"timeout", "rate_limit", "connection", "context_length"},
             "estimated_input_tokens": self.estimate_input_tokens(request, context),
             "remaining_run_tokens": max(
                 0,

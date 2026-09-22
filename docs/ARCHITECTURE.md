@@ -11,7 +11,7 @@ User Query
   ↓
 StructuredResearchBrief
   ↓
-Supervisor research action
+Deterministic bounded plan (every key question mapped)
   ↓
 Budget admission
   ↓
@@ -20,10 +20,10 @@ Isolated Researchers
 Incremental evidence / claim / finding ingest
   ↓
 Criterion-based Coverage Judgement
-  ├─ gap → Supervisor
+  ├─ one blocking gap → targeted repair (one wave, reserved budget)
   └─ enough / low ROI / budget stop
         ↓
-      Grounded Synthesis
+      Finding → Signal → Mechanism → Grounded Synthesis
       ↓
       Quality Gate
       ↓
@@ -99,7 +99,7 @@ Budget admission runs before dispatch. It approves, defers, or denies each Super
 - semantic novelty;
 - configured worker slots.
 
-Research cannot consume the synthesis or quality reserves. When research tokens are exhausted, the runtime forces synthesis instead of launching more workers.
+Initial research cannot borrow the repair, report or verification reserve. The default stage allocation is research 60%, targeted repair 15%, report 15% and verification 10%. The one repair wave can consume its protected 15% only after a blocking gap; report and verification capacity remain protected. When the permitted research stage is exhausted, the runtime forces synthesis instead of launching more workers.
 
 Worker leases use the actual approved wave size, not the configured maximum. Admission and execution share the same `TaskBudgetProfile`. The default profiles are:
 

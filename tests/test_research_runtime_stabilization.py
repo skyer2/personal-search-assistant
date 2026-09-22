@@ -394,7 +394,7 @@ def test_worker_leases_do_not_reserve_unspent_token_ceilings():
     second, second_reason = manager.reserve_worker_lease("task_b", parallel_workers=2)
     assert first and second
     assert not first_reason and not second_reason
-    fair_share = manager.phase_plan.research_cap_tokens(100_000) // 2
+    fair_share = manager.stage_reserve_tokens("research") // 2
     assert manager._worker_leases[first].token_ceiling == fair_share
     assert manager._worker_leases[second].token_ceiling == fair_share
     assert manager.snapshot().active_worker_leases == 2

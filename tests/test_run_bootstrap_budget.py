@@ -92,4 +92,6 @@ def test_denial_without_counters_uses_the_rejecting_phase_counter(monkeypatch) -
     attrs = events[0]["attributes"]
     assert attrs["used"] == 200
     assert attrs["reserved"] == 0
-    assert attrs["limit"] == 650
+    # v4 protects 15% for the single targeted repair wave; initial research
+    # is therefore capped at 60% rather than borrowing the repair share.
+    assert attrs["limit"] == 600

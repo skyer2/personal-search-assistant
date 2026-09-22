@@ -141,7 +141,7 @@ def brief_node(state: ResearchState) -> dict[str, Any]:
         )
         plan.steps[0].step_type = "network_search"
         plan.steps[0].metadata.update({"simple_fact_fast_path": True, "task_kind": "lookup"})
-        payload.update({"plan": plan.to_dict(), "tasks": initialize_tasks(plan), "plan_validation": validate_brief_plan(plan), "brief_plan": build_brief_and_plan(brief, plan_version=plan.plan_version).to_dict(), "dispatch_wave_id": 1})
+        payload.update({"plan": plan.to_dict(), "tasks": initialize_tasks(plan), "plan_validation": validate_brief_plan(plan, brief=brief), "brief_plan": build_brief_and_plan(brief, plan_version=plan.plan_version).to_dict(), "dispatch_wave_id": 1})
     else:
         # The first research wave is deterministic and is derived from the
         # already compiled brief.  This removes the old Brief -> Supervisor ->
@@ -150,7 +150,7 @@ def brief_node(state: ResearchState) -> dict[str, Any]:
             brief,
             plan_version=int(state.get("plan_version") or 1),
         )
-        payload.update({"plan": plan.to_dict(), "tasks": initialize_tasks(plan), "plan_validation": validate_brief_plan(plan), "brief_plan": build_brief_and_plan(brief, plan_version=plan.plan_version).to_dict(), "dispatch_wave_id": 1})
+        payload.update({"plan": plan.to_dict(), "tasks": initialize_tasks(plan), "plan_validation": validate_brief_plan(plan, brief=brief), "brief_plan": build_brief_and_plan(brief, plan_version=plan.plan_version).to_dict(), "dispatch_wave_id": 1})
     return transition_update(state, WorkflowPhase.BRIEF, payload)
 
 

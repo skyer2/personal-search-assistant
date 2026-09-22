@@ -969,7 +969,8 @@ class ResearchGraphRunner:
                                 if session.search_mode == "deep_debug"
                                 else budget_profile.max_llm_calls
                             )),
-                            "repair": bool(item.repair),
+                            "repair": bool(item.repair or wave_id > 1),
+                            "budget_stage": "repair" if bool(item.repair or wave_id > 1) else "research",
                             **{
                                 key: value
                                 for key, value in task_budget_metadata(budget_profile).items()
@@ -1046,6 +1047,27 @@ class ResearchGraphRunner:
                 )
             else:
                 session.active_wave_size = 1
+        # The visible Supervisor decision must describe the action that the
+        # runtime can actually execute.  Leaving CONDUCT_RESEARCH in the
+        # trace after admission rejects every task made partial delivery look
+        # like a contradictory control-plane failure.
+        if action.action == "CONDUCT_RESEARCH":
+            admission_payload = payload.get("dispatch_admission")
+            admission_dict = admission_payload if isinstance(admission_payload, dict) else {}
+            if not admission_dict.get("approved_task_ids"):
+                from app.research.supervisor.models import SupervisorAction
+
+                denied = admission_dict.get("denied_reason")
+                reason = next(iter(denied.values()), "runtime_dispatch_unavailable") if isinstance(denied, dict) else "runtime_dispatch_unavailable"
+                action = SupervisorAction("COMPLETE", f"runtime_admission:{reason}", (), "runtime_admission")
+                payload["supervisor_action"] = action.to_dict()
+                payload["supervisor"] = {
+                    **dict(payload.get("supervisor") or {}),
+                    "last_action": action.action,
+                    "reasoning_summary": action.reason,
+                    "source": action.source,
+                    "runtime_admission_reason": reason,
+                }
         decision = decide_control({**state, **payload})
         # A run with salvageable evidence but no repair budget is a partial
         # delivery.  Preserve that distinction even though the semantic
@@ -1837,6 +1859,7 @@ class ResearchGraphRunner:
             compile_deterministic_answer,
             render_final_answer,
         )
+        from app.research.delivery.insights import build_insight_layer
         from app.research.runtime.atomic_fact import (
             AtomicFactAnswer,
             extract_atomic_fact_answer,
@@ -2048,6 +2071,7 @@ class ResearchGraphRunner:
             compact=compact,
         )
         evidence_refs = list(evidence_pack.evidence_refs)
+        insight_layer = build_insight_layer(list(evidence_pack.findings))
         digests = [
             replace(
                 digest,
@@ -2073,6 +2097,8 @@ class ResearchGraphRunner:
             evidence_digests=digests,
             findings=list(evidence_pack.findings),
             worker_summaries=[],
+            insight_signals=list(insight_layer["signals"]),
+            insight_mechanisms=list(insight_layer["mechanisms"]),
             token_budget=evidence_pack.token_budget,
             attempt=attempts_before + 1,
             pack_tokens_estimated=evidence_pack.estimated_tokens,
@@ -2571,6 +2597,7 @@ class ResearchGraphRunner:
                     "answer_complete": answer_complete,
                     "answer_contract": answer_contract,
                     "synthesis_budget_low": skip_llm_synthesis,
+                    "insight_layer": insight_layer,
                 }
             )
         _emit(
@@ -2601,6 +2628,8 @@ class ResearchGraphRunner:
                     "actual_input_tokens": int(synthesis_metadata.get("actual_input_tokens") or 0),
                     "actual_output_tokens": int(synthesis_metadata.get("actual_output_tokens") or 0),
                     "finish_reason": str(synthesis_metadata.get("finish_reason") or ""),
+                    "provider_failure_class": str(synthesis_metadata.get("provider_failure_class") or ""),
+                    "retryable": bool(synthesis_metadata.get("retryable")),
                     "remaining_run_tokens": int(
                         synthesis_metadata.get("remaining_run_tokens") or 0
                     ),
@@ -2625,6 +2654,8 @@ class ResearchGraphRunner:
                 "successful_attempt": successful_attempt,
                 "answer_complete": answer_complete,
                 "synthesis_mode": recovery_mode or mode,
+                "insight_signal_count": len(insight_layer["signals"]),
+                "insight_mechanism_count": len(insight_layer["mechanisms"]),
             },
         )
         note_stage_duration(
@@ -2733,6 +2764,7 @@ class ResearchGraphRunner:
             coverage=judgement if strict_quality_contract else {},
             broken_evidence_count=broken_evidence_count,
             minimum_high_authority_ratio=0.6 if strict_quality_contract else 0.0,
+            require_authoritative_per_question=strict_quality_contract,
         )
         if completion.passed and report_quality.verdict == "PASS":
             answer_complete = True
