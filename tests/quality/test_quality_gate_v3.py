@@ -73,6 +73,37 @@ def test_report_labels_and_reference_binding_explanations_are_not_broken_or_dupl
     assert "duplicate_claims" not in result.issues
 
 
+def test_citation_after_sentence_punctuation_stays_bound_to_claim() -> None:
+    result = evaluate_report_quality(
+        content=(
+            "# 结论摘要\n\nAgent runtime 是企业生产工作流的重要组成。[1]\n\n"
+            "# 参考来源\n\n[1] official.example.com — https://official.example.com/news"
+        ),
+        brief={"key_questions": ["Agent runtime 的发展情况？"]},
+        evidence_records=_evidence(),
+        answer_contract={"answers": [{"question_id": "q1", "direct_answer": "Agent runtime 是企业生产工作流的重要组成。"}]},
+    )
+
+    assert result.verdict == "PASS"
+    assert "unpublishable_claim_text" not in result.issues
+    assert "duplicate_claims" not in result.issues
+    assert "unsupported_strong_claim" not in result.issues
+
+
+def test_uncertainty_clause_with_influence_predicate_is_publishable() -> None:
+    result = evaluate_report_quality(
+        content=(
+            "# 结论摘要\n\n不确定性在于结果仍受技术、成本与监管变化影响。[1]\n\n"
+            "# 参考来源\n\n[1] official.example.com — https://official.example.com/news"
+        ),
+        brief={"key_questions": ["有哪些不确定性？"]},
+        evidence_records=_evidence(),
+        answer_contract={"answers": [{"question_id": "q1", "direct_answer": "结果仍受技术、成本与监管变化影响。"}]},
+    )
+
+    assert "unpublishable_claim_text" not in result.issues
+
+
 def test_good_report_with_semantic_forecast_contract_passes() -> None:
     result = evaluate_report_quality(
         content=(

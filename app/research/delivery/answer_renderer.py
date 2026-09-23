@@ -41,8 +41,6 @@ def _render_point(point: AnswerPoint, number_by_reference: dict[str, int]) -> st
     ]
     markers = "".join(f"[{number}]" for number in dict.fromkeys(numbers))
     text = point.text.rstrip()
-    if markers and text[-1:] in "。！？":
-        return f"{text[:-1]}{markers}{text[-1]}"
     return f"{text}{markers}"
 
 

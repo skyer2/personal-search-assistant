@@ -93,6 +93,9 @@ class _WorkerLease:
     used_tokens: int = 0
     in_flight_tokens: int = 0
     llm_calls: int = 0
+    # A finalize-only recovery can use at most one extra call after the
+    # regular worker capability reaches its hard call cap.
+    finalization_calls: int = 0
     stage: str = "research"
 
 
@@ -413,7 +416,45 @@ class RunBudgetManager:
                 "tokens_used": lease.used_tokens,
                 "token_limit": lease.token_ceiling,
                 "in_flight_tokens": lease.in_flight_tokens,
+                "finalization_calls": lease.finalization_calls,
             }
+
+    def grant_worker_finalization_call(self, task_id: str) -> bool:
+        """Grant one read-only structured-output call after a worker cap.
+
+        This is intentionally unavailable to the retrieval agent. The worker
+        executor calls it only after that agent was denied by its worker call
+        cap, then invokes the finalize-only capability under ``finalize``.
+        """
+        with self._lock:
+            lease = next(
+                (
+                    item
+                    for item in self._worker_leases.values()
+                    if item.task_id == str(task_id or "")
+                ),
+                None,
+            )
+            if lease is None or lease.finalization_calls >= 1:
+                return False
+            if (
+                self.llm_call_limit > 0
+                and self._llm_calls + self._reserved_llm_calls >= self.llm_call_limit
+            ):
+                return False
+            self._worker_leases[lease.lease_id] = _WorkerLease(
+                lease_id=lease.lease_id,
+                task_id=lease.task_id,
+                token_ceiling=lease.token_ceiling,
+                max_llm_calls=lease.max_llm_calls + 1,
+                max_output_tokens_per_call=lease.max_output_tokens_per_call,
+                used_tokens=lease.used_tokens,
+                in_flight_tokens=lease.in_flight_tokens,
+                llm_calls=lease.llm_calls,
+                finalization_calls=lease.finalization_calls + 1,
+                stage=lease.stage,
+            )
+            return True
 
     def reserve_llm_call(
         self,
@@ -465,9 +506,20 @@ class RunBudgetManager:
                         limit=lease.max_llm_calls,
                     )
                     return "", "worker_llm_call_cap"
+                finalization_phase = normalized_phase in {"finalize", "finalization"}
+                finalization_reserve = (
+                    max(1, int(lease.token_ceiling * 0.15))
+                    if lease.token_ceiling > 0
+                    else 0
+                )
+                worker_call_limit = lease.token_ceiling
+                if lease.token_ceiling > 0 and not finalization_phase:
+                    worker_call_limit = max(
+                        0, lease.token_ceiling - finalization_reserve
+                    )
                 if (
                     lease.token_ceiling > 0
-                    and lease.used_tokens + lease.in_flight_tokens + total > lease.token_ceiling
+                    and lease.used_tokens + lease.in_flight_tokens + total > worker_call_limit
                 ):
                     self._emit_denied(
                         scope="worker",
@@ -476,7 +528,7 @@ class RunBudgetManager:
                         task_id=worker_task_id,
                         used=lease.used_tokens,
                         reserved=lease.in_flight_tokens,
-                        limit=lease.token_ceiling,
+                        limit=worker_call_limit,
                     )
                     return "", "worker_token_cap"
                 effective_after = (
@@ -533,6 +585,7 @@ class RunBudgetManager:
                     used_tokens=lease.used_tokens,
                     in_flight_tokens=lease.in_flight_tokens + total,
                     llm_calls=lease.llm_calls + 1,
+                    finalization_calls=lease.finalization_calls,
                     stage=lease.stage,
                 )
             else:
@@ -562,6 +615,7 @@ class RunBudgetManager:
                         used_tokens=lease.used_tokens + actual,
                         in_flight_tokens=max(0, lease.in_flight_tokens - reservation.estimated_tokens),
                         llm_calls=lease.llm_calls,
+                        finalization_calls=lease.finalization_calls,
                         stage=lease.stage,
                     )
             else:
@@ -596,6 +650,7 @@ class RunBudgetManager:
                     used_tokens=lease.used_tokens,
                     in_flight_tokens=max(0, lease.in_flight_tokens - reservation.estimated_tokens),
                     llm_calls=lease.llm_calls,
+                    finalization_calls=lease.finalization_calls,
                     stage=lease.stage,
                 )
         else:

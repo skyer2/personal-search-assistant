@@ -110,6 +110,39 @@ def test_recovery_keeps_worker_declared_forecast():
     assert q2.claim_type == "forecast"
 
 
+def test_recovery_derives_bounded_inference_from_multiple_directional_sources():
+    """A provider outage may preserve an explicit, source-bound trend answer."""
+    brief = _brief()
+    findings = [
+        *_findings(),
+        {
+            "finding_id": "f3",
+            "claim": "两家厂商的 2027 路线图都把 agent runtime 可靠性列为下一阶段重点。",
+            "evidence_ids": ["e3"],
+            "question_id": "q2",
+            "ask_id": "a2",
+            "validated": True,
+            "confidence": 0.85,
+        },
+    ]
+    result = assess_answerability(
+        brief=brief,
+        findings=findings,
+        evidence_records=[{"evidence_id": "e1"}, {"evidence_id": "e2"}, {"evidence_id": "e3"}],
+    )
+    final = compile_deterministic_answer(
+        objective=brief.objective,
+        brief=brief,
+        findings=findings,
+        answerability=result,
+    )
+    q2 = next(item for item in final.answers if item.question_id == "q2")
+    assert q2.claim_type == "inference"
+    assert q2.direct_answer.startswith("从本次可绑定来源的共同信号看")
+    assert q2.limitations
+    assert assess_answer_completeness(final, brief).complete
+
+
 def test_recovery_refuses_when_no_claim_is_bound():
     brief = SimpleNamespace(objective="问题", key_questions=("问题",))
     result = assess_answerability(
@@ -139,7 +172,7 @@ def test_answerability_requires_real_evidence_alias():
     assert "supporting_evidence" in result.question_status[0].missing_requirements
 
 
-def test_complete_deterministic_recovery_is_degraded_success():
+def test_complete_delivery_has_the_single_success_outcome():
     state = {
         "synthesis_degraded": True,
         "answer_complete": True,
@@ -148,4 +181,4 @@ def test_complete_deterministic_recovery_is_degraded_success():
         "evidence_assessment": {"status": "sufficient"},
         "quality_assessment": {"verdict": "pass"},
     }
-    assert decide_terminal_outcome(state) is FinalOutcome.DEGRADED_SUCCESS
+    assert decide_terminal_outcome(state) is FinalOutcome.SUCCESS

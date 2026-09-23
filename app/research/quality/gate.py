@@ -45,7 +45,23 @@ class QualityGateResult:
 
 
 def _sentences(content: str) -> list[str]:
-    return [item.strip(" -\t") for item in re.split(r"[。！？!?\n]+", content) if item.strip(" -\t")]
+    parts = [
+        item.strip(" -\t")
+        for item in re.split(r"[。！？!?\n]+", content)
+        if item.strip(" -\t")
+    ]
+    sentences: list[str] = []
+    leading_citation = re.compile(r"^((?:\[\d+\])+)[ \t]*(.*)$", re.DOTALL)
+    for part in parts:
+        match = leading_citation.match(part)
+        if match and sentences:
+            sentences[-1] = f"{sentences[-1].rstrip()} {match.group(1)}"
+            remainder = (match.group(2) or "").strip()
+            if remainder:
+                sentences.append(remainder)
+            continue
+        sentences.append(part)
+    return sentences
 
 
 def _presentation_body(content: str) -> str:

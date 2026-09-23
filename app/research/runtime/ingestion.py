@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import re
+import unicodedata
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any
@@ -318,7 +320,75 @@ def _task_metadata(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
         task_id = str(raw.get("task_id") or f"t{index}:{raw.get('step_type') or 'research'}")
         metadata = raw.get("metadata")
         output[task_id] = dict(metadata) if isinstance(metadata, dict) else {}
+    _resolve_task_question_lineage(output, state.get("brief"))
     return output
+
+
+def _normalized_question_text(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"[^\w\u3400-\u9fff]+", "", normalized)
+
+
+def _resolve_task_question_lineage(
+    task_metadata: dict[str, dict[str, Any]], brief_value: Any
+) -> None:
+    """Attach exact Brief ask lineage to planned tasks before claim admission.
+
+    Supervisor plans may target a user's question in `target_gaps` while
+    leaving `question_id`/`ask_id` blank. Resolve only a unique exact text
+    match; broad semantic guessing is deliberately avoided.
+    """
+    brief = brief_value if isinstance(brief_value, dict) else {}
+    research_questions = [
+        row for row in brief.get("research_questions") or [] if isinstance(row, dict)
+    ]
+    if not research_questions:
+        key_questions = [
+            str(item).strip()
+            for item in brief.get("key_questions") or []
+            if str(item).strip()
+        ]
+        user_asks = [row for row in brief.get("user_asks") or [] if isinstance(row, dict)]
+        research_questions = [
+            {
+                "question_id": f"q{index}",
+                "ask_id": str((user_asks[index - 1].get("ask_id") if index <= len(user_asks) else "") or f"A{index}"),
+                "text": question,
+            }
+            for index, question in enumerate(key_questions, 1)
+        ]
+    normalized_questions = [
+        (row, _normalized_question_text(row.get("text")))
+        for row in research_questions
+        if _normalized_question_text(row.get("text"))
+    ]
+    if not normalized_questions:
+        return
+    for metadata in task_metadata.values():
+        if metadata.get("question_id") and metadata.get("ask_id"):
+            continue
+        targets: list[str] = []
+        for key in ("target_gaps", "missing_information", "question_targets"):
+            raw_targets = metadata.get(key) or []
+            values = [raw_targets] if isinstance(raw_targets, str) else raw_targets
+            targets.extend(str(item).strip() for item in values if str(item).strip())
+        matched: dict[str, Any] = {}
+        for target in targets:
+            normalized_target = _normalized_question_text(target)
+            exact = [
+                row
+                for row, normalized_question in normalized_questions
+                if normalized_target == normalized_question
+            ]
+            if len(exact) == 1:
+                matched = exact[0]
+                break
+        if not matched and len(normalized_questions) == 1:
+            matched = normalized_questions[0][0]
+        if not matched:
+            continue
+        metadata["question_id"] = str(matched.get("question_id") or "")
+        metadata["ask_id"] = str(matched.get("ask_id") or "")
 
 
 def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
@@ -355,6 +425,10 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
                 **dict(metadata.get(task_id) or {}),
                 **dict(row["task_metadata"]),
             }
+    # Dispatch metadata is authoritative when present, but it can be an older
+    # serialized shape with blank lineage fields. Re-run exact Brief matching
+    # after the merge so those blanks cannot erase a unique target-gap binding.
+    _resolve_task_question_lineage(metadata, state.get("brief"))
     evidence_rows, prepared_rows = _prepare_evidence(selected, task_metadata=metadata)
     admission = admit_evidence(evidence_rows, require_verified_artifact=True)
     admitted_ids = {item.evidence_id for item in admission.admitted}

@@ -263,7 +263,11 @@ def _ask_coverage(
     evidence_by_id: dict[str, dict[str, Any]],
 ) -> tuple[AskCoverage, ...]:
     """Roll criterion support up to the user's asks."""
-    asks = list(brief.user_asks)
+    # ``StructuredResearchBrief.user_asks`` is the canonical v1 lineage
+    # field.  Keep the coverage judge tolerant of historical / fixture briefs
+    # while a persisted run is being upgraded: ask coverage is an additional
+    # safeguard, not a reason to crash the deterministic coverage diagnostic.
+    asks = list(getattr(brief, "user_asks", ()) or ())
     if not asks:
         return ()
     criterion_to_ask = _criterion_ask_ids(brief)
@@ -458,8 +462,6 @@ def _unresolved_conflicts(
     }
     output: dict[str, tuple[bool, str]] = {}
     for row in conflicts:
-        if not isinstance(row, dict):
-            continue
         edge_id = str(
             row.get("edge_id") or row.get("kind") or row.get("label") or "conflict"
         )
@@ -506,18 +508,36 @@ def judge_coverage(
     required_sources = max(1, int(brief.source_requirements.min_independent_sources or 1))
 
     task_metadata = task_metadata or {}
+    # A Worker that stopped after admitting evidence is partial research, not
+    # a failed question. Its evidence must continue through coverage.
     failed_questions: set[str] = set()
     successful_questions: set[str] = set()
     for row in worker_results or []:
-        if not isinstance(row, dict):
-            continue
         task_id = str(row.get("task_id") or "")
         metadata = row.get("task_metadata") if isinstance(row.get("task_metadata"), dict) else task_metadata.get(task_id, {})
         question_id = str((metadata or {}).get("question_id") or "")
         if not question_id:
             continue
         status = str(row.get("result_status") or row.get("status") or "").casefold()
-        failed = not bool(row.get("ok", status not in {"failed", "error"})) or status in {"failed", "error", "none"}
+        accepted = row.get("finding_acceptance") or {}
+        metrics = row.get("metrics") or {}
+        admitted_evidence = int(
+            row.get("admitted_evidence_count")
+            or (accepted.get("admitted_evidence_count") if isinstance(accepted, dict) else 0)
+            or (metrics.get("admitted_evidence_count") if isinstance(metrics, dict) else 0)
+            or 0
+        )
+        accepted_findings = int(
+            row.get("accepted_finding_count")
+            or (accepted.get("accepted_finding_count") if isinstance(accepted, dict) else 0)
+            or (metrics.get("accepted_finding_count") if isinstance(metrics, dict) else 0)
+            or 0
+        )
+        terminal_failure = (
+            not bool(row.get("ok", status not in {"failed", "error"}))
+            or status in {"failed", "error", "none"}
+        )
+        failed = terminal_failure and admitted_evidence <= 0 and accepted_findings <= 0
         if failed:
             failed_questions.add(question_id)
         else:
@@ -546,21 +566,20 @@ def judge_coverage(
         }
         bound_blocking_conflicts = bound_conflicts & blocking_conflict_ids
         independent_ok = len(unique_source_ids) >= required_sources
+        selected_records = [
+            evidence_by_id[item]
+            for item in unique_evidence_ids
+            if item in evidence_by_id
+        ]
         primary_ok = (
             not brief.source_requirements.primary_required
-            or any(
-                _is_primary(evidence)
-                for item in unique_evidence_ids
-                if (evidence := evidence_by_id.get(item)) is not None
-            )
+            or any(_is_primary(record) for record in selected_records)
         )
         fresh_ok = (
             not brief.freshness_requirements.required
             or any(
-                evidence is not None
-                and _is_fresh(evidence, brief.freshness_requirements.time_horizon)
-                for item in unique_evidence_ids
-                if (evidence := evidence_by_id.get(item)) is not None
+                _is_fresh(record, brief.freshness_requirements.time_horizon)
+                for record in selected_records
             )
         )
         missing_types: list[str] = []
@@ -711,7 +730,7 @@ def judge_coverage(
     if previous is not None and not previous.sufficient and not progress:
         deterministic_sufficient = False
 
-    missing = tuple(gap.description for gap in gaps)
+    missing_descriptions = tuple(gap.description for gap in gaps)
     weak = tuple(
         row.summary for row in normalized_findings if not row.evidence_ids
     )
@@ -734,7 +753,7 @@ def judge_coverage(
         criteria=tuple(supports),
         ask_coverage=ask_coverage,
         delta=delta,
-        missing=missing or tuple(row[1] for row in _criteria(brief)),
+        missing=missing_descriptions or tuple(row[1] for row in _criteria(brief)),
         conflicts=tuple(sorted(conflict_ids)),
         weak_claims=weak,
         recommended_next_questions=tuple(gap.description for gap in gaps[:4]),

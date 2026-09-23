@@ -183,6 +183,11 @@ async def test_timeout_after_soft_finalization_recovers_partial(monkeypatch):
     )
     monkeypatch.setattr(WorkerExecutorV2, "_invoke_leaf", invoke)
     monkeypatch.setattr(WorkerExecutorV2, "_timeout_for", lambda self, step: 0.01)
+    monkeypatch.setattr(
+        WorkerExecutorV2,
+        "_outer_timeout_for",
+        lambda self, step, timeout_sec: 0.01,
+    )
 
     result = await WorkerExecutorV2(FakeHarness(), FakeSession()).execute(
         ResearchTask(

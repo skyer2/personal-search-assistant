@@ -68,7 +68,7 @@ class ClaimAdmissionResult:
 _NAVIGATION = re.compile(r"\b(?:skip to|cookie(?:s)?|subscribe|sign in|menu|footer|breadcrumb)\b|跳到(?:主要)?内容|导航|页脚", re.I)
 _SEO = re.compile(r"\b(?:read more|related articles|share this|all rights reserved)\b|相关阅读|上一篇|下一篇", re.I)
 _QUESTION = re.compile(r"[?？]\s*$|^(?:什么|哪些|如何|为什么|是否|请)")
-_PREDICATE = re.compile(r"(?:是|为|有|将|会|可|能|提高|降低|发布|表示|预计|显示|认为|转向|supports?|reported|will|is|are|was|were|has|have|grew|announced|[A-Za-z]+(?:ed|es))", re.I)
+_PREDICATE = re.compile(r"(?:是|为|有|将|会|可|能|提高|降低|发布|表示|预计|显示|认为|转向|影响|受.*影响|取决于|依赖|面临|存在|包括|意味着|反映|推进|驱动|形成|带来|导致|造成|supports?|reported|will|is|are|was|were|has|have|grew|announced|[A-Za-z]+(?:ed|es))", re.I)
 
 
 def classify_claim_text(value: str) -> ClaimTextQuality:

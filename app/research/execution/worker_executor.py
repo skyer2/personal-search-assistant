@@ -285,7 +285,7 @@ class WorkerExecutorV2:
                             timeout_sec=timeout_sec,
                             **({} if simple_fact else {"worker_lease_id": lease_id}),
                         ),
-                        timeout=timeout_sec,
+                        timeout=self._outer_timeout_for(step, timeout_sec),
                     )
                     break
                 except Exception as exc:
@@ -724,6 +724,8 @@ class WorkerExecutorV2:
         tools_invoked: list[str] = []
         tool_call_ids: set[tuple[str, str]] = set()
         retrieval_budget = None
+        primary_budget_reason = ""
+        primary_timeout_sec = WorkerExecutorV2._soft_deadline_delay(timeout_sec)
         try:
             with tool_gateway.execution_scope(
                 worker_task_id=task.task_id,
@@ -737,17 +739,41 @@ class WorkerExecutorV2:
                     phase="execute",
                     worker_task_id=task.task_id,
                 ):
-                    async for chunk in gateway.astream(
-                        execute_agent,
-                        {"messages": [{"role": "user", "content": user_message}]},
-                        config,
-                    ):
-                        self._collect_worker_stream_chunk(
-                            chunk,
-                            messages,
-                            tool_call_ids,
-                            tools_invoked,
+                    async def collect_primary_stream() -> None:
+                        async for chunk in gateway.astream(
+                            execute_agent,
+                            {"messages": [{"role": "user", "content": user_message}]},
+                            config,
+                        ):
+                            self._collect_worker_stream_chunk(
+                                chunk,
+                                messages,
+                                tool_call_ids,
+                                tools_invoked,
+                            )
+
+                    try:
+                        # Reserve the tail of the worker deadline for a
+                        # retrieval-free structured-output finalizer. Without
+                        # this inner timeout, the outer wait_for cancels the
+                        # entire worker at its hard deadline before finalization
+                        # can run.
+                        await asyncio.wait_for(
+                            collect_primary_stream(), timeout=primary_timeout_sec
                         )
+                    except BudgetReservationError as exc:
+                        # The regular retrieval capability exhausted its own
+                        # call lease. Keep its accumulated tool evidence and
+                        # move to the separately bounded finalize-only call.
+                        primary_stop = str(getattr(exc, "reason", "") or "")
+                        if primary_stop not in {
+                            "worker_llm_call_cap",
+                            "worker_token_cap",
+                        }:
+                            raise
+                        primary_budget_reason = primary_stop
+                    except asyncio.TimeoutError:
+                        primary_budget_reason = "worker_primary_timeout"
         finally:
             tool_usage["tool_calls"] = len(tool_call_ids)
             tool_usage["tools_invoked"] = tools_invoked
@@ -778,6 +804,40 @@ class WorkerExecutorV2:
             if not structured_valid:
                 finalize_agent = resolve_finalize_only_worker(self.harness)
                 if finalize_agent is not None:
+                    lease_snapshot = self.session.budget_manager.worker_lease_snapshot(
+                        task.task_id
+                    )
+                    call_cap_reached = bool(
+                        lease_snapshot
+                        and lease_snapshot.get("llm_calls_used", 0)
+                        >= lease_snapshot.get("llm_calls_limit", 0)
+                    )
+                    if primary_budget_reason and call_cap_reached:
+                        grant = getattr(
+                            self.session.budget_manager,
+                            "grant_worker_finalization_call",
+                            None,
+                        )
+                        if not callable(grant) or not grant(task.task_id):
+                            structured_reason = "finalization_call_unavailable"
+                            return StepResult(
+                                step_type=step.step_type,
+                                content=content,
+                                metadata={
+                                    "step_index": step_index,
+                                    "task_id": task.task_id,
+                                    "worker_dispatch": "direct",
+                                    "tools_invoked": tools_invoked,
+                                    "tool_calls": len(tool_call_ids),
+                                    "final_ai_found": bool(content.strip()),
+                                    "structured_output_valid": False,
+                                    "finalization_retry_count": 0,
+                                    "raw_finding_count": raw_finding_count,
+                                    "stop_reason": primary_budget_reason,
+                                    "invalid_structured_output": True,
+                                    "error_code": structured_reason,
+                                },
+                            )
                     retry_count = 1
                     # The finalize-only agent has no retrieval capability. Retain
                     # only the user request and compact existing output so old tool
@@ -796,7 +856,7 @@ class WorkerExecutorV2:
                         {"role": "user", "content": build_strict_json_retry_instruction(step)},
                     ]
                     with gateway.execution_scope(
-                        phase="execute",
+                        phase="finalize",
                         worker_task_id=task.task_id,
                     ):
                         async for chunk in gateway.astream(
@@ -1121,6 +1181,25 @@ class WorkerExecutorV2:
             if remaining_sec > 0:
                 return max(10.0, min(float(timeout_sec), remaining_sec))
         return float(timeout_sec)
+
+    def _outer_timeout_for(self, step: Any, timeout_sec: float) -> float:
+        """Add one bounded finalizer window without exceeding the run deadline."""
+        # Runtime timeouts are clamped to at least 10 seconds by _timeout_for.
+        # Keep intentionally tiny test overrides intact so timeout/salvage
+        # integration tests do not unexpectedly wait for a production window.
+        if float(timeout_sec) < 10.0:
+            return float(timeout_sec)
+        if str(step.step_type) not in SUBAGENT_STEP_TYPES:
+            return float(timeout_sec)
+        finalizer_window = min(90.0, self._model_timeout_sec())
+        total = float(timeout_sec) + finalizer_window
+        budget_manager = self.session.budget_manager
+        remaining_method = getattr(budget_manager, "remaining_run_sec", None)
+        if callable(remaining_method):
+            remaining = float(remaining_method())
+            if remaining > 0 or float(getattr(budget_manager, "deadline_sec", 0) or 0) > 0:
+                return min(total, max(0.0, remaining))
+        return total
 
     def _record_direct_assistant(self, step: Any) -> None:
         assistant = str(step.subagent or "")

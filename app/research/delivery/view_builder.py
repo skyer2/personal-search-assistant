@@ -29,15 +29,36 @@ def build_answer_view(
         if refs and not item.direct_answer.startswith("当前证据不足"):
             direct = AnswerPoint(item.direct_answer.strip(), refs)
             reasoning = tuple(AnswerPoint(text.strip(), refs) for text in item.reasoning if text.strip())
-            views.append(QuestionView(item.question_id, title, direct, reasoning))
+            views.append(
+                QuestionView(
+                    item.question_id,
+                    title,
+                    direct,
+                    reasoning,
+                    " ".join(value.strip() for value in item.limitations if value.strip()),
+                )
+            )
         else:
             views.append(QuestionView(item.question_id, title, None, (), "缺少足以直接回答该问题的可发布证据。"))
+    used_source_ids = {
+        source_id
+        for question in views
+        for point in (
+            *((question.direct_answer,) if question.direct_answer else ()),
+            *question.reasoning,
+        )
+        for source_id in point.citation_source_ids
+    }
+    all_references = reference_views(evidence_records)
+    used_references = tuple(
+        reference for reference in all_references if reference.source_id in used_source_ids
+    )
     kind: Literal["complete", "partial"] = "complete" if all(item.direct_answer for item in views) else "partial"
     return AnswerViewModel(
         objective=answer.objective,
         kind=kind,
         questions=tuple(views),
-        references=reference_views(evidence_records),
+        references=used_references,
         summary=answer.overall_summary,
         limitations=tuple(answer.unresolved_questions),
     )

@@ -115,6 +115,16 @@ def test_selected_findings_project_numeric_claims_to_citations() -> None:
         False,
         "citation_invalid_number",
     )
+    # The research runner can assign a ledger-owned citation number to a
+    # recovered EvidenceRecord that the legacy citation collector did not see.
+    # It must validate that binding while continuing to reject arbitrary IDs.
+    ledger_numbered_report = report.replace("[1]", "[2]")
+    assert manager.validate_citations(
+        ledger_numbered_report, additional_valid_numbers=[2]
+    )[0] is True
+    assert manager.validate_citations(
+        ledger_numbered_report, additional_valid_numbers=[99]
+    ) == (False, "citation_invalid_number")
 
 
 def test_synthesis_output_removes_runtime_json_and_pdf_disclaimer() -> None:

@@ -927,12 +927,23 @@ class CitationManager:
         }
 
     def validate_citations(
-        self, final_content: str, min_coverage: float = 0.2
+        self,
+        final_content: str,
+        min_coverage: float = 0.2,
+        *,
+        additional_valid_numbers: Iterable[int] = (),
     ) -> tuple[bool, str]:
         metrics = self.compute_metrics(final_content)
         if metrics["registered_sources"] == 0:
             return True, ""
-        valid_numbers = set(self.source_number_map().values())
+        # The research runner may assign stable, run-local numbers to admitted
+        # EvidenceRecords that were not registered by the legacy citation
+        # collector (for example, recovered artifacts). The caller may pass
+        # those runtime-owned numbers; arbitrary model references are still
+        # rejected because this set comes from the evidence ledger.
+        valid_numbers = set(self.source_number_map().values()) | {
+            int(number) for number in additional_valid_numbers if int(number) > 0
+        }
         cited_numbers = {
             int(number)
             for number in CITATION_MARKER_PATTERN.findall(final_content)
@@ -944,11 +955,6 @@ class CitationManager:
         )
         if not closure_ok:
             return False, closure_reason
-        if (
-            "## 参考文献" not in final_content
-            and metrics["citation_coverage_rate"] < min_coverage
-        ):
-            return False, "citation_coverage_low"
         if metrics["citation_coverage_rate"] < min_coverage:
             return False, "citation_coverage_low"
         return True, ""

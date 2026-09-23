@@ -15,7 +15,12 @@ def render_final_view(view: AnswerViewModel, *, citation_numbers: dict[str, int]
         row.source_id: index for index, row in enumerate(view.references, 1)
     }
     lines = ["# 研究结论", ""]
-    if view.summary:
+    direct_answers = {
+        item.direct_answer.text.strip()
+        for item in view.questions
+        if item.direct_answer is not None
+    }
+    if view.summary and view.summary.strip() not in direct_answers:
         lines.extend([view.summary.strip(), ""])
     for item in view.questions:
         lines.extend([f"## {item.title}", ""])
@@ -29,6 +34,8 @@ def render_final_view(view: AnswerViewModel, *, citation_numbers: dict[str, int]
             lines.append("**依据**：")
             lines.extend(f"- {_point(point, numbers)}" for point in item.reasoning)
             lines.append("")
+        if item.limitation:
+            lines.extend([f"**限制与验证：** {item.limitation}", ""])
     if view.limitations:
         lines.extend(["## 主要限制", ""])
         lines.extend(f"- {item}" for item in view.limitations if item.strip())

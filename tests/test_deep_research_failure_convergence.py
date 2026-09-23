@@ -119,6 +119,40 @@ def test_worker_leases_reserve_only_in_flight_tokens() -> None:
     assert denied_reason == "worker_token_cap"
 
 
+def test_worker_token_lease_preserves_capacity_for_finalize_only_call():
+    manager = RunBudgetManager(token_limit=10_000, llm_call_limit=20)
+    lease, reason = manager.reserve_worker_lease(
+        "task-finalize-reserve", token_ceiling=1_000, max_llm_calls=4
+    )
+    assert lease and not reason
+
+    # Research calls are limited to 85% of the lease so a bounded finalizer
+    # can still run after the retrieval phase consumes its working allocation.
+    execute_id, execute_reason = manager.reserve_llm_call(
+        estimated_tokens=800,
+        worker_task_id="task-finalize-reserve",
+        phase="execute",
+    )
+    assert execute_id and not execute_reason
+    manager.commit_llm_usage(execute_id, 800)
+
+    denied, denied_reason = manager.reserve_llm_call(
+        estimated_tokens=51,
+        worker_task_id="task-finalize-reserve",
+        phase="execute",
+    )
+    assert denied == ""
+    assert denied_reason == "worker_token_cap"
+
+    finalize_id, finalize_reason = manager.reserve_llm_call(
+        estimated_tokens=200,
+        worker_task_id="task-finalize-reserve",
+        phase="finalize",
+    )
+    assert finalize_id and not finalize_reason
+    manager.commit_llm_usage(finalize_id, 200)
+
+
 def test_deep_debug_is_explicit_profile_without_changing_production_defaults() -> None:
     config = reload_harness_config()
 

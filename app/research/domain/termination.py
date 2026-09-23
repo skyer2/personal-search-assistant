@@ -13,9 +13,6 @@ from typing import Any, cast
 
 class FinalOutcome(StrEnum):
     SUCCESS = "success"
-    # Compatibility alias for persisted pre-v1 snapshots.  It serializes as
-    # ``success`` and is never emitted as a business terminal state.
-    DEGRADED_SUCCESS = "success"
     PARTIAL = "partial"
     FAILED = "failed"
     CANCELLED = "cancelled"

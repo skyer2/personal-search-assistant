@@ -164,8 +164,6 @@ def canonicalize_sources(
     groups: list[_CanonicalSource] = []
     alias_map: dict[str, str] = {}
     for raw in records or []:
-        if not isinstance(raw, dict):
-            continue
         row = dict(raw)
         url = _canonical_url(str(row.get("locator") or row.get("url") or ""))
         if not url:
@@ -408,8 +406,6 @@ def _build_view(
     }
     fallback_qid = questions[0][0] if len(questions) == 1 else ""
     for claim in claims or []:
-        if not isinstance(claim, dict):
-            continue
         text = str(
             claim.get("statement")
             or claim.get("text")
@@ -569,6 +565,7 @@ def build_partial_answer_view(
         delivery_note=(
             "本轮研究部分完成，仅展示已有证据能够确认的内容；"
             "完整模型综合未完成，因此属于降级部分交付。"
+            "未列出的内容不应视为已得到确认。"
         ),
     )
 

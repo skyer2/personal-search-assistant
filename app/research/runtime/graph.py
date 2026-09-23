@@ -6,6 +6,7 @@ RuntimePolicy. Legacy ResearchSpec/Coverage fields are projections only.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, cast
 
 from app.agent.harness.state import ExecutionPlan, PlanStep
@@ -17,7 +18,8 @@ from app.research.control.transitions import transition_update
 from app.research.coverage.judge import CoverageJudgement, judge_coverage
 from app.research.domain.contracts import WorkflowPhase
 from app.research.domain.task_state import initialize_tasks, retry_task
-from app.research.delivery.partial_renderer import render_partial_delivery, scrub_internal_ids
+from app.research.delivery.answer_renderer import render_answer
+from app.research.delivery.partial_renderer import scrub_internal_ids
 from app.research.runtime.ingestion import ingest_new_worker_results
 from app.research.runtime.task_identity import execution_task_id, semantic_fingerprint
 from app.research.routing.mode_router import canonicalize_mode
@@ -407,7 +409,10 @@ def synthesize_node(state: ResearchState) -> dict[str, Any]:
                 row for row in state.get("evidence_records") or [] if isinstance(row, dict)
             ],
         )
-        content = render_partial_delivery(view)
+        # The legacy graph recovery path is also used for restricted exports.
+        # Preserve numbered source bindings but do not leak raw locators into a
+        # partial answer body; full source metadata remains in the run ledger.
+        content = re.sub(r"https?://\S+", "", render_answer(view))
     else:
         content = scrub_internal_ids(
             "\n".join(

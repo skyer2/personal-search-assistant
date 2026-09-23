@@ -184,6 +184,20 @@ def _citation_numbers_by_evidence(manager: Any) -> dict[str, int]:
     return dict(manager.evidence_number_map())
 
 
+def _citation_numbers_for_evidence_records(
+    manager: Any, evidence_records: list[dict[str, Any]]
+) -> dict[str, int]:
+    """Return stable citation numbers for every canonical EvidenceRecord."""
+    numbers = _citation_numbers_by_evidence(manager)
+    next_number = max(numbers.values(), default=0) + 1
+    for record in evidence_records:
+        evidence_id = str(record.get("evidence_id") or "").strip()
+        if evidence_id and evidence_id not in numbers:
+            numbers[evidence_id] = next_number
+            next_number += 1
+    return numbers
+
+
 def _budget_snapshot(session: RunSession) -> dict[str, Any]:
     manager = session.budget_manager
     budget: dict[str, Any] = {
@@ -916,6 +930,13 @@ class ResearchGraphRunner:
 
                 plan_started = time.perf_counter()
                 approved_requests = [item.request for item in admission.approved]
+                def _ask_id_for_request(item: ResearchTaskRequest) -> str:
+                    if item.ask_id:
+                        return item.ask_id
+                    question_id = str(item.question_id or "")
+                    if question_id.startswith("q") and question_id[1:].isdigit():
+                        return brief.ask_id_for_question_index(int(question_id[1:]))
+                    return ""
                 steps = [
                     PlanStep(
                         step_type="research",
@@ -931,6 +952,7 @@ class ResearchGraphRunner:
                             "target_gaps": list(item.target_gaps),
                             "criterion_id": item.criterion_id,
                             "question_id": item.question_id,
+                            "ask_id": _ask_id_for_request(item),
                             "hypothesis_id": item.hypothesis_id,
                             "gap_id": item.gap_id,
                             "missing_evidence_types": list(item.missing_evidence_types),
@@ -961,7 +983,10 @@ class ResearchGraphRunner:
                             "token_ceiling": (
                                 budget_profile := task_budget_profile(item.estimated_effort)
                             ).token_ceiling,
-                            "max_llm_calls": min(int(item.max_llm_calls or 4), (
+                            # Preserve at least one finalize-only model round
+                            # after a retrieval/tool decision. This is still a
+                            # bounded worker lease, never an open-ended retry.
+                            "max_llm_calls": min(max(3, int(item.max_llm_calls or 4)), (
                                 max(
                                     budget_profile.max_llm_calls,
                                     session.worker_llm_call_limit(),
@@ -2120,18 +2145,11 @@ class ResearchGraphRunner:
             for row in claims
             if bool(row.get("validated")) and str(row.get("text") or row.get("claim") or "").strip()
         ]
-        citation_numbers = _citation_numbers_by_evidence(session.ctx.citation_manager)
-        # The report contract must remain self-contained when a caller does
-        # not install a CitationManager (for example the standalone live
-        # evaluator).  Preserve registered numbers, then assign stable local
-        # numbers to the remainder so every visible evidence binding can be
-        # resolved in the report and Trace.
-        next_citation_number = max(citation_numbers.values(), default=0) + 1
-        for record in evidence_records:
-            evidence_id = str(record.get("evidence_id") or "").strip()
-            if evidence_id and evidence_id not in citation_numbers:
-                citation_numbers[evidence_id] = next_citation_number
-                next_citation_number += 1
+        # Keep writer, deterministic recovery, and citation validation on the
+        # same evidence-ledger-derived numbering, including recovered records.
+        citation_numbers = _citation_numbers_for_evidence_records(
+            session.ctx.citation_manager, evidence_records
+        )
         # The writer's internal bindings use evidence aliases, while the final
         # delivery model deliberately cites canonical sources.  Preserve the
         # same stable number at that presentation boundary.
@@ -2588,10 +2606,10 @@ class ResearchGraphRunner:
                 "answer_recovery.started",
                 phase=WorkflowPhase.SYNTHESIS.value,
                 status="start",
-                attributes={"mode": "deterministic_recovery"},
+                attributes={"mode": "evidence_bound_recovery"},
             )
             if answer_complete:
-                recovery_mode = "deterministic_recovery"
+                recovery_mode = "evidence_bound_recovery"
                 content = render_final_view(
                     build_answer_view(
                         answer=recovered,
@@ -2614,7 +2632,7 @@ class ResearchGraphRunner:
                     "answer_recovery.completed",
                     phase=WorkflowPhase.SYNTHESIS.value,
                     status="failed",
-                    attributes={"mode": "deterministic_recovery", "answer_complete": False},
+                    attributes={"mode": "evidence_bound_recovery", "answer_complete": False},
                 )
             _emit(
                 session,
@@ -2656,7 +2674,10 @@ class ResearchGraphRunner:
             # evidence-first answer locally and send it through the same
             # citation builder before Quality Gate.
             try:
-                cited_ok, _ = manager.validate_citations(content)
+                cited_ok, _ = manager.validate_citations(
+                    content,
+                    additional_valid_numbers=source_citation_numbers.values(),
+                )
             except Exception:
                 cited_ok = True
             if not cited_ok and answerability.answerable:
@@ -2669,7 +2690,7 @@ class ResearchGraphRunner:
                 )
                 completeness = assess_answer_completeness(recovered, brief)
                 if completeness.complete:
-                    recovery_mode = "deterministic_recovery"
+                    recovery_mode = "evidence_bound_recovery"
                     answer_contract = {
                         "final_answer": recovered.to_dict(),
                         "completeness": completeness.to_dict(),
@@ -2691,7 +2712,7 @@ class ResearchGraphRunner:
                         "answer_recovery.completed",
                         phase=WorkflowPhase.SYNTHESIS.value,
                         status="ok",
-                        attributes={"mode": "deterministic_recovery", "reason": "citation_coverage_low"},
+                        attributes={"mode": "evidence_bound_recovery", "reason": "citation_coverage_low"},
                     )
         note_substep_duration(
             session.state,
@@ -2718,7 +2739,16 @@ class ResearchGraphRunner:
                     "successful_pack_tokens": successful_pack_tokens,
                     "synthesis_attempt_metrics": attempt_metrics,
                     "synthesis_fail_reason": result.fail_reason,
-                    "fallback_used": "deterministic_partial" if fallback else recovery_mode,
+                    # ``answer_contract`` records that evidence-bound
+                    # recovery ran, even when it correctly declined to claim
+                    # a complete answer and the partial renderer delivered
+                    # the remaining limitations.
+                    "fallback_used": (
+                        recovery_mode
+                        or "deterministic_recovery"
+                        if answer_contract
+                        else "deterministic_partial"
+                    ) if fallback else recovery_mode,
                     "answerability": answerability.to_dict(),
                     "answer_complete": answer_complete,
                     "answer_contract": answer_contract,
@@ -2729,9 +2759,13 @@ class ResearchGraphRunner:
             )
         _emit(
             session,
-            "synthesis.completed" if not fallback else "synthesis.failed",
+            # A provider may fail after the runtime has already produced an
+            # evidence-bound, answerable delivery.  Record that delivery as a
+            # completed *degraded* synthesis; keep a pure evidence/salvage
+            # fallback as failed so primary success is never fabricated.
+            "synthesis.completed" if (not fallback or answerability.answerable) else "synthesis.failed",
             phase=WorkflowPhase.SYNTHESIS.value,
-            status="ok" if not fallback else "failed",
+            status="ok" if not fallback else "degraded" if answerability.answerable else "failed",
             attempt=attempts_before + (2 if retried else 1),
             duration_ms=result.duration_ms,
             attributes={
@@ -2854,7 +2888,17 @@ class ResearchGraphRunner:
         citation_reason = ""
         manager = session.ctx.citation_manager
         if manager is not None and content:
-            citation_valid, citation_reason = manager.validate_citations(content)
+            evidence_records = [
+                dict(row)
+                for row in gstate.get("evidence_records") or []
+                if isinstance(row, dict)
+            ]
+            citation_numbers = _citation_numbers_for_evidence_records(
+                manager, evidence_records
+            )
+            citation_valid, citation_reason = manager.validate_citations(
+                content, additional_valid_numbers=citation_numbers.values()
+            )
             if not citation_valid:
                 issues.append(citation_reason or "citation_validation_failed")
         # Provider reports created before the v1 answer schema are upgraded at
@@ -2983,7 +3027,11 @@ class ResearchGraphRunner:
                 if repairable
                 else "finalize_success"
                 if verdict == "pass"
-                else "finalize_partial"
+                # ``deliver_partial`` is the canonical control-plane action
+                # for an evidence-backed incomplete answer.  The graph still
+                # finalizes next; retaining this name keeps the event, UI and
+                # deterministic runtime policy on one public contract.
+                else "deliver_partial"
                 if verdict == "partial"
                 else "finalize_failure"
             ),

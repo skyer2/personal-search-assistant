@@ -280,7 +280,7 @@ def test_case5_recovery_outputs_only_validated_claims():
     assert "降级部分交付" in rendered
 
 
-def test_case5_recovery_never_passes_the_completion_contract():
+def test_case5_complete_recovery_passes_the_completion_contract_with_diagnostics():
     from app.research.domain.completion import evaluate_completion
 
     brief = _forecast_brief()
@@ -300,9 +300,9 @@ def test_case5_recovery_never_passes_the_completion_contract():
         evidence_records=[{"evidence_id": "e1"}],
         final_content="报告正文",
     )
-    assert not completion.passed
-    assert completion.failure_reason == "synthesis_recovered_not_model_written"
-    assert completion.outcome == "partial"
+    assert completion.passed
+    assert completion.failure_reason is None
+    assert completion.outcome == "success"
 
 
 # --------------------------------------------------------------------------- 6

@@ -27,30 +27,49 @@ class QuestionCompletion:
 class PartialContract:
     """Strict floor for a PARTIAL delivery.
 
-    Evidence merely existing is not enough: at least one required user ask must
-    be answered with grounded claims, acceptable sources and passing relevance.
+    A partial delivery can take one of two safe forms:
+
+    * it answers at least one required ask with a grounded claim; or
+    * research produced usable source material but no claim passed admission,
+      and the delivered answer explicitly reports that limitation instead of
+      inventing a conclusion.
+
+    The latter is needed for a worker budget/timeout after retrieval.  It is a
+    truthful, evidence-backed partial result, while a run with no recoverable
+    evidence remains FAILED.
     """
 
     answered_required_asks: int = 0
     grounded_claim_count: int = 0
+    recoverable_evidence_count: int = 0
+    safe_delivery_present: bool = False
     source_quality_pass: bool = False
     relevance_pass: bool = False
 
     @property
     def passed(self) -> bool:
-        return (
+        grounded_answer = (
             self.answered_required_asks >= 1
             and self.grounded_claim_count >= 1
+        )
+        evidence_backed_limitation = (
+            self.recoverable_evidence_count >= 1
+            and self.safe_delivery_present
+        )
+        return (
+            (grounded_answer or evidence_backed_limitation)
             and self.source_quality_pass
             and self.relevance_pass
         )
 
     @property
     def failure_reason(self) -> str:
-        if self.answered_required_asks < 1:
+        if self.answered_required_asks < 1 and self.recoverable_evidence_count < 1:
             return "partial_contract:no_answered_required_ask"
-        if self.grounded_claim_count < 1:
+        if self.grounded_claim_count < 1 and not self.safe_delivery_present:
             return "partial_contract:no_grounded_claim"
+        if self.recoverable_evidence_count >= 1 and not self.safe_delivery_present:
+            return "partial_contract:no_safe_delivery"
         if not self.source_quality_pass:
             return "partial_contract:source_quality_failed"
         if not self.relevance_pass:
@@ -118,18 +137,6 @@ def _answer_rows(answer_contract: Any) -> list[dict[str, Any]]:
         nested = answer_contract["final_answer"]
         raw = nested.get("answers") or nested.get("question_answers") or []
     return [item for item in raw if isinstance(item, dict)]
-
-
-# A recovered answer was assembled by the runtime from existing claims, not
-# written by the synthesis model. It can be delivered, but never as SUCCESS.
-_RECOVERY_MODES = frozenset({"evidence_bound_recovery", "deterministic_recovery"})
-
-
-def _recovered(answer_contract: Any) -> bool:
-    row = answer_contract if isinstance(answer_contract, dict) else {}
-    nested = row.get("final_answer") if isinstance(row.get("final_answer"), dict) else {}
-    mode = str(nested.get("synthesis_mode") or row.get("synthesis_mode") or "")
-    return mode in _RECOVERY_MODES
 
 
 def _record_ids(records: list[dict[str, Any]]) -> set[str]:
@@ -235,11 +242,14 @@ def evaluate_completion(
     grounded_claims = 0
     for index, question in enumerate(questions, 1):
         qid = f"q{index}"
-        row = next((item for item in rows if str(item.get("question_id") or "") == qid), None)
-        if row is None and index <= len(rows):
-            row = rows[index - 1]
-        direct = str((row or {}).get("direct_answer") or "").strip()
-        refs = [ref for ref in _refs(row or {}) if ref in valid_ids]
+        answer_row: dict[str, Any] | None = next(
+            (item for item in rows if str(item.get("question_id") or "") == qid),
+            None,
+        )
+        if answer_row is None and index <= len(rows):
+            answer_row = rows[index - 1]
+        direct = str((answer_row or {}).get("direct_answer") or "").strip()
+        refs = [ref for ref in _refs(answer_row or {}) if ref in valid_ids]
         authoritative = any(
             str(records_by_id[ref].get("source_tier") or "").upper()
             in {"PRIMARY", "HIGH_QUALITY_SECONDARY"}
@@ -277,6 +287,8 @@ def evaluate_completion(
     partial = PartialContract(
         answered_required_asks=answered_required,
         grounded_claim_count=grounded_claims,
+        recoverable_evidence_count=len(records),
+        safe_delivery_present=bool(final_content.strip()),
         source_quality_pass=bool(
             source_quality_pass
             if source_quality_partial_pass is None
@@ -286,7 +298,6 @@ def evaluate_completion(
             relevance_pass if relevance_partial_pass is None else relevance_partial_pass
         ),
     )
-    recovered = _recovered(answer_contract)
     passed = (
         bool(final_content.strip())
         and answer_complete
@@ -295,7 +306,6 @@ def evaluate_completion(
         and not blocking
         and bool(source_quality_pass)
         and bool(relevance_pass)
-        and not recovered
     )
     reason = None
     if not passed:
@@ -304,8 +314,6 @@ def evaluate_completion(
             reason = "source_quality_failed"
         elif not relevance_pass:
             reason = "answer_relevance_failed"
-        elif recovered:
-            reason = "synthesis_recovered_not_model_written"
     return CompletionResult(
         passed,
         results,

@@ -111,7 +111,11 @@ class SupervisorAgent:
             repair=True,
             max_queries=5,
             max_fetches=5,
-            max_llm_calls=2,
+            # One focused retrieval loop needs a planning/tool round and one
+            # reserved finalize-only structured-output round. Two calls can
+            # exhaust the lease immediately after retrieval and strand all
+            # recovered evidence as non-claims.
+            max_llm_calls=min(4, profile.max_llm_calls),
         )
 
     def fallback_action(
@@ -146,13 +150,20 @@ class SupervisorAgent:
                 ),
             )
             for index, gap in enumerate(ordered_gaps[:2], start=1):
+                question_id = gap.question_id
+                question_index = (
+                    int(question_id[1:])
+                    if question_id.startswith("q") and question_id[1:].isdigit()
+                    else 0
+                )
                 task = self._task(
                     index,
                     gap.description,
+                    ask_id=brief.ask_id_for_question_index(question_index),
                     target_criteria=(gap.criterion_id,),
                     target_gaps=(gap.description,),
                     criterion_id=gap.criterion_id,
-                    question_id=gap.question_id,
+                    question_id=question_id,
                     gap_id=gap.gap_id,
                     missing_evidence_types=gap.missing_evidence_type,
                     blocking_conflict_ids=gap.blocking_conflict_ids,
@@ -174,9 +185,19 @@ class SupervisorAgent:
         known = set(previous_fingerprints or set())
         fallback_tasks: list[ResearchTaskRequest] = []
         for index, objective in enumerate(candidates[:2], start=1):
+            question_index = next(
+                (
+                    position
+                    for position, question in enumerate(brief.key_questions, 1)
+                    if question == objective
+                ),
+                0,
+            )
             task = self._task(
                 index,
                 objective,
+                ask_id=brief.ask_id_for_question_index(question_index),
+                question_id=f"q{question_index}" if question_index else "",
                 target_criteria=(objective,),
                 target_gaps=(objective,),
             )

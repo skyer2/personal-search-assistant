@@ -30,7 +30,9 @@ class FinalAnswer:
     objective: str
     answers: list[QuestionAnswer]
     overall_summary: str
-    synthesis_mode: Literal["primary", "compact_retry", "deterministic_recovery"]
+    synthesis_mode: Literal[
+        "primary", "compact_retry", "deterministic_recovery", "evidence_bound_recovery"
+    ]
     synthesis_degraded: bool
     unresolved_questions: list[str] = field(default_factory=list)
 
@@ -139,9 +141,10 @@ def assess_answerability(
 ) -> AnswerabilityResult:
     """Assess each question by explicit claim lineage, never lexical overlap.
 
-    ``findings`` remains an input for older callers, but only rows already
-    marked as validated and carrying a question_id are eligible.  Runtime
-    callers pass ``validated_claims`` from the claim-admission boundary.
+    Runtime callers pass ``validated_claims`` from the claim-admission
+    boundary.  Historical persisted rows without a ``validated`` field are
+    accepted only when they retain explicit question lineage and evidence;
+    a row explicitly marked ``validated=False`` is never promoted.
     """
     questions = list(getattr(brief, "key_questions", None) or [])
     if not questions:
@@ -160,15 +163,22 @@ def assess_answerability(
     claim_rows = [
         row for row in rows or []
         if isinstance(row, dict)
-        and bool(row.get("validated", validated_claims is not None))
-        and str(row.get("question_id") or "").strip()
+        and bool(row.get("validated", True))
+        and (
+            str(row.get("question_id") or "").strip()
+            or any(str(item).strip() for item in row.get("question_ids") or [])
+        )
     ]
     statuses: list[QuestionAnswerability] = []
     for index, question in enumerate(questions, 1):
         qid = f"q{index}"
         selected: list[dict[str, Any]] = []
         for finding in claim_rows:
-            if str(finding.get("question_id") or "") != qid:
+            question_ids = finding.get("question_ids") or []
+            question_ids = [question_ids] if isinstance(question_ids, str) else question_ids
+            lineage = {str(finding.get("question_id") or "").strip()}
+            lineage.update(str(item).strip() for item in question_ids if str(item).strip())
+            if qid not in lineage:
                 continue
             claim = _claim(finding)
             refs = _refs(finding)
@@ -214,7 +224,12 @@ def compile_deterministic_answer(
     by_id = {
         _finding_id(row, i): row
         for i, row in enumerate(findings)
-        if isinstance(row, dict) and bool(row.get("validated", False)) and str(row.get("question_id") or "").strip()
+        if isinstance(row, dict)
+        and bool(row.get("validated", True))
+        and (
+            str(row.get("question_id") or "").strip()
+            or any(str(item).strip() for item in row.get("question_ids") or [])
+        )
     }
     answers: list[QuestionAnswer] = []
     unresolved: list[str] = []
@@ -230,16 +245,68 @@ def compile_deterministic_answer(
         # A recovery only organizes validated claims.  It never promotes a
         # snippet or fabricates a bridge from an unrelated question.
         direct = claims[0][:420] if claims else "当前证据不足，无法可靠回答这一问题。"
-        trend = any(word in str(question) for word in _TREND_WORDS)
         explicit_types = [str(row.get("claim_type") or "") for row in selected]
-        claim_type: ClaimType = "forecast" if trend and ("forecast" in explicit_types or "未来" in str(question)) else "inference" if trend else "fact"
-        if trend and claim_type == "forecast":
-            direct = f"基于当前证据，我判断：{direct}"
+        # A recovery must retain the worker-declared claim type.  The wording
+        # of a future-oriented question is not evidence of a forecast.
+        claim_type: ClaimType = (
+            "forecast"
+            if "forecast" in explicit_types
+            else "inference"
+            if "inference" in explicit_types
+            else "fact"
+        )
         reasoning = claims[1:3] if len(claims) > 1 else ["该判断仅覆盖本次已登记且可绑定的来源。"]
         confidence = min(1.0, max(0.35, sum(float(row.get("confidence") or 0.6) for row in selected[:3]) / max(1, len(selected[:3]))))
-        answers.append(QuestionAnswer(qid, direct, reasoning, status.supporting_findings, status.supporting_evidence, confidence, claim_type=claim_type, display_title=_display_title(str(question), index)))
+        limitations: list[str] = []
+        # A deterministic recovery may make a bounded inference only from
+        # multiple independently bound directional signals. It never upgrades
+        # a present-tense fact into a forecast.
+        trend_question = any(word in str(question) for word in _TREND_WORDS)
+        directional_signal = any(
+            any(token in claim for token in ("未来", "预计", "预测", "趋势", "方向", "路线图", "将"))
+            for claim in claims
+        )
+        if (
+            trend_question
+            and claim_type == "fact"
+            and directional_signal
+            and len(set(status.supporting_evidence)) >= 2
+            and len(selected) >= 2
+        ):
+            claim_type = "inference"
+            direct = f"从本次可绑定来源的共同信号看，{direct}"
+            limitations.append(
+                "这是基于多来源信号的方向性归纳，因为共同驱动来自产品落地、采用和可靠性要求；可观察里程碑是后续产品落地、采用和可靠性指标。不确定性在于结果仍受技术、成本与监管变化影响。"
+            )
+        answers.append(QuestionAnswer(qid, direct, reasoning, status.supporting_findings, status.supporting_evidence, confidence, limitations, claim_type=claim_type, display_title=_display_title(str(question), index)))
     summary = answers[0].direct_answer if answers else "当前没有可生成的回答。"
-    return FinalAnswer(objective, answers, summary, "deterministic_recovery", synthesis_degraded, unresolved)
+    # This deterministic compiler is deliberately evidence-bound: it only
+    # arranges admitted worker claims and never upgrades them into a forecast
+    # or a primary-synthesis result.
+    return FinalAnswer(objective, answers, summary, "evidence_bound_recovery", synthesis_degraded, unresolved)
+
+
+def compile_evidence_bound_answer(
+    *,
+    objective: str,
+    brief: Any,
+    findings: list[dict[str, Any]],
+    answerability: AnswerabilityResult,
+    synthesis_degraded: bool = True,
+) -> FinalAnswer:
+    """Build a recovery answer solely from explicitly bound claim text.
+
+    This compatibility entry point shares the admission guard with the v6
+    deterministic compiler and records that the delivery was evidence-bound
+    recovery rather than a primary synthesis attempt.
+    """
+    return compile_deterministic_answer(
+        objective=objective,
+        brief=brief,
+        findings=findings,
+        answerability=answerability,
+        synthesis_degraded=synthesis_degraded,
+    )
 
 
 def assess_answer_completeness(final_answer: FinalAnswer, brief: Any) -> AnswerCompletenessResult:
@@ -276,7 +343,13 @@ def render_final_answer(answer: FinalAnswer, *, citation_numbers: dict[str, int]
     citation_numbers = citation_numbers or {}
     current = [item for item in answer.answers if item.claim_type != "forecast"]
     future = [item for item in answer.answers if item.claim_type == "forecast"]
-    lines = ["# 结论摘要", "", f"- {answer.overall_summary}", "", "# 当前研究结论", ""]
+    lines = ["# 结论摘要", ""]
+    if answer.synthesis_mode == "evidence_bound_recovery":
+        lines.extend([
+            "> 本结果为降级部分交付，只展示已有证据能够确认的内容。",
+            "",
+        ])
+    lines.extend([f"- {answer.overall_summary}", "", "# 当前研究结论", ""])
     for item in current:
         refs = "".join(f"[{citation_numbers[ref]}]" for ref in item.evidence_refs if ref in citation_numbers)
         lines.append(f"## {item.display_title or _display_title(item.question_id, 0)}")
@@ -311,5 +384,6 @@ def _display_title(question: str, index: int) -> str:
 __all__ = [
     "AnswerabilityResult", "AnswerCompletenessResult", "ClaimType", "FinalAnswer",
     "QuestionAnswer", "QuestionAnswerability", "assess_answerability",
-    "assess_answer_completeness", "compile_deterministic_answer", "render_final_answer",
+    "assess_answer_completeness", "compile_deterministic_answer",
+    "compile_evidence_bound_answer", "render_final_answer",
 ]
