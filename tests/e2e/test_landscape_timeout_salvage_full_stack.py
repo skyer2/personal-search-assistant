@@ -75,7 +75,8 @@ def test_landscape_timeout_salvage_reaches_partial_pdf_and_run_download(tmp_path
     assert len(summary["plans"]) == 1
     assert all(row["execution_status"] == "stopped" for row in summary["workers"])
     assert all(row["result_status"] == "partial" for row in summary["workers"])
-    assert all(row["evidence_ids"] for row in summary["workers"])
+    assert all(not any(str(item).startswith(("art-", "artifact:")) for item in row["evidence_ids"]) for row in summary["workers"])
+    assert all(row["artifact_ids"] for row in summary["workers"])
     assert all(row["fail_reason"] == "worker_timeout" for row in summary["workers"])
     assert {row["attempt"] for row in summary["workers"]} == {1}
 

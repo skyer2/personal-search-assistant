@@ -113,6 +113,8 @@ def split_task(task: Any, *, query_budget: int = DEFAULT_WORKER_QUERY_BUDGET) ->
             item.metadata = metadata
         metadata["entities"] = entity_group if entity_group != [""] else []
         metadata["coverage_keys"] = dimension_group if dimension_group != [""] else []
+        metadata["dimensions"] = dimension_group if dimension_group != [""] else []
+        metadata["all_dimensions"] = dimension_group if dimension_group != [""] else []
         metadata["estimated_queries"] = min(max(1, estimated_queries(task, 1)), max(1, int(query_budget * 0.7)))
         metadata["bounded_split_from"] = _task_id(task)
         bounded_id = _task_id(task) if index == 1 else f"{_task_id(task)}_b{index}"

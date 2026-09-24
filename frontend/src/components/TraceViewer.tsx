@@ -79,6 +79,21 @@ function asText(value: unknown, fallback = "-"): string {
   return String(value);
 }
 
+function formatWorkerBudget(value: unknown): string {
+  if (!value || typeof value !== "object") return "—";
+  const row = value as Record<string, unknown>;
+  const pairs: Array<[string, string, string]> = [
+    ["搜索", "search_queries_used", "search_queries_limit"],
+    ["Fetch", "fetch_sources_used", "fetch_sources_limit"],
+    ["LLM", "llm_calls_used", "llm_calls_limit"],
+    ["Tokens", "tokens_used", "token_limit"]
+  ];
+  return pairs
+    .filter(([, used, limit]) => row[used] != null || row[limit] != null)
+    .map(([label, used, limit]) => `${label} ${asText(row[used], "0")}/${asText(row[limit], "?")}`)
+    .join(" · ") || "—";
+}
+
 function SpanTree({
   nodes,
   selectedSpanId,
@@ -300,6 +315,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
   const evals = summary.evals || [];
   const plans = summary.plans || [];
   const synthesis = summary.synthesis || [];
+  const insights = summary.insights || [];
   const claimEvidenceBindings = useMemo(() => synthesis.flatMap((row) => {
     const bindings = (row as Record<string, unknown>).claim_evidence_bindings;
     return Array.isArray(bindings)
@@ -316,6 +332,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
     ? coverageJudgements[coverageJudgements.length - 1]
     : null;
   const failureOrigin = summary.failure_origin || null;
+  const diagnosis = summary.run_diagnosis as Record<string, unknown> | undefined;
   const integrity = summary.trace_integrity || null;
   const progressCount = summary.progress_count ?? progress.length;
   const latency = summary.latency || null;
@@ -365,7 +382,6 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
           <Typography.Text type="secondary">
             session={summary.identity?.session_id || sessionId}
             {summary.identity?.run_id || selectedRunId ? ` · run=${summary.identity?.run_id || selectedRunId}` : ""}
-            {summary.identity?.trace_id ? ` · trace=${String(summary.identity.trace_id).slice(0, 12)}` : ""}
             {summary.identity?.git_sha ? ` · build=${String(summary.identity.git_sha).slice(0, 8)}` : ""}
             {summary.identity?.config_hash ? ` · config=${String(summary.identity.config_hash).slice(0, 8)}` : ""}
           </Typography.Text>
@@ -423,9 +439,6 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                   />
                 ) : null}
                 <Space wrap style={{ marginBottom: 12 }}>
-                  <Tag color={brief?.semantic_fidelity_passed === true ? "green" : brief?.semantic_fidelity_passed === false ? "red" : "default"}>
-                    Semantic Fidelity: {brief?.semantic_fidelity_passed === true ? "PASS" : brief?.semantic_fidelity_passed === false ? "FAIL" : "N/A"}
-                  </Tag>
                   <Tag color={latestCoverage?.status === "sufficient" ? "green" : latestCoverage ? "red" : "default"}>
                     Research Coverage: {latestCoverage ? asText(latestCoverage.status).toUpperCase() : "N/A"}
                   </Tag>
@@ -486,9 +499,30 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     />
                   </Card>
                 ) : null}
+                {diagnosis ? (
+                  <Alert
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    type={diagnosis.status === "error" ? "error" : diagnosis.status === "warning" ? "warning" : "success"}
+                    message={`首个质量退化阶段：${asText(diagnosis.earliest_quality_degradation_stage, "未发现")}`}
+                    description={[
+                      asText(diagnosis.summary, ""),
+                      Array.isArray(diagnosis.failure_chain) ? diagnosis.failure_chain.join(" → ") : ""
+                    ].filter(Boolean).join(" · ")}
+                  />
+                ) : null}
+                {latestQuality?.strict_semantic_review ? (
+                  <Alert
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    type={(latestQuality.strict_semantic_review as Record<string, unknown>).status === "PASS" ? "success" : "warning"}
+                    message={`Fallback 严格语义复核：${asText((latestQuality.strict_semantic_review as Record<string, unknown>).status)}`}
+                    description={asText((latestQuality.strict_semantic_review as Record<string, unknown>).checks)}
+                  />
+                ) : null}
                 {brief ? (
                   <Typography.Paragraph>
-                    Brief {asText(brief.brief_id)} · dims={(brief.dimensions as string[] | undefined)?.join(", ") || "-"}
+                  用户目标：{asText(brief.objective)}
                   </Typography.Paragraph>
                 ) : (
                   <Alert message={loadState === "loaded" ? "已加载：未写入 brief.compiled" : "Trace 未加载，Brief 状态未知"} showIcon type="info" />
@@ -507,23 +541,9 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                   <ResizableTable
                     dataSource={[
                       { key: "objective", field: "objective", value: asText(brief.objective) },
-                      { key: "entities", field: "entities", value: asText((brief.entities as string[] | undefined)?.join(", ")) },
-                      { key: "dimensions", field: "dimensions", value: asText((brief.dimensions as string[] | undefined)?.join(", ")) },
-                      { key: "depth", field: "depth", value: asText(brief.depth) },
-                      { key: "freshness", field: "freshness", value: asText(brief.freshness) },
-                      { key: "deliverable", field: "deliverable", value: asText(brief.deliverable) },
-                      { key: "brief_source", field: "brief_source", value: asText(brief.brief_source) },
-                      { key: "brief_fallback_reason", field: "brief_fallback_reason", value: asText(brief.brief_fallback_reason) },
-                      { key: "original_ask_count", field: "original_ask_count", value: asText(brief.original_ask_count) },
-                      { key: "research_question_count", field: "research_question_count", value: asText(brief.research_question_count) },
-                      { key: "semantic_fidelity_score", field: "semantic_fidelity_score", value: asText(brief.semantic_fidelity_score) },
-                      { key: "brief_ref", field: "brief_ref", value: asText(brief.brief_ref) },
-                      { key: "topology", field: "topology", value: asText(topology?.topology) },
-                      {
-                        key: "topology_reasons",
-                        field: "topology_reasons",
-                        value: asText((topology?.reasons as string[] | undefined)?.join("; "))
-                      }
+                      { key: "objective", field: "用户目标", value: asText(brief.objective) },
+                      { key: "questions", field: "研究问题", value: asText(brief.key_questions) },
+                      { key: "criteria", field: "成功标准", value: asText(brief.success_criteria) }
                     ]}
                     pagination={false}
                     size="small"
@@ -544,20 +564,25 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                 {plans.length === 0 ? (
                   <Alert message={loadState === "loaded" ? "已加载：未写入 plan.created 语义字段" : "Trace 未加载，Plan 状态未知"} showIcon type="info" />
                 ) : (
+                  <>
+                  {plans.some((row) => Array.isArray(row.validation_issues) && row.validation_issues.length > 0) ? (
+                    <Alert type="error" showIcon style={{ marginBottom: 12 }} message="Plan Validation = FAIL；该计划不得派发 Worker" description={asText(plans.flatMap((row) => Array.isArray(row.validation_issues) ? row.validation_issues : []))} />
+                  ) : null}
                   <ResizableTable
-                    dataSource={plans.map((row, index) => ({ ...row, key: `${String(row.plan_id || "p")}-${index}` }))}
+                    dataSource={plans.flatMap((row, index) => {
+                      const specs = Array.isArray(row.task_specs) ? row.task_specs as Record<string, unknown>[] : [];
+                      return specs.length ? specs.map((spec, taskIndex) => ({ ...spec, plan_version: row.plan_version, planning_mode: row.planning_mode, key: `${String(row.plan_id || "p")}-${taskIndex}` })) : [{ ...row, key: `${String(row.plan_id || "p")}-${index}` }];
+                    })}
                     pagination={{ pageSize: 8 }}
                     size="small"
                     columns={[
-                      { title: "Plan", dataIndex: "plan_id", width: 140, key: "plan_id" },
-                      { title: "Brief", dataIndex: "brief_id", width: 140, key: "brief_id" },
-                      { title: "Tasks", dataIndex: "task_count", width: 80, key: "task_count" },
-                      {
-                        title: "Task IDs",
-                        dataIndex: "task_ids",
-                        key: "task_ids",
-                        render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.join(", ") : asText(value)}</div>
-                      },
+                      { title: "Task", dataIndex: "task_id", width: 180, key: "task_id" },
+                      { title: "Question", dataIndex: "question_id", width: 100, key: "question_id" },
+                      { title: "Objective", dataIndex: "objective", width: 300, key: "objective", render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div> },
+                      { title: "Dimensions", dataIndex: "dimensions", width: 250, key: "dimensions", render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div> },
+                      { title: "Evidence Needed", dataIndex: "evidence_needed", width: 240, key: "evidence_needed", render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div> },
+                      { title: "Counter Evidence", dataIndex: "counter_evidence_needed", width: 220, key: "counter_evidence_needed", render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div> },
+                      { title: "Budget", key: "budget", width: 150, render: (_: unknown, row: Record<string, unknown>) => `Search ${asText(row.max_queries)} · Fetch ${asText(row.max_fetches)} · LLM ${asText(row.max_llm_calls)}` },
                       {
                         title: "Coverage missing",
                         dataIndex: "brief_coverage",
@@ -569,6 +594,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       }
                     ]}
                   />
+                  </>
                 )}
               </Card>
             )
@@ -587,36 +613,8 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                     size="small"
                     columns={[
                       { title: "Task", dataIndex: "task_id", width: 180, key: "task_id" },
-                      {
-                        title: "Status",
-                        dataIndex: "status",
-                        width: 90,
-                        key: "status",
-                        render: (status: unknown) => <Tag color={statusColor(status)}>{asText(status)}</Tag>
-                      },
-                      { title: "s", dataIndex: "duration_ms", width: 100, key: "duration_ms", render: (value: unknown) => formatDurationSeconds(value) },
-                      { title: "Attempt", dataIndex: "attempt", width: 90, key: "attempt" },
-                      {
-                        title: "Execution",
-                        dataIndex: "execution_status",
-                        width: 110,
-                        key: "execution_status",
-                        render: (value: unknown) => <Tag color={statusColor(value)}>{asText(value)}</Tag>
-                      },
-                      {
-                        title: "Result",
-                        dataIndex: "result_status",
-                        width: 100,
-                        key: "result_status",
-                        render: (value: unknown) => <Tag color={value === "partial" ? "orange" : statusColor(value)}>{asText(value)}</Tag>
-                      },
-                      {
-                        title: "Plan",
-                        dataIndex: "plan_version",
-                        width: 80,
-                        key: "plan_version",
-                        render: (version: unknown) => (version == null || version === "" ? "-" : `v${version}`)
-                      },
+                      { title: "Time", dataIndex: "duration_ms", width: 90, key: "duration_ms", render: (value: unknown) => formatDurationSeconds(value) },
+                      { title: "Outcome", dataIndex: "outcome", width: 100, key: "outcome", render: (value: unknown) => <Tag color={statusColor(value)}>{asText(value).toUpperCase()}</Tag> },
                       {
                         title: "Evidence",
                         dataIndex: "evidence_ids",
@@ -631,55 +629,10 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                         key: "objective",
                         render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div>
                       },
-                      {
-                        title: "Fail",
-                        dataIndex: "fail_reason",
-                        width: 180,
-                        key: "fail_reason",
-                        render: (value: unknown) => <div className="table-wrap-cell">{asText(value, "")}</div>
-                      },
-                      {
-                        title: "Budget",
-                        dataIndex: "budget_scope",
-                        width: 180,
-                        key: "budget",
-                        render: (_value: unknown, row: Record<string, unknown>) => {
-                          const scope = asText(row.budget_scope, "");
-                          if (!scope) return <div className="table-wrap-cell">—</div>;
-                          return (
-                            <div className="table-wrap-cell">
-                              {scope} / {asText(row.budget_resource, "")}
-                              <br />
-                              {asText(row.budget_reason, "")}
-                            </div>
-                          );
-                        }
-                      },
-                      {
-                        title: "Used / Limit",
-                        dataIndex: "budget_used",
-                        width: 120,
-                        key: "budget_used",
-                        render: (_value: unknown, row: Record<string, unknown>) => (
-                          <div className="table-wrap-cell">
-                            {row.budget_used == null ? "—" : `${asText(row.budget_used)} / ${asText(row.budget_limit, "?")}`}
-                          </div>
-                        )
-                      },
-                      {
-                        title: "Last Tool Error",
-                        dataIndex: "last_tool_error",
-                        width: 180,
-                        key: "last_tool_error",
-                        render: (value: unknown) => {
-                          if (!value) return <div className="table-wrap-cell">—</div>;
-                          if (typeof value === "object") {
-                            const row = value as { tool?: unknown; error?: unknown };
-                            return <div className="table-wrap-cell">{`${asText(row.tool, "")}: ${asText(row.error, "")}`}</div>;
-                          }
-                          return <div className="table-wrap-cell">{asText(value, "")}</div>;
-                        }
-                      }
+                      { title: "Stop Reason", dataIndex: "stop_reason", width: 190, key: "stop_reason", render: (value: unknown, row: Record<string, unknown>) => <div className="table-wrap-cell">{asText(value || row.fail_reason || (row.outcome === "success" ? "completed" : "unknown"))}</div> },
+                      { title: "Budget", dataIndex: "budget", width: 220, key: "budget", render: (value: unknown) => <div className="table-wrap-cell">{formatWorkerBudget(value)}</div> },
+                      { title: "Error", dataIndex: "last_tool_error", width: 220, key: "last_tool_error", render: (value: unknown, row: Record<string, unknown>) => <div className="table-wrap-cell">{asText(value || row.fail_reason, "—")}</div> },
+                      { title: "Advanced artifacts", dataIndex: "artifact_ids", width: 190, key: "artifact_ids", render: (value: unknown) => Array.isArray(value) && value.length ? <details><summary>查看（{value.length}）</summary>{value.join(", ")}</details> : "—" }
                     ]}
                   />
                 )}
@@ -836,8 +789,28 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                           if (!Array.isArray(value)) return "-";
                           return <div className="table-wrap-cell">{value.map((item) => {
                             const row = item as Record<string, unknown>;
-                            return `${asText(row.question_id)}: ${asText(row.status)}${row.blocking === true ? " (blocking)" : ""}`;
-                          }).join("; ")}</div>;
+                            return <div key={String(row.question_id)} style={{ marginBottom: 8 }}>
+                              <strong>{asText(row.question_id)} · {asText(row.status)}{row.blocking === true ? " · blocking" : ""}</strong>
+                              <div>{asText(row.reason)}</div>
+                              <Typography.Text type="secondary">Evidence {asText(row.evidence_refs)} · 独立来源 {asText(row.independent_source_count, "0")} · Primary {asText(row.primary_source_count, "0")} · Fresh {row.freshness_ok === true ? "yes" : "no"}</Typography.Text>
+                              {Array.isArray(row.missing_evidence) && row.missing_evidence.length ? <div>缺少：{row.missing_evidence.join("、")}</div> : null}
+                            </div>;
+                          })}</div>;
+                        }
+                      },
+                      {
+                        title: "Repair 前后",
+                        dataIndex: "repair_result",
+                        width: 360,
+                        key: "repair_result",
+                        render: (value: unknown) => {
+                          const repair = value as { repairs?: Record<string, unknown>[] } | undefined;
+                          if (!repair?.repairs?.length) return "未执行";
+                          return <div className="table-wrap-cell">{repair.repairs.map((item, index) => <div key={`${String(item.repair_id)}-${index}`}>
+                            <strong>{asText(item.repair_id)} · {item.gap_closed ? "Gap closed" : "Gap remains"}</strong>
+                            <div>原因：{asText(item.gap_reason)}；补充：{asText(item.missing_evidence)}</div>
+                            <div>Before {asText((item.before as Record<string, unknown> | undefined)?.status)} → After {asText((item.after as Record<string, unknown> | undefined)?.status)} · 新增 Evidence {asText(item.evidence_delta)}</div>
+                          </div>)}</div>;
                         }
                       },
                       {
@@ -974,15 +947,33 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                       { title: "Fail Reason", dataIndex: "fail_reason", width: 180, key: "fail_reason", render: (value: unknown) => <div className="table-wrap-cell">{asText(value) || "-"}</div> },
                       { title: "Provider Class", dataIndex: "provider_failure_class", width: 170, key: "provider_failure_class", render: (value: unknown) => <div className="table-wrap-cell">{asText(value) || "-"}</div> },
                       { title: "Signals / Mechanisms", width: 150, key: "insights", render: (_: unknown, row: Record<string, unknown>) => `${asText(row.insight_signal_count, "0")} / ${asText(row.insight_mechanism_count, "0")}` },
+                      { title: "Attempts", dataIndex: "attempt_metrics", key: "attempt_metrics", width: 280, render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.map((item, index) => { const row = item as Record<string, unknown>; return <div key={index}><strong>{asText(row.attempt)} · {asText(row.status)}</strong> · {asText(row.duration_ms)} ms · {asText(row.provider)}/{asText(row.model)} · in/out {asText(row.actual_input_tokens)}/{asText(row.actual_output_tokens)} · {asText(row.fail_reason, "ok")}</div>; }) : "—"}</div> },
                       { title: "Fallback", dataIndex: "fallback_action", width: 200, key: "fallback_action", render: (value: unknown) => <div className="table-wrap-cell">{asText(value) || "-"}</div> }
                     ]}
                   />
                 )}
+                {insights.length ? (
+                  <>
+                    <Typography.Title level={5} style={{ marginTop: 16 }}>Insight Gate</Typography.Title>
+                    <ResizableTable
+                      dataSource={insights.map((row, index) => ({ ...row, key: `insight-${index}` }))}
+                      pagination={false}
+                      size="small"
+                      columns={[
+                        { title: "Status", dataIndex: "status", width: 100, key: "status", render: (value: unknown) => <Tag color={statusColor(value)}>{asText(value).toUpperCase()}</Tag> },
+                        { title: "Signals / Mechanisms", key: "counts", width: 180, render: (_: unknown, row: Record<string, unknown>) => `${asText(row.signal_count, "0")} / ${asText(row.mechanism_count, "0")}` },
+                        { title: "Reason", dataIndex: "reason", key: "reason", render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div> },
+                        { title: "Signals", dataIndex: "signals", key: "signals", render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.map((item) => asText((item as Record<string, unknown>).summary || (item as Record<string, unknown>).title)).join("; ") : asText(value)}</div> },
+                        { title: "Mechanisms", dataIndex: "mechanisms", key: "mechanisms", render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.map((item) => asText((item as Record<string, unknown>).explanation || (item as Record<string, unknown>).title)).join("; ") : asText(value)}</div> }
+                      ]}
+                    />
+                  </>
+                ) : null}
                 {claimEvidenceBindings.length > 0 ? (
                   <>
                     <Typography.Title level={5} style={{ marginTop: 16 }}>Claim–Evidence Map</Typography.Title>
                     <Typography.Paragraph type="secondary">
-                      正文只使用每项结论最强的 2–4 条证据；这里保留该结论的完整可追溯绑定。
+                      正文每项结论最多引用 3 条相关证据；这里保留完整 Claim–Evidence 关系供核查。
                     </Typography.Paragraph>
                     <ResizableTable
                       dataSource={claimEvidenceBindings.map((row, index) => ({ ...row, key: `binding-${index}` }))}
@@ -992,6 +983,7 @@ function TraceViewerImpl({ sessionId, runId }: TraceViewerProps) {
                         { title: "Claim", dataIndex: "claim_id", width: 120, key: "claim_id" },
                         { title: "Primary evidence", dataIndex: "primary_evidence_refs", key: "primary_evidence_refs", render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div> },
                         { title: "Supporting evidence", dataIndex: "supporting_evidence_refs", key: "supporting_evidence_refs", render: (value: unknown) => <div className="table-wrap-cell">{asText(value)}</div> },
+                        { title: "Relevance", dataIndex: "evidence_relations", key: "evidence_relations", render: (value: unknown) => <div className="table-wrap-cell">{Array.isArray(value) ? value.map((item) => { const row = item as Record<string, unknown>; return `${asText(row.evidence_ref)}: ${asText(row.relation)} (${asText(row.relevance_score)})`; }).join("; ") : "—"}</div> },
                         { title: "Counter / limitation", key: "constraints", render: (_: unknown, row: Record<string, unknown>) => <div className="table-wrap-cell">{asText([...(Array.isArray(row.counter_evidence_refs) ? row.counter_evidence_refs : []), ...(Array.isArray(row.limitation_refs) ? row.limitation_refs : [])])}</div> }
                       ]}
                     />

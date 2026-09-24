@@ -351,7 +351,7 @@ def render_final_answer(answer: FinalAnswer, *, citation_numbers: dict[str, int]
         ])
     lines.extend([f"- {answer.overall_summary}", "", "# 当前研究结论", ""])
     for item in current:
-        refs = "".join(f"[{citation_numbers[ref]}]" for ref in item.evidence_refs if ref in citation_numbers)
+        refs = "".join(f"[{citation_numbers[ref]}]" for ref in item.evidence_refs[:3] if ref in citation_numbers)
         lines.append(f"## {item.display_title or _display_title(item.question_id, 0)}")
         lines.append("")
         lines.append(f"**结论**：{item.direct_answer}{(' ' + refs) if refs else ''}")
@@ -360,7 +360,7 @@ def render_final_answer(answer: FinalAnswer, *, citation_numbers: dict[str, int]
         lines.append("")
     lines.extend(["# 未来 1~2 年方向", ""])
     for item in future:
-        refs = "".join(f"[{citation_numbers[ref]}]" for ref in item.evidence_refs if ref in citation_numbers)
+        refs = "".join(f"[{citation_numbers[ref]}]" for ref in item.evidence_refs[:3] if ref in citation_numbers)
         lines.extend([f"## {item.display_title or '方向性判断'}", "", f"**方向判断**：{item.direct_answer}{(' ' + refs) if refs else ''}", "", "**不确定性**：该判断仅基于本次已登记证据，需以后续可观察结果验证。", ""])
     if not future:
         lines.append("现有证据以当前状态为主；未来判断应以可观察里程碑和不确定性为边界。\n")

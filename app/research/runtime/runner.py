@@ -178,6 +178,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _requires_insight_layer(intent: str, objective: str) -> bool:
+    """Require a signal and mechanism only for questions that ask for them."""
+    if intent in {"comparison", "trend_forecast", "conflict_analysis"}:
+        return True
+    normalized = str(objective or "").casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "trend", "forecast", "mechanism", "causal", "future direction",
+            "趋势", "预测", "未来", "发展方向", "机制", "驱动因素",
+        )
+    )
+
+
 def _citation_numbers_by_evidence(manager: Any) -> dict[str, int]:
     if manager is None or not hasattr(manager, "evidence_number_map"):
         return {}
@@ -289,6 +303,35 @@ def _emit_assessments(
         ("execution_health.assessed", "execution_health", execution_health_event_attributes),
         ("delivery.assessed", "delivery_readiness", delivery_event_attributes),
     )
+
+
+def _coverage_repair_result(previous: Any, current: Any, plan_metadata: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Explain the single targeted repair against the previous question state."""
+    repair_tasks = [meta for meta in plan_metadata.values() if meta.get("repair") or meta.get("task_kind") == "supervisor_research"]
+    if not repair_tasks:
+        return {}
+    before_rows = {row.question_id: row for row in (previous.key_question_coverage if previous else ())}
+    after_rows = {row.question_id: row for row in current.key_question_coverage}
+    deltas: list[dict[str, Any]] = []
+    for meta in repair_tasks:
+        qid = str(meta.get("question_id") or "")
+        before, after = before_rows.get(qid), after_rows.get(qid)
+        if after is None:
+            continue
+        before_refs = set(before.evidence_refs if before else ())
+        added = sorted(set(after.evidence_refs) - before_refs)
+        deltas.append({
+            "repair_id": str(meta.get("repair_id") or meta.get("gap_id") or "repair"),
+            "question_id": qid,
+            "gap_reason": str(meta.get("gap_reason") or ""),
+            "missing_evidence": list(meta.get("missing_evidence") or meta.get("evidence_needed") or []),
+            "budget": {key: meta.get(key) for key in ("max_queries", "max_fetches", "max_llm_calls") if meta.get(key) is not None},
+            "before": {"status": before.status if before else "unknown", "reason": before.reason if before else "initial assessment"},
+            "after": {"status": after.status, "reason": after.reason},
+            "evidence_delta": added,
+            "gap_closed": bool(before and before.status != "covered" and after.status == "covered"),
+        })
+    return {"triggered": bool(deltas), "repairs": deltas}
     for event_type, key, event_attributes in assessment_events:
         if key == "progress_assessment" and not include_progress:
             continue
@@ -955,6 +998,9 @@ class ResearchGraphRunner:
                             "ask_id": _ask_id_for_request(item),
                             "hypothesis_id": item.hypothesis_id,
                             "gap_id": item.gap_id,
+                            "repair_id": item.repair_id or (f"repair:{item.gap_id or item.question_id}" if item.repair else ""),
+                            "gap_reason": item.gap_reason or item.novelty_reason,
+                            "missing_evidence": list(item.missing_evidence or item.expected_evidence),
                             "missing_evidence_types": list(item.missing_evidence_types),
                             "blocking_conflict_ids": list(item.blocking_conflict_ids),
                             "objective": item.objective,
@@ -995,6 +1041,9 @@ class ResearchGraphRunner:
                                 else budget_profile.max_llm_calls
                             )),
                             "repair": bool(item.repair or wave_id > 1),
+                            "repair_id": item.repair_id or (f"repair:{item.gap_id or item.question_id}" if item.repair else ""),
+                            "gap_reason": item.gap_reason or item.novelty_reason,
+                            "missing_evidence": list(item.missing_evidence or item.expected_evidence),
                             "budget_stage": "repair" if bool(item.repair or wave_id > 1) else "research",
                             **{
                                 key: value
@@ -1398,6 +1447,7 @@ class ResearchGraphRunner:
                 "blocking_gap_count": sum(1 for row in judgement.key_question_coverage if row.blocking),
                 "source_quality": source_metrics,
                 "delta": judgement.delta.to_dict(),
+                "repair_result": _coverage_repair_result(previous, judgement, plan_metadata),
             },
         )
         _emit(
@@ -2181,6 +2231,23 @@ class ResearchGraphRunner:
             "signals": [row.to_dict() for row in insight_synthesis.signals],
             "mechanisms": [row.to_dict() for row in insight_synthesis.mechanisms],
         }
+        analytical_request = _requires_insight_layer(
+            str(brief.user_intent), str(brief.objective or "")
+        )
+        insight_gate_failure = analytical_request and (
+            not insight_synthesis.signals or not insight_synthesis.mechanisms
+        )
+        _emit(
+            session, "insight.assessed", phase=WorkflowPhase.SYNTHESIS.value,
+            status="fail" if insight_gate_failure else "ok",
+            attributes={
+                "signal_count": len(insight_synthesis.signals),
+                "mechanism_count": len(insight_synthesis.mechanisms),
+                "required": analytical_request,
+                "reason": "analytical_request_requires_evidence_backed_signal_and_mechanism" if insight_gate_failure else "requirements_met_or_not_applicable",
+                "signals": insight_layer["signals"], "mechanisms": insight_layer["mechanisms"],
+            },
+        )
         digests = [
             replace(
                 digest,
@@ -2265,9 +2332,15 @@ class ResearchGraphRunner:
                 "evidence_count": len(request.evidence_refs),
             },
         )
-        skip_llm_synthesis = bool(evidence_records) and remaining_synthesis_tokens < 1_000
+        skip_llm_synthesis = insight_gate_failure or (bool(evidence_records) and remaining_synthesis_tokens < 1_000)
         result: Any
-        if skip_llm_synthesis:
+        if insight_gate_failure:
+            result = SimpleNamespace(
+                ok=False, status="stopped", summary="", duration_ms=0,
+                fail_reason="insight_gate_missing_signal_or_mechanism",
+                metadata={"provider_failure_class": "insight_gate_missing_signal_or_mechanism"},
+            )
+        elif skip_llm_synthesis:
             content = render_partial_delivery(
                 objective=brief.objective,
                 findings=list(synthesis_context.findings),
@@ -2368,16 +2441,42 @@ class ResearchGraphRunner:
             status="ok" if result.ok else "error",
             output_size=len(str(getattr(result, "summary", "") or "")),
         )
-        first_attempt_reason = str(result.fail_reason or "")
-        first_attempt_duration_ms = int(result.duration_ms or 0)
-        attempt_metrics = [{
+        current_attempt_reason = str(result.fail_reason or "")
+        current_attempt_duration_ms = int(result.duration_ms or 0)
+        existing_run_metadata = (
+            session.state.metadata
+            if isinstance(getattr(session.state, "metadata", None), dict)
+            else {}
+        )
+        # Synthesis may re-enter this node for the one bounded report repair.
+        # Keep the full run history; replacing it here made the final event
+        # hide the primary and compact provider failures from diagnostics.
+        attempt_metrics = [
+            dict(item)
+            for item in existing_run_metadata.get("synthesis_attempt_metrics", [])
+            if isinstance(item, dict)
+        ]
+        current_attempt = {
             **synthesis_metadata,
             "attempt": request.attempt,
             "pack_tokens_estimated": request.pack_tokens_estimated,
-            "duration_ms": first_attempt_duration_ms,
-            "fail_reason": first_attempt_reason,
+            "duration_ms": current_attempt_duration_ms,
+            "fail_reason": current_attempt_reason,
             "status": "ok" if result.ok else "failed",
-        }]
+        }
+        attempt_metrics = [
+            item for item in attempt_metrics
+            if int(item.get("attempt") or 0) != int(request.attempt)
+        ]
+        attempt_metrics.append(current_attempt)
+        first_attempt_reason = str(
+            existing_run_metadata.get("first_attempt_reason")
+            or current_attempt_reason
+        )
+        first_attempt_duration_ms = int(
+            existing_run_metadata.get("first_attempt_duration_ms")
+            or current_attempt_duration_ms
+        )
         if not result.ok:
             _emit(
                 session,
@@ -2386,12 +2485,18 @@ class ResearchGraphRunner:
                 status="failed",
                 attempt=request.attempt,
                 duration_ms=first_attempt_duration_ms,
-                attributes={"reason": first_attempt_reason, "retry": "compact" if not compact else "none"},
+                attributes={
+                    "reason": first_attempt_reason,
+                    "fail_reason": first_attempt_reason,
+                    "provider_failure_class": str(synthesis_metadata.get("provider_failure_class") or ""),
+                    "retry": "compact" if not compact else "none",
+                },
             )
         retried = False
         retry_allowed = bool(
             not result.ok
             and not report_repair
+            and not insight_gate_failure
             and result.fail_reason in synthesis_executor_module.RETRYABLE_SYNTHESIS_FAILURES
             and remaining_synthesis_tokens >= 1_000
         )
@@ -2561,6 +2666,10 @@ class ResearchGraphRunner:
                     },
                 )
             synthesis_metadata = dict(getattr(result, "metadata", {}) or {})
+            attempt_metrics = [
+                item for item in attempt_metrics
+                if int(item.get("attempt") or 0) != attempts_before + 2
+            ]
             attempt_metrics.append({
                 **synthesis_metadata,
                 "attempt": attempts_before + 2,
@@ -2812,7 +2921,10 @@ class ResearchGraphRunner:
                 "fallback_action": recovery_mode or ("deterministic_partial" if fallback else ""),
                 "synthesis_degraded": synthesis_degraded,
                 "synthesis_retry_count": int(retried),
+                "attempt_metrics": attempt_metrics,
                 "successful_attempt": successful_attempt,
+                "normal_pack_tokens": evidence_pack.token_budget,
+                "successful_pack_tokens": successful_pack_tokens,
                 "answer_complete": answer_complete,
                 "synthesis_mode": recovery_mode or mode,
                 "insight_signal_count": len(insight_layer["signals"]),
@@ -2879,10 +2991,13 @@ class ResearchGraphRunner:
             or {}
         )
         brief_intent = str((gstate.get("brief") or {}).get("user_intent") or "")
+        analytical_request = _requires_insight_layer(
+            brief_intent, str((gstate.get("brief") or {}).get("objective") or "")
+        )
         insight = insight_density(
             content=content,
             findings=[row for row in gstate.get("findings") or [] if isinstance(row, dict)],
-            analytical=brief_intent in {"comparison", "trend_forecast", "conflict_analysis", "recommendation", "structured_report", "explanation"},
+            analytical=analytical_request,
         )
         citation_valid = True
         citation_reason = ""
@@ -2969,6 +3084,37 @@ class ResearchGraphRunner:
             completeness = dict(answer_contract.get("completeness") or {})
             if completeness and not bool(completeness.get("complete")):
                 issues.append("answer_incomplete")
+        synthesis_mode = str(gstate.get("synthesis_mode") or session.state.metadata.get("synthesis_mode") or "")
+        fallback_used = synthesis_mode in {"evidence_bound_recovery", "deterministic_recovery", "deterministic_partial"}
+        answer_rows = answer_contract.get("answers") if isinstance(answer_contract.get("answers"), list) else []
+        if not answer_rows and isinstance(answer_contract.get("final_answer"), dict):
+            nested_answers = answer_contract["final_answer"].get("answers")
+            answer_rows = nested_answers if isinstance(nested_answers, list) else []
+        required_questions = list((gstate.get("brief") or {}).get("key_questions") or [])
+        strict_checks = {
+            "direct_answers": bool(answer_rows) and len(answer_rows) >= len(required_questions) and all(bool(str(row.get("direct_answer") or "").strip()) for row in answer_rows if isinstance(row, dict)),
+            "claim_evidence_grounding": bool(evidence_records) and citation_valid,
+            "report_quality": report_quality.verdict == "PASS",
+            "analytical_insight": not analytical_request or (int(insight_synthesis.get("metrics", {}).get("signal_count") or 0) > 0 and int(insight_synthesis.get("metrics", {}).get("mechanism_count") or 0) > 0),
+            "no_blocking_gap": not any(bool(row.get("blocking")) for row in judgement.get("key_question_coverage") or [] if isinstance(row, dict)),
+        }
+        strict_semantic_review = {"status": "PASS" if all(strict_checks.values()) else "PARTIAL", "checks": strict_checks}
+        if fallback_used and strict_semantic_review["status"] != "PASS":
+            issues.append("strict_semantic_review_partial")
+            # The Completion Contract is the sole terminal authority. A
+            # complete-looking answer from deterministic recovery must still
+            # be PARTIAL when its strict semantic review fails.
+            from dataclasses import replace as dataclass_replace
+
+            completion = dataclass_replace(
+                completion,
+                passed=False,
+                failure_reason="strict_semantic_review_partial",
+                unresolved_blocking=list(dict.fromkeys([
+                    *completion.unresolved_blocking,
+                    "strict_semantic_review_partial",
+                ])),
+            )
         issues = list(dict.fromkeys(issues))
         blocking = bool(issues)
         degradation_issues = [
@@ -3019,6 +3165,7 @@ class ResearchGraphRunner:
             ),
             "insight_density": insight,
             "report_quality": report_quality.to_dict(),
+            "strict_semantic_review": strict_semantic_review if fallback_used else None,
             "quality_metrics": report_quality.metrics,
         }
         decision = {

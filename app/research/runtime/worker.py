@@ -18,6 +18,19 @@ from app.research.runtime.activity import (
 )
 
 WorkerResultStatus = Literal["done", "failed", "skipped", "blocked", "partial"]
+MAX_RESEARCH_WORKER_WALL_SEC = 180.0
+
+
+def worker_wall_timeout_sec(
+    *, step_timeout_sec: float, max_retries: int, remaining_research_sec: float
+) -> float:
+    """Bound one worker attempt, including retries, to the research SLO."""
+    retry_slack = 1.0 + min(0.5, 0.25 * max(0, int(max_retries)))
+    return min(
+        MAX_RESEARCH_WORKER_WALL_SEC,
+        max(1.0, float(step_timeout_sec)) * retry_slack,
+        max(5.0, float(remaining_research_sec)),
+    )
 
 
 class WorkerIdleTimeoutError(Exception):
@@ -489,10 +502,13 @@ class LangChainWorkerRuntime:
                 max_retries = max(
                     0, int(getattr(self.harness.harness_config, "max_retries", 2) or 2)
                 )
-                # 外层墙钟：不再 * (retries+1)；retry 共享同一 deadline，避免 6min straggler
-                retry_slack = 1.0 + min(0.5, 0.25 * max_retries)
-                worker_timeout = min(
-                    float(step_timeout) * retry_slack, max(5.0, remaining)
+                # Retries share one deadline. A single worker may not consume
+                # more than the 180s worker SLO or starve the bounded repair
+                # wave and final delivery reserve.
+                worker_timeout = worker_wall_timeout_sec(
+                    step_timeout_sec=step_timeout,
+                    max_retries=max_retries,
+                    remaining_research_sec=remaining,
                 )
                 # 可选任务：若已 force_synthesis / enough，直接跳过
                 if bool(step.metadata.get("optional")) and (

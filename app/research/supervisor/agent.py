@@ -86,13 +86,28 @@ class SupervisorAgent:
         blocking_conflict_ids: tuple[str, ...] = (),
     ) -> ResearchTaskRequest:
         profile = task_budget_profile("small" if index > 2 else "medium")
-        evidence: tuple[str, ...] = ("一手来源", "高质量独立来源")
-        if "primary_source" in missing_evidence_types:
-            evidence = ("primary source", "一手来源", "高质量独立来源")
-        elif "fresh_evidence" in missing_evidence_types:
-            evidence = ("fresh dated evidence", "一手来源", "高质量独立来源")
-        elif "conflict_resolution" in missing_evidence_types:
-            evidence = ("same-scope authoritative evidence", "一手来源")
+        evidence_by_gap = {
+            "supporting_finding": "至少一条直接回答该研究问题、含明确主张和来源绑定的 finding",
+            "supporting_evidence": "为该 finding 抓取至少一条独立来源原文或可核验摘录",
+            "evidence": "直接支持该问题结论的可核验来源证据",
+            "independent_source": "至少一个与现有来源相互独立的 corroborating source",
+            "primary_source": "primary source / 一手来源；必要时补充高质量独立来源",
+            "fresh_evidence": "带发布日期的近期来源，足以验证当前状态",
+            "conflict_resolution": "针对同一口径的权威来源，说明数据范围与日期",
+            "mechanism_evidence": "来源明确陈述或可逐句验证的因果机制证据；不得把相关性写成因果",
+            "worker_failed": "完成该问题的结构化 finding；已有证据不得只留在工具结果中",
+            "direct_criterion_binding": "直接回答该标准并把 claim 绑定到 canonical evidence ID",
+        }
+        targeted_evidence = tuple(
+            evidence_by_gap[item]
+            for item in missing_evidence_types
+            if item in evidence_by_gap
+        )
+        evidence = targeted_evidence or ("一手来源", "高质量独立来源")
+        if "mechanism_evidence" in missing_evidence_types:
+            evidence += ("来源明确支持的机制证据；若没有直接因果证据，记录为未知，不作推断",)
+        if "counter_evidence" in missing_evidence_types:
+            evidence += ("反向信号或竞争性解释及其来源",)
         return ResearchTaskRequest(
             objective=objective,
             ask_id=ask_id,
@@ -107,6 +122,9 @@ class SupervisorAgent:
             priority="high" if index == 1 else "normal",
             expected_evidence=evidence,
             novelty_reason="针对当前 Coverage 缺口收敛研究范围",
+            repair_id=f"repair:{gap_id or question_id or index}",
+            gap_reason="；".join(missing_evidence_types) or "Coverage 尚未达到问题证据要求",
+            missing_evidence=evidence,
             estimated_effort="small" if index > 2 else "medium",
             repair=True,
             max_queries=5,
@@ -156,9 +174,19 @@ class SupervisorAgent:
                     if question_id.startswith("q") and question_id[1:].isdigit()
                     else 0
                 )
+                question_text = (
+                    brief.key_questions[question_index - 1]
+                    if 0 < question_index <= len(brief.key_questions)
+                    else gap.description
+                )
+                missing_scope = "、".join(gap.missing_evidence_type) or gap.description
+                repair_objective = (
+                    f"针对研究问题「{question_text}」，只补足以下缺口：{missing_scope}。"
+                    "复用已有证据，避免重做已覆盖部分；必须返回带 canonical evidence 绑定的结构化 finding。"
+                )
                 task = self._task(
                     index,
-                    gap.description,
+                    repair_objective,
                     ask_id=brief.ask_id_for_question_index(question_index),
                     target_criteria=(gap.criterion_id,),
                     target_gaps=(gap.description,),
@@ -304,6 +332,9 @@ class SupervisorAgent:
                     estimated_effort=item.estimated_effort,
                     task_id="",
                     repair=item.repair,
+                    repair_id=item.repair_id,
+                    gap_reason=item.gap_reason,
+                    missing_evidence=item.missing_evidence,
                     max_queries=item.max_queries,
                     max_fetches=item.max_fetches,
                     max_llm_calls=item.max_llm_calls,

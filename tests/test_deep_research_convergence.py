@@ -208,6 +208,32 @@ def test_supervisor_consumes_exact_coverage_gap() -> None:
     assert "primary_source" in task.missing_evidence_types
 
 
+def test_repair_task_is_question_scoped_and_names_missing_deliverables() -> None:
+    judgement = CoverageJudgement(
+        sufficient=False,
+        status="gap",
+        gaps=(
+            CoverageGap(
+                gap_id="gap-q1",
+                criterion_id="coverage-q1",
+                description="The question has evidence but no admitted direct finding.",
+                current_evidence_ids=("E1",),
+                missing_evidence_type=("supporting_finding", "supporting_evidence", "worker_failed"),
+                priority="high",
+                question_id="q1",
+            ),
+        ),
+    )
+
+    action = SupervisorAgent(agent=None).fallback_action(_brief(), judgement, {})
+    task = action.research_tasks[0]
+
+    assert "What is Company A's commercial traction?" in task.objective
+    assert "canonical evidence" in task.objective
+    assert "直接回答" in " ".join(task.expected_evidence)
+    assert "独立来源" in " ".join(task.expected_evidence)
+
+
 def test_soft_deadline_allows_first_retrieval_then_blocks_new_search() -> None:
     with worker_retrieval_budget(
         search_queries=10,

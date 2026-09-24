@@ -429,7 +429,7 @@ def _build_view(
         refs = _claim_refs(claim, binding_by_claim)
         canonical_refs = list(
             dict.fromkeys(alias_map[ref] for ref in refs if ref in alias_map)
-        )
+        )[:3]
         publishability = evaluate_publishability(
             normalized, canonical_refs, source_by_id
         )

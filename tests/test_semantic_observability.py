@@ -101,6 +101,44 @@ def test_progress_event_projects_semantic_gap_ids():
     assert attributes["missing_dimensions"] == ["coverage_01"]
 
 
+def test_trace_projection_explains_plan_worker_coverage_and_failure_chain():
+    events = [
+        {"type": "brief.compiled", "attributes": {"objective": "研究趋势", "user_intent": "trend_forecast", "key_questions": ["Q1"]}},
+        {"type": "plan.created", "status": "ok", "attributes": {"task_count": 1, "task_specs": [{"task_id": "t1", "question_id": "q1", "objective": "研究趋势", "dimensions": ["current signal"], "evidence_needed": ["independent sources"]}], "brief_coverage": {"coverage_rate": 1}}},
+        {"type": "worker.completed", "task_id": "t1", "status": "stopped", "duration_ms": 1200, "attributes": {"execution_status": "stopped", "result_status": "partial", "admitted_evidence_count": 1, "evidence_ids": ["E1", "art-web-24"], "artifact_ids": []}},
+        {"type": "coverage.assessed", "status": "gap", "attributes": {"key_question_coverage": [{"question_id": "q1", "status": "partial", "blocking": True, "evidence_refs": ["E1"], "reason": "missing counter-evidence"}], "repair_result": {"triggered": True, "repairs": [{"before": {"status": "partial"}, "after": {"status": "covered"}, "gap_closed": True, "evidence_delta": ["E2"]}]}}},
+        {"type": "insight.assessed", "status": "fail", "attributes": {"signal_count": 0, "mechanism_count": 0, "reason": "missing insight"}},
+        {"type": "synthesis.completed", "status": "degraded", "attributes": {"mode": "normal", "fail_reason": "provider_empty_content", "fallback_action": "evidence_bound_recovery", "insight_signal_count": 0, "insight_mechanism_count": 0}},
+        {"type": "quality.assessed", "status": "partial", "attributes": {"metric": "quality_gate", "reason": "strict_semantic_review_partial"}},
+    ]
+    summary = summarize_trace(events)
+    assert summary["workers"][0]["outcome"] == "partial"
+    assert summary["workers"][0]["evidence_ids"] == ["E1"]
+    assert summary["workers"][0]["artifact_ids"] == ["art-web-24"]
+    assert summary["coverage_judgements"][0]["key_question_coverage"][0]["reason"] == "missing counter-evidence"
+    assert summary["coverage_judgements"][0]["repair_result"]["repairs"][0]["gap_closed"] is True
+    assert summary["run_diagnosis"]["earliest_quality_degradation_stage"] == "plan"
+    assert summary["run_diagnosis"]["metrics"]["plan_task_count"] == 1
+    assert summary["run_diagnosis"]["metrics"]["plan_question_coverage_ratio"] == 1.0
+    assert summary["run_diagnosis"]["metrics"]["plan_avg_dimensions_per_task"] == 1.0
+    assert summary["run_diagnosis"]["metrics"]["repair_triggered"] is True
+    assert len(summary["run_diagnosis"]["failure_chain"]) >= 4
+
+
+def test_plan_diagnosis_does_not_report_missing_specs_as_zero_coverage():
+    summary = summarize_trace(
+        [
+            {"type": "brief.compiled", "attributes": {"key_questions": ["Q1", "Q2"]}},
+            {"type": "plan.created", "attributes": {"task_count": 2, "task_ids": ["t1", "t2"], "task_specs": []}},
+            {"type": "plan.created", "attributes": {"task_count": 1, "task_ids": ["t3"], "task_specs": []}},
+        ]
+    )
+    metrics = summary["run_diagnosis"]["metrics"]
+    assert metrics["plan_task_count"] == 3
+    assert metrics["plan_question_coverage_ratio"] is None
+    assert metrics["plan_avg_dimensions_per_task"] is None
+
+
 def test_semantic_event_vocabulary_and_control_lineage():
     required = {
         "spec.compiled",

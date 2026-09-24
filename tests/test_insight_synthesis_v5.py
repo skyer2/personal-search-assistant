@@ -72,7 +72,59 @@ def test_binding_renders_top_three_but_retains_the_full_binding() -> None:
     )
     binding = synthesis.bindings[0]
     assert len(binding.primary_evidence_refs) + len(binding.supporting_evidence_refs) == 5
-    assert len(binding.display_evidence) <= 4
+    assert len(binding.display_evidence) <= 3
+
+
+def test_explicit_evidence_backed_causal_claim_creates_mechanism() -> None:
+    synthesis = build_insight_synthesis(
+        findings=[{
+            "finding_id": "F1", "question_id": "q2",
+            "claim": "互操作需求增长，因此企业开始投资权限治理。",
+            "evidence_ids": ["E1", "E2"], "confidence": 0.8,
+        }],
+        evidence_records=_records(2),
+    )
+    assert len(synthesis.signals) == 1
+    assert len(synthesis.mechanisms) == 1
+    assert synthesis.mechanisms[0].evidence_refs == ("E1", "E2")
+
+
+def test_mechanism_is_not_invented_without_explicit_causal_evidence() -> None:
+    synthesis = build_insight_synthesis(
+        findings=[{"finding_id": "F1", "claim": "企业 Agent 采用率正在上升。", "evidence_ids": ["E1"]}],
+        evidence_records=_records(1),
+    )
+    assert synthesis.signals
+    assert synthesis.mechanisms == ()
+
+
+def test_mechanism_can_be_extracted_from_claim_bound_source_sentence():
+    synthesis = build_insight_synthesis(
+        findings=[{"finding_id": "F1", "claim": "企业 Agent 采用率正在上升。", "evidence_ids": ["E1"]}],
+        evidence_records=[{
+            **_records(1)[0],
+            "excerpt": "企业 Agent 采用率正在上升，因为系统接入权限与审计能力降低了部署风险。",
+        }],
+    )
+    assert len(synthesis.signals) == 1
+    assert len(synthesis.mechanisms) == 1
+    assert synthesis.mechanisms[0].evidence_refs == ("E1",)
+    assert "来源 excerpt" in synthesis.mechanisms[0].reasoning_basis
+
+
+def test_irrelevant_evidence_is_not_bound_for_body_citation() -> None:
+    synthesis = build_insight_synthesis(
+        findings=[{"finding_id": "F1", "claim": "Agent protocol interoperability improves deployment.", "evidence_ids": ["E1", "E2"]}],
+        evidence_records=[
+            {"evidence_id": "E1", "locator": "https://one.example/a", "excerpt": "Agent protocol interoperability improves deployment.", "source_type": "primary"},
+            {"evidence_id": "E2", "locator": "https://two.example/b", "excerpt": "Quarterly revenue increased for a consumer application.", "source_type": "secondary"},
+        ],
+    )
+    binding = synthesis.bindings[0]
+    relations = {row["evidence_ref"]: row["relation"] for row in binding.evidence_relations}
+    assert relations["E1"] == "direct_support"
+    assert relations["E2"] == "irrelevant"
+    assert "E2" not in binding.primary_evidence_refs + binding.supporting_evidence_refs
 
 
 def test_deterministic_report_has_resolvable_source_markers_without_raw_urls() -> None:

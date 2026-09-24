@@ -76,7 +76,9 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
     accepted_findings = max(accepted_findings, int(citation_metrics.get("finding_count") or 0))
     admitted_evidence = max(admitted_evidence, int(citation_metrics.get("evidence_count") or 0))
     attempts = int(meta.get("synthesis_attempts") or 0)
-    successful_attempt = int(meta.get("successful_attempt") or (1 if attempts == 1 else 0))
+    # Never infer a successful provider attempt from the attempt count: a
+    # deterministic gate can stop before the provider is called.
+    successful_attempt = int(meta.get("successful_attempt") or 0)
     degraded = bool(meta.get("synthesis_degraded"))
     answer_complete = bool(meta.get("answer_complete"))
     answerability = dict(meta.get("answerability") or {})
@@ -114,6 +116,8 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
         "coverage_event_sufficient": coverage_sufficient,
         "quality": quality,
         "trace_integrity": trace.get("trace_integrity") or {},
+        "latency": meta.get("latency") or trace.get("latency") or {},
+        "run_diagnosis": trace.get("run_diagnosis") or {},
         "root_count": root_count,
         "orphan_count": tree.get("orphan_count"),
         "cycle_count": tree.get("cycle_count"),
@@ -134,12 +138,14 @@ def _audit(result: Any, session_id: str, duration_sec: float) -> dict[str, Any]:
                         "attempt", "evidence_pack_tokens", "pack_tokens_estimated",
                         "prompt_chars", "digest_chars", "duration_ms", "ttft_ms",
                         "actual_input_tokens", "actual_output_tokens", "finish_reason",
-                        "error", "model", "provider",
+                        "error", "error_type", "error_message", "error_category",
+                        "fail_reason", "provider_failure_class", "model", "provider",
                     }
                 },
             }
             for event in synthesis_events
         ],
+        "synthesis_attempt_metrics": list(meta.get("synthesis_attempt_metrics") or []),
         "answer_chars": len(str(result.content or "")),
         "checks": checks,
         "passed": status == "success" and all(checks.values()),

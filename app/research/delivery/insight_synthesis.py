@@ -29,6 +29,7 @@ _RAW_SEARCH_STYLE = re.compile(
 )
 _QUESTION_SHAPED = re.compile(r"[？?]|(?:20\d{2}\s*年.{0,28}(?:什么|哪些|如何|吗))")
 _ARTICLE_FRAME = re.compile(r"(?:该图片|文\s*[|｜]|编\s*[|｜]|记者|三句话读懂|核心结论)", re.I)
+_CAUSAL_LINK = re.compile(r"(?:因为|由于|导致|因此|从而|促使|使得|驱动|依赖|源于|推动|带动|促成|引发|倒逼|造成|because|therefore|drives?|leads? to|enables?)", re.I)
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,7 @@ class ClaimEvidenceBinding:
     counter_evidence_refs: tuple[str, ...]
     limitation_refs: tuple[str, ...]
     display_evidence: tuple[dict[str, Any], ...] = ()
+    evidence_relations: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -170,6 +172,7 @@ class ClaimEvidenceBinding:
             "supporting_evidence_refs": list(self.supporting_evidence_refs),
             "counter_evidence_refs": list(self.counter_evidence_refs), "limitation_refs": list(self.limitation_refs),
             "display_evidence": [dict(row) for row in self.display_evidence],
+            "evidence_relations": [dict(row) for row in self.evidence_relations],
         }
 
 
@@ -290,7 +293,7 @@ def candidate_claims(findings: list[dict[str, Any]]) -> list[CandidateClaim]:
         output.append(CandidateClaim(
             claim_id=str(row.get("finding_id") or row.get("claim_id") or f"claim-{index}"),
             statement=text, evidence_refs=refs, source_refs=_refs(row, "source_ids", "sources"),
-            question_id=str(row.get("criterion_id") or (row.get("supported_criteria") or ["q1"])[0] or "q1"),
+            question_id=str(row.get("question_id") or row.get("criterion_id") or (row.get("supported_criteria") or ["q1"])[0] or "q1"),
             confidence=max(0.0, min(1.0, float(row.get("confidence") or 0.6))), claim_type=claim_type,
         ))
     return output
@@ -347,6 +350,16 @@ def _source_label(record: dict[str, Any]) -> str:
     return title or host or "已登记来源"
 
 
+def _causal_source_sentences(text: str) -> list[str]:
+    """Extract source sentences that explicitly state a causal connection."""
+    fragments = re.split(r"(?<=[。！？.!?])\s*|[\r\n]+", str(text or ""))
+    return [
+        fragment.strip()
+        for fragment in fragments
+        if len(fragment.strip()) >= 16 and _CAUSAL_LINK.search(fragment)
+    ]
+
+
 def _rank_refs(refs: tuple[str, ...], index: dict[str, dict[str, Any]]) -> list[str]:
     def score(ref: str) -> tuple[float, float, float, float, str]:
         row = index.get(ref, {})
@@ -359,20 +372,32 @@ def _rank_refs(refs: tuple[str, ...], index: dict[str, dict[str, Any]]) -> list[
 
 def _binding(claim: DedupedClaim, index: dict[str, dict[str, Any]], citation_numbers: dict[str, int]) -> ClaimEvidenceBinding:
     ranked = _rank_refs(claim.evidence_refs, index)
-    primary = [ref for ref in ranked if str(index.get(ref, {}).get("source_type") or "") in {"primary", "authoritative_secondary"}]
-    selected = (primary + [ref for ref in ranked if ref not in primary])[:4]
+    claim_tokens = _tokens(claim.statement)
+    relations: list[dict[str, Any]] = []
+    for ref in ranked:
+        row = index.get(ref, {})
+        evidence_text = " ".join(str(row.get(key) or "") for key in ("excerpt", "summary", "content"))
+        evidence_tokens = _tokens(evidence_text)
+        overlap = len(claim_tokens & evidence_tokens) / max(1, len(claim_tokens)) if evidence_tokens else 0.5
+        support_type = str(row.get("support_type") or "").casefold()
+        relation = "counter_evidence" if support_type in {"counter", "refute", "contradict"} else "irrelevant" if overlap < 0.05 else "direct_support" if overlap >= 0.15 else "supporting_context"
+        relations.append({"evidence_ref": ref, "relation": relation, "relevance_score": round(min(1.0, overlap), 3)})
+    relation_by_ref = {str(row["evidence_ref"]): row for row in relations}
+    usable = [ref for ref in ranked if relation_by_ref[ref]["relation"] in {"direct_support", "supporting_context"}]
+    primary = [ref for ref in usable if str(index.get(ref, {}).get("source_type") or "") in {"primary", "authoritative_secondary"}]
+    selected = (primary + [ref for ref in usable if ref not in primary])[:3]
     display = tuple({
         "evidence_id": ref, "citation_number": int(citation_numbers.get(ref, 0) or 0),
         "source": _source_label(index.get(ref, {})), "date": str(index.get(ref, {}).get("effective_at") or index.get(ref, {}).get("published_at") or "")[:10],
         "source_type": str(index.get(ref, {}).get("source_type") or "secondary"),
     } for ref in selected)
-    primary_refs = tuple(primary[:2])
+    primary_refs = tuple(ref for ref in primary[:2])
     return ClaimEvidenceBinding(
         claim_id=claim.canonical_claim_id, primary_evidence_refs=primary_refs,
         # Keep every remaining canonical reference in the full binding, even
         # when it was authoritative but did not make the body top-two.
-        supporting_evidence_refs=tuple(ref for ref in ranked if ref not in primary_refs), counter_evidence_refs=(), limitation_refs=(),
-        display_evidence=display,
+        supporting_evidence_refs=tuple(ref for ref in usable if ref not in primary_refs), counter_evidence_refs=(), limitation_refs=(),
+        display_evidence=display, evidence_relations=tuple(relations),
     )
 
 
@@ -431,6 +456,42 @@ def build_insight_synthesis(
         summary = seed.statement
         signal = TrendSignal(f"S{number}", label, category, summary, tuple(item.canonical_claim_id for item in group), evidence, (), len(sources - {""}), strength, round(sum(item.confidence for item in group) / len(group), 3))
         signals.append(signal)
+        causal_claims = [claim for claim in group if _CAUSAL_LINK.search(claim.statement)]
+        mechanism_rows: list[tuple[str, list[str], float, str]] = [
+            (claim.statement, list(claim.evidence_refs), claim.confidence, "validated_claim")
+            for claim in causal_claims
+        ]
+        if not mechanism_rows:
+            # Worker summaries can omit an explicit causal phrase even when
+            # the admitted source excerpt states it. Recover only exact source
+            # sentences linked to this signal; never infer causality from
+            # correlation or from unrelated evidence in the pack.
+            for ref in evidence:
+                source = index.get(ref, {})
+                source_text = " ".join(
+                    str(source.get(key) or "")
+                    for key in ("excerpt", "excerpt_ref", "summary", "content")
+                )
+                sentences = _causal_source_sentences(source_text)
+                if sentences:
+                    mechanism_rows.append((sentences[0], [ref], seed.confidence, "admitted_source_excerpt"))
+                    break
+        if mechanism_rows:
+            mechanism_refs = _unique([ref for _text, refs, _confidence, _basis in mechanism_rows for ref in refs])
+            mechanisms.append(MechanismAssessment(
+                mechanism_id=f"M{number}",
+                title=f"{label} 的证据支持机制",
+                explanation="；".join(text for text, _refs, _confidence, _basis in mechanism_rows[:2]),
+                supporting_signal_ids=(signal.signal_id,),
+                counter_signal_ids=(),
+                evidence_refs=tuple(mechanism_refs),
+                reasoning_basis=(
+                    "提取已验证 Claim 或其绑定来源 excerpt 中明确表达的因果关系；未从相关性推断因果。"
+                    if any(basis == "admitted_source_excerpt" for _text, _refs, _confidence, basis in mechanism_rows)
+                    else "只提取已验证 Claim 中明确表达的因果连接词；未从相关性推断因果。"
+                ),
+                confidence=round(sum(confidence for _text, _refs, confidence, _basis in mechanism_rows) / len(mechanism_rows), 3),
+            ))
         category_value: InsightCategory = "forecast" if forecast_seed else "current_trend"
         core_claim = seed.statement
         cards.append(InsightCard(
@@ -466,6 +527,7 @@ def build_insight_synthesis(
         "source_upgrade_success_rate": round(sum(item.upgraded for item in upgrades) / sum(item.attempted for item in upgrades), 4) if any(item.attempted for item in upgrades) else 0.0,
         "forecast_milestone_coverage": 0.0,
         "forecast_uncertainty_coverage": 0.0,
+        "claim_evidence_relevance_avg": round(sum(float(row["relevance_score"]) for binding in bindings for row in binding.evidence_relations) / max(1, sum(len(binding.evidence_relations) for binding in bindings)), 3),
         "raw_snippet_count": 0,
     }
     return InsightSynthesis(tuple(claims), tuple(signals), tuple(mechanisms), tuple(cards), tuple(forecasts), tuple(bindings), upgrades, tuple(_unique(list(limitations or []) + upgrade_limitations)), metrics)

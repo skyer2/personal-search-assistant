@@ -10,6 +10,9 @@ from app.research.delivery.answer_view_builder import (
     build_partial_answer_view,
     canonicalize_sources,
 )
+from app.research.delivery.answer_contract import FinalAnswer, QuestionAnswer
+from app.research.delivery.final_renderer import render_final_view
+from app.research.delivery.view_builder import build_answer_view
 from app.research.delivery.text_normalizer import normalize_claim_text
 
 
@@ -238,4 +241,32 @@ def test_chinese_punctuation_and_quotes_are_normalized():
         "市场还在问“Agent 能做什么”,下半年..."
     )
     assert normalized == "市场还在问“Agent 能做什么”，下半年……。"
+
+
+def test_provider_citation_numbers_are_removed_before_runtime_binding():
+    normalized = normalize_claim_text("市场还在问 Agent 能做什么[7][8]。")
+    assert normalized == "市场还在问 Agent 能做什么。"
+
+
+def test_answer_contract_ignores_model_citation_numbers_and_caps_body_refs():
+    records = [
+        {"evidence_id": f"e{i}", "locator": f"https://source{i}.example/report", "title": f"Source {i}"}
+        for i in range(1, 6)
+    ]
+    answer = FinalAnswer(
+        objective="Q1",
+        answers=[QuestionAnswer(
+            question_id="q1",
+            direct_answer="基于可验证来源的直接结论[97][98]。",
+            evidence_refs=[f"e{i}" for i in range(1, 6)],
+        )],
+        overall_summary="Summary",
+        synthesis_mode="evidence_bound_recovery",
+        synthesis_degraded=True,
+    )
+    view = build_answer_view(answer=answer, evidence_records=records, questions=["Q1"])
+    rendered = render_final_view(view)
+    answer_line = next(line for line in rendered.splitlines() if line.startswith("**回答**"))
+    assert answer_line.count("[") == 3
+    assert "[97]" not in rendered and "[98]" not in rendered
 

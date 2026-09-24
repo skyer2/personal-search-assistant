@@ -210,6 +210,13 @@ def _coalesce_worker_row(
 ) -> None:
     """同一 task_id+plan_version+attempt 的 started/completed 合成一行。"""
     key = _worker_attempt_key(event, attrs)
+    raw_evidence_ids = [str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip()]
+    raw_artifact_ids = [str(item) for item in attrs.get("artifact_ids") or [] if str(item).strip()]
+    artifact_ids = list(dict.fromkeys(raw_artifact_ids + [
+        item for item in raw_evidence_ids
+        if item.startswith(("art-", "artifact:"))
+    ]))
+    evidence_ids = [item for item in raw_evidence_ids if item not in artifact_ids]
     incoming = {
         "type": event_type,
         "task_id": event.get("task_id") or attrs.get("task_id") or None,
@@ -221,20 +228,32 @@ def _coalesce_worker_row(
         "execution_status": attrs.get("execution_status"),
         "result_status": attrs.get("result_status"),
         "fail_reason": attrs.get("fail_reason") or event.get("fail_reason"),
-        "evidence_ids": attrs.get("evidence_ids") or [],
+        "evidence_ids": evidence_ids,
+        "artifact_ids": artifact_ids,
         "finding_ids": attrs.get("finding_ids") or [],
         "gaps": attrs.get("gaps") or [],
         "conflicts": attrs.get("conflicts") or [],
         "confidence": attrs.get("confidence"),
         "tool_calls": attrs.get("tool_calls"),
-        "accepted_finding_count": (attrs.get("metrics") or {}).get("accepted_finding_count"),
-        "admitted_evidence_count": (attrs.get("metrics") or {}).get("admitted_evidence_count"),
+        "accepted_finding_count": attrs.get("accepted_finding_count") or (attrs.get("metrics") or {}).get("accepted_finding_count"),
+        "admitted_evidence_count": attrs.get("admitted_evidence_count") or (attrs.get("metrics") or {}).get("admitted_evidence_count"),
+        "budget": attrs.get("budget") or {},
         "last_tool_error": (attrs.get("metrics") or {}).get("last_tool_error"),
         "brief_id": attrs.get("brief_id"),
         "plan_id": attrs.get("plan_id"),
         "step_type": attrs.get("step_type"),
+        "dispatch_wave_id": _as_int(attrs.get("dispatch_wave_id"), 0),
         "timestamp": event.get("timestamp"),
     }
+    execution = str(incoming.get("execution_status") or "").casefold()
+    result = str(incoming.get("result_status") or "").casefold()
+    evidence_count = int(incoming.get("admitted_evidence_count") or len(incoming.get("evidence_ids") or []))
+    incoming["outcome"] = (
+        "success" if execution == "succeeded" and result == "complete"
+        else "partial" if result == "partial" and evidence_count > 0
+        else "failed" if event_type in _WORKER_TERMINAL
+        else "running"
+    )
     existing = rows.get(key)
     if existing is None:
         rows[key] = incoming
@@ -253,6 +272,7 @@ def _coalesce_worker_row(
         "plan_id",
         "execution_status",
         "result_status",
+        "dispatch_wave_id",
     ):
         if incoming.get(field) not in (None, ""):
             existing[field] = incoming[field]
@@ -262,7 +282,7 @@ def _coalesce_worker_row(
         existing["objective"] = incoming.get("objective")
     if incoming.get("fail_reason"):
         existing["fail_reason"] = incoming["fail_reason"]
-    for list_field in ("evidence_ids", "finding_ids", "gaps", "conflicts"):
+    for list_field in ("evidence_ids", "artifact_ids", "finding_ids", "gaps", "conflicts"):
         if incoming.get(list_field):
             existing[list_field] = incoming[list_field]
     if incoming.get("step_type"):
@@ -270,6 +290,17 @@ def _coalesce_worker_row(
     for field in ("accepted_finding_count", "admitted_evidence_count", "last_tool_error"):
         if incoming.get(field) not in (None, "", {}, []):
             existing[field] = incoming[field]
+    if incoming.get("budget"):
+        existing["budget"] = incoming["budget"]
+    execution = str(existing.get("execution_status") or "").casefold()
+    result = str(existing.get("result_status") or "").casefold()
+    evidence_count = int(existing.get("admitted_evidence_count") or len(existing.get("evidence_ids") or []))
+    existing["outcome"] = (
+        "success" if execution == "succeeded" and result == "complete"
+        else "partial" if result == "partial" and evidence_count > 0
+        else "failed" if event_type in _WORKER_TERMINAL
+        else "running"
+    )
 
 
 def summarize_trace(
@@ -293,6 +324,7 @@ def summarize_trace(
     coverage_judgements: list[dict[str, Any]] = []
     progress: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
+    insights: list[dict[str, Any]] = []
     synthesis: list[dict[str, Any]] = []
     recoveries: list[dict[str, Any]] = []
     evals: list[dict[str, Any]] = []
@@ -360,6 +392,9 @@ def summarize_trace(
                 "brief_id": attrs.get("spec_id") if spec_event else attrs.get("brief_id"),
                 "brief_version": attrs.get("brief_version") or 1,
                 "objective": attrs.get("objective"),
+                "user_intent": attrs.get("user_intent"),
+                "key_questions": attrs.get("key_questions") or [],
+                "success_criteria": attrs.get("success_criteria") or [],
                 "entities": attrs.get("entities") or [],
                 "dimensions": attrs.get("dimensions") or [],
                 "depth": attrs.get("depth"),
@@ -448,11 +483,14 @@ def summarize_trace(
                     "brief_id": attrs.get("brief_id"),
                     "task_count": attrs.get("task_count"),
                     "task_ids": attrs.get("task_ids") or [],
+                    "task_specs": attrs.get("task_specs") or [],
                     "planning_mode": attrs.get("planning_mode"),
                     "parallel_groups": attrs.get("parallel_groups"),
                     "brief_coverage": attrs.get("brief_coverage") or {},
                     "plan_ref": attrs.get("plan_ref"),
                     "plan_hash": attrs.get("plan_hash"),
+                    "validation_issues": attrs.get("validation_issues") or [],
+                    "status": event.get("status"),
                     "span_id": event.get("span_id"),
                     "timestamp": event.get("timestamp"),
                 }
@@ -466,6 +504,11 @@ def summarize_trace(
                     "conflicts": attrs.get("conflicts") or [],
                     "weak_claims": attrs.get("weak_claims") or [],
                     "recommended_next_questions": attrs.get("recommended_next_questions") or [],
+                    "key_question_coverage": attrs.get("key_question_coverage") or [],
+                    "criteria": attrs.get("criteria") or [],
+                    "delta": attrs.get("delta") or {},
+                    "source_quality": attrs.get("source_quality") or {},
+                    "repair_result": attrs.get("repair_result") or {},
                     "source": attrs.get("source"),
                     "reason": attrs.get("reason"),
                     "plan_version": event.get("plan_version") or attrs.get("plan_version"),
@@ -508,6 +551,17 @@ def summarize_trace(
                     "timestamp": event.get("timestamp"),
                 }
             )
+        elif event_type == "insight.assessed":
+            insights.append({
+                "status": event.get("status"),
+                "signal_count": attrs.get("signal_count", 0),
+                "mechanism_count": attrs.get("mechanism_count", 0),
+                "required": attrs.get("required"),
+                "reason": attrs.get("reason"),
+                "signals": attrs.get("signals") or [],
+                "mechanisms": attrs.get("mechanisms") or [],
+                "timestamp": event.get("timestamp"),
+            })
         elif event_type.startswith("synthesis."):
             synthesis.append(
                 {
@@ -527,6 +581,12 @@ def summarize_trace(
                     "input_tokens_estimated": attrs.get("input_tokens_estimated"),
                     "evidence_count": attrs.get("evidence_count"),
                     "fail_reason": attrs.get("fail_reason"),
+                    "fail_class": attrs.get("provider_failure_class") or attrs.get("fail_class"),
+                    "attempt_metrics": attrs.get("attempt_metrics") or [],
+                    "insight_signal_count": attrs.get("insight_signal_count"),
+                    "insight_mechanism_count": attrs.get("insight_mechanism_count"),
+                    "signals": attrs.get("signals") or [],
+                    "mechanisms": attrs.get("mechanisms") or [],
                     "fallback_action": attrs.get("fallback_action"),
                     "content_chars": attrs.get("content_chars"),
                     "status": event.get("status"),
@@ -578,6 +638,7 @@ def summarize_trace(
                     "relevance": attrs.get("relevance") or {},
                     "source_quality": attrs.get("source_quality") or {},
                     "synthesis_mode": attrs.get("synthesis_mode"),
+                    "strict_semantic_review": attrs.get("strict_semantic_review") or {},
                 }
             )
         elif event_type in {"gen_ai.chat", "llm_usage"}:
@@ -593,7 +654,6 @@ def summarize_trace(
             if row is not None:
                 for field in (
                     "finding_ids",
-                    "evidence_ids",
                     "gaps",
                     "conflicts",
                     "confidence",
@@ -605,6 +665,10 @@ def summarize_trace(
                 ):
                     if attrs.get(field) not in (None, "", []):
                         row[field] = attrs.get(field)
+                raw_refs = [str(item) for item in attrs.get("evidence_ids") or [] if str(item).strip()]
+                if raw_refs:
+                    row["artifact_ids"] = list(dict.fromkeys([*(row.get("artifact_ids") or []), *(item for item in raw_refs if item.startswith(("art-", "artifact:")))]))
+                    row["evidence_ids"] = [item for item in raw_refs if not item.startswith(("art-", "artifact:"))]
 
     workers = list(workers_by_key.values())
     for key, denial in budget_denials:
@@ -681,6 +745,124 @@ def summarize_trace(
             None,
         ),
     }
+    degradation: list[tuple[int, str, str]] = []
+    if plans:
+        latest_plan = plans[-1]
+        specs = latest_plan.get("task_specs") or []
+        if latest_plan.get("validation_issues"):
+            degradation.append((0, "plan", "Plan validation failed"))
+        elif specs and any(not row.get("objective") or not row.get("evidence_needed") for row in specs if isinstance(row, dict)):
+            degradation.append((0, "plan", "Plan task is missing an objective or evidence requirement"))
+        elif specs and any(len(row.get("dimensions") or []) == 0 for row in specs if isinstance(row, dict)):
+            degradation.append((0, "plan", "Plan task has no explicit research dimensions"))
+        elif str((brief or {}).get("user_intent") or "") in {"comparison", "trend_forecast", "conflict_analysis", "recommendation", "structured_report", "explanation"} and specs and sum(len(row.get("dimensions") or []) for row in specs if isinstance(row, dict)) / max(1, len(specs)) < 2:
+            degradation.append((0, "plan", "Analytical questions were split into overly broad one-dimension tasks"))
+    if any(str(row.get("outcome") or "").lower() in {"partial", "failed"} for row in workers):
+        degradation.append((1, "worker", "At least one worker stopped before fully satisfying its task"))
+    latest_cov = coverage_judgements[-1] if coverage_judgements else {}
+    if latest_cov and any(bool(row.get("blocking")) for row in latest_cov.get("key_question_coverage") or [] if isinstance(row, dict)):
+        degradation.append((2, "coverage", "One or more key questions still have a blocking evidence gap"))
+    if latest_cov.get("repair_result", {}).get("triggered"):
+        degradation.append((3, "repair", "Targeted research repair was required"))
+    if synthesis:
+        latest_syn = synthesis[-1]
+        if int(latest_syn.get("insight_signal_count") or 0) == 0 or int(latest_syn.get("insight_mechanism_count") or 0) == 0:
+            degradation.append((4, "insight", "Insight layer is missing required signals or mechanisms"))
+        if latest_syn.get("fail_reason") or latest_syn.get("fallback_action"):
+            degradation.append((5, "synthesis", str(latest_syn.get("fail_class") or latest_syn.get("fail_reason") or latest_syn.get("fallback_action"))))
+    quality_result = quality.get("latest") or {}
+    if quality_result and str(quality_result.get("status") or "").lower() not in {"pass", "success", "ok"}:
+        degradation.append((6, "quality", str(quality_result.get("reason") or quality_result.get("status"))))
+    degradation.sort(key=lambda item: item[0])
+    earliest_stage = degradation[0][1] if degradation else None
+    failure_chain = [item[2] for item in degradation]
+    # Plan revisions may include metadata-only events without task specs. Use
+    # the latest substantive plan for projection metrics, and derive question
+    # coverage from the explicit qids carried by its tasks. The older
+    # `brief_coverage` field reports dimension coverage_rate, not a question
+    # coverage_ratio.
+    substantive_plan = next(
+        (row for row in reversed(plans) if row.get("task_specs")),
+        plans[-1] if plans else {},
+    )
+    plan_specs_by_id: dict[str, dict[str, Any]] = {}
+    for plan_row in plans:
+        for spec in plan_row.get("task_specs") or []:
+            if not isinstance(spec, dict):
+                continue
+            spec_id = str(spec.get("task_id") or "").strip()
+            if spec_id:
+                plan_specs_by_id[spec_id] = spec
+    plan_specs = list(plan_specs_by_id.values()) or [
+        row for row in (substantive_plan.get("task_specs") or [])
+        if isinstance(row, dict)
+    ]
+    plan_task_ids = {
+        str(task_id).strip()
+        for plan_row in plans
+        for task_id in plan_row.get("task_ids") or []
+        if str(task_id).strip()
+    }
+    plan_task_ids.update(
+        str(row.get("task_id") or "").strip()
+        for row in plan_specs
+        if str(row.get("task_id") or "").strip()
+    )
+    question_count = len((brief or {}).get("key_questions") or [])
+    expected_question_ids = {f"q{index}" for index in range(1, question_count + 1)}
+    planned_question_ids = {
+        str(row.get("question_id") or "").strip()
+        for row in plan_specs
+        if str(row.get("question_id") or "").strip()
+    }
+    question_coverage_ratio = (
+        len(expected_question_ids & planned_question_ids) / len(expected_question_ids)
+        if expected_question_ids and planned_question_ids
+        else None
+    )
+    dimension_specs = [row for row in plan_specs if isinstance(row.get("dimensions"), list)]
+    plan_task_count = len(plan_task_ids) or max(
+        (_as_int(row.get("task_count"), 0) for row in plans),
+        default=0,
+    )
+    repair_result = latest_cov.get("repair_result") or {}
+    repair_triggered = (
+        bool(repair_result.get("triggered"))
+        or any(bool(row.get("repair")) for row in plan_specs)
+        or any(_as_int(row.get("dispatch_wave_id"), 0) > 1 for row in workers)
+    )
+    run_diagnosis = {
+        "stage": earliest_stage or "delivery",
+        "status": "error" if earliest_stage and earliest_stage in {"plan", "insight", "synthesis", "quality"} else "warning" if earliest_stage else "ok",
+        "earliest_quality_degradation_stage": earliest_stage,
+        "summary": degradation[0][2] if degradation else "No quality degradation detected in the recorded stages.",
+        "reason": str((failure_origin or {}).get("reason") or "") or None,
+        "impact": "；".join(failure_chain) if failure_chain else None,
+        "next_action": f"Inspect {earliest_stage} stage details" if earliest_stage else None,
+        "failure_chain": failure_chain,
+        "metrics": {
+            "plan_task_count": plan_task_count,
+            "plan_question_coverage_ratio": question_coverage_ratio,
+            "plan_avg_dimensions_per_task": (
+                round(sum(len(row.get("dimensions") or []) for row in dimension_specs) / len(dimension_specs), 2)
+                if dimension_specs
+                else None
+            ),
+            "worker_success_count": sum(row.get("outcome") == "success" for row in workers),
+            "worker_partial_count": sum(row.get("outcome") == "partial" for row in workers),
+            "worker_failed_count": sum(row.get("outcome") == "failed" for row in workers),
+            "coverage_question_covered": sum(row.get("status") == "covered" for row in (latest_cov.get("key_question_coverage") or []) if isinstance(row, dict)),
+            "coverage_question_partial": sum(row.get("status") in {"partial", "partially_covered"} for row in (latest_cov.get("key_question_coverage") or []) if isinstance(row, dict)),
+            "coverage_question_uncovered": sum(row.get("status") == "uncovered" for row in (latest_cov.get("key_question_coverage") or []) if isinstance(row, dict)),
+            "repair_triggered": repair_triggered,
+            "repair_gap_closed": any(bool(item.get("gap_closed")) for item in repair_result.get("repairs", []) if isinstance(item, dict)),
+            "signal_count": int((insights[-1].get("signal_count") if insights else 0) or 0),
+            "mechanism_count": int((insights[-1].get("mechanism_count") if insights else 0) or 0),
+            "primary_synthesis_success": any(row.get("type") == "synthesis.completed" and row.get("mode") == "normal" and not row.get("fallback_action") for row in synthesis),
+            "compact_synthesis_success": any(row.get("type") == "synthesis.completed" and row.get("mode") == "degraded" and not row.get("fallback_action") for row in synthesis),
+            "deterministic_recovery_used": any(bool(row.get("fallback_action")) for row in synthesis),
+        },
+    }
     return {
         "identity": identity,
         "brief": brief,
@@ -692,6 +874,7 @@ def summarize_trace(
         "workers": workers,
         "progress": progress,
         "evidence": evidence,
+        "insights": insights,
         "synthesis": synthesis,
         "recoveries": recoveries,
         "termination": termination,
@@ -703,6 +886,7 @@ def summarize_trace(
         "failures": failures,
         "failure_counts": failure_counts,
         "failure_origin": failure_origin,
+        "run_diagnosis": run_diagnosis,
         "usage": usage,
         "event_count": len(events),
         "worker_count": len(workers),

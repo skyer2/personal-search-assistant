@@ -185,14 +185,16 @@ def test_batch_search_does_not_consume_fetch_budget():
 
 
 def test_worker_timeout_cap_formula():
-    """Document expected outer timeout: not step*(retries+1)."""
-    step_timeout = 90
-    max_retries = 2
-    remaining = 500.0
-    retry_slack = 1.0 + min(0.5, 0.25 * max_retries)
-    worker_timeout = min(float(step_timeout) * retry_slack, max(5.0, remaining))
-    assert worker_timeout <= 135.0  # 90 * 1.5
-    assert worker_timeout < step_timeout * (max_retries + 1)
+    """Retries share a bounded wall clock and cannot starve final delivery."""
+    from app.research.runtime.worker import worker_wall_timeout_sec
+
+    worker_timeout = worker_wall_timeout_sec(
+        step_timeout_sec=300, max_retries=2, remaining_research_sec=500
+    )
+    assert worker_timeout == 180.0
+    assert worker_wall_timeout_sec(
+        step_timeout_sec=60, max_retries=0, remaining_research_sec=35
+    ) == 35.0
     print("[OK] worker timeout capped", worker_timeout)
 
 

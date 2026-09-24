@@ -33,6 +33,10 @@ def test_initial_plan_covers_every_key_question_with_counter_lane() -> None:
     assert len(plan.steps) == 3
     assert not validate_brief_plan(plan, brief=brief)
     assert all("counter_evidence" in step.metadata["research_lanes"] for step in plan.steps)
+    assert all(
+        any("mechanism" in item for item in step.metadata["evidence_needed"])
+        for step in plan.steps
+    )
 
 
 def test_initial_research_cannot_borrow_targeted_repair_reserve() -> None:
@@ -81,7 +85,7 @@ class _EmptyModel:
         return ""
 
 
-def test_provider_empty_content_is_explicit_retryable_telemetry() -> None:
+def test_empty_provider_response_is_precisely_classified_and_retryable() -> None:
     executor = SynthesisExecutor(
         SimpleNamespace(synthesis_model=_EmptyModel(), harness_config=SimpleNamespace(synthesis_step_timeout_sec=5)),
         SimpleNamespace(budget_manager=RunBudgetManager(token_limit=10_000, llm_call_limit=10)),
@@ -90,6 +94,6 @@ def test_provider_empty_content_is_explicit_retryable_telemetry() -> None:
         SynthesisRequest(mode="normal", evidence_refs=["e1"]),
         ResearchContext(run_id="r", query="q", session_id="s"),
     ))
-    assert result.fail_reason == "provider_empty_content"
-    assert result.metadata["provider_failure_class"] == "provider_empty_content"
+    assert result.fail_reason == "provider_http_empty"
+    assert result.metadata["provider_failure_class"] == "provider_http_empty"
     assert result.metadata["retryable"] is True

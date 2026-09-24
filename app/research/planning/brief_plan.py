@@ -27,13 +27,18 @@ class ResearchTaskSpec:
     task_id: str
     question_id: str
     objective: str
-    hypothesis: str
+    hypotheses: tuple[str, ...] = ()
     evidence_needed: tuple[str, ...] = ()
+    preferred_source_types: tuple[str, ...] = ()
     counter_evidence_needed: tuple[str, ...] = ()
     search_hints: tuple[str, ...] = ()
     entities: tuple[str, ...] = ()
     dimensions: tuple[str, ...] = ()
     max_queries: int = MAX_ESTIMATED_QUERIES
+    max_fetches: int = 5
+    max_llm_calls: int = 4
+    priority: int = 1
+    plan_version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -87,6 +92,30 @@ def _analysis_type(brief: StructuredResearchBrief) -> bool:
     }
 
 
+def _dimensions_for_question(question: str, intent: str) -> tuple[str, ...]:
+    text = question.casefold()
+    if any(word in text for word in ("热点", "hot trend", "hotspot")):
+        return (
+            "enterprise adoption and commercialization",
+            "interoperability: MCP and A2A",
+            "computer-use and multimodal agents",
+            "reliability and evaluation",
+            "governance and security",
+        )
+    if any(word in text for word in ("未来", "发展方向", "趋势", "forecast", "future")):
+        return (
+            "outcome-oriented agent products",
+            "long-running agents and recovery",
+            "protocol and interoperability ecosystem",
+            "reliability, evaluation and governance infrastructure",
+        )
+    if intent in {"comparison", "recommendation"}:
+        return ("capability and commercialization", "evidence, risks and alternatives")
+    if intent in {"trend_forecast", "structured_report", "explanation", "conflict_analysis"}:
+        return ("current signals and evidence", "mechanisms, counter-evidence and uncertainty")
+    return (question[:120],)
+
+
 def build_brief_and_plan(brief: StructuredResearchBrief, *, plan_version: int = 1) -> ResearchBriefAndPlan:
     # Every key question must be represented in the initial bounded DAG.
     # Parallelism is controlled at dispatch time; truncating questions here
@@ -99,16 +128,29 @@ def build_brief_and_plan(brief: StructuredResearchBrief, *, plan_version: int = 
     tasks: list[ResearchTaskSpec] = []
     for index, question in enumerate(questions, 1):
         qid = f"q{index}"
-        dimensions = (question[:120],)
-        evidence = tuple(brief.source_requirements.preferred[:2]) or ("reliable source",)
+        dimensions = _dimensions_for_question(question, brief.user_intent)
+        evidence_items = list(brief.source_requirements.preferred[:2]) or ["reliable source"]
+        trend_question = any(
+            marker in question.casefold()
+            for marker in ("热点", "未来", "发展方向", "趋势", "forecast", "future", "trend")
+        ) or brief.user_intent == "trend_forecast"
+        if trend_question:
+            evidence_items.extend((
+                "independent current signals supporting each trend",
+                "source-backed explanation of the mechanism linking signals to outcomes",
+                "counter-signals and uncertainty that could weaken the trend",
+            ))
+        evidence = tuple(dict.fromkeys(evidence_items))
         counter = ("counter-evidence or competing estimate",) if analysis else ()
+        hypothesis = f"可由独立来源证据验证或反驳：{question}"
         tasks.append(
             ResearchTaskSpec(
                 task_id=f"plan_{plan_version}_{index}",
                 question_id=qid,
                 objective=question,
-                hypothesis=f"可通过来源证据回答：{question}",
+                hypotheses=(hypothesis,),
                 evidence_needed=evidence,
+                preferred_source_types=tuple(brief.source_requirements.preferred),
                 counter_evidence_needed=counter,
                 # These are bounded query hints for the worker's existing
                 # primary-source lane, not additional tasks or budget.  The
@@ -125,6 +167,10 @@ def build_brief_and_plan(brief: StructuredResearchBrief, *, plan_version: int = 
                 # lanes.  This preserves uncertainty handling without making
                 # a worker a miniature open-ended research system.
                 max_queries=min(MAX_ESTIMATED_QUERIES, 3 if len(questions) > 1 else 4),
+                max_fetches=5,
+                max_llm_calls=4,
+                priority=1 if index == 1 else 2,
+                plan_version=plan_version,
             )
         )
     return ResearchBriefAndPlan(brief=brief, tasks=tuple(tasks))
@@ -152,11 +198,13 @@ def execution_plan_from_brief(
                 "task_kind": "initial_bounded_plan",
                 "question_id": task.question_id,
                 "ask_id": f"a{task.question_id[1:]}",
-                "hypothesis": task.hypothesis,
+                "hypotheses": list(task.hypotheses),
+                "hypothesis": task.hypotheses[0] if task.hypotheses else "",
                 "hypothesis_id": f"h_{task.question_id}",
                 "criterion_id": task.objective,
                 "target_criteria": [task.objective],
                 "target_gaps": [task.objective],
+                "coverage_keys": list(task.dimensions),
                 "evidence_needed": list(task.evidence_needed),
                 "counter_evidence_needed": list(task.counter_evidence_needed),
                 "source_strategy": ["primary_source", "independent_corroboration", "counter_evidence"] if analysis else ["primary_source", "independent_corroboration"],
@@ -164,8 +212,13 @@ def execution_plan_from_brief(
                 "search_hints": list(task.search_hints),
                 "entities": list(task.entities[:MAX_ENTITIES]),
                 "dimensions": list(task.dimensions[:MAX_DIMENSIONS]),
+                "all_dimensions": list(task.dimensions),
                 "estimated_queries": min(task.max_queries, max(1, int(query_budget * 0.7))),
                 "max_queries": min(task.max_queries, max(1, int(query_budget * 0.7))),
+                "max_fetches": task.max_fetches,
+                "preferred_source_types": list(task.preferred_source_types),
+                "priority": task.priority,
+                "plan_version": task.plan_version,
                 "analysis_type": brief.user_intent,
                 "token_ceiling": profile.token_ceiling,
                 "max_llm_calls": profile.max_llm_calls,
@@ -212,17 +265,31 @@ def validate_brief_plan(
         metadata = step.metadata or {}
         if not str(metadata.get("question_id") or "").strip():
             issues.append({"code": "missing_question_id", "task_id": step.task_id, "detail": ""})
-        if not str(metadata.get("hypothesis") or "").strip():
+        if not (metadata.get("hypotheses") or metadata.get("hypothesis")):
             issues.append({"code": "missing_hypothesis", "task_id": step.task_id, "detail": ""})
+        if not str(step.objective or step.description or "").strip():
+            issues.append({"code": "missing_objective", "task_id": step.task_id, "detail": ""})
+        evidence_needed = metadata.get("evidence_needed") or metadata.get("expected_evidence") or []
+        if not evidence_needed:
+            issues.append({"code": "missing_evidence_needed", "task_id": step.task_id, "detail": ""})
         analysis = str(metadata.get("analysis_type") or "")
         if analysis in {"comparison", "trend_forecast", "conflict_analysis", "recommendation", "structured_report", "explanation"} and not metadata.get("counter_evidence_needed"):
             issues.append({"code": "missing_counter_evidence", "task_id": step.task_id, "detail": analysis})
+        if analysis in {"comparison", "trend_forecast", "conflict_analysis", "recommendation", "structured_report", "explanation"} and not (metadata.get("all_dimensions") or metadata.get("dimensions")):
+            issues.append({"code": "missing_analysis_dimensions", "task_id": step.task_id, "detail": analysis})
         if analysis and not metadata.get("research_lanes"):
             issues.append({"code": "missing_research_lanes", "task_id": step.task_id, "detail": analysis})
     if brief is not None:
         coverage = plan_coverage(plan, brief)
         for question_id in coverage.uncovered_question_ids:
             issues.append({"code": "uncovered_key_question", "task_id": "", "detail": question_id})
+        query_total = sum(
+            max(0, int((step.metadata or {}).get("max_queries") or (step.metadata or {}).get("estimated_queries") or 0))
+            for step in plan.steps
+        )
+        first_wave_budget = max(1, query_budget) * max(1, len(required_question_ids := coverage.required_question_ids))
+        if query_total > first_wave_budget:
+            issues.append({"code": "first_wave_budget_exceeded", "task_id": "", "detail": f"{query_total}>{first_wave_budget}"})
     return issues
 
 

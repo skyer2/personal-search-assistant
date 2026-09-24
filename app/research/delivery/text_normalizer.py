@@ -21,6 +21,7 @@ _TRUNCATED_END = re.compile(
     r"的第|领域近来|方面的|由于|因此|同时|此外)[，,]?$"
 )
 _URL = re.compile(r"https?://\S+", re.IGNORECASE)
+_INLINE_CITATION = re.compile(r"\[\s*\d{1,4}\s*\]")
 _INTERNAL = re.compile(
     r"\b(?:(?:evidence|finding|claim|gap|coverage|task|worker_result)_[A-Za-z0-9_-]+|"
     r"(?:worker|provider|synthesis|tool|llm|token|budget|step)_[A-Za-z0-9_-]+)\b",
@@ -64,6 +65,9 @@ def normalize_claim_text(text: str) -> str:
     value = unicodedata.normalize("NFKC", str(text or "")).strip()
     if not value:
         return ""
+    # Provider/worker prose cannot choose citation numbers. Remove any inline
+    # markers and let the runtime append only the top-ranked bound sources.
+    value = _INLINE_CITATION.sub("", value)
     if is_article_frame(value):
         return ""
     value = _URL.sub("", value)

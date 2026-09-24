@@ -327,6 +327,7 @@ export interface TraceSummary {
   workers?: Array<Record<string, unknown>>;
   progress?: Array<Record<string, unknown>>;
   evidence?: Array<Record<string, unknown>>;
+  insights?: Array<Record<string, unknown>>;
   synthesis?: Array<Record<string, unknown>>;
   recoveries?: Array<Record<string, unknown>>;
   quality?: Record<string, unknown>;
@@ -342,6 +343,7 @@ export interface TraceSummary {
   failures?: Array<Record<string, unknown>>;
   failure_counts?: Record<string, number>;
   failure_origin?: Record<string, unknown> | null;
+  run_diagnosis?: Record<string, unknown> | null;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;

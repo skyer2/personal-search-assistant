@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from app.research.delivery.answer_contract import FinalAnswer
 from app.research.delivery.reference_formatter import reference_views
 from app.research.delivery.view_model import AnswerPoint, AnswerViewModel, QuestionView
+
+_PROVIDER_CITATION = re.compile(r"\[\s*\d{1,4}\s*\]")
+
+
+def _runtime_bound_text(value: str) -> str:
+    """Ignore model-selected citation numbers; the renderer binds sources."""
+    return _PROVIDER_CITATION.sub("", str(value or "")).strip()
 
 
 def build_answer_view(
@@ -19,16 +27,21 @@ def build_answer_view(
     views: list[QuestionView] = []
     for index, item in enumerate(answer.answers, 1):
         refs = tuple(
-            dict.fromkeys(
+            list(dict.fromkeys(
                 str(records_by_id[ref].get("source_id") or ref)
                 for ref in item.evidence_refs
                 if ref in records_by_id
-            )
+            ))[:3]
         )
         title = item.display_title or (str(questions[index - 1])[:60] if index <= len(questions) else f"关键问题 {index}")
-        if refs and not item.direct_answer.startswith("当前证据不足"):
-            direct = AnswerPoint(item.direct_answer.strip(), refs)
-            reasoning = tuple(AnswerPoint(text.strip(), refs) for text in item.reasoning if text.strip())
+        direct_text = _runtime_bound_text(item.direct_answer)
+        if refs and direct_text and not direct_text.startswith("当前证据不足"):
+            direct = AnswerPoint(direct_text, refs)
+            reasoning = tuple(
+                AnswerPoint(cleaned, refs)
+                for text in item.reasoning
+                if (cleaned := _runtime_bound_text(text))
+            )
             views.append(
                 QuestionView(
                     item.question_id,

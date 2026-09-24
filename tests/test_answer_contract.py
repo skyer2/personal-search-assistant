@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
 from app.research.delivery.answer_contract import (
+    FinalAnswer,
+    QuestionAnswer,
     assess_answer_completeness,
     assess_answerability,
     compile_deterministic_answer,
@@ -182,3 +184,34 @@ def test_complete_delivery_has_the_single_success_outcome():
         "quality_assessment": {"verdict": "pass"},
     }
     assert decide_terminal_outcome(state) is FinalOutcome.SUCCESS
+
+
+def test_strict_review_failure_cannot_upgrade_complete_contract_to_success():
+    state = {
+        "brief": {"key_questions": ["Q1"]},
+        "answer_contract": {"answers": [{"question_id": "q1", "direct_answer": "Grounded answer", "evidence_refs": ["e1"]}]},
+        "quality_assessment": {
+            "verdict": "partial",
+            "completion_contract": {"passed": False, "outcome": "partial", "failure_reason": "strict_semantic_review_partial"},
+        },
+        "final_content": "Grounded answer [1]",
+        "evidence_records": [{"evidence_id": "e1"}],
+    }
+    assert decide_terminal_outcome(state) is FinalOutcome.PARTIAL
+
+
+def test_recovery_answer_limits_body_citations_to_three():
+    answer = FinalAnswer(
+        objective="Q1",
+        answers=[QuestionAnswer(
+            question_id="q1",
+            direct_answer="A grounded answer",
+            evidence_refs=["e1", "e2", "e3", "e4", "e5"],
+        )],
+        overall_summary="Summary",
+        synthesis_mode="evidence_bound_recovery",
+        synthesis_degraded=True,
+    )
+    rendered = render_final_answer(answer, citation_numbers={f"e{i}": i for i in range(1, 6)})
+    direct_answer = next(line for line in rendered.splitlines() if line.startswith("**结论**"))
+    assert direct_answer.count("[") == 3

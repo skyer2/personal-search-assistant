@@ -26,6 +26,10 @@ RETRYABLE_SYNTHESIS_FAILURES = frozenset(
         "context_length_exceeded",
         "synthesis_timeout",
         "provider_empty_content",
+        "provider_http_empty",
+        "provider_stream_no_content",
+        "provider_finish_without_content",
+        "provider_content_filtered",
         "content_removed_by_cleaner",
     }
 )
@@ -512,7 +516,24 @@ class SynthesisExecutor:
         if not supported:
             fail_reason = "unsupported_response_shape"
         elif not raw_content.strip():
-            fail_reason = "provider_empty_content"
+            metadata = getattr(response, "response_metadata", None)
+            metadata = metadata if isinstance(metadata, dict) else {}
+            additional = getattr(response, "additional_kwargs", None)
+            additional = additional if isinstance(additional, dict) else {}
+            finish_reason = str(metadata.get("finish_reason") or additional.get("finish_reason") or "").casefold()
+            status_code = metadata.get("status_code") or metadata.get("http_status")
+            if finish_reason in {"content_filter", "content_filtered", "safety"} or metadata.get("content_filter_results"):
+                fail_reason = "provider_content_filtered"
+            elif status_code and int(status_code) >= 400:
+                fail_reason = "provider_http_empty"
+            elif finish_reason:
+                fail_reason = "provider_finish_without_content"
+            elif bool(metadata.get("streaming") or metadata.get("stream")):
+                fail_reason = "provider_stream_no_content"
+            else:
+                # Transport details are absent from this response shape. Keep
+                # the cause explicit without claiming a status we did not see.
+                fail_reason = "provider_http_empty"
         elif not cleaned_content.strip():
             fail_reason = "content_removed_by_cleaner"
         else:

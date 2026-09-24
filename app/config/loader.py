@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from app.config.timeouts import wall_timeout_sec
+from app.config.timeouts import model_stage_wall_timeout_sec, wall_timeout_sec
 
 _CONFIG_PATH = Path(__file__).resolve().parent / "harness.yml"
 _cached_config: "HarnessConfig | None" = None
@@ -602,8 +602,9 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             os.getenv("HARNESS_MAX_PARALLEL_WORKERS", orch.get("max_parallel_workers", 3))
         ),
         step_timeout_sec=int(
-            wall_timeout_sec(
+            model_stage_wall_timeout_sec(
                 "HARNESS_STEP_TIMEOUT_SEC",
+                "LLM_WORKER_TIMEOUT_SEC",
                 int(orch.get("step_timeout_sec", 120)),
                 model_margin_sec=10,
             )

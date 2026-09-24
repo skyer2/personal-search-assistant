@@ -53,6 +53,9 @@ def brief_event_attributes(
         "brief_id": brief_id,
         "brief_version": _optional_int(value.get("brief_version")) or 1,
         "objective": str(value.get("objective") or value.get("raw_query") or ""),
+        "user_intent": str(value.get("user_intent") or ""),
+        "key_questions": _strings(value.get("key_questions")),
+        "success_criteria": _strings(value.get("success_criteria")),
         "entities": entities,
         "dimensions": dimensions,
         "depth": str(value.get("depth") or ""),
@@ -80,6 +83,33 @@ def plan_event_attributes(
         str(step.resolved_task_id(index))
         for index, step in enumerate(getattr(plan, "steps", None) or [])
     ]
+    task_specs: list[dict[str, Any]] = []
+    for index, step in enumerate(getattr(plan, "steps", None) or []):
+        metadata = getattr(step, "metadata", None) or {}
+        task_specs.append({
+            "task_id": str(step.resolved_task_id(index)),
+            "question_id": str(metadata.get("question_id") or ""),
+            "objective": str(getattr(step, "objective", "") or getattr(step, "description", "")),
+            "dimensions": _strings(metadata.get("all_dimensions") or metadata.get("coverage_keys") or metadata.get("dimensions")),
+            "hypotheses": _strings(metadata.get("hypotheses") or ([metadata.get("hypothesis")] if metadata.get("hypothesis") else [])),
+            "evidence_needed": _strings(metadata.get("evidence_needed") or metadata.get("expected_evidence")),
+            "preferred_source_types": _strings(metadata.get("preferred_source_types") or metadata.get("source_hints")),
+            "counter_evidence_needed": _strings(metadata.get("counter_evidence_needed")),
+            "max_queries": _optional_int(metadata.get("max_queries") or metadata.get("estimated_queries")),
+            "max_fetches": _optional_int(metadata.get("max_fetches") or metadata.get("max_fetch_sources")),
+            "max_llm_calls": _optional_int(metadata.get("max_llm_calls")),
+            "priority": metadata.get("priority", "normal"),
+            "plan_version": plan_version,
+            "repair": bool(metadata.get("repair") or metadata.get("task_kind") == "supervisor_research" and metadata.get("gap_id")),
+            "repair_id": str(metadata.get("repair_id") or ""),
+            "gap_reason": str(metadata.get("gap_reason") or ""),
+            "missing_evidence": _strings(metadata.get("missing_evidence") or metadata.get("missing_evidence_types")),
+            "budget": {
+                "max_queries": _optional_int(metadata.get("max_queries") or metadata.get("estimated_queries")),
+                "max_fetches": _optional_int(metadata.get("max_fetches") or metadata.get("max_fetch_sources")),
+                "max_llm_calls": _optional_int(metadata.get("max_llm_calls")),
+            },
+        })
     plan_id = f"plan:{run_id}:{plan_version}"
     payload = {
         "plan_id": plan_id,
@@ -87,6 +117,7 @@ def plan_event_attributes(
         "brief_id": str((brief or {}).get("brief_id") or f"brief:{run_id}"),
         "task_count": len(task_ids),
         "task_ids": task_ids,
+        "task_specs": task_specs,
         "planning_mode": str(getattr(plan, "planning_mode", "") or ""),
         "planner_source": str(planner_source or ""),
         "brief_coverage": plan_brief_coverage(dict(brief or {}), plan),
@@ -110,6 +141,7 @@ def worker_event_attributes(
     stop_reason: str = "",
     fail_reason: str = "",
     evidence_ids: list[str] | None = None,
+    artifact_ids: list[str] | None = None,
     finding_ids: list[str] | None = None,
     tool_calls: int | None = None,
     duration_ms: int | None = None,
@@ -129,6 +161,7 @@ def worker_event_attributes(
         "stop_reason": str(stop_reason or ""),
         "fail_reason": str(fail_reason or ""),
         "evidence_ids": _strings(evidence_ids),
+        "artifact_ids": _strings(artifact_ids),
         "finding_ids": _strings(finding_ids),
         "tool_calls": _optional_int(tool_calls),
         "duration_ms": _optional_int(duration_ms),
@@ -251,6 +284,7 @@ def quality_event_attributes(assessment: dict[str, Any] | None) -> dict[str, Any
         "relevance": dict(relevance) if isinstance(relevance, dict) else {},
         "source_quality": dict(source_quality) if isinstance(source_quality, dict) else {},
         "synthesis_mode": str(value.get("synthesis_mode") or ""),
+        "strict_semantic_review": dict(value.get("strict_semantic_review") or {}) if isinstance(value.get("strict_semantic_review"), dict) else {},
     }
 
 

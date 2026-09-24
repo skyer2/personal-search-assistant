@@ -684,6 +684,26 @@ class WorkerExecutorV2:
             for item in (step.metadata.get("source_hints") or [])
             if str(item).strip()
         ]
+        dimensions = [
+            str(item)
+            for item in (step.metadata.get("dimensions") or step.metadata.get("coverage_keys") or [])
+            if str(item).strip()
+        ]
+        task_objective = str(step.objective or step.description or context.query)
+        analysis_type = str(step.metadata.get("analysis_type") or "")
+        requires_mechanism = analysis_type in {"comparison", "trend_forecast", "conflict_analysis"} or any(
+            marker in task_objective.casefold()
+            for marker in ("trend", "forecast", "future", "mechanism", "趋势", "未来", "发展方向", "机制", "驱动因素")
+        )
+        if dimensions:
+            user_message += "\n\n【必须覆盖的研究维度】\n- " + "\n- ".join(dimensions[:8])
+        if requires_mechanism:
+            user_message += (
+                "\n\n【趋势与机制证据要求】\n"
+                "对每个趋势判断，尽量分别记录：当前信号、来源明确支持的作用机制、反向信号或不确定性。"
+                "只有来源或已验证 finding 明确支持因果关系时，才能写机制 claim；证据只显示同时发生时不得推断因果。"
+                "如果检索不到机制证据，将缺口写入 gaps，不要用常识补全。"
+            )
         if source_strategy or evidence_needed or counter_needed or source_hints:
             hint_block = (
                 "第一批 batch_search 至少使用两个检索提示，并优先抓取命中的原始页面：\n- "

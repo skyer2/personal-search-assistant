@@ -77,6 +77,10 @@ def test_key_questions_and_source_identity_drive_coverage():
     assert partial.criteria[0].status == "partial"
     assert partial.criteria[0].evidence_ids == ("evidence-1", "evidence-2")
     assert partial.criteria[0].source_ids == ("company-a.com",)
+    question = partial.key_question_coverage[0]
+    assert question.evidence_refs == ("evidence-1", "evidence-2")
+    assert question.independent_source_count == 1
+    assert question.reason and "independent_source" in question.reason
 
     independent_finding = replace(finding, evidence_ids=("evidence-1", "evidence-3"))
     independent = judge_coverage(
@@ -90,6 +94,51 @@ def test_key_questions_and_source_identity_drive_coverage():
     )
     assert independent.sufficient is True
     assert independent.criteria[0].status == "supported"
+
+
+def test_trend_coverage_requires_source_backed_mechanism_and_explains_gap():
+    question = "What direction will AI agents take in the future?"
+    brief = StructuredResearchBrief(
+        brief_id="brief-trend-mechanism",
+        version=1,
+        objective=question,
+        user_intent="trend_forecast",
+        key_questions=(question,),
+        success_criteria=("Answer with current signals, a cited mechanism, and uncertainty.",),
+        source_requirements=SourceRequirements(min_independent_sources=2),
+    )
+    finding = ResearchFinding(
+        finding_id="finding-trend",
+        task_id="task-q1",
+        summary="AI agent deployments are expanding.",
+        claims=("AI agent deployments are expanding.",),
+        evidence_ids=("e1", "e2"),
+        supported_criteria=(question,),
+    )
+    claim = {
+        "claim_id": "claim-trend",
+        "text": "AI agent deployments are expanding.",
+        "criterion_id": question,
+        "evidence_ids": ["e1", "e2"],
+        "validated": True,
+    }
+    sources = [
+        {"evidence_id": "e1", "source_id": "a.example", "excerpt": "More companies are testing AI agents."},
+        {"evidence_id": "e2", "source_id": "b.example", "excerpt": "The market reports more AI agent deployments."},
+    ]
+
+    gap = judge_coverage(brief, [finding], claims=[claim], evidence=sources)
+    assert gap.sufficient is False
+    assert "mechanism_evidence" in gap.key_question_coverage[0].missing_evidence_types
+
+    covered = judge_coverage(
+        brief,
+        [finding],
+        claims=[claim],
+        evidence=[{**sources[0], "excerpt": "Companies adopt agents because workflow automation reduces repeated manual work."}, sources[1]],
+    )
+    assert covered.sufficient is True
+    assert "mechanism_evidence" not in covered.key_question_coverage[0].missing_evidence_types
 
 
 def test_no_evidence_delta_cannot_close_gap():

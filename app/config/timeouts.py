@@ -41,3 +41,25 @@ def wall_timeout_sec(
     if override is not None and override.strip():
         return _read_seconds(override_env, configured_default_sec)
     return max(configured_default_sec, llm_timeout_sec() + model_margin_sec)
+
+
+def model_stage_wall_timeout_sec(
+    override_env: str,
+    model_timeout_env: str,
+    configured_default_sec: float,
+    *,
+    model_margin_sec: float = 0.0,
+) -> float:
+    """Resolve a stage wall timeout from that stage's model timeout.
+
+    A global LLM timeout may be much larger than a stage-specific timeout. In
+    that case it must not inflate the enclosing stage's wall-clock budget.
+    Explicit stage wall timeouts still take precedence.
+    """
+    override = os.getenv(override_env)
+    if override is not None and override.strip():
+        return _read_seconds(override_env, configured_default_sec)
+    return max(
+        configured_default_sec,
+        model_timeout_sec(model_timeout_env) + model_margin_sec,
+    )

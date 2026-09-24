@@ -254,7 +254,7 @@ def _run_failure(message: str):
     )
 
 
-def test_empty_synthesis_reports_provider_empty_content():
+def test_empty_synthesis_reports_transport_empty_classification():
     harness = FakeHarness()
     harness.synthesis_model = FailingModel(None)
     result = asyncio.run(
@@ -262,7 +262,8 @@ def test_empty_synthesis_reports_provider_empty_content():
             SynthesisRequest(mode="degraded", evidence_refs=["ev"]), _context()
         )
     )
-    assert result.fail_reason == "provider_empty_content"
+    assert result.fail_reason == "provider_http_empty"
+    assert result.metadata["provider_failure_class"] == "provider_http_empty"
     assert result.metadata["raw_response_type"] == "str"
     assert result.metadata["raw_content_chars"] == 0
     assert result.metadata["cleaned_content_chars"] == 0

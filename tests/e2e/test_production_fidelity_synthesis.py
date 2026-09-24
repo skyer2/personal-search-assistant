@@ -118,8 +118,8 @@ class ProductionFaultProvider:
             raise BudgetReservationError(self.worker_failure)
         payload = {
             "ok": not bool(self.worker_failure),
-            "summary": "Collected one landscape source.",
-            "facts": ["Candidate AI startups have recent funding signals."],
+            "summary": "Recent funding and commercialization signals help identify promising AI startups.",
+            "facts": ["Candidate AI startups are worth evaluating because recent funding and commercialization signals point to active market traction."],
             "sources": [card["url"]] if self.worker_evidence else [],
             "evidence_ids": [card["artifact_id"]] if self.worker_evidence else [],
             "artifact_ids": [card["artifact_id"]] if self.worker_evidence else [],
@@ -127,7 +127,7 @@ class ProductionFaultProvider:
                 [
                     {
                         "finding_id": "finding_landscape",
-                        "claim": "Candidate AI startups have recent funding signals.",
+                        "claim": "Candidate AI startups are worth evaluating because recent funding and commercialization signals point to active market traction.",
                         "evidence_ids": [card["artifact_id"]],
                     }
                 ]
@@ -321,7 +321,7 @@ def test_l3_empty_content_falls_back_to_partial_delivery(tmp_path: Path, monkeyp
     # gets one chance before deterministic recovery.
     assert provider.synthesis_calls >= 2
     assert all(
-        event["attributes"]["fail_reason"] == "provider_empty_content"
+        event["attributes"]["fail_reason"] == "provider_http_empty"
         for event in events
         if event["type"] == "synthesis.failed"
     )

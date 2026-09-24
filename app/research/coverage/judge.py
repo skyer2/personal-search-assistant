@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -100,13 +101,19 @@ class KeyQuestionCoverage:
     question_id: str
     status: str
     blocking: bool
+    question: str = ""
+    evidence_refs: tuple[str, ...] = ()
     support_count: int = 0
     independent_source_count: int = 0
     high_authority_source_count: int = 0
+    primary_source_count: int = 0
     direct_evidence_count: int = 0
     counter_evidence_count: int = 0
+    freshness_ok: bool = True
     unresolved_conflicts: tuple[str, ...] = ()
     missing_evidence_types: tuple[str, ...] = ()
+    missing_evidence: tuple[str, ...] = ()
+    reason: str = ""
     confidence: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -119,13 +126,19 @@ class KeyQuestionCoverage:
             question_id=str(row.get("question_id") or ""),
             status=str(row.get("status") or "uncovered"),
             blocking=bool(row.get("blocking", True)),
+            question=str(row.get("question") or ""),
+            evidence_refs=tuple(str(item) for item in row.get("evidence_refs") or []),
             support_count=max(0, int(row.get("support_count") or 0)),
             independent_source_count=max(0, int(row.get("independent_source_count") or 0)),
             high_authority_source_count=max(0, int(row.get("high_authority_source_count") or 0)),
+            primary_source_count=max(0, int(row.get("primary_source_count") or 0)),
             direct_evidence_count=max(0, int(row.get("direct_evidence_count") or 0)),
             counter_evidence_count=max(0, int(row.get("counter_evidence_count") or 0)),
+            freshness_ok=bool(row.get("freshness_ok", True)),
             unresolved_conflicts=tuple(str(item) for item in row.get("unresolved_conflicts") or []),
             missing_evidence_types=tuple(str(item) for item in row.get("missing_evidence_types") or []),
+            missing_evidence=tuple(str(item) for item in row.get("missing_evidence") or []),
+            reason=str(row.get("reason") or ""),
             confidence=max(0.0, min(1.0, float(row.get("confidence") or 0.0))),
         )
 
@@ -255,6 +268,47 @@ def _criterion_ask_ids(brief: StructuredResearchBrief) -> dict[str, str]:
         if ask_id:
             mapping[criterion_id] = ask_id
     return mapping
+
+
+_EXPLICIT_CAUSAL_LINK = re.compile(
+    r"(?:因为|由于|导致|因此|从而|促使|使得|驱动|依赖|源于|推动|带动|促成|引发|倒逼|造成|"
+    r"because|therefore|drives?|leads? to|enables?)",
+    re.I,
+)
+
+
+def _requires_mechanism(brief: StructuredResearchBrief, question: str) -> bool:
+    text = str(question or "").casefold()
+    return brief.user_intent in {"trend_forecast", "comparison", "conflict_analysis", "mechanism"} or any(
+        marker in text
+        for marker in ("trend", "forecast", "future", "why", "机制", "驱动因素", "未来", "发展方向", "趋势")
+    )
+
+
+def _has_source_backed_mechanism(
+    *, criterion_id: str, criterion: str, claim_ids: list[str], evidence_records: list[dict[str, Any]], claims: list[dict[str, Any]]
+) -> bool:
+    ids = set(claim_ids)
+    for claim in claims:
+        claim_criteria = {
+            str(item)
+            for item in list(claim.get("criterion_ids") or [claim.get("criterion_id")])
+            + list(claim.get("supported_criteria") or [])
+            if str(item or "").strip()
+        }
+        if not bool(claim.get("validated", False)):
+            continue
+        if str(claim.get("criterion_id") or "") not in {criterion_id, criterion} and not (claim_criteria & {criterion_id, criterion}):
+            continue
+        if str(claim.get("claim_id") or claim.get("canonical_claim_id") or "") in ids:
+            statement = str(claim.get("text") or claim.get("claim") or claim.get("statement") or "")
+            if _EXPLICIT_CAUSAL_LINK.search(statement):
+                return True
+    for row in evidence_records:
+        source_text = " ".join(str(row.get(key) or "") for key in ("excerpt", "summary", "content"))
+        if len(source_text.strip()) >= 16 and _EXPLICIT_CAUSAL_LINK.search(source_text):
+            return True
+    return False
 
 
 def _ask_coverage(
@@ -575,6 +629,17 @@ def judge_coverage(
             not brief.source_requirements.primary_required
             or any(_is_primary(record) for record in selected_records)
         )
+        mechanism_required = _requires_mechanism(brief, criterion)
+        mechanism_ok = (
+            not mechanism_required
+            or _has_source_backed_mechanism(
+                criterion_id=criterion_id,
+                criterion=criterion,
+                claim_ids=list(claim_ids),
+                evidence_records=selected_records,
+                claims=normalized_claims,
+            )
+        )
         fresh_ok = (
             not brief.freshness_requirements.required
             or any(
@@ -591,6 +656,8 @@ def judge_coverage(
             missing_types.append("independent_source")
         if not primary_ok:
             missing_types.append("primary_source")
+        if not mechanism_ok:
+            missing_types.append("mechanism_evidence")
         if not fresh_ok:
             missing_types.append("fresh_evidence")
         if bound_blocking_conflicts:
@@ -599,7 +666,7 @@ def judge_coverage(
         if bound_blocking_conflicts:
             status = "conflicted"
             missing = f"{criterion}（存在 blocking unresolved conflict）"
-        elif directly_bound and unique_evidence_ids and independent_ok and primary_ok and fresh_ok:
+        elif directly_bound and unique_evidence_ids and independent_ok and primary_ok and mechanism_ok and fresh_ok:
             status = "supported"
             missing = ""
         elif unique_source_ids or unique_evidence_ids:
@@ -613,22 +680,38 @@ def judge_coverage(
             1 for evidence_id in unique_evidence_ids
             if (record := evidence_by_id.get(evidence_id)) is not None and is_high_authority(record)
         )
+        primary_source_count = sum(1 for record in selected_records if _is_primary(record))
         direct_evidence_count = len(unique_evidence_ids) if directly_bound else 0
         coverage_status = "covered" if status == "supported" else "partially_covered" if status == "partial" else "uncovered"
         blocking = coverage_status != "covered" or question_id in failed_questions
         if question_id in failed_questions:
             missing_types.append("worker_failed")
+        explanation_missing = tuple(dict.fromkeys(missing_types))
+        if coverage_status == "covered":
+            explanation = "存在直接绑定的有效证据，独立来源、权威来源与时效要求均满足，且没有阻塞冲突。"
+        elif bound_blocking_conflicts:
+            explanation = "存在尚未解决的阻塞冲突，不能将该问题判定为已覆盖。"
+        elif not unique_evidence_ids:
+            explanation = "尚无绑定到该问题的有效 Evidence。"
+        else:
+            explanation = "仍缺少：" + "、".join(explanation_missing)
         question_coverage.append(KeyQuestionCoverage(
             question_id=question_id,
             status=coverage_status,
             blocking=blocking,
+            question=criterion,
+            evidence_refs=tuple(unique_evidence_ids),
             support_count=len(unique_evidence_ids),
             independent_source_count=len(unique_source_ids),
             high_authority_source_count=high_authority_count,
+            primary_source_count=primary_source_count,
             direct_evidence_count=direct_evidence_count,
             counter_evidence_count=0,
+            freshness_ok=fresh_ok,
             unresolved_conflicts=tuple(sorted(bound_conflicts)),
-            missing_evidence_types=tuple(dict.fromkeys(missing_types)),
+            missing_evidence_types=explanation_missing,
+            missing_evidence=explanation_missing,
+            reason=explanation,
             confidence=confidence if coverage_status != "uncovered" else 0.0,
         ))
         if status != "supported" or question_id in failed_questions:

@@ -25,6 +25,9 @@ class ResearchTaskRequest:
     estimated_effort: str = "medium"
     task_id: str = ""
     repair: bool = False
+    repair_id: str = ""
+    gap_reason: str = ""
+    missing_evidence: tuple[str, ...] = ()
     max_queries: int = 7
     max_fetches: int = 7
     max_llm_calls: int = 4
@@ -60,6 +63,9 @@ class ResearchTaskRequest:
             estimated_effort=str(row.get("estimated_effort") or "medium"),
             task_id=str(row.get("task_id") or ""),
             repair=bool(row.get("repair")),
+            repair_id=str(row.get("repair_id") or ""),
+            gap_reason=str(row.get("gap_reason") or ""),
+            missing_evidence=tuple(str(item) for item in row.get("missing_evidence") or []),
             max_queries=max(1, min(7, int(row.get("max_queries") or 7))),
             max_fetches=max(1, min(7, int(row.get("max_fetches") or 7))),
             max_llm_calls=max(1, min(8, int(row.get("max_llm_calls") or 4))),

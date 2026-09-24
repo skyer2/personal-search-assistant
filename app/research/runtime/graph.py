@@ -80,9 +80,16 @@ def _plan_from_tasks(
                 "target_gaps": list(item.target_gaps),
                 "criterion_id": item.criterion_id,
                 "gap_id": item.gap_id,
+                "repair_id": item.repair_id,
+                "gap_reason": item.gap_reason or item.novelty_reason,
+                "missing_evidence": list(item.missing_evidence or item.expected_evidence),
+                "repair": item.repair,
                 "missing_evidence_types": list(item.missing_evidence_types),
                 "blocking_conflict_ids": list(item.blocking_conflict_ids),
                 "expected_evidence": list(item.expected_evidence),
+                "evidence_needed": list(item.expected_evidence),
+                "hypothesis": f"Evidence can directly verify or refute: {item.objective}",
+                "hypotheses": [f"Evidence can directly verify or refute: {item.objective}"],
                 "coverage_keys": list(item.target_criteria),
                 "estimated_queries": max(1, min(10, len(item.target_criteria) or 1)),
                 "source_hints": list(item.source_hints),
@@ -133,6 +140,7 @@ def brief_node(state: ResearchState) -> dict[str, Any]:
             [
                 ResearchTaskRequest(
                     brief.objective,
+                    question_id="q1",
                     priority="high",
                     expected_evidence=("primary source",),
                     target_criteria=tuple(brief.key_questions or (brief.objective,)),
@@ -163,6 +171,10 @@ def route_after_brief(state: ResearchState) -> Any:
     plan_raw = state.get("plan") if isinstance(state.get("plan"), dict) else None
     if not plan_raw:
         return "supervisor"
+    if state.get("plan_validation"):
+        # Plan validation is a dispatch gate. The Supervisor records the
+        # terminal diagnosis but cannot repair or dispatch an invalid plan.
+        return "supervisor"
     plan = ExecutionPlan.from_dict(plan_raw)
     sends: list[Any] = []
     for index, step in enumerate(plan.steps):
@@ -187,6 +199,28 @@ def route_after_brief(state: ResearchState) -> Any:
 
 
 def supervisor_node(state: ResearchState) -> dict[str, Any]:
+    plan_issues = [row for row in state.get("plan_validation") or [] if isinstance(row, dict)]
+    if plan_issues:
+        action = SupervisorAction(
+            "STOP_FAILURE",
+            "plan_validation_failed: " + ", ".join(str(row.get("code") or "invalid_plan") for row in plan_issues),
+            (),
+            "plan_validator",
+        )
+        return transition_update(
+            state,
+            WorkflowPhase.SUPERVISOR,
+            {
+                "supervisor_action": action.to_dict(),
+                "supervisor": {
+                    **dict(state.get("supervisor") or {}),
+                    "last_action": action.action,
+                    "reasoning_summary": action.reason,
+                    "source": action.source,
+                },
+                "control_decision": {"action": "finalize", "reason_codes": ["plan_validation_failed"]},
+            },
+        )
     brief = _brief(state)
     findings = [row for row in state.get("findings") or [] if isinstance(row, dict)]
     judgement_raw = state.get("coverage_judgement")
