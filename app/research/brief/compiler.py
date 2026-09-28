@@ -26,6 +26,7 @@ from app.research.intent.user_ask import (
     UserAskContract,
     compile_user_ask_contract,
 )
+from app.research.spec.compiler import compile_research_spec
 from app.config.timeouts import model_timeout_sec
 from app.research.brief.validator import validate_structured_brief
 from app.research.execution.structured_llm_gateway import (
@@ -75,25 +76,26 @@ def _explicit_subjects(query: str) -> list[str]:
     return subjects if 2 <= len(subjects) <= 12 else []
 
 
-def _intent(query: str) -> str:
-    lowered = query.lower()
-    if any(token in query for token in ("冲突", "矛盾", "不一致", "争议")):
+def _intent_from_kind(kind: str) -> str:
+    return {
+        "fact": "atomic_fact",
+        "recommendation": "recommendation",
+        "comparison": "comparison",
+        "explanation": "explanation",
+        "current_state": "freshness_update",
+        "forecast": "trend_forecast",
+    }.get(kind, "research")
+
+
+def _project_brief_intent(objective: str, kinds: list[str]) -> str:
+    """Legacy topology projection; AskSpec.kind remains the semantic authority."""
+    if any(token in objective for token in ("冲突", "矛盾", "不一致", "争议")):
         return "conflict_analysis"
-    if any(token in lowered for token in ("对比", "比较", " vs ", "versus")):
-        return "comparison"
-    if any(token in query for token in ("报告", "深度报告", "调研报告")):
+    if any(token in objective for token in ("报告", "调研报告", "深度报告")):
         return "structured_report"
-    if any(token in query for token in ("未来", "趋势", "预测", "前景")):
-        return "trend_forecast"
-    if any(token in query for token in ("值得", "推荐", "应该选", "有哪些")):
-        return "recommendation"
-    if any(token in query for token in ("最新", "当前", "现在", "截至")):
-        return "freshness_update"
-    if any(token in query for token in ("为什么", "原因", "为何")):
-        return "explanation"
-    atomic = any(token in query or token in lowered for token in _ATOMICS)
-    if atomic and len(query) <= 48 and not any(token in query or token in lowered for token in _OPEN_SIGNALS):
-        return "atomic_fact"
+    for kind in ("forecast", "comparison", "recommendation", "explanation", "current_state", "fact"):
+        if kind in kinds:
+            return _intent_from_kind(kind)
     return "research"
 
 
@@ -160,9 +162,17 @@ def compile_structured_brief(
     question, so a Brief LLM failure degrades understanding, not intent.
     """
     objective = " ".join(part for part in (query, conversation_delta) if part).strip()
-    intent = _intent(objective)
-    contract = compile_user_ask_contract(query, conversation_delta=conversation_delta)
     subjects = _explicit_subjects(objective)
+    research_spec = compile_research_spec(
+        query, conversation_delta=conversation_delta,
+        explicit_subjects=tuple(subjects),
+    )
+    answer_spec = research_spec.answer_spec
+    intent = _project_brief_intent(
+        objective,
+        [ask.kind for ask in answer_spec.asks] if answer_spec else [],
+    )
+    contract = compile_user_ask_contract(query, conversation_delta=conversation_delta)
     if not subjects:
         derived = [ask.subject for ask in contract.asks if ask.subject.strip()]
         subjects = list(dict.fromkeys(derived))[:12]
@@ -193,6 +203,8 @@ def compile_structured_brief(
         success_criteria=tuple(success), assumptions=assumptions,
         clarification_needed=not bool(objective.strip()), compiler_source="deterministic_fallback",
         confidence=0.55, raw_query=query,
+        answer_spec=answer_spec.to_dict() if answer_spec else {},
+        engine_version=research_spec.engine_version,
     )
     if validate_structured_brief(brief):
         return replace(brief, clarification_needed=True)
@@ -293,6 +305,8 @@ def _merge_llm_brief(fallback: StructuredResearchBrief, patch: dict[str, Any]) -
         clarification_needed=bool(patch.get("clarification_needed", fallback.clarification_needed)),
         compiler_source="structured_llm", confidence=max(0.0, min(1.0, float(patch.get("confidence") or 0.75))),
         raw_query=fallback.raw_query,
+        answer_spec=fallback.answer_spec,
+        engine_version=fallback.engine_version,
     )
     return fallback if validate_structured_brief(brief) else brief
 

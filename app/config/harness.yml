@@ -101,7 +101,7 @@ harness:
 
   budget:
     # Hard Safety Ceiling（确定性顶；Adaptive Effort 只能 clamp 到其下，不能抬高）
-    # 复杂深研搜允许最多 30 分钟；Research 必须给 Synthesis 留出固定墙钟预算。
+    # Hard Safety Ceiling（确定性顶；Answer Contract v2 在 run 创建时再收紧）。
     max_total_tokens: 500000
     max_tool_calls: 300
     max_step_tool_calls: 40

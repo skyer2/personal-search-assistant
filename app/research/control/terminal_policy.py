@@ -21,6 +21,9 @@ def terminal_update(
     synthesis_attempted: bool = False,
     quality_attempted: bool = False,
 ) -> dict[str, Any]:
+    existing = state.get("termination")
+    if isinstance(existing, dict) and str(existing.get("outcome") or "") in {"success", "partial", "failed", "cancelled"}:
+        return {"lifecycle": {"status": "terminated"}, "termination": dict(existing)}
     outcome = decide_terminal_outcome(state)
     runtime_status = RuntimeStatus.CANCELLED.value
     if not str(state.get("cancel_reason") or ""):
@@ -29,7 +32,7 @@ def terminal_update(
             if isinstance(state.get("internal_error"), dict) and state.get("internal_error")
             else RuntimeStatus.FINISHED.value
         )
-    quality = state.get("quality_assessment") if isinstance(state.get("quality_assessment"), dict) else {}
+    quality: dict[str, Any] = dict(state.get("quality_assessment") or {}) if isinstance(state.get("quality_assessment"), dict) else {}
     if reason:
         resolved_reason = reason
     elif str(state.get("stop_reason") or "") == "marginal_gain_low":

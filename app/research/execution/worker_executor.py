@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from dataclasses import asdict
 from typing import Any
@@ -366,7 +367,13 @@ class WorkerExecutorV2:
                 1
                 for finding in payload.get("findings") or []
                 if isinstance(finding, dict)
-                and any(str(item).strip() for item in finding.get("evidence_ids") or [])
+                and any(
+                    str(item).strip()
+                    for item in [
+                        *(finding.get("evidence_ids") or []),
+                        *(finding.get("artifact_ids") or []),
+                    ]
+                )
             )
             last_tool_error = str(
                 result.metadata.get("last_tool_error")
@@ -497,6 +504,7 @@ class WorkerExecutorV2:
                 worker_result.metrics.update(
                     {
                         **activity_metrics,
+                        **({"v2_stage_at_exit": tool_usage["v2_stage"]} if tool_usage.get("v2_stage") else {}),
                         "idle_ms": max(
                             0,
                             wall_ms
@@ -651,6 +659,16 @@ class WorkerExecutorV2:
         timeout_sec: float = 60.0,
         worker_lease_id: str = "",
     ) -> StepResult:
+        if (step.metadata or {}).get("engine_version") == "answer_contract_v2":
+            return await self._invoke_bounded_v2_worker(
+                task=task,
+                context=context,
+                step=step,
+                step_index=step_index,
+                tool_usage=tool_usage,
+                timeout_sec=timeout_sec,
+                worker_lease_id=worker_lease_id,
+            )
         self._record_direct_assistant(step)
         builder = self.harness.context_builder
         user_message = builder.build_step_message(
@@ -735,17 +753,21 @@ class WorkerExecutorV2:
             },
         )
         gateway = LLMGateway(self.session.budget_manager)
+        v2_worker = (step.metadata or {}).get("engine_version") == "answer_contract_v2"
+        primary_timeout_sec = (
+            min(35.0, WorkerExecutorV2._soft_deadline_delay(timeout_sec))
+            if v2_worker else WorkerExecutorV2._soft_deadline_delay(timeout_sec)
+        )
         tool_gateway = ToolGateway(
             **self._worker_budget_limits(step),
             soft_deadline_at=time.monotonic()
-            + WorkerExecutorV2._soft_deadline_delay(timeout_sec),
+            + primary_timeout_sec,
         )
         messages: list[Any] = []
         tools_invoked: list[str] = []
         tool_call_ids: set[tuple[str, str]] = set()
         retrieval_budget = None
         primary_budget_reason = ""
-        primary_timeout_sec = WorkerExecutorV2._soft_deadline_delay(timeout_sec)
         try:
             with tool_gateway.execution_scope(
                 worker_task_id=task.task_id,
@@ -866,9 +888,14 @@ class WorkerExecutorV2:
                         str(getattr(message, "content", "") or "")[:1200]
                         for message in messages
                         if getattr(message, "type", "") == "tool"
-                    )[-10000:]
+                    )[-4000 if v2_worker else -10000:]
+                    retry_base = (
+                        f"用户问题：{context.query}\n本步目标：{step.objective or step.description}\n"
+                        f"必需字段：{list((step.metadata or {}).get('unit_assembly_field_ids') or [])}"
+                        if v2_worker else user_message
+                    )
                     repair_messages = [
-                        {"role": "user", "content": user_message},
+                        {"role": "user", "content": retry_base},
                         {
                             "role": "assistant",
                             "content": f"已有工具证据：\n{tool_context}\n原始输出：\n{content[-4000:]}",
@@ -925,6 +952,211 @@ class WorkerExecutorV2:
                 ),
             },
         )
+
+    async def _invoke_bounded_v2_worker(
+        self,
+        *,
+        task: ResearchTask,
+        context: ResearchContext,
+        step: Any,
+        step_index: int,
+        tool_usage: dict[str, Any],
+        timeout_sec: float,
+        worker_lease_id: str,
+    ) -> StepResult:
+        """Retrieve first, then make one bounded extraction call over fetched text."""
+        from app.agent.harness.artifacts import get_artifact_store
+        from app.agent.llm import worker_model
+        from app.tools.batch_retrieval import run_batch_search
+        from app.tools.fetch_url import fetch_url_content
+        from app.agent.harness.step_budget import consume_fetch_sources_or_block
+        from urllib.parse import urlparse
+
+        metadata = step.metadata or {}
+        objective = str(step.objective or step.description or context.query)
+        entities = [str(item).strip() for item in metadata.get("candidate_entity_ids") or metadata.get("entities") or [] if str(item).strip()]
+        is_multi_subject_comparison = str(metadata.get("ask_kind") or "") == "comparison" and len(entities) >= 2
+        queries = (
+            [f"{name} official product documentation" for name in entities[:2]]
+            if is_multi_subject_comparison
+            else [f"{entities[0]} official docs announcement"] if entities else []
+        )
+        if not is_multi_subject_comparison:
+            queries.append(objective)
+        queries.extend(str(item) for item in (metadata.get("search_hints") or metadata.get("source_hints") or []) if str(item).strip())
+        queries = list(dict.fromkeys(queries))[:2]
+        gateway = LLMGateway(self.session.budget_manager)
+        tool_gateway = ToolGateway(**self._worker_budget_limits(step))
+        fetched: list[dict[str, Any]] = []
+        search_rows: list[dict[str, Any]] = []
+        search_groups: list[list[dict[str, Any]]] = []
+        started = time.monotonic()
+        store = get_artifact_store()
+        with tool_gateway.execution_scope(
+            worker_task_id=task.task_id,
+            step_index=step_index,
+            run_id=context.run_id,
+            session_id=context.session_id,
+            worker_lease_id=worker_lease_id,
+        ) as retrieval_budget:
+            tool_usage["v2_stage"] = "search"
+            search = await asyncio.wait_for(
+                asyncio.to_thread(tool_gateway.call, run_batch_search, queries, max_results=5),
+                timeout=22.0,
+            )
+            for group in search.get("results") or []:
+                rows = [row for row in group.get("results") or [] if isinstance(row, dict)]
+                search_groups.append(rows)
+                search_rows.extend(rows)
+            def source_priority(row: dict[str, Any]) -> tuple[int, int]:
+                url = str(row.get("url") or "")
+                host = (urlparse(url).hostname or "").lower()
+                # Retrieval preference only. Source quality is decided later
+                # from actual page content and claim provenance.
+                primary_candidate = int(
+                    host == "github.com"
+                    or host.startswith(("docs.", "api-docs.", "developer."))
+                )
+                return primary_candidate, int(bool(row.get("published_at")))
+
+            ranked_rows = sorted(search_rows, key=source_priority, reverse=True)
+            if is_multi_subject_comparison:
+                # Reserve one retrieval slot for each side before filling the
+                # remaining slot by relevance. Validation still decides which
+                # fetched claims are actually admissible.
+                leading = [
+                    sorted(rows, key=source_priority, reverse=True)[0]
+                    for rows in search_groups[:2] if rows
+                ]
+                ranked_rows = leading + ranked_rows
+            urls: list[str] = []
+            selected_hosts: set[str] = set()
+            for row in ranked_rows:
+                url = str(row.get("url") or "")
+                host = (urlparse(url).hostname or "").lower()
+                if not url or not host or host in selected_hosts:
+                    continue
+                urls.append(url)
+                selected_hosts.add(host)
+                if len(urls) >= 3:
+                    break
+            if urls:
+                tool_usage["v2_stage"] = "fetch"
+                blocked = consume_fetch_sources_or_block(len(urls), tool_name="batch_fetch")
+                if blocked:
+                    urls = []
+                else:
+                    fetch_tasks = [
+                        asyncio.create_task(
+                            asyncio.to_thread(fetch_url_content, url, max_chars=5000, use_cache=False)
+                        )
+                        for url in urls
+                    ]
+                    done, pending = await asyncio.wait(fetch_tasks, timeout=15.0)
+                    for pending_task in pending:
+                        pending_task.cancel()
+                    fetched = []
+                    for completed in done:
+                        try:
+                            row = completed.result()
+                        except Exception:
+                            continue
+                        if row.get("ok") and row.get("artifact_id"):
+                            fetched.append(row)
+            tool_usage["tool_calls"] = int(bool(queries)) + int(bool(urls))
+            tool_usage["tools_invoked"] = ["batch_search"] + (["batch_fetch"] if urls else [])
+            tool_usage["budget"] = retrieval_budget.snapshot()
+
+        fetched_by_url = {str(row.get("url") or ""): row for row in fetched}
+        documents = []
+        ask_kind = str(metadata.get("ask_kind") or "fact")
+        target_units = max(1, int(metadata.get("target_units") or 1))
+        max_documents = 2 if ask_kind == "fact" else 3
+        for url in urls:
+            row = fetched_by_url.get(url)
+            if row is None:
+                continue
+            artifact_id = str(row.get("artifact_id") or "")
+            artifact = store.get(artifact_id)
+            if artifact is None:
+                continue
+            documents.append({
+                "artifact_id": artifact_id,
+                "url": str(row.get("url") or ""),
+                "title": str(row.get("title") or ""),
+                "published_at": str(row.get("published_at") or ""),
+                "text": artifact.content[:900],
+            })
+            if len(documents) >= max_documents:
+                break
+        field_ids = list(metadata.get("unit_assembly_field_ids") or metadata.get("target_field_ids") or [])
+        field_specs = {
+            str(row.get("field_id") or ""): dict(row)
+            for row in metadata.get("unit_assembly_field_specs") or []
+            if isinstance(row, dict) and row.get("field_id")
+        }
+        field_shape: dict[str, dict[str, Any]] = {}
+        for field_id in field_ids:
+            value_type = str(field_specs.get(field_id, {}).get("value_type") or "fact")
+            field_shape[str(field_id)] = {
+                "value": "",
+                "value_kind": value_type,
+                **(
+                    {"premise_claim_ids": ["C1"], "rationale": "与已核实事实的关系"}
+                    if value_type in {"inference", "forecast"}
+                    else {"limitation_status": "not_verified"}
+                    if value_type == "limitation"
+                    else {"claim_ids": ["C1"]}
+                ),
+            }
+        unit_limit = min(2, target_units) if ask_kind == "recommendation" else 1
+        prompt = (
+            f"问题：{context.query}\n必需字段：{field_ids}。"
+            f"题型：{ask_kind}，本任务最多交付{unit_limit}个不同对象的答案单元。"
+            f"{'比较对象必须同时包含：' + '、'.join(entities[:2]) + '。' if is_multi_subject_comparison else ''}"
+            "仅根据下面抓取的原文，输出一行 JSON。先写简短事实 claim，再把每个字段 value "
+            "逐字复制为对应 claim 的连续片段（不超过60字）。"
+            f"{'日期口径须有单独 claim。' if 'scope' in field_ids else ''}"
+            "推荐题每个单元只能对应一家有名称的公司；why_interesting 等推断字段须写非空 rationale，"
+            "premise_claim_ids 引用已证实的产品或进展事实；limitations 未验证可写 not_verified。"
+            "claim 只能绑定原文给出的 artifact_id，不得编造。证据不足时输出 gaps，不要补事实。"
+            "格式：{\"summary\":\"...\",\"findings\":[{\"claim_id\":\"C1\",\"claim\":\"...\","
+            "\"claim_type\":\"fact\",\"artifact_ids\":[\"实际ID\"],\"confidence\":0.9}],"
+            "\"candidate_answer_units\":[{\"unit_id\":\"U1\",\"entity_ids\":[\"实体\"],"
+            f"\"fields\":{json.dumps(field_shape, ensure_ascii=False)}}}],\"gaps\":[]}}。"
+            f"原文：{json.dumps(documents, ensure_ascii=False)}"
+        )
+        if not documents:
+            return StepResult(step_type=step.step_type, content="", metadata={
+                "step_index": step_index, "task_id": task.task_id,
+                "worker_dispatch": "direct", "tools_invoked": tool_usage["tools_invoked"],
+                "tool_calls": tool_usage["tool_calls"], "structured_output_valid": False,
+                "invalid_structured_output": True, "error_code": "no_fetched_source",
+                "raw_finding_count": 0,
+            })
+        remaining = max(5.0, min(35.0, timeout_sec - (time.monotonic() - started) - 3.0))
+        tool_usage["v2_stage"] = "extract"
+        configured_worker_model = (os.getenv("LLM_WORKER_MODEL") or os.getenv("LLM_QWEN_MAX") or "").casefold()
+        model_options: dict[str, Any] = {"max_tokens": 1200 if ask_kind == "fact" else 2000}
+        if "glm-5.3" in configured_worker_model:
+            model_options["extra_body"] = {
+                "reasoning_effort": os.getenv("HARNESS_V2_WORKER_REASONING_EFFORT", "low")
+            }
+        with gateway.execution_scope(phase="execute", worker_task_id=task.task_id):
+            reply = await asyncio.wait_for(
+                gateway.ainvoke(worker_model.bind(**model_options), prompt), timeout=remaining
+            )
+        content = str(getattr(reply, "content", "") or "")
+        payload = parse_worker_payload(content, step_type=step.step_type, subagent=step.subagent or "")
+        valid, reason = validate_structured_worker_payload(payload, step, require_json=True)
+        return StepResult(step_type=step.step_type, content=content, metadata={
+            "step_index": step_index, "task_id": task.task_id,
+            "worker_dispatch": "direct", "tools_invoked": tool_usage["tools_invoked"],
+            "tool_calls": tool_usage["tool_calls"], "final_ai_found": bool(content.strip()),
+            "structured_output_valid": valid, "finalization_retry_count": 0,
+            "raw_finding_count": len(payload.findings), "stop_reason": "",
+            **({"invalid_structured_output": True, "error_code": reason} if not valid else {}),
+        })
 
     @staticmethod
     def _collect_worker_stream_chunk(
@@ -1092,20 +1324,20 @@ class WorkerExecutorV2:
         facts = [fact for fact in facts if fact]
         sources = [str(item.get("url")) for item in results]
         summary = str(results[0].get("title") or next(iter(facts), "")).strip()
+        findings = []
+        for index, (fact, source) in enumerate(zip(facts, sources), 1):
+            findings.append({
+                "task_id": task.task_id,
+                "claim": fact,
+                "evidence_ids": [source],
+                "sources": [source],
+            })
         payload = {
             "ok": bool(results and facts),
             "summary": summary,
             "facts": facts,
             "sources": sources,
-            "findings": [
-                {
-                    "task_id": task.task_id,
-                    "claim": fact,
-                    "evidence_ids": [source],
-                    "sources": [source],
-                }
-                for fact, source in zip(facts, sources)
-            ],
+            "findings": findings,
             "artifact_ids": [],
             "error_code": "",
             "worker": "simple_fact_search",
@@ -1189,7 +1421,10 @@ class WorkerExecutorV2:
                 else getattr(config, "step_timeout_sec", 120)
             ),
         )
-        timeout_sec = max(timeout_sec, int(self._model_timeout_sec()) + 30)
+        if (step.metadata or {}).get("engine_version") == "answer_contract_v2":
+            timeout_sec = min(timeout_sec, 75)
+        else:
+            timeout_sec = max(timeout_sec, int(self._model_timeout_sec()) + 30)
         if str(step.step_type) in SYNTHESIS_STEP_TYPES:
             synthesis_timeout = int(
                 getattr(config, "synthesis_step_timeout_sec", 0) or 0
@@ -1208,6 +1443,8 @@ class WorkerExecutorV2:
         # Keep intentionally tiny test overrides intact so timeout/salvage
         # integration tests do not unexpectedly wait for a production window.
         if float(timeout_sec) < 10.0:
+            return float(timeout_sec)
+        if (step.metadata or {}).get("engine_version") == "answer_contract_v2":
             return float(timeout_sec)
         if str(step.step_type) not in SUBAGENT_STEP_TYPES:
             return float(timeout_sec)

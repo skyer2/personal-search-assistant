@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "suite": "answer-contract-v2-10x3",
+  "engine_version": "answer_contract_v2",
+  "mode": "agent",
+  "repetitions": 3,
+  "release_gate": {"full_success_min": 27, "first_pass_success_min": 24, "p95_latency_sec_max": 240},
+  "case_source": "scripts/live_deep_research_suite.py::CASES",
+  "model_config": null,
+  "candidate_commit": null,
+  "freeze_status": "pending release candidate"
+}

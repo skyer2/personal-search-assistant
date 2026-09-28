@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.research.brief.models import StructuredResearchBrief
+from app.research.spec.validator import validate_answer_spec
 
 _DELIVERABLE_FORMATS = {"text", "markdown", "pdf"}
 _DELIVERABLE_DEPTHS = {"brief", "standard", "long"}
@@ -28,6 +29,8 @@ def validate_structured_brief(brief: StructuredResearchBrief) -> list[str]:
         issues.append("unsupported_deliverable_depth")
     if len(brief.explicit_subjects) > 12:
         issues.append("too_many_explicit_subjects")
+    if brief.engine_version == "answer_contract_v2":
+        issues.extend(validate_answer_spec(brief.answer_spec))
     return issues
 
 

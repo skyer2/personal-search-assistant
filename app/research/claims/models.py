@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 ClaimType = Literal["fact", "inference", "forecast", "attributed_opinion"]
+ValidationStatus = Literal["pending", "supported", "rejected", "unknown"]
+SupportRelation = Literal["supports", "contradicts", "context_only", "unknown"]
 
 ConflictKind = Literal[
     "expected_disagreement",
@@ -42,6 +44,10 @@ class ClaimRecord:
     validated: bool = False
     publishability_score: float = 0.0
     admission_reasons: list[str] = field(default_factory=list)
+    field_ids: list[str] = field(default_factory=list)
+    validation_status: ValidationStatus = "pending"
+    validation_version: str = ""
+    support_edge_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,6 +86,49 @@ class ClaimRecord:
             validated=bool(row.get("validated", False)),
             publishability_score=max(0.0, min(1.0, float(row.get("publishability_score") or 0.0))),
             admission_reasons=[str(x) for x in (row.get("admission_reasons") or []) if str(x).strip()],
+            field_ids=[str(x) for x in (row.get("field_ids") or []) if str(x).strip()],
+            validation_status=(
+                str(row.get("validation_status"))
+                if str(row.get("validation_status")) in {"pending", "supported", "rejected", "unknown"}
+                else "pending"
+            ),  # type: ignore[arg-type]
+            validation_version=str(row.get("validation_version") or ""),
+            support_edge_ids=[str(x) for x in (row.get("support_edge_ids") or []) if str(x).strip()],
+        )
+
+    @property
+    def is_supported(self) -> bool:
+        return self.validation_status == "supported"
+
+
+@dataclass(frozen=True)
+class SupportEdge:
+    edge_id: str
+    claim_id: str
+    evidence_id: str
+    span_id: str
+    relation: SupportRelation
+    checked_by: str
+    validator_version: str
+    reason_codes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SupportEdge":
+        relation = str(data.get("relation") or "unknown")
+        if relation not in {"supports", "contradicts", "context_only", "unknown"}:
+            relation = "unknown"
+        return cls(
+            edge_id=str(data.get("edge_id") or ""),
+            claim_id=str(data.get("claim_id") or ""),
+            evidence_id=str(data.get("evidence_id") or ""),
+            span_id=str(data.get("span_id") or ""),
+            relation=relation,  # type: ignore[arg-type]
+            checked_by=str(data.get("checked_by") or ""),
+            validator_version=str(data.get("validator_version") or ""),
+            reason_codes=tuple(str(item) for item in data.get("reason_codes") or []),
         )
 
 

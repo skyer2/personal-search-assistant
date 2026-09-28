@@ -258,6 +258,13 @@ export interface TraceTree {
 }
 
 export interface TraceSummary {
+  schema_version?: number;
+  completion?: Record<string, unknown>;
+  answer_units_summary?: {
+    evaluated?: number;
+    unit_ids?: string[];
+    per_ask?: Array<Record<string, unknown>>;
+  };
   status?: string;
   started_at?: string | null;
   ended_at?: string | null;

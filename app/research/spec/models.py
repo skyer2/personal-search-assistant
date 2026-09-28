@@ -7,6 +7,110 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from app.research.spec.intent import AskKind
+
+
+ANSWER_SCHEMA_VERSION = 2
+ANSWER_POLICY_VERSION = "answer-policy-v2"
+
+
+@dataclass(frozen=True)
+class FieldRequirement:
+    field_id: str
+    value_type: str
+    support_policy: str
+    unknown_allowed: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "FieldRequirement":
+        return cls(
+            field_id=str(data.get("field_id") or ""),
+            value_type=str(data.get("value_type") or ""),
+            support_policy=str(data.get("support_policy") or ""),
+            unknown_allowed=bool(data.get("unknown_allowed", False)),
+        )
+
+
+@dataclass(frozen=True)
+class AskSpec:
+    ask_id: str
+    question_id: str
+    original_text: str
+    kind: AskKind
+    required: bool
+    entity_scope: dict[str, Any]
+    time_scope: dict[str, Any]
+    required_fields: tuple[FieldRequirement, ...]
+    target_units: int = 1
+    min_partial_units: int = 1
+    max_units: int = 1
+    partial_allowed: bool = True
+    selection_criteria: tuple[str, ...] = ()
+    current_fact_max_age_days: int = 180
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AskSpec":
+        kind = str(data.get("kind") or "")
+        if kind not in {"fact", "recommendation", "comparison", "explanation", "current_state", "forecast"}:
+            raise ValueError(f"unknown ask kind: {kind!r}")
+        return cls(
+            ask_id=str(data.get("ask_id") or ""),
+            question_id=str(data.get("question_id") or ""),
+            original_text=str(data.get("original_text") or ""),
+            kind=kind,  # type: ignore[arg-type]
+            required=bool(data.get("required", True)),
+            entity_scope=dict(data.get("entity_scope") or {}),
+            time_scope=dict(data.get("time_scope") or {}),
+            required_fields=tuple(
+                FieldRequirement.from_dict(item)
+                for item in data.get("required_fields") or []
+                if isinstance(item, dict)
+            ),
+            target_units=int(data.get("target_units") or 0),
+            min_partial_units=int(data.get("min_partial_units") or 0),
+            max_units=int(data.get("max_units") or 0),
+            partial_allowed=bool(data.get("partial_allowed", True)),
+            selection_criteria=tuple(str(item) for item in data.get("selection_criteria") or []),
+            current_fact_max_age_days=int(data.get("current_fact_max_age_days") or 180),
+        )
+
+
+@dataclass(frozen=True)
+class AnswerSpec:
+    schema_version: int
+    spec_id: str
+    revision: int
+    objective: str
+    as_of: str
+    timezone: str
+    asks: tuple[AskSpec, ...]
+    assumptions: tuple[str, ...] = ()
+    policy_version: str = ANSWER_POLICY_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AnswerSpec":
+        return cls(
+            schema_version=int(data.get("schema_version") or 0),
+            spec_id=str(data.get("spec_id") or ""),
+            revision=int(data.get("revision") or 0),
+            objective=str(data.get("objective") or ""),
+            as_of=str(data.get("as_of") or ""),
+            timezone=str(data.get("timezone") or ""),
+            asks=tuple(
+                AskSpec.from_dict(item)
+                for item in data.get("asks") or []
+                if isinstance(item, dict)
+            ),
+            assumptions=tuple(str(item) for item in data.get("assumptions") or []),
+            policy_version=str(data.get("policy_version") or ""),
+        )
+
 
 @dataclass
 class ResearchSubject:
@@ -203,6 +307,8 @@ class ResearchSpec:
     source_policy: SourcePolicy = field(default_factory=SourcePolicy)
     assumptions: list[str] = field(default_factory=list)
     language_hints: list[str] = field(default_factory=list)
+    answer_spec: AnswerSpec | None = None
+    engine_version: str = "answer_contract_v2"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -257,6 +363,12 @@ class ResearchSpec:
             }),
             assumptions=[str(item) for item in row.get("assumptions") or [] if str(item).strip()],
             language_hints=[str(item) for item in row.get("language_hints") or [] if str(item).strip()],
+            answer_spec=(
+                AnswerSpec.from_dict(row["answer_spec"])
+                if isinstance(row.get("answer_spec"), dict)
+                else None
+            ),
+            engine_version=str(row.get("engine_version") or "answer_contract_v2"),
         )
 
 
@@ -266,10 +378,15 @@ def stable_spec_id(objective: str) -> str:
 
 
 __all__ = [
+    "ANSWER_POLICY_VERSION",
+    "ANSWER_SCHEMA_VERSION",
+    "AnswerSpec",
+    "AskSpec",
     "Ambiguity",
     "Constraint",
     "DeliveryRequirements",
     "EvidenceRequirements",
+    "FieldRequirement",
     "FreshnessPolicy",
     "InteractionRequirements",
     "Premise",

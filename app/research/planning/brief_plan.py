@@ -12,6 +12,7 @@ from typing import Any
 
 from app.agent.harness.state import ExecutionPlan, PlanStep
 from app.research.brief.models import StructuredResearchBrief
+from app.research.spec.models import AnswerSpec
 from app.research.planning.bounded import (
     DEFAULT_WORKER_QUERY_BUDGET,
     MAX_DIMENSIONS,
@@ -39,6 +40,17 @@ class ResearchTaskSpec:
     max_llm_calls: int = 4
     priority: int = 1
     plan_version: int = 1
+    spec_revision: int = 1
+    ask_id: str = ""
+    target_field_ids: tuple[str, ...] = ()
+    unit_assembly_field_ids: tuple[str, ...] = ()
+    candidate_entity_ids: tuple[str, ...] = ()
+    expected_claim_types: tuple[str, ...] = ()
+    source_strategy: tuple[str, ...] = ()
+    done_condition: str = ""
+    lease_id: str = ""
+    wave_id: int = 1
+    repair_of_gap_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -120,14 +132,23 @@ def build_brief_and_plan(brief: StructuredResearchBrief, *, plan_version: int = 
     # Every key question must be represented in the initial bounded DAG.
     # Parallelism is controlled at dispatch time; truncating questions here
     # turns a known delivery requirement into an impossible repair request.
-    questions = list(brief.key_questions or (brief.objective,))
+    answer_spec = AnswerSpec.from_dict(brief.answer_spec) if brief.answer_spec else None
+    questions = (
+        [ask.original_text for ask in answer_spec.asks]
+        if brief.engine_version == "answer_contract_v2" and answer_spec
+        else list(brief.key_questions or (brief.objective,))
+    )
     entities = tuple(brief.explicit_subjects[:MAX_ENTITIES])
     if not entities:
         entities = (brief.objective[:100],)
     analysis = _analysis_type(brief)
+    ask_by_question = {
+        ask.question_id: ask for ask in (answer_spec.asks if answer_spec else ())
+    }
     tasks: list[ResearchTaskSpec] = []
     for index, question in enumerate(questions, 1):
         qid = f"q{index}"
+        ask = ask_by_question.get(qid)
         dimensions = _dimensions_for_question(question, brief.user_intent)
         evidence_items = list(brief.source_requirements.preferred[:2]) or ["reliable source"]
         trend_question = any(
@@ -171,6 +192,19 @@ def build_brief_and_plan(brief: StructuredResearchBrief, *, plan_version: int = 
                 max_llm_calls=4,
                 priority=1 if index == 1 else 2,
                 plan_version=plan_version,
+                spec_revision=answer_spec.revision if answer_spec else brief.version,
+                ask_id=ask.ask_id if ask else "",
+                target_field_ids=tuple(field.field_id for field in ask.required_fields[:3]) if ask else (),
+                unit_assembly_field_ids=tuple(field.field_id for field in ask.required_fields) if ask else (),
+                candidate_entity_ids=entities[: min(3, len(entities))],
+                expected_claim_types=tuple(field.value_type for field in ask.required_fields) if ask else ("fact",),
+                source_strategy=("primary_source", "independent_corroboration", "counter_evidence") if analysis else ("primary_source", "independent_corroboration"),
+                done_condition=(
+                    f"produce validated fields for {ask.target_units} answer unit(s)"
+                    if ask else "produce cited evidence for the question"
+                ),
+                lease_id=f"lease:{brief.brief_id}:{plan_version}:{index}",
+                wave_id=1,
             )
         )
     return ResearchBriefAndPlan(brief=brief, tasks=tuple(tasks))
@@ -184,8 +218,14 @@ def execution_plan_from_brief(
 
     contract = build_brief_and_plan(brief, plan_version=plan_version)
     analysis = _analysis_type(brief)
+    answer_asks_by_id = {
+        str(row.get("ask_id") or ""): row
+        for row in (brief.answer_spec or {}).get("asks") or []
+        if isinstance(row, dict)
+    }
     steps: list[PlanStep] = []
     for task in contract.tasks:
+        answer_ask = answer_asks_by_id.get(task.ask_id, {})
         profile = task_budget_profile("medium")
         step = PlanStep(
             step_type="research",
@@ -195,9 +235,22 @@ def execution_plan_from_brief(
             allowed_tools=worker_tools_for_step("research"),
             metadata={
                 "kind": "research_task",
+                "engine_version": brief.engine_version,
                 "task_kind": "initial_bounded_plan",
                 "question_id": task.question_id,
-                "ask_id": f"a{task.question_id[1:]}",
+                "ask_id": task.ask_id,
+                "spec_revision": task.spec_revision,
+                "target_field_ids": list(task.target_field_ids),
+                "unit_assembly_field_ids": list(task.unit_assembly_field_ids),
+                "unit_assembly_field_specs": list(answer_ask.get("required_fields") or []),
+                "target_units": int(answer_ask.get("target_units") or 1),
+                "ask_kind": str(answer_ask.get("kind") or "fact"),
+                "candidate_entity_ids": list(task.candidate_entity_ids),
+                "expected_claim_types": list(task.expected_claim_types),
+                "done_condition": task.done_condition,
+                "lease_id": task.lease_id,
+                "wave_id": task.wave_id,
+                "repair_of_gap_ids": list(task.repair_of_gap_ids),
                 "hypotheses": list(task.hypotheses),
                 "hypothesis": task.hypotheses[0] if task.hypotheses else "",
                 "hypothesis_id": f"h_{task.question_id}",
@@ -207,7 +260,7 @@ def execution_plan_from_brief(
                 "coverage_keys": list(task.dimensions),
                 "evidence_needed": list(task.evidence_needed),
                 "counter_evidence_needed": list(task.counter_evidence_needed),
-                "source_strategy": ["primary_source", "independent_corroboration", "counter_evidence"] if analysis else ["primary_source", "independent_corroboration"],
+                "source_strategy": list(task.source_strategy),
                 "research_lanes": ["primary_source", "supporting_evidence", "counter_evidence"] if analysis else ["primary_source", "supporting_evidence"],
                 "search_hints": list(task.search_hints),
                 "entities": list(task.entities[:MAX_ENTITIES]),
@@ -239,7 +292,12 @@ def execution_plan_from_brief(
 
 
 def plan_coverage(plan: ExecutionPlan, brief: StructuredResearchBrief) -> PlanCoverage:
-    required = tuple(f"q{index}" for index, _ in enumerate(brief.key_questions or (brief.objective,), 1))
+    answer_spec = AnswerSpec.from_dict(brief.answer_spec) if brief.answer_spec else None
+    required = (
+        tuple(ask.question_id for ask in answer_spec.asks)
+        if brief.engine_version == "answer_contract_v2" and answer_spec
+        else tuple(f"q{index}" for index, _ in enumerate(brief.key_questions or (brief.objective,), 1))
+    )
     counts: dict[str, int] = {}
     for step in plan.steps:
         question_id = str((step.metadata or {}).get("question_id") or "").strip()
@@ -265,6 +323,10 @@ def validate_brief_plan(
         metadata = step.metadata or {}
         if not str(metadata.get("question_id") or "").strip():
             issues.append({"code": "missing_question_id", "task_id": step.task_id, "detail": ""})
+        if brief is not None and brief.engine_version == "answer_contract_v2":
+            for key in ("ask_id", "spec_revision", "target_field_ids", "done_condition", "lease_id", "wave_id"):
+                if metadata.get(key) in (None, "", []):
+                    issues.append({"code": f"missing_{key}", "task_id": step.task_id, "detail": ""})
         if not (metadata.get("hypotheses") or metadata.get("hypothesis")):
             issues.append({"code": "missing_hypothesis", "task_id": step.task_id, "detail": ""})
         if not str(step.objective or step.description or "").strip():

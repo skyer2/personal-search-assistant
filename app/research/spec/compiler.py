@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import re
+import os
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from app.research.intent.user_ask import compile_user_ask_contract
 
 from app.research.spec.models import (
+    ANSWER_POLICY_VERSION,
+    ANSWER_SCHEMA_VERSION,
+    AnswerSpec,
+    AskSpec,
     Ambiguity,
     Constraint,
     DeliveryRequirements,
     EvidenceRequirements,
+    FieldRequirement,
     FreshnessPolicy,
     InteractionRequirements,
     ReasoningRequirements,
@@ -20,6 +30,115 @@ from app.research.spec.models import (
     SuccessCriterion,
     stable_spec_id,
 )
+
+_NUMBER_WORDS = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _target_units(text: str, kind: str) -> int:
+    if kind not in {"recommendation", "comparison"}:
+        return 1
+    match = re.search(r"(?<!\d)(\d{1,2})\s*(?:家|个|款|种|项|tools?|companies?)", text, re.IGNORECASE)
+    if match:
+        return max(1, min(20, int(match.group(1))))
+    match = re.search(r"([一两二三四五六七八九十])\s*(?:家|个|款|种|项)", text)
+    if match:
+        return _NUMBER_WORDS[match.group(1)]
+    return 5 if kind == "recommendation" else 1
+
+
+def _field_requirements(kind: str) -> tuple[FieldRequirement, ...]:
+    rows: dict[str, tuple[tuple[str, str, str, bool], ...]] = {
+        "fact": (("answer", "fact", "direct_fact", False), ("scope", "scope", "explicit_scope", False)),
+        "recommendation": (
+            ("company", "entity", "identity", False),
+            ("product", "fact", "product_fact", False),
+            ("why_interesting", "inference", "grounded_reason", False),
+            ("limitations", "limitation", "explicit_boundary", True),
+        ),
+        "comparison": (
+            ("subjects", "entity_list", "identity", False),
+            ("dimensions", "comparison", "per_subject_evidence", False),
+            ("conditional_judgment", "inference", "grounded_reason", False),
+        ),
+        "explanation": (
+            ("explanation", "inference", "causal_evidence", False),
+            ("boundary", "limitation", "causality_boundary", False),
+        ),
+        "current_state": (
+            ("status", "fact", "current_fact", False),
+            ("as_of", "datetime", "explicit_scope", False),
+        ),
+        "forecast": (
+            ("current_signal", "fact", "current_fact", False),
+            ("mechanism", "inference", "grounded_reason", False),
+            ("direction", "forecast", "grounded_forecast", False),
+            ("milestone", "forecast", "observable_milestone", False),
+            ("uncertainty", "limitation", "explicit_boundary", False),
+        ),
+    }
+    return tuple(FieldRequirement(*row) for row in rows[kind])
+
+
+def _compile_answer_spec(
+    objective: str,
+    *,
+    spec_id: str,
+    revision: int,
+    as_of: datetime,
+    timezone: str,
+    explicit_subjects: tuple[str, ...] = (),
+) -> AnswerSpec:
+    contract = compile_user_ask_contract(objective)
+    asks: list[AskSpec] = []
+    assumptions: list[str] = []
+    for index, user_ask in enumerate(contract.asks, 1):
+        kind = user_ask.ask_type
+        target = _target_units(user_ask.text, kind)
+        partial_allowed = not any(token in user_ask.text for token in ("必须完整", "否则不要", "不要部分", "all or nothing"))
+        entity_scope: dict[str, Any] = {"subject": user_ask.subject} if user_ask.subject else {"type": "unspecified"}
+        if kind == "comparison" and len(explicit_subjects) >= 2:
+            entity_scope = {"subjects": list(explicit_subjects)}
+        if kind == "recommendation" and any(token in objective.casefold() for token in ("ai初创", "ai 创业", "ai startup")):
+            entity_scope = {"type": "ai_startup", "geography": "global"}
+        time_scope = (
+            {"mode": "explicit", "value": user_ask.time_scope}
+            if user_ask.time_scope
+            else {"mode": "current" if kind in {"current_state", "recommendation", "forecast"} else "unspecified"}
+        )
+        asks.append(AskSpec(
+            ask_id=user_ask.ask_id,
+            question_id=f"q{index}",
+            original_text=user_ask.text,
+            kind=kind,
+            required=user_ask.required,
+            entity_scope=entity_scope,
+            time_scope=time_scope,
+            required_fields=_field_requirements(kind),
+            target_units=target,
+            min_partial_units=1,
+            max_units=target,
+            partial_allowed=partial_allowed,
+            selection_criteria=(
+                ("product_difference", "practical_value", "verified_progress")
+                if kind == "recommendation"
+                else ("user_requested_dimensions",) if kind == "comparison" else ()
+            ),
+        ))
+        if kind == "recommendation" and target == 5 and not re.search(r"\d|[一两二三四五六七八九十]\s*(?:家|个|款|种|项)", user_ask.text):
+            assumptions.append("用户未指定数量，默认交付5个经验证对象")
+    if not asks and objective:
+        raise ValueError("contract_invalid:no_asks")
+    return AnswerSpec(
+        schema_version=ANSWER_SCHEMA_VERSION,
+        spec_id=spec_id,
+        revision=revision,
+        objective=objective,
+        as_of=as_of.isoformat(),
+        timezone=timezone,
+        asks=tuple(asks),
+        assumptions=tuple(assumptions),
+        policy_version=ANSWER_POLICY_VERSION,
+    )
 
 _SEPARATORS = re.compile(r"[、,，;；/]|和|与|及")
 _DIMENSION_HINTS = (
@@ -141,6 +260,10 @@ def compile_research_spec(
     *,
     conversation_delta: str = "",
     existing_spec: dict[str, Any] | None = None,
+    as_of: datetime | None = None,
+    timezone: str = "Asia/Shanghai",
+    engine_version: str | None = None,
+    explicit_subjects: tuple[str, ...] = (),
 ) -> ResearchSpec:
     objective = re.sub(r"\s+", " ", " ".join(part for part in (query, conversation_delta) if part).strip())
     shape = _shape(objective)
@@ -185,11 +308,23 @@ def compile_research_spec(
         )
     constraints = [Constraint("constraint_scope", "Do not expand beyond the requested research objective.", True)]
     ambiguities = [] if objective else [Ambiguity("ambiguity_empty", "Query is empty", True)]
+    now = as_of or datetime.now(ZoneInfo(timezone))
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=ZoneInfo(timezone))
+    spec_id = stable_spec_id(objective)
+    revision = 1
+    selected_engine = str(
+        engine_version or os.getenv("HARNESS_RESEARCH_ENGINE_VERSION", "legacy_v1")
+    ).strip()
+    if selected_engine not in {"legacy_v1", "answer_contract_v2"}:
+        raise ValueError(f"unsupported research engine: {selected_engine}")
     if existing_spec:
         previous = ResearchSpec.from_dict(existing_spec)
+        spec_id = previous.spec_id
+        revision = previous.version + 1
         return ResearchSpec(
-            spec_id=previous.spec_id,
-            version=previous.version + 1,
+            spec_id=spec_id,
+            version=revision,
             objective=objective or previous.objective,
             subjects=subjects or previous.subjects,
             dimensions=dimensions or previous.dimensions,
@@ -213,9 +348,18 @@ def compile_research_spec(
             ),
             assumptions=previous.assumptions,
             language_hints=sorted(set(previous.language_hints) | set(_language_hints(objective))),
+            answer_spec=_compile_answer_spec(
+                objective or previous.objective,
+                spec_id=spec_id,
+                revision=revision,
+                as_of=now,
+                timezone=timezone,
+                explicit_subjects=explicit_subjects,
+            ),
+            engine_version=selected_engine,
         )
     return ResearchSpec(
-        spec_id=stable_spec_id(objective),
+        spec_id=spec_id,
         version=1,
         objective=objective,
         subjects=subjects,
@@ -234,6 +378,15 @@ def compile_research_spec(
         ),
         source_policy=_source_policy(objective, evidence.prefer_primary),
         language_hints=_language_hints(objective),
+        answer_spec=_compile_answer_spec(
+            objective,
+            spec_id=spec_id,
+            revision=revision,
+            as_of=now,
+            timezone=timezone,
+            explicit_subjects=explicit_subjects,
+        ),
+        engine_version=selected_engine,
     )
 
 

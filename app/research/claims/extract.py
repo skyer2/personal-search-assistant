@@ -54,25 +54,15 @@ def _normalize_unit(unit: str, text: str = "") -> str:
 
 
 def _authority_score(sources: list[str], source_quality: str) -> float:
-    from app.agent.harness.research_brief import PRIMARY_SOURCE_HINTS
-
-    score = 0.0
+    _ = sources
     sq = (source_quality or "").lower()
     if sq in {"primary", "official", "regulatory"}:
-        score += 0.55
-    elif sq in {"secondary", "high"}:
-        score += 0.25
-    blob = " ".join(sources).lower()
-    if any(h.lower() in blob for h in PRIMARY_SOURCE_HINTS):
-        score += 0.35
-    # IR / SEC / 年报 URL 即使未标 primary，也按接近官方来源加分
-    if any(tok in blob for tok in ("sec.gov", "10-k", "10k", "/ir.", "ir.", "investor", "arxiv.org")):
-        score += 0.35
-    if any(tok in blob for tok in ("reuters", "bloomberg", "wsj", "ft.com", "nytimes")):
-        score += 0.1
-    if any(tok in blob for tok in ("reddit", "forum", "zhihu", "medium.com", "blog")):
-        score -= 0.2
-    return max(0.0, min(1.0, score))
+        return 0.9
+    if sq in {"authoritative_secondary", "high_quality_secondary", "high"}:
+        return 0.75
+    if sq == "secondary":
+        return 0.55
+    return 0.0
 
 
 def _claim_id(*parts: str) -> str:
@@ -208,6 +198,16 @@ def extract_claims_from_worker_results(rows: list[Any] | None) -> list[ClaimReco
                         authority_score=_authority_score(sources, sq),
                     )
                 ]
+            requested_id = str(finding.get("claim_id") or "").strip()
+            field_ids = [str(item) for item in finding.get("field_ids") or [] if str(item)]
+            claim_type = str(finding.get("claim_type") or "fact")
+            if claim_type not in {"fact", "inference", "forecast", "attributed_opinion"}:
+                claim_type = "fact"
+            for parsed_index, claim in enumerate(parsed, 1):
+                if requested_id:
+                    claim.claim_id = requested_id if len(parsed) == 1 else f"{requested_id}:{parsed_index}"
+                claim.field_ids = field_ids
+                claim.claim_type = claim_type  # type: ignore[assignment]
             for claim in parsed:
                 if claim.claim_id in seen:
                     continue

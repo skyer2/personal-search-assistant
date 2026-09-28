@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 
@@ -35,31 +36,25 @@ class SourceQuality:
         return {**asdict(self), "score": self.score}
 
 
-_PRIMARY = (
-    "sec.gov", "gov.", ".gov/", "europa.eu", "arxiv.org", "doi.org",
-    "openai.com", "anthropic.com", "microsoft.com", "google.com", "meta.com",
-    "/investor", "/ir/", "newsroom", "/blog/", "/docs/", "official",
-)
-_AUTHORITATIVE = (
-    "reuters.com", "bloomberg.com", "ft.com", "wsj.com", "cnbc.com",
-    "nature.com", "science.org", "gartner.com", "idc.com",
-)
-_COMMUNITY = (
-    "reddit.com", "news.ycombinator.com", "zhihu.com", "juejin.cn",
-    "medium.com", "substack.com", "twitter.com", "x.com", "weibo.com",
-)
-
-
-def score_source(locator: str, *, declared_quality: str = "", published_at: str = "") -> SourceQuality:
-    """Classify a source without network access; unknown remains a weak signal."""
-    value = f"{locator} {declared_quality}".casefold()
-    if any(token in value for token in _PRIMARY):
+def score_source(
+    locator: str,
+    *,
+    declared_quality: str = "",
+    published_at: str = "",
+    publisher_relationship: str = "unknown",
+    content_kind: str = "snippet",
+    as_of: datetime | None = None,
+) -> SourceQuality:
+    """Score declared source properties; URL wording never upgrades quality."""
+    quality = declared_quality.casefold().strip()
+    relationship = publisher_relationship.casefold().strip()
+    if relationship == "first_party" or quality in {"primary", "official", "regulatory"}:
         source_type: SourceType = "primary"
         authority, directness = 0.92, 0.90
-    elif any(token in value for token in _AUTHORITATIVE):
+    elif quality in {"authoritative_secondary", "high_quality_secondary"}:
         source_type = "authoritative_secondary"
         authority, directness = 0.80, 0.78
-    elif any(token in value for token in _COMMUNITY):
+    elif quality == "community":
         source_type = "community"
         authority, directness = 0.25, 0.35
     elif locator.startswith(("http://", "https://")):
@@ -68,9 +63,28 @@ def score_source(locator: str, *, declared_quality: str = "", published_at: str 
     else:
         source_type = "unknown"
         authority, directness = 0.15, 0.20
-    freshness = 0.85 if published_at else 0.45
-    completeness = 0.85 if locator.startswith(("http://", "https://")) else 0.35
-    return SourceQuality(authority, directness, freshness, 1.0, completeness, source_type)
+    if content_kind in {"fulltext", "structured_record"}:
+        directness = max(directness, 0.85)
+        completeness = 0.9
+    elif content_kind == "excerpt":
+        directness = max(directness, 0.65)
+        completeness = 0.65
+    else:
+        directness = min(directness, 0.35)
+        completeness = 0.25
+    freshness = 0.0
+    if published_at:
+        try:
+            published = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+            if published.tzinfo is None:
+                published = published.replace(tzinfo=timezone.utc)
+            reference = as_of or datetime.now(timezone.utc)
+            age_days = max(0, (reference.astimezone(timezone.utc) - published.astimezone(timezone.utc)).days)
+            freshness = 1.0 if age_days <= 30 else 0.85 if age_days <= 180 else 0.55 if age_days <= 365 else 0.25
+        except ValueError:
+            freshness = 0.0
+    independence = 1.0 if relationship == "independent" else 0.5 if relationship == "first_party" else 0.0
+    return SourceQuality(authority, directness, freshness, independence, completeness, source_type)
 
 
 def is_high_authority(record: dict[str, Any]) -> bool:
@@ -84,7 +98,12 @@ def source_quality_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(rows)
     primary = sum(item == "primary" for item in types)
     high = sum(is_high_authority(row) for row in rows)
-    domains = {str(row.get("source_id") or row.get("locator") or "") for row in rows}
+    origins = {
+        str(row.get("origin_group_id") or "")
+        for row in rows
+        if str(row.get("publisher_relationship") or "") == "independent"
+        and str(row.get("origin_group_id") or "")
+    }
     concentration = 0.0
     if total:
         counts: dict[str, int] = {}
@@ -96,7 +115,7 @@ def source_quality_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
         "evidence_count": total,
         "primary_source_ratio": round(primary / total, 4) if total else 0.0,
         "high_authority_source_ratio": round(high / total, 4) if total else 0.0,
-        "independent_source_count": len({item for item in domains if item}),
+        "independent_source_count": len(origins),
         "source_domain_concentration": round(concentration, 4),
         "source_domain_concentration_warning": concentration > 0.5,
     }

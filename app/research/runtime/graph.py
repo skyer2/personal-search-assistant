@@ -127,28 +127,21 @@ def _decision_dict(decision: Any) -> dict[str, Any]:
 def brief_node(state: ResearchState) -> dict[str, Any]:
     brief = _brief(state)
     eligibility = FastPathEligibility.from_brief(brief)
+    fast_path = brief.engine_version != "answer_contract_v2" and eligibility.eligible
     payload: dict[str, Any] = {
         "brief": brief.to_dict(),
-        "fast_path": eligibility.eligible,
+        "answer_spec": dict(brief.answer_spec),
+        "engine_version": brief.engine_version,
+        "fast_path": fast_path,
         "route_signals": [
             f"brief_intent:{brief.user_intent}",
-            "topology:fast_path" if eligibility.eligible else "topology:supervisor_loop",
+            "topology:fast_path" if fast_path else "topology:supervisor_loop",
         ],
     }
-    if eligibility.eligible:
-        plan = _plan_from_tasks(
-            [
-                ResearchTaskRequest(
-                    brief.objective,
-                    question_id="q1",
-                    priority="high",
-                    expected_evidence=("primary source",),
-                    target_criteria=tuple(brief.key_questions or (brief.objective,)),
-                    task_id="fast_path:search",
-                )
-            ],
+    if fast_path:
+        plan = execution_plan_from_brief(
+            brief,
             plan_version=int(state.get("plan_version") or 1),
-            planning_mode="brief_fast_path",
         )
         plan.steps[0].step_type = "network_search"
         plan.steps[0].metadata.update({"simple_fact_fast_path": True, "task_kind": "lookup"})
@@ -277,6 +270,39 @@ def supervisor_node(state: ResearchState) -> dict[str, Any]:
             plan_version=int(state.get("plan_version") or 1) + (1 if state.get("plan") else 0),
             planning_mode="supervisor_action",
         )
+        answer_spec = dict(brief.answer_spec or {})
+        asks = {
+            str(item.get("ask_id") or ""): item
+            for item in answer_spec.get("asks") or [] if isinstance(item, dict)
+        }
+        for index, step in enumerate(plan.steps, 1):
+            metadata = step.metadata
+            ask = asks.get(str(metadata.get("ask_id") or ""))
+            if ask:
+                metadata.update({
+                    "engine_version": brief.engine_version,
+                    "spec_revision": int(answer_spec.get("revision") or brief.version),
+                    "target_field_ids": [
+                        str(item.get("field_id"))
+                        for item in ask.get("required_fields") or []
+                        if isinstance(item, dict) and item.get("field_id")
+                    ][:3],
+                    "unit_assembly_field_ids": [
+                        str(item.get("field_id"))
+                        for item in ask.get("required_fields") or []
+                        if isinstance(item, dict) and item.get("field_id")
+                    ],
+                    "candidate_entity_ids": list(metadata.get("entities") or [])[:3],
+                    "expected_claim_types": [
+                        str(item.get("value_type"))
+                        for item in ask.get("required_fields") or []
+                        if isinstance(item, dict) and item.get("value_type")
+                    ][:3],
+                    "done_condition": f"close explicit fields for {ask.get('target_units', 1)} answer unit(s)",
+                    "lease_id": f"lease:{brief.brief_id}:{wave_id}:{index}",
+                    "wave_id": wave_id,
+                    "repair_of_gap_ids": [str(metadata.get("gap_id"))] if metadata.get("gap_id") else [],
+                })
         payload.update(
             {
                 "plan": plan.to_dict(),
@@ -332,6 +358,12 @@ def route_supervisor(state: ResearchState) -> Any:
         return "synthesize"
     if action == "wait":
         return "coverage_judge"
+    if (
+        str(state.get("engine_version") or "") == "answer_contract_v2"
+        and action in {"finalize_failure", "finalize_success"}
+        and not state.get("cancel_reason")
+    ):
+        return "synthesize"
     return "finalize"
 
 
@@ -518,7 +550,7 @@ def finalize_node(state: ResearchState) -> dict[str, Any]:
         # Completion is the authority: a recovered or degraded delivery may pass
         # the quality checks and still not be completed research.
         research_completed=str(assessment.get("verdict") or "") == "pass"
-        and bool((assessment.get("completion_contract") or {}).get("passed", True)),
+        and bool((assessment.get("completion_contract") or {}).get("passed", False)),
         synthesis_attempted=bool(state.get("final_content")) or int(state.get("synthesis_attempts") or 0) > 0,
         quality_attempted=bool(assessment),
     )

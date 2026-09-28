@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "status": "migration_incomplete",
+  "entries": [
+    {
+      "path": "app/research/delivery/answer_contract.py",
+      "historical_consumers": ["legacy_v1 runtime", "legacy answer tests"],
+      "new_run_boundary": "answer_contract_v2 must use unit_renderer and CompletionResultV2",
+      "reason": "Legacy generation callers have not yet been removed; this is not read-only",
+      "removal_gate": "Migrate and delete legacy generation callers"
+    },
+    {
+      "path": "app/research/domain/completion.py",
+      "historical_consumers": ["legacy_v1 runtime", "legacy completion tests"],
+      "new_run_boundary": "answer_contract_v2 must use completion_v2.py",
+      "reason": "Legacy completion callers remain active; this is not read-only",
+      "removal_gate": "Migrate and delete legacy completion callers"
+    }
+  ]
+}

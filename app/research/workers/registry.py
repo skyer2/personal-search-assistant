@@ -101,7 +101,7 @@ def resolve_finalize_only_worker(harness: Any) -> Any | None:
     existing = workers.get(FINALIZE_ONLY_WORKER_KEY)
     if existing is not None:
         return existing
-    model = getattr(harness, "control_agent", None) or getattr(harness, "synthesis_model", None)
+    model = getattr(harness, "synthesis_model", None) or getattr(harness, "control_agent", None)
     if model is None:
         return None
     from app.research.workers.factory import create_research_worker

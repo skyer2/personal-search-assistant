@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -143,6 +144,7 @@ class ArtifactStore:
 
     def __init__(self, session_dir: Path | None = None):
         self.session_dir = Path(session_dir) if session_dir else None
+        self.cache_scope_id = uuid.uuid4().hex
         self._items: dict[str, Artifact] = {}
         self._counter = 0
 

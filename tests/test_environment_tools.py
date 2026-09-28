@@ -44,6 +44,35 @@ def test_fetch_url_in_web_tools():
     print("[OK] search+fetch remain environment tools")
 
 
+def test_fetch_cache_does_not_reuse_artifact_id_across_stores():
+    from app.agent.harness.artifacts import ArtifactStore, reset_artifact_store, set_artifact_store
+    from app.agent.harness.evidence_store import EvidenceStore, reset_evidence_store, set_evidence_store
+    from app.tools.retrieval_cache import clear_retrieval_cache
+
+    clear_retrieval_cache()
+    set_evidence_store(EvidenceStore())
+    try:
+        first = ArtifactStore()
+        set_artifact_store(first)
+        one = fetch_url_content(
+            "https://example.com/store-isolation",
+            fetcher=lambda _url, _timeout: ("first session text", "text/plain"),
+        )
+        second = ArtifactStore()
+        set_artifact_store(second)
+        two = fetch_url_content(
+            "https://example.com/store-isolation",
+            fetcher=lambda _url, _timeout: ("second session text", "text/plain"),
+        )
+        assert one["ok"] and two["ok"]
+        assert first.get(one["artifact_id"]).content == "first session text"
+        assert second.get(two["artifact_id"]).content == "second session text"
+    finally:
+        reset_artifact_store()
+        reset_evidence_store()
+        clear_retrieval_cache()
+
+
 if __name__ == "__main__":
     test_fetch_url_strips_html_and_stores_artifact()
     test_fetch_url_in_web_tools()

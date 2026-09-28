@@ -12,6 +12,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from app.research.spec.intent import classify_ask_kind
+
 AskType = Literal[
     "current_state",
     "forecast",
@@ -29,7 +31,7 @@ _CURRENT = ("最新", "当前", "现在", "目前", "截至", "近期", "今年"
 _COMPARISON = ("对比", "比较", "区别", "差异", "vs", "versus", "哪个更", "谁更")
 _RECOMMENDATION = ("推荐", "值得", "应该选", "该选", "建议", "怎么选", "如何选", "适合")
 _EXPLANATION = ("为什么", "为何", "原因", "怎么做到", "如何实现", "机制")
-_FACT = ("是谁", "哪一年", "哪年", "什么时候", "多少", "发布时间", "总部")
+_FACT = ("是谁", "哪一年", "哪年", "什么时候", "何时", "多少", "发布时间", "首次发布", "总部")
 
 # Output-format instructions are deliverable constraints, not research asks.
 _DELIVERY_ONLY = re.compile(
@@ -40,6 +42,9 @@ _DELIVERY_ONLY = re.compile(
     re.IGNORECASE,
 )
 _CONTINUATION = ("为什么", "为何", "原因", "理由", "why", "怎么讲", "如何解释")
+_QUALIFIER_PREFIXES = (
+    "请给出", "请使用", "请说明", "请区分", "请明确", "要求", "并说明", "并给出",
+)
 
 # Chinese numeric horizons: 1-2年 / 一到两年 / 3个月 / 未来两年
 _HORIZON = re.compile(
@@ -106,6 +111,12 @@ def _is_continuation(text: str) -> bool:
     return any(blob.startswith(token) for token in _CONTINUATION)
 
 
+def _is_qualifier(text: str) -> bool:
+    """Evidence/output qualifiers constrain the prior ask; they are not asks."""
+    blob = str(text or "").strip()
+    return bool(blob) and any(blob.startswith(token) for token in _QUALIFIER_PREFIXES)
+
+
 def split_user_clauses(query: str) -> list[str]:
     """Split a multi-part user query into its original clauses, verbatim.
 
@@ -128,6 +139,9 @@ def split_user_clauses(query: str) -> list[str]:
     for piece in parts:
         if is_delivery_instruction(piece):
             continue
+        if _is_qualifier(piece) and merged:
+            merged[-1] = f"{merged[-1].rstrip('？?。.！!')}，{piece}"
+            continue
         if _is_continuation(piece) and merged:
             merged[-1] = f"{merged[-1].rstrip('？?。.！!')}，{piece}"
             continue
@@ -140,22 +154,8 @@ def split_user_clauses(query: str) -> list[str]:
 
 
 def classify_ask_type(text: str) -> AskType:
-    """Classify one clause. Ordering favours the most specific signal."""
-    blob = str(text or "")
-    lowered = blob.lower()
-    if any(token in blob for token in _FORECAST):
-        return "forecast"
-    if any(token in blob or token in lowered for token in _COMPARISON):
-        return "comparison"
-    if any(token in blob for token in _RECOMMENDATION):
-        return "recommendation"
-    if any(token in blob for token in _CURRENT):
-        return "current_state"
-    if any(token in blob for token in _EXPLANATION):
-        return "explanation"
-    if any(token in blob for token in _FACT):
-        return "fact"
-    return "current_state"
+    """Compatibility facade over the one v2 classifier."""
+    return classify_ask_kind(text)
 
 
 def extract_time_scope(text: str) -> str:

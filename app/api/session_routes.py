@@ -38,6 +38,29 @@ _UPDATED_DIR = _APP_ROOT / "updated"
 _TRACES_DIR = _APP_ROOT / "logs" / "traces"
 
 
+def _answer_contract_projection(records: list[dict]) -> dict:
+    """Project server-owned v2 completion; never infer it from log wording."""
+    for record in reversed(records):
+        event_type = str(record.get("type") or record.get("event") or "")
+        if event_type not in {"quality.assessed", "quality"}:
+            continue
+        attributes = record.get("attributes") if isinstance(record.get("attributes"), dict) else {}
+        completion = attributes.get("completion_contract")
+        if not isinstance(completion, dict) or not completion:
+            continue
+        unit_ids = [str(item) for item in completion.get("evaluated_unit_ids") or [] if str(item)]
+        return {
+            "schema_version": int(completion.get("schema_version") or 1),
+            "completion": completion,
+            "answer_units_summary": {
+                "evaluated": len(unit_ids),
+                "unit_ids": unit_ids,
+                "per_ask": list(completion.get("per_ask") or []),
+            },
+        }
+    return {"schema_version": 1, "completion": {}, "answer_units_summary": {"evaluated": 0, "unit_ids": [], "per_ask": []}}
+
+
 @router.get("/api/sessions")
 async def list_sessions(
     tenant_id: str | None = None,
@@ -228,6 +251,8 @@ async def get_run_trace(run_id: str):
     payload = load_trace_payload(run.session_id, run_id=run_id)
     payload["status"] = run.status
     payload["query"] = run.query
+    records = [event.to_jsonl_record() for event in load_events(run.session_id, run_id=run_id)]
+    payload.update(_answer_contract_projection(records))
     return payload
 
 
@@ -258,11 +283,14 @@ async def get_run_trace_summary(run_id: str):
     summary["status"] = run.status
     summary["started_at"] = run.started_at
     summary["ended_at"] = run.ended_at
+    contract_projection = _answer_contract_projection(records)
+    summary.update(contract_projection)
     return {
         "run_id": run_id,
         "session_id": run.session_id,
         "summary": summary,
         "total": payload.get("total", 0),
+        **contract_projection,
     }
 
 

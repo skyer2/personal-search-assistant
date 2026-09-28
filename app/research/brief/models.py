@@ -72,6 +72,8 @@ class StructuredResearchBrief:
     compiler_source: str = "deterministic_fallback"
     confidence: float = 0.5
     raw_query: str = ""
+    answer_spec: dict[str, Any] = field(default_factory=dict)
+    engine_version: str = "legacy_v1"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -85,8 +87,6 @@ class StructuredResearchBrief:
         for item in self.research_questions:
             if item.question_id == qid:
                 return item.ask_id
-        if 0 < index <= len(self.research_questions):
-            return self.research_questions[index - 1].ask_id
         return ""
 
     @classmethod
@@ -133,6 +133,8 @@ class StructuredResearchBrief:
             compiler_source=str(row.get("compiler_source") or "deterministic_fallback"),
             confidence=max(0.0, min(1.0, float(row.get("confidence") or 0.5))),
             raw_query=str(row.get("raw_query") or ""),
+            answer_spec=dict(row.get("answer_spec") or {}),
+            engine_version=str(row.get("engine_version") or "legacy_v1"),
         )
 
 

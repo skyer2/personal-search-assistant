@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+import os
 from typing import Annotated, Any, NotRequired, TypedDict
 
 from app.research.domain.contracts import LifecycleStatus, WorkflowPhase
@@ -60,6 +61,7 @@ class ResearchState(TypedDict):
     claims: Annotated[list[dict[str, Any]], merge_records]
     claim_conflicts: Annotated[list[dict[str, Any]], merge_records]
     claim_resolutions: Annotated[list[dict[str, Any]], merge_records]
+    support_edges: Annotated[list[dict[str, Any]], merge_records]
     evidence_records: Annotated[list[dict[str, Any]], merge_records]
     artifact_refs: Annotated[list[str], merge_strings]
 
@@ -121,6 +123,12 @@ class ResearchState(TypedDict):
     answerability: dict[str, Any]
     answer_complete: bool
     answer_contract: dict[str, Any]
+    answer_spec: dict[str, Any]
+    answer_units: Annotated[list[dict[str, Any]], merge_records]
+    completion: dict[str, Any]
+    engine_version: str
+    evidence_version: Annotated[str, keep_last]
+    answer_version: Annotated[str, keep_last]
     candidate_set: Annotated[dict[str, Any], merge_dicts]
     semantic_stall: int
 
@@ -153,7 +161,11 @@ def empty_research_state(
     max_tool_calls: int = 80,
     max_replan_count: int = 1,
     search_mode: str = "agent",
+    engine_version: str | None = None,
 ) -> ResearchState:
+    selected_engine = str(
+        engine_version or os.getenv("HARNESS_RESEARCH_ENGINE_VERSION", "legacy_v1")
+    )
     return {
         "run_id": run_id,
         "session_id": session_id,
@@ -178,6 +190,7 @@ def empty_research_state(
         "claims": [],
         "claim_conflicts": [],
         "claim_resolutions": [],
+        "support_edges": [],
         "evidence_records": [],
         "artifact_refs": [],
         "intent": None,
@@ -193,14 +206,14 @@ def empty_research_state(
             "tool_calls": 0,
             "max_tool_calls": max_tool_calls,
             "llm_calls": 0,
-            "max_llm_calls": 120,
+            "max_llm_calls": 24,
             "total_tokens": 0,
-            "max_total_tokens": 500000,
-            "deadline_remaining_sec": 1800.0,
-            "synthesis_reserve_sec": 180.0,
-            "max_parallel_workers": 3,
+            "max_total_tokens": 160000,
+            "deadline_remaining_sec": 240.0,
+            "synthesis_reserve_sec": 60.0,
+            "max_parallel_workers": 2,
             "max_replan_count": max_replan_count,
-            "max_research_waves": max(1, int(max_replan_count) + 1),
+            "max_research_waves": min(3, max(1, int(max_replan_count) + 1)),
             "max_task_attempts": 2,
             "max_semantic_stall_cycles": 2,
             "max_active_tasks": 3,
@@ -250,6 +263,12 @@ def empty_research_state(
         "answerability": {},
         "answer_complete": False,
         "answer_contract": {},
+        "answer_spec": {},
+        "answer_units": [],
+        "completion": {},
+        "engine_version": selected_engine,
+        "evidence_version": "evidence-v0",
+        "answer_version": "answer-v0",
         "candidate_set": {},
         "semantic_stall": 0,
     }

@@ -130,6 +130,22 @@ def _finding_id(finding: dict[str, Any], index: int) -> str:
     )
 
 
+def _legacy_admitted_row(row: dict[str, Any]) -> bool:
+    """Read-only adapter for persisted pre-v2 findings.
+
+    Missing validation never means true by itself: the historical row must
+    retain stable identity, explicit question lineage and evidence binding.
+    New runs pass ClaimRecords with an explicit validation status instead.
+    """
+    if "validated" in row:
+        return bool(row.get("validated"))
+    return bool(
+        (row.get("finding_id") or row.get("claim_id"))
+        and (row.get("question_id") or row.get("question_ids"))
+        and _refs(row)
+    )
+
+
 def assess_answerability(
     *,
     brief: Any,
@@ -163,7 +179,7 @@ def assess_answerability(
     claim_rows = [
         row for row in rows or []
         if isinstance(row, dict)
-        and bool(row.get("validated", True))
+        and _legacy_admitted_row(row)
         and (
             str(row.get("question_id") or "").strip()
             or any(str(item).strip() for item in row.get("question_ids") or [])
@@ -225,7 +241,7 @@ def compile_deterministic_answer(
         _finding_id(row, i): row
         for i, row in enumerate(findings)
         if isinstance(row, dict)
-        and bool(row.get("validated", True))
+        and _legacy_admitted_row(row)
         and (
             str(row.get("question_id") or "").strip()
             or any(str(item).strip() for item in row.get("question_ids") or [])
@@ -244,7 +260,7 @@ def compile_deterministic_answer(
         claims = [_claim(row) for row in selected if _claim(row)]
         # A recovery only organizes validated claims.  It never promotes a
         # snippet or fabricates a bridge from an unrelated question.
-        direct = claims[0][:420] if claims else "当前证据不足，无法可靠回答这一问题。"
+        direct = "；".join(claims[:3])[:900] if claims else "当前证据不足，无法可靠回答这一问题。"
         explicit_types = [str(row.get("claim_type") or "") for row in selected]
         # A recovery must retain the worker-declared claim type.  The wording
         # of a future-oriented question is not evidence of a forecast.
@@ -358,12 +374,11 @@ def render_final_answer(answer: FinalAnswer, *, citation_numbers: dict[str, int]
         if item.reasoning:
             lines.extend(["", "**依据与限制**：", *[f"- {row}" for row in item.reasoning]])
         lines.append("")
-    lines.extend(["# 未来 1~2 年方向", ""])
+    if future:
+        lines.extend(["# 预测与不确定性", ""])
     for item in future:
         refs = "".join(f"[{citation_numbers[ref]}]" for ref in item.evidence_refs[:3] if ref in citation_numbers)
         lines.extend([f"## {item.display_title or '方向性判断'}", "", f"**方向判断**：{item.direct_answer}{(' ' + refs) if refs else ''}", "", "**不确定性**：该判断仅基于本次已登记证据，需以后续可观察结果验证。", ""])
-    if not future:
-        lines.append("现有证据以当前状态为主；未来判断应以可观察里程碑和不确定性为边界。\n")
     if answer.unresolved_questions:
         lines.extend(["# 主要不确定性", "", *[f"- {row}" for row in answer.unresolved_questions], ""])
     lines.extend(["# 综合判断", "", "这些结论需要结合来源质量、证据独立性和后续变化持续复核，而不能替代新的事实核验。", ""])
@@ -373,9 +388,9 @@ def render_final_answer(answer: FinalAnswer, *, citation_numbers: dict[str, int]
 def _display_title(question: str, index: int) -> str:
     value = str(question or "").strip()
     if "热点" in value or "当前" in value:
-        return "2026 当前热点"
+        return "当前状态"
     if "未来" in value or "方向" in value or "趋势" in value:
-        return "未来 1–2 年方向"
+        return "预测与可观察里程碑"
     if value.startswith("q") and value[1:].isdigit():
         return f"关键判断 {value[1:]}"
     return value[:60] or f"关键判断 {index or 1}"

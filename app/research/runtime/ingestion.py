@@ -5,15 +5,18 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.research.claims.extract import extract_claims_from_worker_results
 from app.research.claims.admission import ClaimDraft, admit_claim
-from app.research.claims.models import ClaimRecord
+from app.research.claims.models import ClaimRecord, SupportEdge
 from app.research.claims.reconcile import detect_conflict_edges
 from app.research.claims.resolve import resolve_edges
+from app.research.delivery.unit_models import AnswerUnit
+from app.research.delivery.unit_validator import validate_answer_units
 from app.research.evidence.admission import admit_evidence
 from app.research.evidence.models import EvidenceRecord
 from app.research.evidence.policy import registrable_domain
@@ -24,10 +27,28 @@ from app.research.runtime.task_identity import (
     normalize_search_query,
     worker_result_id,
 )
+from app.research.spec.models import AnswerSpec
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _v2_source_matches_claim(statement: str, records: list[EvidenceRecord]) -> bool:
+    """Reject a cited URL or claimed first-party source bound to another page."""
+    mentioned_urls = re.findall(r"https?://[^\s\]\)）>，。；]+", statement)
+    cited_hosts = {
+        (urlparse(record.locator).hostname or "").casefold()
+        for record in records
+    }
+    if mentioned_urls and any(
+        (urlparse(url).hostname or "").casefold() not in cited_hosts
+        for url in mentioned_urls
+    ):
+        return False
+    if any(token in statement.casefold() for token in ("官方", "官网", "official", "first-party")):
+        return any(record.source_type == "primary" for record in records)
+    return True
 
 
 def _source_locator(source: Any) -> str:
@@ -47,10 +68,11 @@ def _source_kind(locator: str) -> str:
 
 
 def _authority(locator: str, source_quality: str = "") -> tuple[str, float]:
-    lowered = f"{locator} {source_quality}".lower()
-    if any(token in lowered for token in ("primary", "official", "regulatory", "sec.gov", "arxiv.org", "/ir.", "investor", "docs.")):
+    _ = locator
+    declared = source_quality.casefold().strip()
+    if declared in {"primary", "official", "regulatory"}:
         return "PRIMARY", 0.9
-    if any(token in lowered for token in ("reuters", "bloomberg", "wsj", "ft.com", "nytimes", "nature.com")):
+    if declared in {"authoritative_secondary", "high_quality_secondary"}:
         return "HIGH_QUALITY_SECONDARY", 0.75
     return "SECONDARY", 0.55
 
@@ -89,6 +111,31 @@ def _runtime_artifact_metadata(
         return {}
 
 
+def _verified_first_party_page(locator: str, artifact_ref: str, entities: list[str]) -> bool:
+    """Require an exact brand-domain match and branded fetched page title."""
+    if not artifact_ref or not entities:
+        return False
+    domain = registrable_domain(locator).casefold()
+    domain_label = domain.split(".", 1)[0]
+    if not domain_label:
+        return False
+    try:
+        from app.agent.harness.artifacts import get_artifact_store
+
+        artifact = get_artifact_store().get(artifact_ref)
+        if artifact is None or artifact.locator != locator or not artifact.content:
+            return False
+        title = str(artifact.title or "").casefold()
+        for entity in entities:
+            brand = re.split(r"[-\s_/]", entity.casefold().strip(), maxsplit=1)[0]
+            brand = re.sub(r"[^a-z0-9]", "", brand)
+            if len(brand) >= 4 and brand == domain_label and brand in title:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _resolve_artifact_source(artifact_ref: str) -> tuple[str, dict[str, Any]]:
     """Return the original source URL for a runtime artifact when available.
 
@@ -110,6 +157,18 @@ def _resolve_artifact_source(artifact_ref: str) -> tuple[str, dict[str, Any]]:
         )
     except Exception:
         return "", {}
+
+
+def _artifact_for_evidence_id(evidence_id: str) -> str:
+    if not evidence_id:
+        return ""
+    try:
+        from app.agent.harness.evidence_store import get_evidence_store
+
+        span = get_evidence_store().get(evidence_id)
+        return str(getattr(span, "artifact_id", "") or "")
+    except Exception:
+        return ""
 
 
 def _prepare_evidence(
@@ -141,6 +200,7 @@ def _prepare_evidence(
                 payload.get("artifact_ref")
                 or (artifact_ids[index] if index < len(artifact_ids) else "")
                 or (locator if locator.casefold().startswith("art-") else "")
+                or _artifact_for_evidence_id(requested)
                 or ""
             )
             resolved_locator, resolved_metadata = _resolve_artifact_source(artifact_ref)
@@ -153,10 +213,34 @@ def _prepare_evidence(
                 requested,
             )
             runtime_metadata = {**resolved_metadata, **runtime_metadata}
+            content_kind = (
+                str(runtime_metadata.get("content_kind"))
+                if str(runtime_metadata.get("content_kind")) in {"snippet", "excerpt", "fulltext", "structured_record"}
+                else "fulltext"
+                if artifact_ref or str(meta.get("engine_version") or "") != "answer_contract_v2"
+                else "snippet"
+            )
+            publisher_relationship = (
+                str(runtime_metadata.get("publisher_relationship"))
+                if str(runtime_metadata.get("publisher_relationship")) in {"first_party", "independent", "syndication", "unknown"}
+                else "unknown"
+            )
+            if (
+                str(meta.get("engine_version") or "") == "answer_contract_v2"
+                and publisher_relationship == "unknown"
+                and _verified_first_party_page(
+                    locator,
+                    artifact_ref,
+                    [str(item) for item in meta.get("candidate_entity_ids") or meta.get("entities") or []],
+                )
+            ):
+                publisher_relationship = "first_party"
             quality = score_source(
                 locator,
                 declared_quality=source_quality,
                 published_at=str(runtime_metadata.get("published_at") or ""),
+                publisher_relationship=publisher_relationship,
+                content_kind=content_kind,
             )
             tier = "PRIMARY" if quality.source_type == "primary" else (
                 "HIGH_QUALITY_SECONDARY"
@@ -193,6 +277,20 @@ def _prepare_evidence(
                 run_id=str(row.get("run_id") or ""),
                 excerpt_quality=float(payload.get("excerpt_quality") or 0.0),
                 extraction_confidence=float(payload.get("extraction_confidence") or 0.0),
+                artifact_id=artifact_ref,
+                canonical_url=locator if locator.startswith(("http://", "https://")) else "",
+                registrable_domain=registrable_domain(locator),
+                content_kind=content_kind,  # type: ignore[arg-type]
+                content_hash=str(runtime_metadata.get("content_hash") or ""),
+                content_ref=str(payload.get("excerpt_ref") or artifact_ref),
+                spans=[dict(item) for item in payload.get("spans") or [] if isinstance(item, dict)],
+                publisher_relationship=publisher_relationship,  # type: ignore[arg-type]
+                origin_group_id=str(runtime_metadata.get("origin_group_id") or ""),
+                provenance={
+                    "tool_call_id": str(payload.get("tool_call_id") or ""),
+                    "task_id": task_id,
+                    "run_id": str(row.get("run_id") or ""),
+                },
             )
             records.append(record)
             row_evidence.append(record)
@@ -429,13 +527,22 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
     # serialized shape with blank lineage fields. Re-run exact Brief matching
     # after the merge so those blanks cannot erase a unique target-gap binding.
     _resolve_task_question_lineage(metadata, state.get("brief"))
+    for item in metadata.values():
+        item.setdefault("engine_version", str(state.get("engine_version") or "legacy_v1"))
     evidence_rows, prepared_rows = _prepare_evidence(selected, task_metadata=metadata)
     admission = admit_evidence(evidence_rows, require_verified_artifact=True)
+    for item in admission.admitted:
+        item.admission_status = "admitted"
+        item.reason_codes = []
+    for item in admission.rejected:
+        item.admission_status = "rejected"
+        item.reason_codes = [admission.reasons.get(item.evidence_id, "evidence_rejected")]
     admitted_ids = {item.evidence_id for item in admission.admitted}
 
     claims = extract_claims_from_worker_results(prepared_rows)
     evidence_by_id = {item.evidence_id: item for item in admission.admitted}
     claim_admission_diagnostics: list[dict[str, Any]] = []
+    support_edges: list[SupportEdge] = []
     for claim in claims:
         meta = metadata.get(claim.task_id, {})
         claim.subject_id = str(claim.subject_id or meta.get("subject_id") or claim.subject or "general")
@@ -451,7 +558,23 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
         )
         claim.evidence_ids = [item for item in claim.evidence_ids if item in admitted_ids]
         claim.question_id = str(meta.get("question_id") or "")
-        claim.ask_id = str(meta.get("ask_id") or (f"a{claim.question_id[1:]}" if claim.question_id.startswith("q") else ""))
+        claim.ask_id = str(meta.get("ask_id") or "")
+        claim.field_ids = [str(item) for item in meta.get("target_field_ids") or [] if str(item)]
+        if str(meta.get("engine_version") or "") == "answer_contract_v2":
+            claim_evidence = [evidence_by_id[item] for item in claim.evidence_ids if item in evidence_by_id]
+            if not _v2_source_matches_claim(claim.text, claim_evidence):
+                claim.validated = False
+                claim.validation_status = "rejected"
+                claim.validation_version = "claim-validator-v2"
+                claim.admission_reasons = ["claim_source_mismatch"]
+                claim_admission_diagnostics.append({
+                    "claim_id": claim.claim_id,
+                    "task_id": claim.task_id,
+                    "question_id": claim.question_id,
+                    "status": "rejected",
+                    "reasons": ["claim_source_mismatch"],
+                })
+                continue
         admission_result = admit_claim(
             ClaimDraft(
                 draft_id=claim.claim_id,
@@ -467,8 +590,24 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
             evidence_by_id,
         )
         claim.validated = admission_result.admitted
+        claim.validation_status = "supported" if admission_result.admitted else "rejected"
+        claim.validation_version = "claim-validator-v2"
         claim.publishability_score = admission_result.publishability_score
         claim.admission_reasons = list(admission_result.reasons)
+        if admission_result.admitted:
+            for index, evidence_id in enumerate(claim.evidence_ids, 1):
+                edge = SupportEdge(
+                    edge_id=f"support:{claim.claim_id}:{index}",
+                    claim_id=claim.claim_id,
+                    evidence_id=evidence_id,
+                    span_id="",
+                    relation="supports",
+                    checked_by="deterministic_claim_admission",
+                    validator_version="claim-validator-v2",
+                    reason_codes=(),
+                )
+                support_edges.append(edge)
+                claim.support_edge_ids.append(edge.edge_id)
         claim_admission_diagnostics.append({
             "claim_id": claim.claim_id,
             "task_id": claim.task_id,
@@ -534,7 +673,7 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
             admission_result = admit_claim(
                 ClaimDraft(
                     draft_id=str(raw_finding.get("finding_id") or f"draft_{row_task_id}"),
-                    ask_id=str(meta.get("ask_id") or (f"a{str(meta.get('question_id') or '')[1:]}" if str(meta.get("question_id") or "").startswith("q") else "")),
+                    ask_id=str(meta.get("ask_id") or ""),
                     question_id=str(meta.get("question_id") or ""),
                     task_id=row_task_id,
                     statement=claim_text,
@@ -562,7 +701,7 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
                 {
                     **raw_finding,
                     "claim": resolved.claim,
-                    "ask_id": str(meta.get("ask_id") or (f"a{str(meta.get('question_id') or '')[1:]}" if str(meta.get("question_id") or "").startswith("q") else "")),
+                    "ask_id": str(meta.get("ask_id") or ""),
                     "question_id": str(meta.get("question_id") or ""),
                     "validated": True,
                     "publishability_score": admission_result.publishability_score,
@@ -622,6 +761,54 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
     }
     new_evidence = [item for item in admission.admitted if item.evidence_id not in previous_evidence]
     new_claims = [item for item in claims if item.claim_id not in previous_claims]
+    all_support_edges = [
+        SupportEdge.from_dict(item)
+        for item in state.get("support_edges") or []
+        if isinstance(item, dict)
+    ] + support_edges
+    answer_spec_raw = state.get("answer_spec") or dict(state.get("brief") or {}).get("answer_spec") or {}
+    answer_units: list[AnswerUnit] = []
+    evidence_version = "evidence-v0"
+    all_evidence_ids = sorted({*previous_evidence, *(item.evidence_id for item in admission.admitted)})
+    if all_evidence_ids:
+        evidence_version = "evidence-" + hashlib.sha1("|".join(all_evidence_ids).encode("utf-8")).hexdigest()[:12]
+    if isinstance(answer_spec_raw, dict) and answer_spec_raw:
+        from app.research.delivery.unit_assembler import assemble_candidate_unit
+
+        answer_spec = AnswerSpec.from_dict(answer_spec_raw)
+        ask_by_id = {ask.ask_id: ask for ask in answer_spec.asks}
+        claim_text_by_id = {
+            claim.claim_id: claim.text
+            for claim in [*existing_claims, *claims]
+            if claim.claim_id
+        }
+        candidates: list[AnswerUnit] = []
+        for row in prepared_rows:
+            task_id = str(row.get("task_id") or "")
+            meta = metadata.get(task_id, {})
+            ask_id = str(meta.get("ask_id") or "")
+            ask = ask_by_id.get(ask_id)
+            if ask is None:
+                continue
+            for index, raw_unit in enumerate(dict(row.get("payload") or {}).get("candidate_answer_units") or [], 1):
+                if not isinstance(raw_unit, dict):
+                    continue
+                candidates.append(assemble_candidate_unit(
+                    answer_spec,
+                    ask,
+                    dict(raw_unit),
+                    task_id=task_id,
+                    index=index,
+                    supported_claim_ids=claims_by_task.get(task_id, []),
+                    claim_text_by_id=claim_text_by_id,
+                ))
+        answer_units = validate_answer_units(
+            answer_spec,
+            candidates,
+            [*existing_claims, *claims],
+            all_support_edges,
+            evidence_version=evidence_version,
+        )
     previous_queries = [
         str(item) for item in state.get("search_query_fingerprints") or [] if str(item).strip()
     ]
@@ -639,6 +826,9 @@ def ingest_new_worker_results(state: dict[str, Any]) -> dict[str, Any]:
         "evidence_records": [item.to_dict() for item in new_evidence],
         "evidence_refs": sorted({item.evidence_id for item in new_evidence}),
         "claims": [item.to_dict() for item in new_claims],
+        "support_edges": [item.to_dict() for item in support_edges if item.claim_id in {claim.claim_id for claim in new_claims}],
+        "answer_units": [item.to_dict() for item in answer_units],
+        "evidence_version": evidence_version,
         "claim_conflicts": [item.to_dict() for item in new_edges],
         "claim_resolutions": [item.to_dict() for item in new_resolutions],
         "findings": findings,

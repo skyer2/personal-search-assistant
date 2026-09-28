@@ -87,6 +87,7 @@ class WorkerResultPayload:
     evidence_ids: list[str] = field(default_factory=list)
     artifact_ids: list[str] = field(default_factory=list)
     stop_reason: str = ""
+    candidate_answer_units: list[dict[str, Any]] = field(default_factory=list)
 
     def to_context_snippet(self, max_chars: int = 600) -> str:
         parts = [self.summary or ""]
@@ -207,6 +208,10 @@ def parse_worker_payload(
             ],
             artifact_ids=artifact_ids,
             stop_reason=str(json_blob.get("stop_reason", "")),
+            candidate_answer_units=[
+                dict(item) for item in json_blob.get("candidate_answer_units") or []
+                if isinstance(item, dict)
+            ][:20],
         )
 
     return WorkerResultPayload(
@@ -256,20 +261,47 @@ def validate_structured_worker_payload(
             ]
         ):
             return False, "invalid_structured_worker_result"
+    metadata = step.metadata or {}
+    if metadata.get("engine_version") == "answer_contract_v2":
+        required_field_ids = {
+            str(item) for item in metadata.get("unit_assembly_field_ids") or metadata.get("target_field_ids") or []
+            if str(item)
+        }
+        if required_field_ids and not payload.candidate_answer_units:
+            return False, "answer_unit_missing"
+        for candidate in payload.candidate_answer_units:
+            fields = candidate.get("fields")
+            if not isinstance(fields, dict) or not required_field_ids.issubset(fields):
+                return False, "answer_unit_required_field_missing"
+            if any(not isinstance(fields[field_id], dict) for field_id in required_field_ids):
+                return False, "answer_unit_field_shape_invalid"
     return True, ""
 
 
 def build_strict_json_retry_instruction(step: PlanStep) -> str:
     """Finalization-only retry contract: no retrieval, findings only."""
     worker = step.subagent or step.step_type
+    metadata = step.metadata or {}
+    field_ids = list(metadata.get("unit_assembly_field_ids") or metadata.get("target_field_ids") or [])
+    unit_fields = {
+        str(field_id): {
+            "value": f"{field_id} 的字段值",
+            "value_kind": "fact",
+            "claim_ids": ["C1"],
+            "premise_claim_ids": [],
+            "rationale": "",
+            "limitation_status": "",
+        }
+        for field_id in field_ids
+    }
     return f"""
     【Finalization-only 重试 — 禁止再检索，只输出 JSON】
-    上次回传缺少最终 AI JSON 或缺少 evidence-backed findings。禁止调用 internet_search / fetch_url / batch_search / batch_fetch，不要重新搜索或抓页。
+    上次回传缺少最终 AI JSON、证据绑定或冻结的答案字段。禁止调用 internet_search / fetch_url / batch_search / batch_fetch，不要重新搜索或抓页。
     已抓取的网页如需核对，只用 read_artifact / read_evidence。
     evidence_ids / artifact_ids 必须逐字复制工具返回的真实 ID；禁止自造 E1、E2、source1 等编号。
     每个 finding 必须有 claim，并至少绑定一个真实 evidence_ids 或 artifact_ids；没有可绑定证据时不要输出 supported finding。
     请仅输出 JSON，不要任何解释文字：
-    {{"ok":true,"summary":"...","findings":[{{"claim":"...","evidence_ids":["<exact runtime evidence id>"],"artifact_ids":["<exact runtime artifact id>"],"confidence":0.9}}],"gaps":[],"conflicts":[],"stop_reason":"local_evidence_sufficient","error_code":"","worker":"{worker}","step_type":"{step.step_type}"}}
+    {{"ok":true,"summary":"...","findings":[{{"claim_id":"C1","claim":"...","claim_type":"fact","field_ids":{list(metadata.get('target_field_ids') or [])},"evidence_ids":["<exact runtime evidence id>"],"artifact_ids":["<exact runtime artifact id>"],"confidence":0.9}}],"candidate_answer_units":[{{"unit_id":"U1","entity_ids":["canonical entity"],"fields":{json.dumps(unit_fields, ensure_ascii=False)}}}],"gaps":[],"conflicts":[],"stop_reason":"local_evidence_sufficient","error_code":"","worker":"{worker}","step_type":"{step.step_type}"}}
     """
 
 
@@ -321,6 +353,10 @@ def worker_payload_from_dict(
         evidence_ids=[str(item) for item in row.get("evidence_ids") or [] if str(item).strip()][:20],
         artifact_ids=artifact_ids,
         stop_reason=str(row.get("stop_reason") or ""),
+        candidate_answer_units=[
+            dict(item) for item in row.get("candidate_answer_units") or []
+            if isinstance(item, dict)
+        ][:20],
     )
 
 
@@ -461,7 +497,9 @@ def build_worker_output_instruction(step: PlanStep) -> str:
     """【修改点】要求子 Agent 回传结构化 JSON（监督者解析）。"""
     if step.step_type not in SUBAGENT_STEP_TYPES:
         return ""
-    return f"""
+    metadata = step.metadata or {}
+    if metadata.get("engine_version") != "answer_contract_v2":
+        return f"""
     【工人结构化回传 — 必须遵守】
     最终回复必须是纯 JSON，不要 markdown 代码块：
     {{
@@ -475,6 +513,39 @@ def build_worker_output_instruction(step: PlanStep) -> str:
       "stop_reason": "local_evidence_sufficient"
     }}
     你的最终交付物是 findings，不是搜索记录。每个 finding 的 claim 必须可验证，且至少绑定一个工具返回的真实 evidence_ids 或 artifact_ids；不要把网页全文贴回 JSON。
+    evidence_ids / artifact_ids 必须逐字复制工具返回值；禁止自造 E1、E2、source1 等编号。没有可绑定证据时不得输出 supported finding。
+    若失败：ok=false，并填写 error_code（如 search_empty / sql_empty / timeout）。
+    """
+    field_ids = list(metadata.get("unit_assembly_field_ids") or metadata.get("target_field_ids") or [])
+    unit_fields = {
+        str(field_id): {
+            "value": f"{field_id} 的字段值",
+            "value_kind": "fact",
+            "claim_ids": ["C1"],
+            "premise_claim_ids": [],
+            "rationale": "",
+            "limitation_status": "",
+        }
+        for field_id in field_ids
+    }
+    return f"""
+    【工人结构化回传 — 必须遵守】
+    最终回复必须是纯 JSON，不要 markdown 代码块：
+    {{
+      "ok": true,
+      "summary": "本步结论摘要",
+      "findings": [
+        {{"claim_id": "C1", "claim": "可核对的完整主张", "claim_type": "fact|inference|forecast|attributed_opinion", "field_ids": {list(metadata.get('target_field_ids') or [])}, "evidence_ids": ["<exact runtime evidence id>"], "artifact_ids": ["<exact runtime artifact id>"], "confidence": 0.8}}
+      ],
+      "candidate_answer_units": [
+        {{"unit_id":"U1","entity_ids":["规范实体名"],"fields":{json.dumps(unit_fields, ensure_ascii=False)}}}
+      ],
+      "gaps": ["尚未覆盖的问题"],
+      "conflicts": ["来源冲突描述"],
+      "stop_reason": "local_evidence_sufficient"
+    }}
+    ask_id={metadata.get('ask_id')!r}，spec_revision={metadata.get('spec_revision')!r}，本任务最多验证3类字段={list(metadata.get('target_field_ids') or [])!r}，答案单元装配字段={list(metadata.get('unit_assembly_field_ids') or metadata.get('target_field_ids') or [])!r}。candidate_answer_units 中每个事实字段必须绑定 findings 的 claim_id；推断字段必须用 premise_claim_ids 绑定支持前提并填写 rationale。不要把搜索结果本身当作答案单元。
+    你的最终交付物是 candidate_answer_units 与 findings，不是搜索记录。每个 finding 的 claim 必须可验证，且至少绑定一个工具返回的真实 evidence_ids 或 artifact_ids；不要把网页全文贴回 JSON。
     evidence_ids / artifact_ids 必须逐字复制工具返回值；禁止自造 E1、E2、source1 等编号。没有可绑定证据时不得输出 supported finding。
     若失败：ok=false，并填写 error_code（如 search_empty / sql_empty / timeout）。
     """
@@ -530,6 +601,8 @@ def _normalize_findings(raw: Any) -> list[dict[str, Any]]:
                         "artifact_ids": artifact_ids,
                         "confidence": _safe_confidence(item.get("confidence")),
                         "source_quality": str(item.get("source_quality") or "unknown"),
+                        "claim_type": str(item.get("claim_type") or "fact"),
+                        "field_ids": [str(value) for value in item.get("field_ids") or [] if str(value)],
                     }
                 )
     return items

@@ -432,11 +432,8 @@ def _claim_bound(criterion_id: str, criterion: str, row: dict[str, Any]) -> bool
 
 def _is_primary(row: dict[str, Any]) -> bool:
     tier = str(row.get("source_tier") or row.get("source_kind") or "").upper()
-    locator = str(row.get("locator") or row.get("url") or "").lower()
-    return tier == "PRIMARY" or any(
-        token in locator
-        for token in ("gov.cn", "sec.gov", "/ir.", "investor", "docs.", "official")
-    )
+    relationship = str(row.get("publisher_relationship") or "").casefold()
+    return tier == "PRIMARY" or relationship == "first_party"
 
 
 def _parse_date(value: Any) -> datetime | None:

@@ -13,7 +13,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from app.api.tracing import build_run_config
 from app.agent.harness.token_counter import estimate_tokens
-from app.research.execution.llm_gateway import LLMGateway
+from app.research.execution.llm_gateway import LLMGateway, bind_output_limit, model_capabilities
 from app.research.delivery.synthesis_context import EvidenceDigest
 from app.research.runtime.worker import ResearchContext, WorkerResult
 from langchain_core.messages import HumanMessage
@@ -29,12 +29,11 @@ RETRYABLE_SYNTHESIS_FAILURES = frozenset(
         "provider_http_empty",
         "provider_stream_no_content",
         "provider_finish_without_content",
-        "provider_content_filtered",
         "content_removed_by_cleaner",
     }
 )
 NON_RETRYABLE_SYNTHESIS_FAILURES = frozenset(
-    {"provider_auth", "provider_bad_request", "run_token_cap", "run_llm_call_cap"}
+    {"provider_auth", "provider_bad_request", "provider_content_filtered", "run_token_cap", "run_llm_call_cap"}
 )
 # The synthesis capability uses a low-latency model.  A long answer budget
 # encourages long reasoning/queue time without adding evidence; bounded
@@ -114,6 +113,8 @@ class SynthesisRequest:
     token_budget: int = 40_000
     attempt: int = 1
     pack_tokens_estimated: int = 0
+    answer_spec: dict[str, Any] = field(default_factory=dict)
+    answer_units: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SynthesisExecutor:
@@ -266,10 +267,7 @@ class SynthesisExecutor:
         gateway = LLMGateway(self.session.budget_manager)
         with gateway.execution_scope(phase="synthesis"):
             output_token_limit = _OUTPUT_TOKEN_LIMITS.get(request.mode, 3_000)
-            invoke_target = model
-            bind = getattr(model, "bind", None)
-            if callable(bind):
-                invoke_target = bind(max_tokens=output_token_limit)
+            invoke_target = bind_output_limit(model, output_token_limit)
             try:
                 payload = [
                     HumanMessage(
@@ -303,7 +301,7 @@ class SynthesisExecutor:
     def _supports_synthesis_streaming(target: Any) -> bool:
         """Avoid treating a graph-agent ``astream`` as a chat token stream."""
 
-        if bool(getattr(target, "supports_synthesis_streaming", False)):
+        if model_capabilities(target).supports_streaming or bool(getattr(target, "supports_synthesis_streaming", False)):
             return True
         return isinstance(target, BaseChatModel) or isinstance(
             getattr(target, "bound", None), BaseChatModel
@@ -389,7 +387,7 @@ class SynthesisExecutor:
             "冲突规则：resolved 只能采用指定 winner；expected_disagreement 必须说明口径差异；unresolved 只能披露不确定性，禁止自行选择任何一方。",
             "引用规则：正文每个含数字、金额、日期或百分比的事实句末尾必须标注证据绑定给出的 [n]；禁止使用 E 编号、artifact 编号、URL 或自造编号。",
             "交付规则：不要输出 JSON，也不要说明文件生成能力；PDF/Markdown 由运行时统一生成。",
-            "结构规则：严格使用“结论摘要、2026 当前热点、未来 1~2 年方向、主要不确定性、综合判断、参考来源”组织；禁止使用直接回答、关键判断、q1/q2/q3 标题。",
+            "结构规则：按 AnswerSpec 中用户原问题与题型组织；不得添加用户未要求的年份、预测章节或主题；禁止使用 q1/q2/q3 作为用户标题。",
             "摘要规则：结论摘要只写 3~5 条抽象结论，不能复制正文整句，也不能堆砌来源。",
             "分析规则：每个当前热点都写核心结论、机制、为什么重要、最强依据和限制；每个预测都写当前信号、机制、方向判断、可观察里程碑和不确定性。",
             "去重规则：同一结论只能由一个正文段落拥有；事实、综合判断和预测必须清楚区分。",
@@ -421,6 +419,8 @@ class SynthesisExecutor:
         if not conflict_lines:
             conflict_lines.extend(f"- {item}" for item in request.unresolved_conflicts[:20])
         sections = (
+            ("AnswerSpec：", [json.dumps(request.answer_spec, ensure_ascii=False)] if request.answer_spec else []),
+            ("已验证 AnswerUnits：", [json.dumps(row, ensure_ascii=False) for row in request.answer_units[:20]]),
             ("结构化洞察卡：", card_lines),
             ("结构化预测卡：", forecast_lines),
             ("Claim–Evidence 绑定：", binding_lines),
@@ -539,6 +539,15 @@ class SynthesisExecutor:
         else:
             fail_reason = ""
         actual_input_tokens, actual_output_tokens = self._usage(response)
+        finish_reason = self._finish_reason(response)
+        normalized_finish = finish_reason.casefold()
+        stop_class = (
+            "completed" if normalized_finish in {"stop", "completed", "end_turn"}
+            else "length" if normalized_finish in {"length", "max_tokens", "max_output_tokens"}
+            else "content_filter" if normalized_finish in {"content_filter", "content_filtered", "safety"}
+            else "tool_call" if normalized_finish in {"tool_calls", "function_call"}
+            else "provider_error" if fail_reason else "unknown"
+        )
         return {
             "raw_response_type": type(response).__name__,
             "raw_content_chars": len(raw_content),
@@ -546,7 +555,8 @@ class SynthesisExecutor:
             "cleaned_content_chars": len(cleaned_content),
             "response_supported": supported,
             "fail_reason": fail_reason,
-            "finish_reason": self._finish_reason(response),
+            "finish_reason": finish_reason,
+            "stop_class": stop_class,
             "estimated_input_tokens": self.estimate_input_tokens(request, context),
             "actual_input_tokens": actual_input_tokens,
             "actual_output_tokens": actual_output_tokens,

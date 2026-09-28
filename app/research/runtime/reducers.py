@@ -31,6 +31,7 @@ def merge_records(left: list[Any] | None, right: list[Any] | None) -> list[Any]:
             or row.get("edge_id")
             or row.get("gap_id")
             or row.get("candidate_id")
+            or row.get("unit_id")
             or ""
         )
         if record_id and record_id in indexes:

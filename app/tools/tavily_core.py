@@ -88,7 +88,9 @@ def search_internet(
 
         return cached_call(
             kind="search",
-            cache_key=search_cache_key(str(query or ""), str(topic), int(max_results or 5)),
+            cache_key=search_cache_key(
+                f"{_configured_provider()}:{query}", str(topic), int(max_results or 5)
+            ),
             producer=_call,
         )
     except Exception:

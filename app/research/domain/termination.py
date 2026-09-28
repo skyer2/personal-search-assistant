@@ -33,6 +33,15 @@ def decide_terminal_outcome(state: dict[str, Any]) -> FinalOutcome:
         return FinalOutcome.CANCELLED
 
     quality = _quality(state)
+    if str(state.get("engine_version") or "") == "answer_contract_v2":
+        completion = quality.get("completion_contract")
+        if not isinstance(completion, dict) or int(completion.get("schema_version") or 0) != 2:
+            return FinalOutcome.FAILED
+        if completion.get("outcome") == "success" and completion.get("passed") is True:
+            return FinalOutcome.SUCCESS
+        if completion.get("outcome") == "partial":
+            return FinalOutcome.PARTIAL
+        return FinalOutcome.FAILED
     final_content = str(state.get("final_content") or "").strip()
     evidence_records = [row for row in state.get("evidence_records") or [] if isinstance(row, dict)]
     evidence = state.get("evidence_assessment")
@@ -63,13 +72,13 @@ def decide_terminal_outcome(state: dict[str, Any]) -> FinalOutcome:
 
     relevance = state.get("relevance_assessment")
     relevance_row = relevance if isinstance(relevance, dict) else {}
-    relevance_pass = bool(relevance_row.get("passed", True))
+    relevance_pass = bool(relevance_row.get("passed", False))
     # PARTIAL uses the lower relevance floor: on-topic and fact-dense, but not
     # required to answer every ask.
     relevance_partial_pass = bool(relevance_row.get("partial_passed", relevance_pass))
     source_quality = state.get("source_quality")
     source_row = source_quality if isinstance(source_quality, dict) else {}
-    source_pass = bool(source_row.get("passed", True))
+    source_pass = bool(source_row.get("passed", False))
     source_partial_pass = bool(source_row.get("partial_passed", source_pass))
 
     completion = evaluate_completion(

@@ -20,6 +20,9 @@ class Finding:
     confidence: float
     status: str
     summary: str = ""
+    claim_id: str = ""
+    claim_type: str = "fact"
+    field_ids: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -103,6 +106,9 @@ def normalize_finding(
         confidence=round(confidence, 3),
         status=status,
         summary=claim[:400],
+        claim_id=(f"{resolved_task_id}:{raw.get('claim_id')}" if raw.get("claim_id") else ""),
+        claim_type=str(raw.get("claim_type") or "fact"),
+        field_ids=[str(item) for item in raw.get("field_ids") or [] if str(item)],
     )
     return finding, {}
 

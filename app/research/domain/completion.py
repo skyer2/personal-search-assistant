@@ -246,8 +246,6 @@ def evaluate_completion(
             (item for item in rows if str(item.get("question_id") or "") == qid),
             None,
         )
-        if answer_row is None and index <= len(rows):
-            answer_row = rows[index - 1]
         direct = str((answer_row or {}).get("direct_answer") or "").strip()
         refs = [ref for ref in _refs(answer_row or {}) if ref in valid_ids]
         authoritative = any(

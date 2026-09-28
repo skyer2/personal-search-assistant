@@ -172,10 +172,14 @@ def fetch_url_content(
         return _produce()
     try:
         from app.tools.retrieval_cache import cached_call, fetch_cache_key
+        from app.agent.harness.artifacts import get_artifact_store
 
         return cached_call(
             kind="fetch",
-            cache_key=fetch_cache_key(target, int(max_chars or 8000)),
+            # Artifact IDs are local to a store. Never reuse a cached ID from
+            # another run/session, where it could resolve to the wrong page.
+            cache_key=fetch_cache_key(target, int(max_chars or 8000))
+            + f":{get_artifact_store().cache_scope_id}",
             producer=_produce,
         )
     except Exception:

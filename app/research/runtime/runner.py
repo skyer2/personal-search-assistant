@@ -303,6 +303,27 @@ def _emit_assessments(
         ("execution_health.assessed", "execution_health", execution_health_event_attributes),
         ("delivery.assessed", "delivery_readiness", delivery_event_attributes),
     )
+    for event_type, key, event_attributes in assessment_events:
+        if key == "progress_assessment" and not include_progress:
+            continue
+        assessment = dict(state.get(key) or {})
+        attributes = dict(event_attributes(assessment))
+        if key == "progress_assessment":
+            attributes["dispatch_wave_id"] = int(state.get("dispatch_wave_id") or 0)
+        _emit(
+            session,
+            event_type,
+            phase=phase,
+            status=str(assessment.get("status") or "unknown"),
+            attributes=attributes,
+        )
+    _emit(
+        session,
+        "control.decided",
+        phase=phase,
+        status=str(decision["action"]),
+        attributes=control_decision_event_attributes(decision),
+    )
 
 
 def _coverage_repair_result(previous: Any, current: Any, plan_metadata: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -332,27 +353,6 @@ def _coverage_repair_result(previous: Any, current: Any, plan_metadata: dict[str
             "gap_closed": bool(before and before.status != "covered" and after.status == "covered"),
         })
     return {"triggered": bool(deltas), "repairs": deltas}
-    for event_type, key, event_attributes in assessment_events:
-        if key == "progress_assessment" and not include_progress:
-            continue
-        assessment = dict(state.get(key) or {})
-        attributes = dict(event_attributes(assessment))
-        if key == "progress_assessment":
-            attributes["dispatch_wave_id"] = int(state.get("dispatch_wave_id") or 0)
-        _emit(
-            session,
-            event_type,
-            phase=phase,
-            status=str(assessment.get("status") or "unknown"),
-            attributes=attributes,
-        )
-    _emit(
-        session,
-        "control.decided",
-        phase=phase,
-        status=str(decision["action"]),
-        attributes=control_decision_event_attributes(decision),
-    )
 
 
 async def _default_checkpointer() -> Any:
@@ -458,6 +458,16 @@ class ResearchGraphRunner:
         previous_profile = canonicalize_mode(previous.get("profile")) if previous.get("profile") else None
 
         desired_overrides = run_budget_overrides_for_mode(profile, personal)
+        engine_version = os.getenv("HARNESS_RESEARCH_ENGINE_VERSION", "legacy_v1").strip()
+        v2_limits = {
+            "max_total_tokens": 160_000,
+            "max_tool_calls": 36,
+            "max_run_sec": 240,
+            "max_llm_calls": 24,
+            "max_llm_calls_per_worker": 8,
+            "max_parallel_workers": 2,
+            "synthesis_reserve_sec": 60,
+        }
         manager_mismatch = bool(
             manager is not None
             and (
@@ -467,6 +477,21 @@ class ResearchGraphRunner:
                     profile == "deep_debug"
                     and any(
                         getattr(manager, field) != desired_overrides[key]
+                        for key, field in (
+                            ("max_total_tokens", "token_limit"),
+                            ("max_run_sec", "deadline_sec"),
+                            ("max_llm_calls", "llm_call_limit"),
+                            ("max_tool_calls", "tool_call_limit"),
+                            ("max_llm_calls_per_worker", "max_llm_calls_per_worker"),
+                            ("max_parallel_workers", "max_parallel_workers"),
+                            ("synthesis_reserve_sec", "synthesis_reserve_sec"),
+                        )
+                    )
+                )
+                or (
+                    engine_version == "answer_contract_v2"
+                    and any(
+                        getattr(manager, field) != v2_limits[key]
                         for key, field in (
                             ("max_total_tokens", "token_limit"),
                             ("max_run_sec", "deadline_sec"),
@@ -507,10 +532,20 @@ class ResearchGraphRunner:
         budget_cfg = budget_for_mode(profile, personal)
         overrides = run_budget_overrides_for_mode(profile, personal)
         run_budget = {**budget_cfg, **overrides, **previous}
-        # v1 bounds research to one repair wave (two waves total), regardless
-        # of legacy deep-debug settings.
-        run_budget["max_replan_count"] = min(1, max(0, int(run_budget.get("max_replan_count", 1) or 0)))
-        run_budget["max_research_waves"] = 2
+        if engine_version == "answer_contract_v2":
+            run_budget.update({
+                **v2_limits,
+                "step_timeout_sec": 75,
+                "synthesis_step_timeout_sec": 25,
+                "synthesis_retry_timeout_sec": 15,
+                "max_replan_count": 2,
+                "max_research_waves": 3,
+                "engine_version": engine_version,
+            })
+        else:
+            # In-flight legacy runs retain the old bounded compatibility path.
+            run_budget["max_replan_count"] = min(1, max(0, int(run_budget.get("max_replan_count", 1) or 0)))
+            run_budget["max_research_waves"] = 2
         if manager is None:
             manager = create_run_budget_manager(
                 self.harness.harness_config,
@@ -532,7 +567,7 @@ class ResearchGraphRunner:
             synthesis_reserve_tokens=snapshot.synthesis_reserve_tokens,
             synthesis_reserve_sec=manager.synthesis_reserve_sec,
             deadline_at_monotonic=manager.deadline_at,
-            max_research_waves=2,
+            max_research_waves=int(run_budget.get("max_research_waves") or 2),
         )
         metadata["run_budget"] = run_budget
         metadata["route_decision"] = decision.to_dict()
@@ -563,7 +598,7 @@ class ResearchGraphRunner:
             budget_cfg["max_replan_count"] = max(0, int(run_budget["max_replan_count"]))
         # The ordinary agent profile is capped by the harness setting; the
         # debug profile intentionally carries a larger, separate replan budget.
-        if getattr(self.harness.harness_config, "max_replan_count", None) is not None:
+        if os.getenv("HARNESS_RESEARCH_ENGINE_VERSION", "legacy_v1") != "answer_contract_v2" and getattr(self.harness.harness_config, "max_replan_count", None) is not None:
             budget_cfg["max_replan_count"] = min(
                 int(budget_cfg["max_replan_count"]),
                 max(0, int(self.harness.harness_config.max_replan_count)),
@@ -571,11 +606,14 @@ class ResearchGraphRunner:
         brief = await self._compile_initial_brief(session)
         from app.research.brief.models import FastPathEligibility
 
-        fast_path = FastPathEligibility.from_brief(brief).eligible
+        fast_path = brief.engine_version != "answer_contract_v2" and FastPathEligibility.from_brief(brief).eligible
         if fast_path:
             budget_cfg = {**budget_cfg, "max_tool_calls": 3, "max_replan_count": 0, "parallel": False}
             if hasattr(session.budget_manager, "cap_tool_calls"):
                 session.budget_manager.cap_tool_calls(3)
+        if brief.engine_version == "answer_contract_v2":
+            budget_cfg["max_tool_calls"] = min(int(budget_cfg["max_tool_calls"]), 36)
+            budget_cfg["max_replan_count"] = min(int(budget_cfg["max_replan_count"]), 2)
         payload = empty_research_state(
             run_id=session.run_id,
             session_id=session.session_id,
@@ -586,6 +624,7 @@ class ResearchGraphRunner:
             max_tool_calls=int(budget_cfg["max_tool_calls"]),
             max_replan_count=int(budget_cfg["max_replan_count"]),
             search_mode=profile,
+            engine_version=brief.engine_version,
         )
         payload["brief"] = brief.to_dict()
         payload["intent"] = dict(session.state.metadata.get("intent_router") or {})
@@ -980,6 +1019,15 @@ class ResearchGraphRunner:
                     if question_id.startswith("q") and question_id[1:].isdigit():
                         return brief.ask_id_for_question_index(int(question_id[1:]))
                     return ""
+                answer_spec_payload = dict(brief.answer_spec or {})
+                answer_asks_by_id = {
+                    str(row.get("ask_id") or ""): row
+                    for row in answer_spec_payload.get("asks") or []
+                    if isinstance(row, dict)
+                }
+                def _required_fields_for_request(item: ResearchTaskRequest) -> list[dict[str, Any]]:
+                    ask = answer_asks_by_id.get(_ask_id_for_request(item), {})
+                    return [row for row in ask.get("required_fields") or [] if isinstance(row, dict)]
                 steps = [
                     PlanStep(
                         step_type="research",
@@ -989,6 +1037,8 @@ class ResearchGraphRunner:
                         allowed_tools=worker_tools_for_step("research"),
                         metadata={
                             "kind": "research_task",
+                            "engine_version": brief.engine_version,
+                            "spec_revision": int(answer_spec_payload.get("revision") or brief.version),
                             "task_kind": "supervisor_research",
                             "priority": item.priority,
                             "target_criteria": list(item.target_criteria),
@@ -996,6 +1046,17 @@ class ResearchGraphRunner:
                             "criterion_id": item.criterion_id,
                             "question_id": item.question_id,
                             "ask_id": _ask_id_for_request(item),
+                            "target_field_ids": [
+                                str(row.get("field_id")) for row in _required_fields_for_request(item)
+                                if row.get("field_id")
+                            ][:3],
+                            "unit_assembly_field_ids": [
+                                str(row.get("field_id")) for row in _required_fields_for_request(item)
+                                if row.get("field_id")
+                            ],
+                            "unit_assembly_field_specs": _required_fields_for_request(item),
+                            "target_units": int(answer_asks_by_id.get(_ask_id_for_request(item), {}).get("target_units") or 1),
+                            "ask_kind": str(answer_asks_by_id.get(_ask_id_for_request(item), {}).get("kind") or "fact"),
                             "hypothesis_id": item.hypothesis_id,
                             "gap_id": item.gap_id,
                             "repair_id": item.repair_id or (f"repair:{item.gap_id or item.question_id}" if item.repair else ""),
@@ -1325,6 +1386,65 @@ class ResearchGraphRunner:
         conflicts = [row for row in state.get("claim_conflicts") or [] if isinstance(row, dict)]
         evidence_records = [row for row in state.get("evidence_records") or [] if isinstance(row, dict)]
         source_metrics = source_quality_metrics(evidence_records)
+        if str(state.get("engine_version") or "") == "answer_contract_v2":
+            from app.research.coverage.answer_units import answer_unit_coverage
+            from app.research.spec.models import AnswerSpec
+
+            judgement_v2 = answer_unit_coverage(
+                AnswerSpec.from_dict(dict(state.get("answer_spec") or {})),
+                [row for row in state.get("answer_units") or [] if isinstance(row, dict)],
+            )
+            progress_v2 = {
+                "status": judgement_v2["status"],
+                "coverage_ratio": judgement_v2["coverage_ratio"],
+                "unresolved_conflicts": [],
+                "missing": list(judgement_v2["missing"]),
+                "missing_ids": [str(row.get("gap_id") or "") for row in judgement_v2["gaps"]],
+                "semantic_gap_ids": [str(row.get("gap_id") or "") for row in judgement_v2["gaps"]],
+                "reason_codes": [] if judgement_v2["sufficient"] else ["answer_unit_coverage_gap"],
+                "key_question_coverage": list(judgement_v2["key_question_coverage"]),
+                "blocking_gap_count": sum(bool(row.get("blocking")) for row in judgement_v2["gaps"]),
+            }
+            update_v2 = {
+                "coverage_judgement": judgement_v2,
+                "progress_assessment": progress_v2,
+                "control_decision": {},
+            }
+            sync_execution_projection(session.state, {**gstate, **update_v2})
+            if isinstance(session.state.metadata, dict):
+                session.state.metadata.update({
+                    "coverage_judgement": judgement_v2,
+                    "progress_assessment": progress_v2,
+                })
+            _emit(
+                session,
+                "coverage.assessed",
+                phase=WorkflowPhase.COVERAGE_JUDGE.value,
+                status=str(judgement_v2["status"]),
+                attributes={
+                    "sufficient": judgement_v2["sufficient"],
+                    "coverage_ratio": judgement_v2["coverage_ratio"],
+                    "required_field_slots": judgement_v2["required_field_slots"],
+                    "covered_required_field_slots": judgement_v2["covered_required_field_slots"],
+                    "missing": judgement_v2["missing"],
+                    "source": "answer_contract_v2",
+                    "source_quality": source_metrics,
+                },
+            )
+            _emit(
+                session,
+                "progress.assessed",
+                phase=WorkflowPhase.COVERAGE_JUDGE.value,
+                status=str(judgement_v2["status"]),
+                plan_version=int(gstate.get("plan_version") or 1),
+                attributes=progress_event_attributes(
+                    progress_v2,
+                    dispatch_wave_id=int(gstate.get("dispatch_wave_id") or 0),
+                ),
+            )
+            note_stage_duration(session.state, "coverage", int((time.perf_counter() - coverage_started) * 1000))
+            note_stage_duration(session.state, "gap_check", int((time.perf_counter() - coverage_started) * 1000))
+            return transition_update(gstate, WorkflowPhase.COVERAGE_JUDGE, update_v2)
         plan_metadata: dict[str, dict[str, Any]] = {}
         plan_raw = state.get("plan")
         if isinstance(plan_raw, dict):
@@ -1953,6 +2073,7 @@ class ResearchGraphRunner:
             )
 
     async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        import hashlib
         import app.research.execution.synthesis_executor as synthesis_executor_module
         from dataclasses import replace
         from types import SimpleNamespace
@@ -1989,6 +2110,78 @@ class ResearchGraphRunner:
         session = _require_session(gstate)
         synthesis_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
+        if str(gstate.get("engine_version") or "") == "answer_contract_v2":
+            from app.research.delivery.unit_renderer import render_validated_units
+            from app.research.spec.models import AnswerSpec
+
+            answer_spec = AnswerSpec.from_dict(dict(gstate.get("answer_spec") or {}))
+            evidence_records_v2 = [dict(row) for row in gstate.get("evidence_records") or [] if isinstance(row, dict)]
+            citation_numbers_v2 = _citation_numbers_for_evidence_records(
+                session.ctx.citation_manager, evidence_records_v2
+            )
+            rendered = render_validated_units(
+                answer_spec,
+                [row for row in gstate.get("answer_units") or [] if isinstance(row, dict)],
+                [row for row in gstate.get("claims") or [] if isinstance(row, dict)],
+                [row for row in gstate.get("support_edges") or [] if isinstance(row, dict)],
+                evidence_records_v2,
+                citation_numbers_v2,
+            )
+            answer_version = "answer-" + hashlib.sha1(rendered.content.encode("utf-8")).hexdigest()[:12]
+            has_units = bool(rendered.rendered_unit_ids)
+            content = rendered.content
+            session.state.final_content = content
+            answer_contract_v2 = {
+                "schema_version": 2,
+                "spec_revision": answer_spec.revision,
+                "answer_version": answer_version,
+                "rendered_unit_ids": list(rendered.rendered_unit_ids),
+                "citation_map": rendered.citation_map,
+            }
+            if isinstance(session.state.metadata, dict):
+                session.state.metadata.update({
+                    "synthesis_attempted": True,
+                    "synthesis_attempts": 0,
+                    "synthesis_mode": "validated_units",
+                    "synthesis_status": "ok" if has_units else "failed",
+                    "synthesis_failed": not has_units,
+                    "synthesis_degraded": False,
+                    "answer_complete": False,
+                    "answer_contract": answer_contract_v2,
+                    "answer_version": answer_version,
+                })
+            _emit(
+                session,
+                "synthesis.completed" if has_units else "synthesis.failed",
+                phase=WorkflowPhase.SYNTHESIS.value,
+                status="ok" if has_units else "failed",
+                attributes={
+                    "mode": "validated_units",
+                    "answer_unit_count": len(rendered.rendered_unit_ids),
+                    "evidence_count": len(rendered.citation_map),
+                    "spec_revision": answer_spec.revision,
+                    "answer_version": answer_version,
+                },
+            )
+            note_stage_duration(
+                session.state,
+                "synthesis",
+                int((time.perf_counter() - synthesis_started) * 1000),
+            )
+            return transition_update(
+                gstate,
+                WorkflowPhase.SYNTHESIS,
+                {
+                    "final_content": content,
+                    "synthesis_attempts": 0,
+                    "synthesis_failed": not has_units,
+                    "synthesis_degraded": False,
+                    "answer_complete": False,
+                    "answer_contract": answer_contract_v2,
+                    "answer_version": answer_version,
+                    "quality_assessment": {},
+                },
+            )
         if bool(gstate.get("fast_path")):
             manager = getattr(session.ctx, "citation_manager", None)
             worker_row = next(
@@ -2965,6 +3158,120 @@ class ResearchGraphRunner:
         session = _require_session(gstate)
         quality_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
+        if str(gstate.get("engine_version") or "") == "answer_contract_v2":
+            from app.research.domain.completion_v2 import evaluate_completion_v2
+            from app.research.spec.models import AnswerSpec
+
+            content_v2 = str(gstate.get("final_content") or "").strip()
+            answer_contract_v2 = dict(gstate.get("answer_contract") or {})
+            citation_map_v2 = dict(answer_contract_v2.get("citation_map") or {})
+            manager_v2 = session.ctx.citation_manager
+            citation_valid_v2: bool | None = None
+            citation_reason_v2 = "citation_validation_not_run"
+            if manager_v2 is not None and content_v2:
+                try:
+                    citation_valid_v2, citation_reason_v2 = manager_v2.validate_citations(
+                        content_v2,
+                        additional_valid_numbers=[
+                            int(row.get("display_number") or 0)
+                            for row in citation_map_v2.values()
+                            if isinstance(row, dict) and int(row.get("display_number") or 0) > 0
+                        ],
+                    )
+                except Exception:
+                    citation_valid_v2 = None
+                    citation_reason_v2 = "citation_validation_error"
+            evidence_by_id_v2 = {
+                str(row.get("evidence_id") or ""): row
+                for row in gstate.get("evidence_records") or []
+                if isinstance(row, dict) and row.get("evidence_id")
+            }
+            source_pass_v2 = bool(citation_map_v2) and all(
+                evidence_id in evidence_by_id_v2
+                and str(evidence_by_id_v2[evidence_id].get("admission_status") or "") == "admitted"
+                for evidence_id in citation_map_v2
+            )
+            source_requirements_v2 = dict((gstate.get("brief") or {}).get("source_requirements") or {})
+            if source_pass_v2 and bool(source_requirements_v2.get("primary_required")):
+                source_pass_v2 = any(
+                    str(evidence_by_id_v2[evidence_id].get("source_type") or "") == "primary"
+                    for evidence_id in citation_map_v2
+                )
+            rendered_ids_v2 = [str(item) for item in answer_contract_v2.get("rendered_unit_ids") or [] if str(item)]
+            relevance_pass_v2 = bool(rendered_ids_v2)
+            quality_dimensions_v2 = {
+                "source": "pass" if source_pass_v2 else "fail",
+                "relevance": "pass" if relevance_pass_v2 else "fail",
+            }
+            completion_v2 = evaluate_completion_v2(
+                AnswerSpec.from_dict(dict(gstate.get("answer_spec") or {})),
+                [row for row in gstate.get("answer_units") or [] if isinstance(row, dict)],
+                evidence_version=str(gstate.get("evidence_version") or "evidence-v0"),
+                answer_version=str(gstate.get("answer_version") or answer_contract_v2.get("answer_version") or "answer-v0"),
+                final_document=content_v2,
+                validation_versions={"unit": "unit-validator-v2", "claim": "claim-validator-v2"},
+                citation_valid=citation_valid_v2,
+                quality_dimensions=quality_dimensions_v2,
+                degraded=False,
+                recovery_mode="none",
+            )
+            issues_v2 = list(completion_v2.blockers)
+            if citation_valid_v2 is not True:
+                issues_v2.append(citation_reason_v2)
+            verdict_v2 = "pass" if completion_v2.outcome == "success" else completion_v2.outcome
+            assessment_v2 = {
+                "verdict": verdict_v2,
+                "issues": list(dict.fromkeys(issues_v2)),
+                "repairable": False,
+                "suggested_action": "",
+                "grounding": source_pass_v2 and citation_valid_v2 is True,
+                "citation_metrics": {
+                    "evidence_count": len(citation_map_v2),
+                    "citation_valid": citation_valid_v2,
+                },
+                "answer_complete": completion_v2.outcome == "success",
+                "completion_contract": completion_v2.to_dict(),
+                "synthesis_mode": "validated_units",
+                "quality_metrics": quality_dimensions_v2,
+            }
+            decision_v2 = {
+                "action": (
+                    "finalize_success" if completion_v2.outcome == "success"
+                    else "deliver_partial" if completion_v2.outcome == "partial"
+                    else "finalize_failure"
+                ),
+                "reason_codes": assessment_v2["issues"] or ["quality_pass"],
+            }
+            if isinstance(session.state.metadata, dict):
+                session.state.metadata.update({
+                    "quality": assessment_v2,
+                    "quality_attempted": True,
+                    "answer_grounded": assessment_v2["grounding"],
+                    "control_decision": decision_v2,
+                    "partial_delivery": completion_v2.outcome == "partial",
+                    "completion": completion_v2.to_dict(),
+                    "answer_complete": completion_v2.outcome == "success",
+                })
+            _emit(
+                session,
+                "quality.assessed",
+                phase=WorkflowPhase.QUALITY.value,
+                status=verdict_v2,
+                attributes=quality_event_attributes(assessment_v2),
+            )
+            _emit(
+                session,
+                "control.decided",
+                phase=WorkflowPhase.QUALITY.value,
+                status=str(decision_v2["action"]),
+                attributes=control_decision_event_attributes(decision_v2),
+            )
+            note_stage_duration(session.state, "quality", int((time.perf_counter() - quality_started) * 1000))
+            return transition_update(gstate, WorkflowPhase.QUALITY, {
+                "quality_assessment": assessment_v2,
+                "completion": completion_v2.to_dict(),
+                "answer_complete": completion_v2.outcome == "success",
+            })
         content = str(gstate.get("final_content") or "").strip()
         judgement = dict(gstate.get("coverage_judgement") or {})
         strict_quality_contract = not bool(gstate.get("fast_path")) and "key_question_coverage" in judgement
@@ -3086,10 +3393,12 @@ class ResearchGraphRunner:
                 issues.append("answer_incomplete")
         synthesis_mode = str(gstate.get("synthesis_mode") or session.state.metadata.get("synthesis_mode") or "")
         fallback_used = synthesis_mode in {"evidence_bound_recovery", "deterministic_recovery", "deterministic_partial"}
-        answer_rows = answer_contract.get("answers") if isinstance(answer_contract.get("answers"), list) else []
+        answer_rows: list[dict[str, Any]] = [
+            row for row in answer_contract.get("answers") or [] if isinstance(row, dict)
+        ] if isinstance(answer_contract.get("answers"), list) else []
         if not answer_rows and isinstance(answer_contract.get("final_answer"), dict):
             nested_answers = answer_contract["final_answer"].get("answers")
-            answer_rows = nested_answers if isinstance(nested_answers, list) else []
+            answer_rows = [row for row in nested_answers if isinstance(row, dict)] if isinstance(nested_answers, list) else []
         required_questions = list((gstate.get("brief") or {}).get("key_questions") or [])
         strict_checks = {
             "direct_answers": bool(answer_rows) and len(answer_rows) >= len(required_questions) and all(bool(str(row.get("direct_answer") or "").strip()) for row in answer_rows if isinstance(row, dict)),
@@ -3226,6 +3535,13 @@ class ResearchGraphRunner:
         from app.research.runtime.graph import finalize_node
 
         session = _require_session(gstate)
+        existing_termination = gstate.get("termination")
+        if (
+            isinstance(existing_termination, dict)
+            and str(existing_termination.get("outcome") or "") in {"success", "partial", "failed", "cancelled"}
+            and session.result is not None
+        ):
+            return {"lifecycle": {"status": "terminated"}, "termination": dict(existing_termination)}
         finalize_started = time.perf_counter()
         sync_execution_projection(session.state, gstate)
         session.state.final_content = str(gstate.get("final_content") or "")
@@ -3267,6 +3583,22 @@ class ResearchGraphRunner:
             brief = dict(gstate.get("brief") or {})
             manager = getattr(session.ctx, "citation_manager", None)
             source_counts = manager.source_counts_by_tier() if manager is not None else {}
+            worker_diagnostics = []
+            for row in gstate.get("worker_results") or []:
+                if not isinstance(row, dict):
+                    continue
+                payload = dict(row.get("payload") or {})
+                metrics = dict(row.get("metrics") or {})
+                worker_diagnostics.append({
+                    "task_id": str(row.get("task_id") or ""),
+                    "status": str(row.get("status") or ""),
+                    "fail_reason": str(row.get("fail_reason") or metrics.get("fail_reason") or ""),
+                    "structured_output_valid": metrics.get("structured_output_valid"),
+                    "last_tool_error": metrics.get("last_tool_error") or row.get("last_tool_error") or {},
+                    "finding_count": len(payload.get("findings") or []),
+                    "candidate_answer_unit_count": len(payload.get("candidate_answer_units") or []),
+                    "evidence_ref_count": len(payload.get("evidence_ids") or []) + len(payload.get("artifact_ids") or []),
+                })
             result.metadata.update(
                 {
                     "brief": brief,
@@ -3286,6 +3618,7 @@ class ResearchGraphRunner:
                         )
                     ),
                     "latency": critical_path_summary(session.state.metadata),
+                    "worker_diagnostics": worker_diagnostics,
                 }
             )
         note_stage_duration(
