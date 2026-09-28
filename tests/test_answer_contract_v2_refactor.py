@@ -389,4 +389,3 @@ def test_first_party_requires_exact_brand_domain_and_fetched_title() -> None:
         assert not _verified_first_party_page(fake.locator, fake.artifact_id, ["DeepSeek-R1"])
     finally:
         reset_artifact_store()
-
